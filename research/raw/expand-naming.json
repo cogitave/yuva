@@ -1,0 +1,199 @@
+{
+ "area": "naming",
+ "findings": [
+  {
+   "topic": "Brainstorm longlist (24 candidates) and vetting methodology",
+   "summary": "Generated 24 Linux-flavored candidates from the requested roots: Agentix, Agnix, Agentux, Cognix, Cognux, Mnemix, Mnemux, Synix, Synaptix, Axonix, Daemonix, Autonix, Noetix, Nousix, Mindux, Neuronix, Sentix, Psynix, Mentix, Cortix, Holonix, Animux, Sapix, Logix. 16 were vetted hard. Method (WebSearch backend had no API key, so all checks were direct-source): (1) npm/PyPI/crates.io registry HTTP status for exact package name; (2) GitHub Search API total_count + top repos with stars for name-in-repo-name; (3) RDAP .com (Verisign) and .org (PIR) registration status (404 = unregistered); (4) GitHub user/org handle availability; (5) Mojeek full-web index search for company/trademark-level hits; (6) direct fetch of registered domains to identify the owner. Instant kills found during vetting: Holonix (Holochain's official Nix dev environment, holochain/holonix, 151+7 stars), Sentix (npm 'Autonomous multi-agent DevSecOps pipeline CLI' v2.47.0 + SentiX sentiment model, 35 stars), Neuronix (135 GitHub repos, PyPI taken), Synaptix/Logix (not searched - phonetically identical to Synaptics Inc. / Rockwell Logix, flagged as open question).",
+   "designImplication": "For an OS-scale project the name must be claimable as a full namespace stack: GitHub org, npm+PyPI+crates (agent SDKs in 3 languages), .org domain, and a 3-4 letter kernel symbol prefix. Only 4 of 24 candidates survive that bar (Mnemux, Cognux, Mindux, Nousix). The agent/AI naming space is already saturated: every 'agent*' and 'cogn*' form has active 2025-2026 projects squatting it.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=holonix+in:name",
+    "https://registry.npmjs.org/sentix",
+    "https://pypi.org/pypi/neuronix/json",
+    "https://rdap.verisign.com/com/v1/domain/mnemux.com"
+   ]
+  },
+  {
+   "topic": "Rank 1: Mnemux",
+   "summary": "Mnemo- (Greek mneme 'memory', Mnemosyne mother of the Muses) + -ux (Unix/Linux ending). Reads as 'the memory Unix' and sounds like the familiar Unix tool 'tmux'. Verified COMPLETELY virgin, the only candidate with zero footprint anywhere: GitHub repo search total_count=0; GitHub user/org handle 'mnemux' unregistered (API 404); npm 404, PyPI 404, crates.io 404; mnemux.com AND mnemux.org both unregistered per RDAP (404 from Verisign and PIR); Mojeek full-web search returns 'Results 0 to 0 from 0'. Caution: sibling name Mnemix is already an active project in exactly our space - micahcourey/mnemix, 'Standalone, local-first memory layer for AI coding agents', PyPI mnemix v0.4.0, homepage mnemix.org, updated 2026-04-23 - so Mnemux must visibly differentiate from Mnemix.",
+   "designImplication": "Strongest fit and strongest availability. The name puts the OS's actual differentiator - the DEFAULT persistent tiered memory subsystem - in the brand itself, the way 'Unix' put uniplexing in the brand. Entire namespace stack is reservable today: github.com/mnemux org, mnemux on npm/PyPI/crates for the agent SDKs, mnemux.org for the project (kernel projects live on .org: kernel.org, debian.org), and a clean kernel symbol prefix (mnx_ / MNX_). One-char-from-Mnemix adjacency is the only risk; mitigate by registering mnemux.com+.org immediately (both free) and shipping the memory-syscall surface under the mnx_ prefix so the OS, not the lookalike, defines the term.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=mnemux+in:name",
+    "https://api.github.com/users/mnemux",
+    "https://registry.npmjs.org/mnemux",
+    "https://pypi.org/pypi/mnemux/json",
+    "https://crates.io/api/v1/crates/mnemux",
+    "https://rdap.verisign.com/com/v1/domain/mnemux.com",
+    "https://rdap.publicinterestregistry.org/rdap/domain/mnemux.org",
+    "https://www.mojeek.com/search?q=%22mnemux%22",
+    "https://api.github.com/repos/micahcourey/mnemix"
+   ]
+  },
+  {
+   "topic": "Rank 2: Cognux",
+   "summary": "Cognition/cognosco (Latin 'to know') + -ux. 'The cognitive Unix.' Near-virgin: GitHub repo search total_count=2, both trivial zero-star repos (a to-do list and an empty cognux.github.io); npm 404, PyPI 404, crates.io 404; Mojeek full-web search returns only 'limited relevance' filler (zero real hits); cognux.org unregistered (RDAP 404). cognux.com is registered but only as an inventory domain - fetching it returns 'Cognux.com - Premium Domain For Sale | Atom', i.e. buyable, no operating company behind it. GitHub handle 'cognux' is taken (API 200) by the inactive account owning the empty github.io repo. Contrast with sibling Cognix: 484 GitHub repos and PyPI cognix v0.2.5 'AI-powered CLI development assistant' - Cognix is dead, Cognux is clean.",
+   "designImplication": "Best 'whole-mind' option if the team wants the brand to cover cognition broadly (memory + reasoning + self-improvement) rather than memory specifically. All three package registries and .org are free; .com is purchasable from Atom at premium-domain pricing - budget question, not availability question. GitHub org handle is squatted by an inactive empty account; plan for github.com/cognux-os or a GitHub name-squatting policy claim. Kernel prefix cgx_ available by construction.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=cognux+in:name",
+    "https://registry.npmjs.org/cognux",
+    "https://pypi.org/pypi/cognux/json",
+    "https://crates.io/api/v1/crates/cognux",
+    "https://www.mojeek.com/search?q=%22cognux%22",
+    "https://cognux.com",
+    "https://rdap.publicinterestregistry.org/rdap/domain/cognux.org",
+    "https://api.github.com/users/cognux",
+    "https://pypi.org/pypi/cognix/json"
+   ]
+  },
+  {
+   "topic": "Rank 3: Mindux",
+   "summary": "Mind + -ux; the only candidate instantly parseable by non-classicists ('the mind Unix'). GitHub repo search total_count=0 (zero repos anywhere); npm 404, PyPI 404, crates.io 404; Mojeek full-web search: zero relevant hits; mindux.org unregistered (RDAP 404). mindux.com registered but fetch shows 'Mindux.com is for sale | HugeDomains' - parked inventory, no company. GitHub handle 'mindux' taken (API 200) by an account with no repos surfacing in search.",
+   "designImplication": "Cleanest English-readable option - zero GitHub repos is rarer than it sounds (even Mnemix has 12, Agentux 14). Slight downside for a kernel brand: 'mind' is the least technical root and may read consumer-grade rather than systems-grade; it also under-sells the memory-first architecture relative to Mnemux. Package namespace fully free in all three registries; .org free; .com buyable from HugeDomains. Use as fallback if Mnemux's pronunciation (silent or voiced initial M) tests badly.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=mindux+in:name",
+    "https://registry.npmjs.org/mindux",
+    "https://pypi.org/pypi/mindux/json",
+    "https://crates.io/api/v1/crates/mindux",
+    "https://www.mojeek.com/search?q=%22mindux%22",
+    "https://mindux.com",
+    "https://rdap.publicinterestregistry.org/rdap/domain/mindux.org",
+    "https://api.github.com/users/mindux"
+   ]
+  },
+  {
+   "topic": "Rank 4: Nousix",
+   "summary": "Nous (Greek 'intellect/mind' - the agent-as-thinker root) + -ix. GitHub repo search total_count=2, both empty zero-star repos under an org named 'Nousix' (Nousix/work, Nousix/Python); npm 404, PyPI 404, crates.io 404; Mojeek: zero relevant hits; nousix.org unregistered (RDAP 404). nousix.com registered (RDAP 200) but serves an empty response (no site, owner unknown). GitHub handle 'nousix' taken (API 200) by the inactive org.",
+   "designImplication": "Philosophically the deepest name (nous = the faculty that grasps - exactly what an agent-native OS hosts) and package-registry clean, but carries two un-cleared risks: (a) pronunciation forks badly ('NOO-six' / 'nous-ix' / 'no-USIX'), and a kernel name gets spoken at conferences; (b) brand adjacency to Nous Research, an active AI lab whose mark is exactly 'Nous' (not source-verified here - see open questions). Treat as shortlist alternate, not primary; .com owner would need RDAP entity lookup before committing.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=nousix+in:name",
+    "https://registry.npmjs.org/nousix",
+    "https://pypi.org/pypi/nousix/json",
+    "https://crates.io/api/v1/crates/nousix",
+    "https://www.mojeek.com/search?q=%22nousix%22",
+    "https://rdap.verisign.com/com/v1/domain/nousix.com",
+    "https://rdap.publicinterestregistry.org/rdap/domain/nousix.org",
+    "https://api.github.com/users/nousix"
+   ]
+  },
+  {
+   "topic": "Rank 5 (conflicted): Agnix",
+   "summary": "Agent + nix, with a bonus reading (Agni, Vedic fire deity). Linguistically the best agent-root name, but conflicted: agent-sh/agnix is an ACTIVE, popular project - 267 stars, 'The missing linter and lsp for AI coding assistants. Validate CLAUDE.md, AGENTS.md, SKILL.md, hooks, MCP', npm package agnix at v0.30.0, last updated 2026-06-04 (two days before this research). Also a historical BackupTheBerlios/agnix repo (an old educational network OS kernel, 0 stars). PyPI and crates free; agnix.com/.org both registered (RDAP 200). GitHub repo search total_count=22.",
+   "designImplication": "Direct namespace collision inside the agent-tooling ecosystem our OS would live in: 'npm install agnix' already means someone else's agent linter, and the linter validates the same artifact types (CLAUDE.md, MCP, hooks) our kernel would standardize. Confusion would be permanent and bidirectional. Use only if willing to negotiate/buy the npm name and outgrow a healthy active project - not recommended for a greenfield kernel that needs unambiguous identity from day one.",
+   "sources": [
+    "https://api.github.com/repos/agent-sh/agnix",
+    "https://registry.npmjs.org/agnix",
+    "https://api.github.com/search/repositories?q=agnix+in:name",
+    "https://pypi.org/pypi/agnix/json",
+    "https://rdap.verisign.com/com/v1/domain/agnix.com"
+   ]
+  },
+  {
+   "topic": "Rank 6 (conflicted): Autonix",
+   "summary": "Autonomous + nix. All three package registries free (npm/PyPI/crates all 404), but GitHub repo search total_count=56 and the top result exposes the core problem: ttuegel/autonix-deps (12 stars) is 'Library for Nix expression dependency generation' - i.e. the world already parses 'autonix' as 'automation FOR the Nix package manager', not 'autonomous Unix'. The Holonix precedent (holochain/holonix = 'Holochain app development environment based on Nix', 151 stars) confirms -nix suffix names get read as Nix-ecosystem tooling. autonix.com/.org both registered (RDAP 200).",
+   "designImplication": "Semantic trap specific to our audience: an agent-native unikernel will inevitably interact with the Nix/NixOS community (reproducible builds are natural for agent sandboxes), and there 'Autonix' will be misread as a Nix derivation tool. Also unverified phonetic clash with Autonics (industrial automation manufacturer). Registries being free is not enough; skip unless the -nix/Nix pun is desired on purpose.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=autonix+in:name",
+    "https://registry.npmjs.org/autonix",
+    "https://pypi.org/pypi/autonix/json",
+    "https://crates.io/api/v1/crates/autonix",
+    "https://api.github.com/search/repositories?q=holonix+in:name",
+    "https://rdap.verisign.com/com/v1/domain/autonix.com"
+   ]
+  },
+  {
+   "topic": "Rank 7 (conflicted): Agentux",
+   "summary": "Agent + ux, mirroring Linux most directly. Conflicts: (a) PyPI package agentux v0.1.4 'Portable multi-agent UX stress tester' exists; (b) 'Agent UX' is already an established generic design-industry term - Mojeek surfaces 'Agent UX (AUX): Designing for the Next User' (blog.goldfoot.com) and an 'AgentUX 0.1.1' VS Code extension on VsixHub; (c) 14 GitHub repos named AgentUX (all 0-star, incl. 'observability and benchmarking platform for agent usability'); (d) agentux.com and .org both registered (RDAP 200), .com serves a 114-byte stub. npm and crates free. GitHub handle taken.",
+   "designImplication": "The name would forever collide with the generic phrase 'agent UX' (user-experience design FOR agents), which is an adjacent-but-different concept the industry already uses; search results and word-of-mouth would split. For a kernel that wants to OWN its term, building on a phrase already genericized in a neighboring meaning is the same mistake as naming a database 'DataUX'. Not recommended despite npm/crates being free.",
+   "sources": [
+    "https://pypi.org/pypi/agentux/json",
+    "https://www.mojeek.com/search?q=%22agentux%22",
+    "https://api.github.com/search/repositories?q=agentux+in:name",
+    "https://rdap.verisign.com/com/v1/domain/agentux.com",
+    "https://api.github.com/users/agentux"
+   ]
+  },
+  {
+   "topic": "Rank 8 (conflicted): Axonix",
+   "summary": "Axon (neural signal line) + ix. All package registries free (npm/PyPI/crates 404) and only 29 low-star GitHub repos, but commercial conflicts verified via Mojeek: Axonix was a mobile ad exchange launched by Telefonica and Blackstone (TechCrunch 2014: 'Telefonica, Blackstone Launch Axonix, A Mobile Ad Exchange', London HQ; AppBrain still tracks an Axonix Android SDK), plus an active 'Axonix 4' stage-lighting console brand (eliteele.com, India) and an 'Axonix' display font. axonix.com and .org both registered (RDAP 200), .com refuses bot fetches.",
+   "designImplication": "Multiple prior commercial uses of the exact string across software (ad-tech SDK) and electronics (lighting console) mean trademark clearance in class 9/42 is doubtful even though the developer-namespace is open. Axon root also pulls toward 'neural wiring' rather than agency/memory - weaker conceptual fit for a kernel whose pitch is persistent memory and self-improvement. Keep only as aesthetic backup pending a real trademark search.",
+   "sources": [
+    "https://www.mojeek.com/search?q=%22axonix%22",
+    "https://registry.npmjs.org/axonix",
+    "https://pypi.org/pypi/axonix/json",
+    "https://crates.io/api/v1/crates/axonix",
+    "https://api.github.com/search/repositories?q=axonix+in:name",
+    "https://rdap.verisign.com/com/v1/domain/axonix.com"
+   ]
+  },
+  {
+   "topic": "Rank 9 (conflicted): Daemonix",
+   "summary": "Daemon (the Unix word for an autonomous background process - thematically perfect for autonomous agents) + ix. Conflicts: crates.io daemonix 'Spawn daemon processes on Unix-like systems' with 303,802 downloads - a substantial Rust crate; npm daemonix v3.1.4 'managing NodeJS processes/clusters as a daemon in Linux/Unix environments'; GitHub total_count=9 incl. DXC-0/daemonix (custom Fedora/uBlue image, 10 stars). PyPI free. daemonix.com/.org registered (RDAP 200).",
+   "designImplication": "If the kernel ships a Rust SDK (likely for a greenfield unikernel), the single most important registry - crates.io - is occupied by a 300k-download crate in the same semantic field (process daemonization on Unix). 'cargo add daemonix' can never mean our SDK. The daemon root remains excellent raw material (agents ARE daemons with minds); consider it for an internal subsystem name (e.g., the agent-runtime supervisor) rather than the OS brand.",
+   "sources": [
+    "https://crates.io/api/v1/crates/daemonix",
+    "https://registry.npmjs.org/daemonix",
+    "https://api.github.com/search/repositories?q=daemonix+in:name",
+    "https://pypi.org/pypi/daemonix/json",
+    "https://rdap.verisign.com/com/v1/domain/daemonix.com"
+   ]
+  },
+  {
+   "topic": "Eliminated: Synix",
+   "summary": "Synapse + ix. Triple-killed: (1) phonetically identical to SINIX, the real Siemens Nixdorf Unix variant (Wikipedia: System V family, initial release 1984, last SINIX release 5.43 in 1995, continued as Reliant UNIX 5.45 by Fujitsu Siemens, MIPS/Intel platforms) - a literal prior OS with the same sound; (2) PyPI synix v0.22.2 is 'Build system for agent memory' (marklubin/synix, homepage synix.dev, updated 2026-05-28) - an ACTIVE project in exactly our agent-memory niche; (3) npm synix taken (CLI tool v1.0.0). GitHub total_count=125.",
+   "designImplication": "An agent-native OS named like a 1984 Siemens Unix invites both trademark archaeology (UNIX marks went through X/Open branding) and direct confusion with a live agent-memory build system. Hard eliminate; documents the principle that -ix names must be checked against historical commercial Unix variants (SINIX, IRIX, AIX, Xenix...) not just live projects.",
+   "sources": [
+    "https://en.wikipedia.org/wiki/SINIX",
+    "https://pypi.org/pypi/synix/json",
+    "https://api.github.com/repos/marklubin/synix",
+    "https://registry.npmjs.org/synix",
+    "https://api.github.com/search/repositories?q=synix+in:name"
+   ]
+  },
+  {
+   "topic": "Eliminated: Agentix",
+   "summary": "Most obvious candidate, most crowded: GitHub repo search total_count=205 with Agentix-Project/Agentix (68 stars, 'The universal bridge between agents and environments - evaluate, RL-train, and trace any agent, in any sandbox, on any model', active 2026-06-05); npm agentix = 'AI-powered SDK that unifies multi-chain wallets, plugins & tools for autonomous Web3 agents' v1.0.0; crates agentix = 'Multi-provider LLM client for Rust - streaming, tool calls, MCP, DeepSeek, OpenAI, Anthropic, Gemini' (868 downloads); agentix.com is an ACTIVE company site ('Agentix - Empowering Business Automation'). Only PyPI is free.",
+   "designImplication": "Four simultaneous occupants - an agent-RL framework, a Web3 agent SDK, a Rust LLM client, and an automation company - all in the agent/AI space. Zero distinctiveness achievable. Eliminate; also evidence that any 'agent-' prefix name will be contested, pushing the brand strategy toward cognition/memory roots where the field is empty.",
+   "sources": [
+    "https://api.github.com/repos/Agentix-Project/Agentix",
+    "https://registry.npmjs.org/agentix",
+    "https://crates.io/api/v1/crates/agentix",
+    "https://agentix.com",
+    "https://api.github.com/search/repositories?q=agentix+in:name"
+   ]
+  },
+  {
+   "topic": "Eliminated: Cognix, Noetix, Mnemix",
+   "summary": "Cognix: 484 GitHub repos; PyPI cognix v0.2.5 'AI-powered CLI development assistant'; cognix-labs org exists. Noetix: GitHub total_count=23 but Noetix-Robotics org is active (noetix_n2_gym, RL framework for N2 humanoid robots, 24 stars) and noetixrobotics.com is the live site of Beijing Songyan Dynamics' humanoid-robot product line (N2, E1, Bumi, Hobbs robots) - an operating AI-robotics company owns the mark in our industry. Mnemix: PyPI mnemix v0.4.0 is the Python binding for an active 'local-first memory layer for AI coding agents' (micahcourey/mnemix, mnemix.org, 12 GitHub repos total) - identical concept space to our default-memory OS.",
+   "designImplication": "All three fail for the same structural reason: a live AI-sector occupant (dev-assistant, humanoid-robot company, agent-memory layer) already owns the exact string. For trademark purposes 'AI robotics company' vs 'AI operating system' is the same Nice class neighborhood. These eliminations are what promote the -ux variants (Mnemux/Cognux/Mindux): shifting the suffix one vowel escapes every one of these collisions while keeping the Linux flavor.",
+   "sources": [
+    "https://api.github.com/search/repositories?q=cognix+in:name",
+    "https://pypi.org/pypi/cognix/json",
+    "https://noetixrobotics.com",
+    "https://api.github.com/search/repositories?q=noetix+in:name",
+    "https://pypi.org/pypi/mnemix/json",
+    "https://api.github.com/repos/micahcourey/mnemix"
+   ]
+  },
+  {
+   "topic": "Final recommendation and naming-system proposal",
+   "summary": "Ranked shortlist: 1) Mnemux (virgin everywhere incl. both domains and GitHub handle; memory-root matches the OS's flagship default tiered memory), 2) Cognux (registries+org domain free, .com buyable, broadest cognition meaning), 3) Mindux (zero repos, plainest English), 4) Nousix (clean but pronunciation + Nous-adjacency risk). Everything agent-rooted (Agentix/Agnix/Agentux) is occupied by active 2025-2026 agent-tooling projects; everything neural-rooted (Axonix/Neuronix/Synix) hits either companies or historical Unix marks. Verified-free namespace stack for Mnemux as of 2026-06-06: github.com/mnemux (404), npm (404), PyPI (404), crates.io (404), mnemux.com (RDAP 404), mnemux.org (RDAP 404), zero Mojeek web hits.",
+   "designImplication": "Adopt Mnemux as working title and reserve the full stack within days - virgin namespaces in the AI space have short half-lives (agnix went 0-to-267-stars and mnemix 0-to-PyPI-v0.4.0 within roughly a year). The conflicted-but-thematic roots remain usable INSIDE the OS as subsystem names where trademark scope doesn't apply: daemon* for the agent supervisor, synapse/axon for IPC channels between co-resident agents, nous for the inference-broker service - giving the kernel a coherent cognitive-anatomy naming system under the Mnemux brand.",
+   "sources": [
+    "https://api.github.com/users/mnemux",
+    "https://rdap.verisign.com/com/v1/domain/mnemux.com",
+    "https://rdap.publicinterestregistry.org/rdap/domain/mnemux.org",
+    "https://www.mojeek.com/search?q=%22mnemux%22",
+    "https://api.github.com/repos/agent-sh/agnix",
+    "https://pypi.org/pypi/mnemix/json"
+   ]
+  }
+ ],
+ "openQuestions": [
+  "No formal trademark search was possible (USPTO TESS / EUIPO / WIPO Madrid are not bot-fetchable); Mnemux/Cognux/Mindux need a Nice class 9+42 clearance search by counsel before public use.",
+  "nousix.com and agentux.com are registered but serve empty/stub responses; RDAP entity lookups (registrant org, registration date) were not run - needed to assess acquisition cost or abandonment.",
+  "GitHub handles mindux, cognux, nousix, agentux are held by inactive accounts; whether GitHub's name-squatting policy would release them is unverified - fallback org names (mnemux-os style) should be budgeted.",
+  "Phonetic-adjacency risks not source-verified: Autonix vs Autonics (industrial sensor manufacturer - autonics.com refused bot fetch), Nousix vs Nous Research (AI lab), Synaptix vs Synaptics Inc., Logix vs Rockwell ControlLogix - all flagged from background knowledge only.",
+  "Mnemux pronunciation needs a branding decision (silent-M 'NEE-mux' vs voiced 'MNEH-mux'); the tmux-like sonority is an asset only if one canonical pronunciation ships in the docs.",
+  "WebSearch tool (Brave backend) was unavailable (missing BRAVE_API_KEY) and DuckDuckGo served a CAPTCHA; web-level sweeps relied on Mojeek's smaller index - a Google/Bing pass on the final name is advisable before announcement.",
+  "Premium-domain pricing for cognux.com (Atom marketplace) and mindux.com (HugeDomains) was not quoted; if budget allows, acquiring both runner-up .coms cheaply now would protect the naming system."
+ ]
+}

@@ -1,0 +1,36 @@
+# Cargo build configuration for the none-class TABOS targets.
+#
+# Sources:
+#    https://os.phil-opp.com/minimal-rust-kernel/  ("The build-std Option")
+#    https://doc.rust-lang.org/cargo/reference/unstable.html#build-std
+#    https://docs.rust-embedded.org/embedonomicon/custom-target.html
+#  - runner key (cargo invokes <runner> <built-binary>):
+#    https://doc.rust-lang.org/cargo/reference/config.html#targettriplerunner
+#
+# All commands below assume cargo is invoked from the repo root (so the relative
+# linker-script and target-spec paths resolve). See BUILD.md.
+
+[unstable]
+json-target-spec = true
+# Recent nightlies gate `.json` target specs behind this flag (the older
+# Recompile core + its dependency compiler_builtins for our custom targets
+# (no precompiled std exists for none-class triples).
+build-std = ["core", "compiler_builtins"]
+# Enable compiler_builtins' memcpy/memset/memcmp/memmove (mem feature). Without
+# this the linker fails as soon as the kernel copies a struct or zeroes memory.
+build-std-features = ["compiler-builtins-mem"]
+
+# ---- x86_64: PVH ELF, loads at 1 MiB, links with kernel/linker/x86_64.ld ----
+# `[target.<stem>]` matches `--target targets/x86_64-tabos-none.json` by the
+# file-name stem (Cargo custom-JSON-target matching rule).
+[target.x86_64-tabos-none]
+# rust-lld (ld.lld) consumes `-T<script>`. The script keeps the
+# XEN_ELFNOTE_PHYS32_ENTRY note and places .text at 0x0010_0000.
+rustflags = ["-C", "link-arg=-Tkernel/linker/x86_64.ld"]
+# Runner gets the built ELF path appended as $1.
+runner = ["bash", "scripts/run-x86_64.sh"]
+
+# ---- aarch64: QEMU virt first-light, links with kernel/linker/aarch64.ld ----
+[target.aarch64-tabos-none]
+rustflags = ["-C", "link-arg=-Tkernel/linker/aarch64.ld"]
+runner = ["bash", "scripts/run-aarch64.sh"]

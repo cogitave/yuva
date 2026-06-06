@@ -1,0 +1,19 @@
+# Build output
+/target
+
+# QEMU serial capture logs produced by the M0 DoD assertion (BUILD.md)
+/serial-*.log
+/*.serial.log
+
+# Editor / OS cruft
+*.rs.bk
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local cargo overrides that should not be shared
+.cargo/config.local.toml
+
+# NOTE: Cargo.lock is committed on purpose — this workspace builds binaries and
+# we want reproducible boot images.

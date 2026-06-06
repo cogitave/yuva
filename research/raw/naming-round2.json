@@ -1,0 +1,355 @@
+[
+ {
+  "name": "engram",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN — 'engram' 0.0.1 'Persistent storage for local modules' (merrihew), published 2014, dead/trivial but name occupied"
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN — 'engram' 0.1.0, summary 'Do not use. Placeholder.', squatted 2025-04-21 by benjaminbeilharz; name unavailable"
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN — 'engram' v2.2.1, 'fast and space-efficient version control system for portable file backups', 57,466 downloads, last updated 2025-11-20 (active), repo gitlab.com/mbednarek360/engram"
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN — 1,381 repos match. Fatal: deepseek-ai/Engram (4,443 stars, LLM conditional-memory research, pushed 2026-01); Gentleman-Programming/engram (4,176 stars, 'Persistent memory system for AI coding agents' with MCP server, pushed 2026-05-29); plus active cluster: Patdolitse/piia-engram (164 stars, AI memory MCP, pushed today 2026-06-06), NickCirv/engram (133 stars, agent-memory context spine, pushed today), NanoFlow-io/engram (123 stars, agent long-term memory plugin, 2026-05)"
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN — github.com/engram is an Organization named 'Engram' (created 2020-09, 0 public repos, dormant squat — handle unavailable regardless)"
+   },
+   {
+    "check": "github-repos-os-variant",
+    "result": "TAKEN — 'engram-os' org exists (repo: 'An AI OS architecture' with privacy-by-design, 0 stars); ynajimiii/engram-os = 'A cognitive OS for autonomous long-horizon AI execution' (1 star, 2026-03); Abhion24/Engram-Memory-OS-for-Claude-Code (1 star, 2026-04); voschen/EngramOS (0 stars, 2026-06). Variant is squatted in exactly our space"
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN — engram.com registered since 1996-02-16 via Network Solutions, expires 2027-02-17, last changed 2025-12 (long-held, not dropping)"
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN — engram.org registered since 2016-01-11 via GoDaddy, transferred 2025-07-28 (recent activity), expires 2027-01, full client-lock status set"
+   },
+   {
+    "check": "web",
+    "result": "UNKNOWN via search engines (Brave WebSearch missing API key; Mojeek and DuckDuckGo both 403-blocked automated queries) — but GitHub API data and direct Destinypedia fetch made search redundant"
+   },
+   {
+    "check": "web-gaming",
+    "result": "TAKEN — confirmed via direct fetch of destinypedia.com/Engram: 'Engram' is the core loot-drop item of Bungie's Destiny and Destiny 2 (dozens of named Engram types, central game mechanic since 2014). Massive consumer-gaming mindshare for the exact word"
+   }
+  ],
+  "topConflicts": [
+   "https://github.com/Gentleman-Programming/engram — 4,176 stars, ACTIVE (pushed 2026-05-29): 'Persistent memory system for AI coding agents. Agent-agnostic Go binary with SQLite + FTS5, MCP server, HTTP API, CLI, TUI' — this IS our concept (agent memory as first-class objects) under the exact same name",
+   "https://github.com/deepseek-ai/Engram — 4,443 stars, DeepSeek (famous AI lab) research project: 'Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models' (pushed 2026-01-14) — owns the term in AI-memory research discourse",
+   "Destiny 2 'Engrams' (Bungie) — https://www.destinypedia.com/Engram — core loot mechanic of a major game franchise since 2014; the word's dominant pop-culture meaning, guaranteed SEO/brand pollution",
+   "Active agent-memory tool cluster on the same name: https://github.com/NickCirv/engram (133 stars, pushed 2026-06-06), https://github.com/Patdolitse/piia-engram (164 stars, pushed 2026-06-06), https://github.com/NanoFlow-io/engram (123 stars, OpenClaw agent memory plugin)",
+   "Even the escape-hatch variant is occupied in our exact space: https://github.com/ynajimiii/engram-os ('A cognitive OS for autonomous long-horizon AI execution'), https://github.com/Abhion24/Engram-Memory-OS-for-Claude-Code ('Persistent Memory OS for Claude Code'), and the 'engram-os' GitHub org ('An AI OS architecture')",
+   "crates.io 'engram' — active VCS/backup tool, 57k downloads, v2.2.1 (Nov 2025): https://crates.io/crates/engram"
+  ],
+  "notes": "Eliminated on multiple independent grounds — this is the worst-case scenario for the candidate. Every registry is occupied (npm dead-2014, PyPI deliberately squatted 2025, crates.io actively maintained, GitHub handle org-squatted, .com held since 1996, .org recently transferred and locked). But registries are the least of it: the rubric's kill condition is met twice over. (1) Gentleman-Programming/engram (4.2k stars, actively pushed last week) is a persistent-memory system for AI coding agents — semantically identical to our pitch of 'agent memories as first-class objects'. Shipping under this name would look like a clone. (2) deepseek-ai/Engram (4.4k stars) plants the term in LLM-memory research from a famous lab. (3) Three more active agent-memory tools (100-170 stars each, two pushed TODAY) share the name — the AI-memory niche is independently converging on 'engram' because the metaphor is obvious, which guarantees permanent naming collision and zero searchability. (4) Destiny 2's Engrams dominate consumer search results and social mentions (Bungie trademark adjacency in games/software is a real legal-risk vector). (5) The fallback variants engram-os / EngramOS are already taken by repos literally describing 'cognitive OS for autonomous AI execution' and 'Memory OS for Claude Code'. Phonetic adjacents (engramma, engrampa, engrammer) add further clutter. The Semon-coined neuroscience metaphor is apt but it is apt for everyone — the entire space discovered it first. Recommendation: discard; if the memory-trace metaphor is wanted, explore rarer Semon-adjacent coinages (e.g. 'mneme', 'ecphory', 'homophony' from Semon's own vocabulary) and re-vet."
+ },
+ {
+  "name": "mneme",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN — 'mneme' by onokumus (Hybrid ESM/CJS demo package). Dead: last publish Aug 2021, v0.1.1-alpha.2, trivial hello-world content. Name unavailable for publishing regardless."
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN — 'mneme' note-taking format + Flask web editor by Risto Stevcev. Dead since 2014 (last release 0.201, May 2014), but notably self-described as 'named after Mneme, the Muse of Memory' — same naming rationale, note/memory space."
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN and ACTIVE — 'mneme' event-sourcing/CQRS library for Rust by jwilger (github.com/jwilger/mneme). Created Jan 2025, latest release 0.5.0 Mar 2025, 9 versions, 5,814 downloads. Event-sourcing is persistence-adjacent to our memory concept."
+   },
+   {
+    "check": "github-repos",
+    "result": "HEAVILY TAKEN — 269 repos match 'mneme' in name. Top: zachallaun/mneme (137 stars, Elixir snapshot testing, active Aug 2025); Olympus-HPC/Mneme (23 stars, academic HPC tooling, pushed 2026-06-06 — the predicted academic software, confirmed active); Mneme-memory/MNEME-BETA (10 stars, 'Claude conversational memory system Mneme', created Mar 2026, pushed May 2026); TheoV823/mneme (11 stars, 'Enforce architectural decisions in AI-assisted development', pushed 2026-06-06); Billy1900/mneme (4 stars, 'Rust memory system for autonomous AI agents', topics agent-memory/llm-agents, pushed May 2026, has docs site); MadAppGang/mnemex (39 stars, 'Claude code memory', pushed Jun 2026 — phonetic sibling)."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN — github.com/mneme is David Olsson (Stockholm), account since 2011, 15 repos, profile updated Mar 2026. Additionally org 'Mneme-memory' exists and is dedicated to an AI memory product named Mneme."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN — mneme.com registered 1999-11-20 via Network Solutions, expires 2026-11-20, last changed Apr 2026 (maintained, not lapsing)."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN — mneme.org registered 2018-03-21, now at GoDaddy (transferred Jan 2025), expires 2027-03-21, full client-lock status set May 2026 (actively held)."
+   },
+   {
+    "check": "web",
+    "result": "CONFLICTED — Mojeek '\"mneme\" AI agent memory' surfaced Billy1900's 'Mneme: A Rust memory system for autonomous AI agents built from cognitive neuroscience' as a top hit, and TheoV823/mneme is listed on AlternativeTo as a Kiro (AI coding) alternative. Second query (mneme + OS) was rate-limited (403) but evidence already conclusive."
+   },
+   {
+    "check": "github-repos (os-variant)",
+    "result": "mneme-os / mnemeos: effectively FREE — only matches are 'mNeme-iOS' (BloomTech bootcamp flashcard app, 1 star, dead since 2020). The suffix is clean but does not cure the base-name collisions."
+   }
+  ],
+  "topConflicts": [
+   "https://github.com/Mneme-memory/MNEME-BETA — 'Claude conversational memory system Mneme' under a dedicated org 'Mneme-memory'; created Mar 2026, pushed May 2026. An active AI conversational-memory product using the exact name in exactly our space.",
+   "https://github.com/Billy1900/mneme (docs: https://billy1900.github.io/mneme/) — 'A Rust memory system for autonomous AI agents' (memory compaction/evolution/conflict resolution), topics agent-memory/llm-agents; active May 2026. Second independent active occupant in exactly the agent-memory space, already ranking in web search for 'mneme AI agent memory'.",
+   "https://github.com/zachallaun/mneme — 137-star Elixir snapshot-testing library, active through Aug 2025. Owns 'mneme' developer mindshare and would dominate search.",
+   "https://crates.io/crates/mneme — active 2025 Rust event-sourcing library (jwilger), 5.8k downloads; blocks the crate name a Rust-leaning OS project would want.",
+   "https://github.com/Olympus-HPC/Mneme — academic HPC software, pushed 2026-06-06 (active); confirms the predicted academic-software collision.",
+   "mneme.com (Network Solutions, held since 1999) and mneme.org (GoDaddy, locked, expires 2027) — both registered and maintained."
+  ],
+  "notes": "Eliminated. Every single registry is occupied: npm (dead placeholder), PyPI (dead but memory/note-taking themed), crates.io (ACTIVE 2025 event-sourcing lib), GitHub handle (active user since 2011), and both .com/.org domains (registered, maintained, locked). The kill shots are on GitHub: at least TWO independent, currently active 2026 projects use 'Mneme' for exactly our concept — Mneme-memory/MNEME-BETA ('Claude conversational memory system Mneme', with its own org) and Billy1900/mneme ('Rust memory system for autonomous AI agents'). A third active 2026 project (TheoV823/mneme) sits in AI-assisted development governance, and MadAppGang/mnemex ('Claude code memory', 39 stars) occupies the nearest phonetic variant. This clustering is structural, not bad luck: 'Mneme = muse of memory' is the obvious classical pick for any AI-memory product, so collisions will keep accumulating. Additional drag: zachallaun/mneme (137 stars) owns developer search results; Olympus-HPC/Mneme is the predicted active academic software; the Jupiter-moon sense pollutes general search; and the word is a pronunciation hazard (silent 'm', NEE-mee) with confusion risk against mnemonic/Mnemosyne/Mnemo. The mneme-os/mnemeos variant is technically free on GitHub but would still be read as 'the Mneme project's OS' next to two active AI-memory products named Mneme. Recommend dropping the candidate entirely rather than suffixing."
+ },
+ {
+  "name": "daimon",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN — 'daimon' by Yosi Azulay (flycotech.com): active local dev-server manager with TUI + MCP server for Claude Code. 9 versions, v0.10.0 published 2026-05-22 (2 weeks ago). Very active, AI-tooling space, bin name 'daimon' occupied."
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN — 'daimon' v0.0.2 (May 2024) by alxfed: trivial 4 KB stub explicitly themed on the Greek δαίμων concept. Dormant, but the name is squatted with our exact etymology."
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN — 'daimon' = 'A Rust-native AI agent framework' (Lexmata/daimon, publisher quinnjr). 8 versions to 0.16.0, all published March 2026, keywords: agent, ai, anthropic, llm, openai. Whole crate family exists (daimon-macros, daimon-provider-azure/bedrock/gemini, daimon-plugin-*). EXACTLY our space."
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN/CROWDED — 790 repos matching 'daimon' in name. Active AI/agent occupants: daimon111/daimon (19 stars, pushed 2026-02-21) + daimon111/daimon-template ('fork this to spawn your own daimon. autonomous agent template'); NGirchev/open-daimon (6 stars, pushed 2026-05-21, Java/Spring AI agent framework, topics ai-agent/agent-framework/react-agent); Lexmata/daimon (2 stars, pushed 2026-05-18, the crates.io framework); Yosi-Azulay/daimon (the npm tool); mmmarxdr/daimon (4 stars, pushed 2026-06-03). Dead-but-named: steerapi/daimon 'DaiMoN: A Decentralized Artificial Intelligence Model Network' (11 stars, 2019)."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN — github.com/daimon is an existing user (id 178696, created 2010, 1 repo, dormant since 2015). Handle unobtainable."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN — daimon.com registered 2004-10-09, registrar GoDaddy Online Services Cayman Islands, full client delete/renew/transfer/update locks, expires 2032. Long-held, locked, not acquirable cheaply."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN — daimon.org RDAP returned HTTP 200 with a full 7.7 KB registration record (registered). PIR blocks scripted detail pulls (403 on plain UA) but existence is confirmed."
+   },
+   {
+    "check": "github-os-variant",
+    "result": "NEAR-FREE — 'daimonos'/'daimon-os' search: 5 repos, all 0 stars, mostly dead (one 2018 Python chatbot-daemon, rest empty/typos). The -os variant is open but inherits all bare-name conflicts."
+   },
+   {
+    "check": "web",
+    "result": "CONFLICTED — Mojeek surfaced Daimon Robotics, a real embodied-AI/robotics company (dexterous manipulation, force-feedback; hiring via hiredchina.com; daimonrobotics.com resolves — TLS handshake quirk only). Plus heavy pop-culture load: His Dark Materials daemons, Marvel's Daimon Hellstrom (Hulu Helstrom series), Persona/SMT daimons, Digimon's Daimon Masaru. Phonetically identical to 'daemon'/'demon', so all search traffic collides with 40 years of Unix daemon literature."
+   }
+  ],
+  "topConflicts": [
+   "https://crates.io/crates/daimon — 'A Rust-native AI agent framework' (Lexmata/daimon), 8 versions published March 2026 with multi-provider features (Anthropic/OpenAI/MCP). Exact name, exact space (agents), active.",
+   "https://www.npmjs.com/package/daimon — active dev-server manager + MCP server for Claude Code, v0.10.0 published 2026-05-22; owns the 'daimon' CLI binary on every dev machine that installs it. Active, AI-tooling space.",
+   "https://github.com/daimon111/daimon (+ daimon111/daimon-template) — autonomous agent ecosystem, 19 stars, active Feb 2026; the template's tagline 'fork this to spawn your own daimon. autonomous agent template' uses our exact 'agents ARE daimons' concept verbatim.",
+   "https://github.com/NGirchev/open-daimon — self-hosted Java/Spring Boot AI agent framework with ReAct loop, active May 2026.",
+   "Daimon Robotics (daimonrobotics.com) — operating embodied-AI/robotics company (dexterous hands, tactile sensing); adjacent hardware-AI brand with the exact name.",
+   "daimon.com (registered 2004, locked until 2032) and daimon.org both registered; github.com/daimon handle taken."
+  ],
+  "notes": "Zero availability anywhere: npm, PyPI, crates.io, GitHub handle, daimon.com, and daimon.org are all taken. The kill shots are in exactly our space: crates.io 'daimon' is an actively developed Rust-native AI AGENT FRAMEWORK (March 2026, Anthropic/OpenAI/MCP providers), npm 'daimon' is an actively shipping Claude Code/MCP dev tool (last publish two weeks before today), and daimon111/daimon is an active autonomous-agent project whose template repo pitches the identical 'spawn your own daimon' agent metaphor — the conceptual differentiation is already burned. An operating robotics-AI company (Daimon Robotics) holds the brand in adjacent embodied-AI space, raising trademark risk in class 9/42. Phonetic risks: indistinguishable in speech from 'daemon'/'demon', so the name is unsearchable against Unix daemon literature, and carries famous-fiction adjacency (His Dark Materials daemons, Marvel's Daimon Hellstrom, Persona). The daimonos/daimon-os GitHub variant is technically open (5 zero-star repos) but would still collide with every conflict above in search, packaging, and speech. Per the rubric — active occupants in exactly the agents space plus all registries taken — this candidate is eliminated; do not try to rescue it with suffixes."
+ },
+ {
+  "name": "hexis",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "FREE (404 from registry.npmjs.org/hexis)"
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN — 'hexis' v1.0.5 by Eric Hartford (ehartford, of Dolphin-models fame). 'Persistent memory and identity for AI — a Postgres-native cognitive architecture.' 10 releases Feb 7–15 2026; actively maintained. The README explicitly cites Aristotle's hexis (ἕξις) 'a stable disposition earned through repeated action' as the name rationale — identical to ours. Features multi-layered memory, autonomous heartbeat, skills marketplace, MCP server."
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN — 'hexis' 0.0.1 published 2026-02-26 by terry-li-hm: 'The disposition layer between raw AI intelligence and effective action — a meta-cognitive framework for AI coding agents.' Keywords: agent, ai, claude, framework, metacognition. Currently a 3-LOC placeholder (18 downloads) but a deliberate name-claim in exactly our space, backed by GitHub org hexis-framework."
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN/CROWDED — 236 repos match. Top hit QuixiAI/Hexis: 585 stars, 73 forks, pushed 2026-05-24 (active, ~2 weeks old activity) — the Eric Hartford agent-memory project. Also hexis-framework/hexis (crates project), HEXIS rhythm-game converters (dead), assorted zero-star personal repos."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN — github.com/hexis user exists (created 2016, 0 repos, dormant) so the bare handle is unavailable; org 'hexis-framework' also exists (created 2026-02-26, 5 public repos)."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN — hexis.com registered 2024-06-24, expires 2027-06-24, registrar Sea Wasp LLC, last changed 2026-04-15."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN — hexis.org registered 2011-12-17, expires 2026-12-17, registrar NameCheap."
+   },
+   {
+    "check": "web",
+    "result": "CONFLICTED — Mojeek: Hexis is an AI-powered sports nutrition startup (raised $2M pre-seed, covered by Sports Business Journal, hexis.live); HEXIS is a large French vinyl-wrap/graphics-film company (hexis-graphics.com / hexis-online.com); Hexis Cyber Solutions was an endpoint-security vendor (HawkEye G, residue at symtrex.com); Hexis was also a defunct osu!-style rhythm game."
+   },
+   {
+    "check": "github-os-variant",
+    "result": "NEAR-FREE but moot — 'hexis-os/hexisos' search: 4 repos, all trivial (Aezdek/HexisOS 0 stars, rest are rhythm-game beatmap converters). The -os variant is uncrowded but inherits the fatal bare-name collision."
+   }
+  ],
+  "topConflicts": [
+   "QuixiAI/Hexis (Eric Hartford) — 585 stars, pushed 2026-05-24, on PyPI as 'hexis' v1.0.5: an AI cognitive architecture with persistent memory, identity, autonomous heartbeat, and a SKILLS MARKETPLACE, whose README cites the exact same Aristotelian hexis rationale we intended. https://github.com/QuixiAI/Hexis | https://pypi.org/project/hexis/",
+   "hexis-framework/hexis on crates.io — 'meta-cognitive framework for AI coding agents', keywords agent/ai/claude/metacognition, published Feb 2026. A second independent claim on the name in exactly our niche. https://crates.io/crates/hexis | https://github.com/hexis-framework/hexis",
+   "Hexis — AI-powered sports nutrition app, $2M pre-seed (active funded startup using 'Hexis' + 'AI' branding). https://www.sportsbusinessjournal.com (coverage); hexis.live",
+   "HEXIS S.A. — established French vinyl-wrap/graphics-film brand with global trademark presence. https://www.hexis-graphics.com"
+  ],
+  "notes": "Hard kill. The exact concept (Aristotelian hexis = disposition acquired through practice, applied to AI agent skill/memory systems) has already been independently claimed TWICE in 2026: (1) Eric Hartford's QuixiAI/Hexis — an active, well-starred (585), well-publicized agent cognitive-architecture project with persistent memory, identity, and a skills marketplace, sitting on the PyPI name and using the identical naming justification; (2) the 'hexis' crate — a meta-cognitive 'disposition layer' framework for AI coding agents. Both occupy precisely our space (agent OS / memory / skill acquisition); the first is famous-adjacent (Hartford is a prominent open-source AI figure), making any launch under this name look derivative or confusing. Registry availability is irrelevant: npm being free does not offset PyPI+crates being squarely occupied by same-space projects. Secondary trademark/SEO noise is also heavy: an active funded AI nutrition startup (Hexis), a large international graphics-film company (HEXIS), and a former cybersecurity vendor (Hexis Cyber Solutions). Both hexis.com and hexis.org are registered. The hexis-os/hexisos variant is technically uncrowded on GitHub but would still collide head-on with QuixiAI/Hexis in every search and conversation. Recommend abandoning this candidate entirely rather than seeking variants."
+ },
+ {
+  "name": "noesis",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN — 'noesis' 0.1.0 published 2026-03-10 by lmtlssss as an explicit namespace squat: 'Reserved npm handle for the Noesis paper-to-vector intake lane' (an AI/RAG-sounding project). Fresh reservation, not abandonware."
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN — NOESIS network data-mining framework (noesis.ikor.org), releases 2018, last 0.2.8 Sep-2018. Dormant but holds the name."
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN — 'noesis' 0.3.0 published 2026-03-04 by terry-li-hm: CLI for the Perplexity API (keywords: ai, cli, research, search). Tiny (16 downloads) but recent and squarely in AI tooling."
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN/CROWDED — 747 repos match. Top hits: Noesis/Tutorials (431 stars, NoesisGUI samples, pushed 2026-02), Noesis/UnrealPlugin (355 stars, pushed 2026-04), plus a large plugin ecosystem for Rich Whitehouse's Noesis 3D tool (fmt_RE_MESH 170 stars, etc.), leggedrobotics/noesis (RL toolbox for robotics, 54 stars, dormant 2023), IBM/dstc-noesis (archived)."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN — github.com/Noesis is the NoesisGUI organization (noesisengine.com, Spain): active commercial cross-platform game UI middleware for C++/.NET, 15 public repos, 213 followers, repos actively pushed through 2026."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN — noesis.com registered (RDAP returned 200 with a registration record)."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN — noesis.org registered (RDAP returned 200 with a registration record)."
+   },
+   {
+    "check": "github-os-variant",
+    "result": "TAKEN — beltromatti/Noesis-OS: 'bare-metal ARM64 microkernel in Rust for edge AI inference, real-time compute, zero-copy IPC, microVM deployment', homepage noesisai.org (registered, behind Cloudflare, origin currently 522). Only 2 stars, single push Nov-2025, but it is the exact OS+AI concept under the exact name. Also Umbra-Noesis/umbra-noesis-os (0 stars, trivial)."
+   },
+   {
+    "check": "web (Mojeek)",
+    "result": "HEAVILY OCCUPIED — (1) NoesisGUI/Noesis Engine, famous game-UI middleware; (2) Noesis (Rich Whitehouse), well-known 3D model viewer with its own Wikipedia article 'Noesis (software)'; (3) Noesis.pt, large Portuguese IT consultancy (Grupo Noesis, 21% YoY growth) actively marketing 'Agentic AI' enterprise solutions and an 'Agent Workbench'; (4) Noesis Solutions (Leuven, Belgium), established CAE/simulation software vendor (Optimus, SimApps); (5) Noesis Energy (Crunchbase); (6) Noesis Australia, planning software since 1989."
+   }
+  ],
+  "topConflicts": [
+   "NoesisGUI / Noesis Engine — famous, active commercial UI middleware for games, owns the GitHub handle: https://github.com/Noesis , https://noesisengine.com/",
+   "Noesis (Rich Whitehouse) — widely known 3D asset viewer/extractor with a Wikipedia article and a large GitHub plugin ecosystem: https://en.wikipedia.org/wiki/Noesis_(software)",
+   "Noesis.pt — active enterprise IT firm explicitly selling Agentic AI solutions ('Agent Workbench', 'Agentic AI at enterprise scale'): https://www.noesis.pt/",
+   "beltromatti/Noesis-OS — existing 'Noesis-OS' project that is literally an AI-inference microkernel (exact name + exact space, with noesisai.org domain): https://github.com/beltromatti/Noesis-OS",
+   "crates.io 'noesis' — fresh (Mar 2026) AI CLI for the Perplexity API holding the Rust name: https://crates.io/crates/noesis",
+   "Noesis Solutions — established Belgian simulation-software brand: https://www.noesissolutions.com/"
+  ],
+  "notes": "Every single registry and handle is occupied: npm (squatted Mar 2026 by another AI project reserving the name), PyPI (2018 network-mining framework), crates.io (Mar 2026 AI/Perplexity CLI), GitHub org (NoesisGUI), noesis.com and noesis.org (both registered), and 747 GitHub repos match the name. Worse than registry congestion: the name has at least three established software brands (NoesisGUI middleware — famous in gamedev; Rich Whitehouse's Noesis — Wikipedia-notable; Noesis Solutions — CAE vendor), an active IT consultancy (Noesis.pt) marketing Agentic AI products under this exact name, and an existing 'Noesis-OS' GitHub project that is precisely an AI-focused microkernel with its own noesisai.org domain. The OS-variant escape hatch (noesis-os/noesisos) is therefore also burned. SEO would be hopeless against entrenched multi-industry incumbents, and the agentic-AI overlap with Noesis.pt plus Noesis-OS creates direct confusion and plausible trademark exposure in software classes (NoesisGUI almost certainly holds marks). Phonetically clean and conceptually apt (Husserl's noesis), but the namespace is among the most crowded a Greek-philosophy term can be. Per the strict rubric — famous brand and active AI/agent/OS occupants with the same name — this candidate is eliminated."
+ },
+ {
+  "name": "noema",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN - 'noema' v0.0.3 (Feb 2025, crazywolf132): 'AI-powered React component generation' lib with keywords ai/agents/llm/orchestration. Low-activity but squarely AI-tagged; name unavailable."
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN - 'Noema' v1.1.3 (AlbanPerli, releases Oct-Dec 2024): 'A declarative way to control LLMs', explicitly built on Husserl's Noema/Noesis/Constitution concepts - the EXACT same naming rationale as ours. Repo AlbanPerli/Noema-Declarative-AI, 80 stars, pushed 2026-01-26."
+   },
+   {
+    "check": "crates",
+    "result": "TAKEN - 'noema' Rust IOC/DI framework, 14 versions, actively published 2026-01-14 through 2026-04-22 (latest 0.3.0 six weeks ago), 142 recent downloads. Active occupant."
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN/CROWDED - 276 repos named noema. Active hits in our exact space: HappyFox001/Noema (65 stars, pushed TODAY 2026-06-06, 'voice-first desktop AI companion with memory, emotion, tools, and plugins'); Fail-Safe/Noema (11 stars, pushed 2026-06-05, 'The intentional memory layer for your AI agents'); armin976/noema-ios (24 stars, pushed 2026-04-22, local-LLM iOS app); AlbanPerli/Noema-Declarative-AI (80 stars); ktsoator/noema ('intelligent agent turning goals into action'). noema-os/noemaos variant: 0 repos (free, but moot)."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN - github.com/Noema is an individual user 'Kia', created 2013, 0 public repos, dormant since 2018. Handle unavailable but occupant is dead."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN - noema.com registered since 1994-03-23, expires 2028-03-24, registrar Squarespace Domains II. Long-held, not lapsing."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN - noema.org registered since 2016-08-27, expires 2028-08-27, registrar Gandi SAS."
+   },
+   {
+    "check": "web",
+    "result": "HEAVILY CONFLICTED - (1) noema.ai is a LIVE commercial product: 'Noema AI', an Azure-native SaaS AI assistant by Noema Consulting (noema.net), copyright 2025. (2) Noema Magazine (noemamag.com, Berggruen Institute) is a famous publication that constantly covers AI - it dominates 'noema + AI' search results. (3) NOEMA - Technology & Society (noemalab.eu) also occupies the tech niche."
+   }
+  ],
+  "topConflicts": [
+   "Fail-Safe/Noema - 'The intentional memory layer for your AI agents' - active (pushed 2026-06-05), a DIRECT hit on the agent-memory space: https://github.com/Fail-Safe/Noema",
+   "HappyFox001/Noema - voice-first desktop AI companion with memory, tools, plugins - 65 stars, pushed 2026-06-06 (today): https://github.com/HappyFox001/Noema",
+   "Noema AI - live commercial AI assistant SaaS by Noema Consulting, occupying the prime .ai domain: https://noema.ai/",
+   "AlbanPerli/Noema-Declarative-AI - PyPI 'Noema' package, LLM-control framework explicitly named after the same Husserl noema/noesis concept (80 stars): https://github.com/AlbanPerli/Noema-Declarative-AI and https://pypi.org/project/Noema/",
+   "Noema Magazine (Berggruen Institute) - famous journal that publishes extensively on AI; owns the word's mindshare and SEO: https://www.noemamag.com/",
+   "Noema local-LLM iOS app (armin976/noema-ios, 24 stars, active): https://github.com/armin976/noema-ios",
+   "crates.io 'noema' - actively maintained Rust IOC/DI framework, latest release 2026-04-22: https://crates.io/crates/noema"
+  ],
+  "notes": "Eliminated under the strict rubric on multiple independent grounds. Every registry is taken: npm (AI UI-generation lib), PyPI (LLM-control framework that uses the identical Husserl noema/noesis naming rationale - our concept is literally already executed), and crates.io (actively maintained Rust DI framework, last release Apr 2026). GitHub shows 276 same-name repos with at least four active projects in the AI/agent space, including 'Noema: the intentional memory layer for your AI agents' (pushed yesterday) which sits in EXACTLY the agent-OS/memory territory, and a 65-star AI companion with memory+tools pushed today. Commercially, noema.ai is a live AI-assistant SaaS (Noema Consulting), so any 'Noema' AI product invites direct confusion and trademark exposure in class 9/42. Noema Magazine (Berggruen Institute) is a famous brand that dominates search for the word and publishes constantly about AI - we would never own SEO or mindshare. noema.com (held since 1994) and noema.org are both long-registered. Phonetic adjacency: 'Noema'/'Noemi/Noemia' personal names, and the NOEMA radio observatory (NOrthern Extended Millimeter Array) add further noise. The noema-os GitHub namespace is technically empty, but a free hyphenated variant cannot rescue a name whose bare form has an active occupant in our precise niche plus a famous-brand collision. Recommend dropping this candidate; if the Husserl pairing is desired, vet the noesis side or coinages (e.g. noemic/noemata-derivatives) instead - noting AlbanPerli's framework already claims the noesis/noema vocabulary in the LLM domain."
+ },
+ {
+  "name": "polis",
+  "verdict": "eliminated",
+  "checks": [
+   {
+    "check": "npm",
+    "result": "TAKEN - 'polis' by Ivan Popovski (user sipware), v0.0.15, GPLv3, no README; last publish 2017-03-09. Dead but name blocked."
+   },
+   {
+    "check": "pypi",
+    "result": "TAKEN - 'polis' 0.0.1 by Tiger_Shark, uploaded 2020-10-22, summary 'placeholder.' (squat pointing at an unrelated SEC-data project). Dead but name blocked."
+   },
+   {
+    "check": "crates",
+    "result": "FREE - 404, crate `polis` does not exist."
+   },
+   {
+    "check": "github-repos",
+    "result": "TAKEN heavily - total_count 11,435. Top: ory/polis (2,236 stars, pushed 2026-06-05, ACTIVE SSO/SAML/OIDC product by Ory, ex-BoxyHQ Jackson); compdemocracy/polis (1,173 stars, pushed 2026-06-04, ACTIVE, self-described 'Open Source AI for large scale open ended feedback' = the famous Pol.is deliberation platform); odralabshq/polis (2 stars but created 2026-01, pushed 2026-06-05, ACTIVE Rust company product: 'Secure Workspace for Autonomous Coding Agents')."
+   },
+   {
+    "check": "github-org",
+    "result": "TAKEN - github.com/polis is Vitaliy Polishchuk, personal account since 2011, 2 public repos. Handle unavailable."
+   },
+   {
+    "check": "rdap-com",
+    "result": "TAKEN - polis.com registered since 1994-05-19, expires 2028-05-20, full client-prohibited lock set."
+   },
+   {
+    "check": "rdap-org",
+    "result": "TAKEN - polis.org registered since 2001-11-18, renewed (last changed 2026-01-02), expires 2026-11-18."
+   },
+   {
+    "check": "github-repos (polis-os/polisos variants)",
+    "result": "NEAR-FREE - 'polis-os' 15 hits and 'polisos' 1 hit, all zero/one-star unrelated trivia (insurance-policy apps, 'Polish' false positives); only Rekognize-ai/sentinelai-polis-os-web (0 stars, 2025) brushes the AI space. But variant is poisoned by the bare-name conflicts."
+   },
+   {
+    "check": "web",
+    "result": "CONFLICTED - WebSearch lacked API key and Mojeek 403'd; used DuckDuckGo Lite. Query 'polis operating system agents': result #1 is odralabshq/polis 'Polis - Secure Workspace for AI Coding Agents... wraps any AI agent in an isolated VM', result #2 is its marketing site odralabs.com ('The secure workspace for autonomous agents. A complete runtime with network control, tool governance'); pol.is/home also ranks ('real-time system... enabled by advanced statistics and machine learning')."
+   }
+  ],
+  "topConflicts": [
+   "odralabshq/polis - 'Polis: Secure Workspace for Autonomous Coding Agents', active company product (Odra Labs, odralabs.com), Rust, AGPL-3.0, created Jan 2026, pushed 2026-06-05; only 2 stars but it is a commercially backed runtime/workspace FOR AI AGENTS - identical space, identical positioning, owns the SEO for 'polis + agents'. https://github.com/odralabshq/polis",
+   "compdemocracy/polis (pol.is) - famous open-source AI/ML deliberation platform ('Open Source AI for large scale open ended feedback'), 1,173 stars, active (pushed 2026-06-04), used by vTaiwan and notably by Anthropic for Collective Constitutional AI - within the AI community 'Polis' already means this. https://github.com/compdemocracy/polis",
+   "ory/polis - active SSO/SAML/OIDC infrastructure product by Ory, 2,236 stars, pushed 2026-06-05; a maintained commercial-OSS dev-infra brand named exactly Polis with likely trademark posture. https://github.com/ory/polis"
+  ],
+  "notes": "Availability is poor across the board: npm and PyPI names are squatted (dead but blocked), GitHub handle is a personal account, polis.com (held since 1994, hard-locked) and polis.org (held since 2001 by an active registrant) are both registered, and GitHub has 11,435 name matches. Crates.io is the only free registry. The kill-shot is not the registries but the occupants: odralabshq/polis is an actively developed, company-backed 'secure workspace/runtime for autonomous AI coding agents' - EXACTLY the agent-OS space, launched 2026 and pushed the day before this check - and it already wins the web results for 'polis + agents + OS'. Layered on top: pol.is is a famous brand in the AI x collective-intelligence space (Anthropic itself used it for Collective Constitutional AI), and Ory's Polis is a 2.2k-star active identity-infrastructure product, creating dev-tool trademark adjacency. Linguistic risk confirmed as structural, not just slang: 'polis' is the literal standard word for 'police' in Turkish, Swedish, Norwegian (archaic), Malay/Indonesian, and Greek-derived usage - an agent OS named 'police' invites surveillance/control connotations that directly undercut the 'free citizens' metaphor. The -os variants (polis-os/polisos) are technically open on GitHub but inherit all of the above confusion. Verdict: eliminated - active occupant in exactly our space plus a famous AI-adjacent brand plus saturated namespace."
+ }
+]

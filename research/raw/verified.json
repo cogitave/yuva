@@ -1,0 +1,324 @@
+[
+ {
+  "key": "sel4",
+  "source": "seL4 whitepaper",
+  "urls": [
+   "https://sel4.systems/About/seL4-whitepaper.pdf",
+   "https://docs.sel4.systems/Tutorials/mcs.html",
+   "https://sel4.systems/About/"
+  ],
+  "claims": [
+   {
+    "claim": "A microkernel design reduces the privileged trusted computing base by roughly three orders of magnitude versus Linux (on the order of 10 kSLOC vs ~20+ MSLOC), and the cited Biggs et al. 2018 study found that 29% of critical Linux compromises would be fully eliminated and another 55% mitigated to below critical severity by a (verified) microkernel architecture.",
+    "status": "confirmed",
+    "votes": "2 confirmed / 1 refuted / 0 unverifiable",
+    "evidence": [
+     "\"the Linux kernel comprises of the order of 20 million lines of source code (20 MSLOC); we can estimate that it contains literally tens of thousands of bugs [Biggs et al., 2018]\" ... \"In a well-designed microkernel, such as seL4, it is of the order of ten thousand lines of source code (10 kSLOC). This is literally three orders of magnitude smaller than the Linux kernel, and the attack surface shrinks accordingly\" ... \"Our recent study shows that of the known Linux compromises classified as critical, i.e. most severe, 29% would be fully eliminated by a microkernel design, and another 55% would be mitigated enough to no longer qualify as critical [Biggs et al., 2018].\" (Note: the source sentence attributes the 29%/55% result to \"a microkernel design\"; the claim's parenthetical \"(verified)\" is the claim-writer's gloss, consistent with but not stated in that sentence.)",
+     "\"the Linux kernel comprises of the order of 20 million lines of source code (20 MSLOC); we can estimate that it contains literally tens of thousands of bugs [Biggs et al., 2018]. ... Linux has a large trusted computing base (TCB)\" ... \"In a well-designed microkernel, such as seL4, it is of the order of ten thousand lines of source code (10 kSLOC). This is literally three orders of magnitude smaller than the Linux kernel, and the attack surface shrinks accordingly\" ... \"Our recent study shows that of the known Linux compromises classified as critical, i.e. most severe, 29% would be fully eliminated by a microkernel design, and another 55% would be mitigated enough to no longer qualify as critical [Biggs et al., 2018].\" (The cited reference is Simon Biggs, Damon Lee, and Gernot Heiser, APSys 2018.) All numbers match: ~20 MSLOC vs ~10 kSLOC, three orders of magnitude, 29% eliminated, 55% mitigated below critical."
+    ],
+    "corrections": [
+     "A microkernel design reduces the privileged trusted computing base by roughly three orders of magnitude versus Linux (on the order of 10 kSLOC vs ~20 MSLOC), and the cited Biggs et al. 2018 study found that 29% of critical Linux compromises would be fully eliminated and another 55% mitigated to below critical severity by a microkernel design (the whitepaper does not qualify this as a 'verified' microkernel)."
+    ]
+   },
+   {
+    "claim": "In seL4, capability invocation is the single, exclusive mechanism for any operation on a kernel object - every system call is a capability invocation checked against the rights encoded in the capability (object capabilities, not ACLs, are the enforcement primitive). seL4 has approximately ten kernel object types, all referenced by capabilities.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"In a capability-based system, such as seL4, invoking a capability is the one and only way of performing an operation on a system object. In fact, a system call in seL4 is a capability invocation, with arguments specifying what operation to perform on the object referenced by the invoked capability. The kernel will then check whether the capability authorises the requested operation, and immediately abort the operation if it is not authorised.\" ... \"a capability also encodes access rights, in fact, the capability is an encapsulation of an object reference and the rights it conveys to that object\" ... \"Note that this notion of object capabilities is quite different from (and far more powerful than) what Linux calls 'capabilities', which are really access-control lists (ACLs) with system-call granularity.\" ... \"There are ten types of seL4 objects, all referenced by capabilities:\" (source says exactly ten and lists them: Endpoints, Reply Objects, Address Spaces, Cnodes, Thread Control Blocks, Scheduling Contexts, Notifications, Frames, Interrupt objects, Untypeds; the claim's \"approximately ten\" is compatible)",
+     "\"In a capability-based system, such as seL4, invoking a capability is the one and only way of performing an operation on a system object. In fact, a system call in seL4 is a capability invocation, with arguments specifying what operation to perform on the object referenced by the invoked capability. The kernel will then check whether the capability authorises the requested operation, and immediately abort the operation if it is not authorised.\" ... \"Note that this notion of object capabilities is quite different from (and far more powerful than) what Linux calls 'capabilities', which are really access-control lists (ACLs) with system-call granularity.\" ... \"There are ten types of seL4 objects, all referenced by capabilities\". The source's exact count is ten object types, consistent with the claim's \"approximately ten\"; the \"one and only way\" wording supports the \"single, exclusive mechanism\" qualifier."
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "unikraft",
+  "source": "Unikraft paper (arXiv:2104.12721, EuroSys 2021)",
+  "urls": [
+   "https://arxiv.org/abs/2104.12721",
+   "https://arxiv.org/html/2104.12721",
+   "https://ar5iv.labs.arxiv.org/html/2104.12721"
+  ],
+  "claims": [
+   {
+    "claim": "Unikraft is a micro-library OS that fully modularizes OS primitives, allowing a unikernel to be composed with only the components an application actually needs.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "We introduce Unikraft, a novel micro-library OS that (1) fully modularizes OS primitives so that it is easy to customize the unikernel and include only relevant components and (2) exposes a set of composable, performance-oriented APIs in order to make it easy for developers to obtain high performance.",
+     "We introduce Unikraft, a novel micro-library OS that (1) fully modularizes OS primitives so that it is easy to customize the unikernel and include only relevant components and (2) exposes a set of composable, performance-oriented APIs in order to make it easy for developers to obtain high performance."
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "Unikraft images for common applications (e.g., nginx/SQLite/Redis class apps) are around 1 MB, run in under 10 MB of RAM, and boot in about 1 ms on top of VMM time (around 3-40 ms total boot).",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Our evaluation using off-the-shelf applications such as nginx, SQLite, and Redis shows that running them on Unikraft results in a 1.7x-2.7x performance improvement compared to Linux guests. In addition, Unikraft images for these apps are around 1MB, require less than 10MB of RAM to run, and boot in around 1ms on top of the VMM time (total boot time 3ms-40ms).",
+     "Our evaluation using off-the-shelf applications such as nginx, SQLite, and Redis shows that running them on Unikraft results in a 1.7x-2.7x performance improvement compared to Linux guests. In addition, Unikraft images for these apps are around 1MB, require less than 10MB of RAM to run, and boot in around 1ms on top of the VMM time (total boot time 3ms-40ms)."
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "mirage",
+  "source": "MirageOS / Unikernels: Library Operating Systems for the Cloud (ASPLOS 2013)",
+  "urls": [
+   "https://anil.recoil.org/papers/2013-asplos-mirage.pdf",
+   "https://anil.recoil.org/papers/2013-asplos-mirage",
+   "https://dl.acm.org/doi/10.1145/2451116.2451167"
+  ],
+  "claims": [
+   {
+    "claim": "Unikernels compile the entire software stack (system libraries, language runtime, application) into a single bootable, single-purpose VM image that runs directly on a standard hypervisor, with OS services (e.g., network stack, device drivers) implemented as libraries linked into the application.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"The entire software stack of system libraries, language runtime, and applications is compiled into a single bootable VM image that runs directly on a standard hypervisor (Figure 1).\" ... \"We dub these VMs unikernels: specialised, sealed, single-purpose libOS VMs that run directly on the hypervisor. A libOS is structured very differently from a conventional OS: all services, from the scheduler to the device drivers to the network stack, are implemented as libraries linked directly with the application.\"",
+     "\"The entire software stack of system libraries, language runtime, and applications is compiled into a single bootable VM image that runs directly on a standard hypervisor (Figure 1).\" ... \"Unikernels are single-purpose appliances that are compile-time specialised into standalone kernels\" ... \"A libOS is structured very differently from a conventional OS: all services, from the scheduler to the device drivers to the network stack, are implemented as libraries linked directly with the application.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "Instead of multi-user access control, unikernels in Mirage use the hypervisor as the sole unit of isolation, with a single address space and no userspace processes; protection inside the appliance is enforced by language type-safety (OCaml).",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"However, rather than adopt a multi-user access control mechanism that is inordinately complex for a specialised appliance, unikernels use the hypervisor as the sole unit of isolation and let applications trust external entities via protocol libraries such as SSL or SSH.\" ... \"Likewise, access control within the appliance no longer requires userspace processes, instead depending on the language's type-safety to enforce restrictions. the virtual address space can be simplified into a single-address space model.\" The OCaml attribution is supported by: \"We describe a complete unikernel prototype in the form of our OCaml-based Mirage implementation\" and (abstract) \"The architecture combines static type-safety with a single address-space layout that can be made immutable via a hypervisor extension.\"",
+     "\"However, rather than adopt a multi-user access control mechanism that is inordinately complex for a specialised appliance, unikernels use the hypervisor as the sole unit of isolation\" ... \"Likewise, access control within the appliance no longer requires userspace processes, instead depending on the language's type-safety to enforce restrictions. the virtual address space can be simplified into a single-address space model.\" ... \"As unikernels are single-image and single-address space\" ... \"Our Mirage prototype produces unikernels by compiling and linking OCaml code into a bootable Xen VM image.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "Mirage adopts the multikernel philosophy: one single-vCPU VM per core, with multicore parallelism achieved via multiple communicating unikernels over a hypervisor, and non-OCaml/legacy code encapsulated in separate VMs communicating via message-passing.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"One early decision decision we took is to adopt the multikernel [15] philosophy of running a VM per core, and the single-threaded OCaml runtime has fast sequential performance that is ideal for this need. Each Mirage unikernel runs over Xen using a single virtual CPU, and multicore is supported via multiple communicating unikernels over a single instance of Xen.\" The legacy-code portion is supported by: \"existing non-OCaml code can be encapsulated in separate VMs and communicated with via message-passing, analogous to processes in a conventional OS (§5.2).\"",
+     "\"One early decision decision we took is to adopt the multikernel [15] philosophy of running a VM per core, and the single-threaded OCaml runtime has fast sequential performance that is ideal for this need. Each Mirage unikernel runs over Xen using a single virtual CPU, and multicore is supported via multiple communicating unikernels over a single instance of Xen.\" ... \"The advantage of running on a hypervisor is that the reverse is also possible: existing non-OCaml code can be encapsulated in separate VMs and communicated with via message-passing, analogous to processes in a conventional OS (§5.2).\""
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "exokernel",
+  "source": "Engler et al., Exokernel: An Operating System Architecture for Application-Level Resource Management (SOSP 1995)",
+  "urls": [
+   "https://pdos.csail.mit.edu/6.828/2008/readings/engler95exokernel.pdf",
+   "https://pdos.csail.mit.edu/papers/exokernel-sosp95.ps",
+   "https://dl.acm.org/doi/10.1145/224056.224076"
+  ],
+  "claims": [
+   {
+    "claim": "The exokernel architecture implements traditional OS abstractions (e.g., virtual memory, IPC) entirely at application level in untrusted library operating systems, while a minimal kernel only securely multiplexes hardware resources.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"we have designed a new operating system architecture, exokernel, in which traditional operating system abstractions, such as virtual memory (VM) and interprocess communication (IPC), are implemented entirely at application level by untrusted software. In this architecture, a minimal kernel--which we call an exokernel--securely multiplexes available hardware resources.\" Also (abstract): \"a small kernel securely exports all hardware resources through a low-level interface to untrusted library operating systems.\" The 'only' qualifier matches the design principle: \"an exokernel should avoid resource management. It should only manage resources to the extent required by protection.\"",
+     "\"we have designed a new operating system architecture, exokernel, in which traditional operating system abstractions, such as virtual memory (VM) and interprocess communication (IPC), are implemented entirely at application level by untrusted software. In this architecture, a minimal kernel--which we call an exokernel--securely multiplexes available hardware resources. Library operating systems, working above the exokernel interface, implement higher-level abstractions.\" The 'only' qualifier is supported by: \"Phrased negatively, this principle states that an exokernel should avoid resource management. It should only manage resources to the extent required by protection.\" Abstract also states: \"a small kernel securely exports all hardware resources through a low-level interface to untrusted library operating systems.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "An exokernel separates protection from management using three techniques: secure bindings, visible resource revocation, and an abort protocol, which together let the kernel guard resources and forcibly reclaim them from uncooperative applications.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"an exokernel separates protection from management through a low-level interface. In separating protection from management, an exokernel performs three important tasks: (1) tracking ownership of resources, (2) ensuring protection by guarding all resource usage or binding points, and (3) revoking access to resources. To achieve these tasks, an exokernel employs three techniques. First, using secure bindings, library operating systems can securely bind to machine resources. Second, visible revocation allows library operating systems to participate in a resource revocation protocol. Third, an abort protocol is used by an exokernel to break secure bindings of uncooperative library operating systems by force.\" Also (intro): \"by using an abort protocol, an exokernel can break secure bindings of uncooperative applications by force.\"",
+     "\"an exokernel separates protection from management through a low-level interface. In separating protection from management, an exokernel performs three important tasks: (1) tracking ownership of resources, (2) ensuring protection by guarding all resource usage or binding points, and (3) revoking access to resources. To achieve these tasks, an exokernel employs three techniques. First, using secure bindings, library operating systems can securely bind to machine resources. Second, visible revocation allows library operating systems to participate in a resource revocation protocol. Third, an abort protocol is used by an exokernel to break secure bindings of uncooperative library operating systems by force.\" The count of exactly three techniques is also stated in Section 1: \"An exokernel employs three techniques to export resources securely.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "Secure bindings decouple authorization (at bind time) from use (at access time), allowing the kernel to protect resources without understanding their semantics.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"A secure binding is a protection mechanism that decouples authorization from the actual use of a resource... a secure binding performs authorization only at bind time, which allows management to be decoupled from protection... By isolating the need to understand these semantics to bind time, the kernel can efficiently implement access checks at access time without understanding them. Simply put, a secure binding allows the kernel to protect resources without understanding them.\"",
+     "\"A secure binding is a protection mechanism that decouples authorization from the actual use of a resource.\" ... \"a secure binding performs authorization only at bind time, which allows management to be decoupled from protection.\" ... \"By isolating the need to understand these semantics to bind time, the kernel can efficiently implement access checks at access time without understanding them. Simply put, a secure binding allows the kernel to protect resources without understanding them.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "The paper applies the end-to-end argument to OS design: applications know their resource-management goals better than the OS and should be given maximal control over resource management.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "\"The familiar \\\"end-to-end\\\" argument applies as well to low-level operating system software as it does to low-level communication protocols [44]. Applications know better than operating systems what the goal of their resource management decisions should be and therefore, they should be given as much control as possible over those decisions.\"",
+     "\"The familiar \\\"end-to-end\\\" argument applies as well to low-level operating system software as it does to low-level communication protocols [44]. Applications know better than operating systems what the goal of their resource management decisions should be and therefore, they should be given as much control as possible over those decisions.\" The 'maximal control' phrasing matches \"as much control as possible\" and is reinforced by: \"To provide the maximum opportunity for application-level resource management, the exokernel architecture consists of a thin exokernel veneer that multiplexes and exports physical resources securely.\""
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "firecracker",
+  "source": "Agache et al., Firecracker: Lightweight Virtualization for Serverless Applications (NSDI 2020)",
+  "urls": [
+   "https://www.usenix.org/conference/nsdi20/presentation/agache",
+   "https://www.usenix.org/system/files/nsdi20-paper-agache.pdf"
+  ],
+  "claims": [
+   {
+    "claim": "Firecracker is a from-scratch, open-source Virtual Machine Monitor (VMM) deliberately specialized for serverless/container workloads rather than general-purpose computing, used in production by AWS Lambda.",
+    "status": "refuted",
+    "votes": "0 confirmed / 3 refuted / 0 unverifiable",
+    "evidence": [],
+    "corrections": [
+     "Firecracker is a new, open-source Virtual Machine Monitor (VMM) — built by entirely replacing QEMU (while keeping KVM) and starting from Google's Chrome OS VMM crosvm, reusing some of its components before diverging substantially — deliberately specialized for serverless and container workloads rather than all general uses, and used in production by AWS Lambda (and Fargate) since 2018.",
+     "Firecracker is an open-source Virtual Machine Monitor (VMM) — started from Google's Chrome OS VMM crosvm (re-using some of its components, then diverging substantially) rather than written from scratch — deliberately specialized for serverless/container workloads instead of general-purpose computing, and used in production by AWS Lambda (and Fargate).",
+     "Firecracker is a new, open-source Virtual Machine Monitor (VMM) deliberately specialized for serverless/container workloads rather than general-purpose computing, used in production by AWS Lambda since 2018 — but it was not built from scratch: its implementation started with Google's Chrome OS VMM crosvm, re-using some of its components (the two codebases have since diverged substantially)."
+    ]
+   },
+   {
+    "claim": "The paper argues the traditional dichotomy - strong-security/high-overhead VMs versus weak-security/low-overhead containers - is a false choice that can be escaped via workload-specialized virtualization.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"The traditional view is that there is a choice between virtualization with strong security and high overhead, and container technologies with weaker security and minimal overhead. This tradeoff is unacceptable to public infrastructure providers, who need both strong security and minimal overhead. To meet this need, we developed Firecracker, a new open source Virtual Machine Monitor (VMM) specialized for serverless workloads...\" Section 1: \"implementors of serverless and container services can choose between hypervisor-based virtualization (and the potentially unacceptable overhead related to it), and Linux containers (and the related compatibility vs. security tradeoffs). We built Firecracker because we didn't want to choose.\" Section 1.1 ties the escape to workload specialization: \"Firecracker was built specifically for serverless and container applications... the performance, density, and isolation goals of Firecracker were set by its intended use for serverless and containers.\"",
+     "\"The traditional view is that there is a choice between virtualization with strong security and high overhead, and container technologies with weaker security and minimal overhead. This tradeoff is unacceptable to public infrastructure providers, who need both strong security and minimal overhead. To meet this need, we developed Firecracker, a new open source Virtual Machine Monitor (VMM) specialized for serverless workloads\" (abstract); and from the introduction: \"implementors of serverless and container services can choose between hypervisor-based virtualization (and the potentially unacceptable overhead related to it), and Linux containers (and the related compatibility vs. security tradeoffs). We built Firecracker because we didn't want to choose.\""
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "memos",
+  "source": "MemOS (arXiv:2507.03724)",
+  "urls": [
+   "https://arxiv.org/abs/2507.03724",
+   "https://arxiv.org/html/2507.03724",
+   "https://ar5iv.labs.arxiv.org/html/2507.03724"
+  ],
+  "claims": [
+   {
+    "claim": "MemOS proposes treating memory as a first-class, manageable operating-system resource for LLMs, unifying three memory types - plaintext, activation-based (KV/activation state), and parameter-level memories - under a single representation, scheduling, and evolution framework.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"we propose MemOS, a memory operating system that treats memory as a manageable system resource. It unifies the representation, scheduling, and evolution of plaintext, activation-based, and parameter-level memories, enabling cost-efficient storage and retrieval.\" Full text: \"MemOS treats memory units as first-class resources and builds upon operating system design principles to introduce comprehensive governance mechanisms including scheduling, layering, API abstraction, permission control, and exception handling\"; \"Memory as a System Resource: Abstract memory from a latent, internal dependency into a first-class, schedulable, and manageable resource.\" The KV/activation-state gloss is also literal: \"Activation memory consists of intermediate states generated during inference, with the KV-cache as the central structure\" and \"the three memory types defined in MemCube—Activation Memory (KV-Cache), Plaintext Memory, and Parameter Memory\".",
+     "Abstract: \"we propose MemOS, a memory operating system that treats memory as a manageable system resource. It unifies the representation, scheduling, and evolution of plaintext, activation-based, and parameter-level memories, enabling cost-efficient storage and retrieval.\" Full text: \"MemOS treats memory units as first-class resources and builds upon operating system design principles\"; \"Memory as a System Resource: Abstract memory from a latent, internal dependency into a first-class, schedulable, and manageable resource\"; \"the first hierarchical memory architecture for LLMs that models and unifies three distinct substrates: plaintext memory, activation memory, and parameter memory.\" The 'KV/activation state' gloss matches the paper: \"plain memories frequently recalled across sessions may be promoted to Activation Memory (KV cache)\" and \"activation memory (contextual inference state)\"."
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "MemOS defines a basic memory unit called the MemCube, which encapsulates memory content plus metadata (e.g., provenance, versioning), and supports operations allowing memories to transition/migrate between memory types over time - bridging retrieval-based memory and parameter-based learning.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"As the basic unit, a MemCube encapsulates both memory content and metadata such as provenance and versioning. MemCubes can be composed, migrated, and fused over time, enabling flexible transitions between memory types and bridging retrieval with parameter-based learning.\" Full text corroborates the cross-type transition operations: \"MemScheduler supports cross-type memory migration. For example, plain memories frequently recalled across sessions may be promoted to Activation Memory (KV cache). Stable templates used repeatedly can be distilled into parameter Memory. Conversely, underutilized KV entries may be downgraded to Plain Memory and archived to cold storage.\"",
+     "Abstract: \"As the basic unit, a MemCube encapsulates both memory content and metadata such as provenance and versioning. MemCubes can be composed, migrated, and fused over time, enabling flexible transitions between memory types and bridging retrieval with parameter-based learning.\" Full text: \"MemOS introduces the MemCube—a unified abstraction that standardizes memory representation, lifecycle management, cross-modal fusion, and dynamic memory state transitions\"; \"MemScheduler supports cross-type memory migration. For example, plain memories frequently recalled across sessions may be promoted to Activation Memory (KV cache). Stable templates used repeatedly can be distilled into parameter Memory.\""
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "memgpt",
+  "source": "MemGPT: Towards LLMs as Operating Systems (arXiv:2310.08560)",
+  "urls": [
+   "https://arxiv.org/abs/2310.08560",
+   "https://arxiv.org/html/2310.08560",
+   "https://ar5iv.labs.arxiv.org/html/2310.08560"
+  ],
+  "claims": [
+   {
+    "claim": "MemGPT overcomes LLM context window limits via virtual context management, a technique explicitly inspired by hierarchical memory / virtual memory paging in traditional operating systems, where data moves between fast (in-context) and slow (external) memory tiers to give the appearance of a larger context.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"To enable using context beyond limited context windows, we propose virtual context management, a technique drawing inspiration from hierarchical memory systems in traditional operating systems that provide the appearance of large memory resources through data movement between fast and slow memory.\" Introduction: \"Our approach borrows from the idea of virtual memory paging that was developed to enable applications to work on datasets that far exceed the available memory by paging data between main memory and disk.\" Section 2 confirms the fast=in-context / slow=external mapping: \"main context (analogous to main memory/physical memory/RAM) and external context (analogous to disk memory/disk storage). Main context consists of the LLM prompt tokens—anything in main context is considered in-context and can be accessed by the LLM processor during inference.\"",
+     "Abstract (v2): \"To enable using context beyond limited context windows, we propose virtual context management, a technique drawing inspiration from hierarchical memory systems in traditional operating systems that provide the appearance of large memory resources through data movement between fast and slow memory.\" Full text: \"Our approach borrows from the idea of virtual memory paging that was developed to enable applications to work on datasets that far exceed the available memory by paging data between main memory and disk.\" Full text also maps the fast/slow tiers to in-context/external: \"main context (analogous to main memory/physical memory/RAM) and external context (analogous to disk memory/disk storage). Main context consists of the LLM prompt tokens—anything in main context is considered in-context and can be accessed by the LLM processor during inference.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "MemGPT implements (1) an intelligent management layer that moves data between main context and external storage tiers, and (2) interrupts that manage control flow between the system and the user.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"we introduce MemGPT (Memory-GPT), a system that intelligently manages different memory tiers in order to effectively provide extended context within the LLM's limited context window, and utilizes interrupts to manage control flow between itself and the user.\" The data-movement function of the management component is explicit in the introduction: \"MemGPT enables the LLM to retrieve relevant historical data missing from what is placed in-context, and also evict less relevant data from context and into external storage systems.\" The conclusion reiterates both mechanisms: \"MemGPT demonstrates that operating system techniques like hierarchical memory management and interrupts can unlock the potential of LLMs even when constrained by fixed context lengths.\"",
+     "Abstract (v2): \"we introduce MemGPT (Memory-GPT), a system that intelligently manages different memory tiers in order to effectively provide extended context within the LLM's limited context window, and utilizes interrupts to manage control flow between itself and the user.\" Full text: \"MemGPT orchestrates data movement between main context and external context via function calls that are generated by the LLM processor.\" and \"MemGPT uses functions to move data between main context and external context (the archival and recall storage databases).\" Conclusion: \"MemGPT demonstrates that operating system techniques like hierarchical memory management and interrupts can unlock the potential of LLMs even when constrained by fixed context lengths.\""
+    ],
+    "corrections": []
+   }
+  ]
+ },
+ {
+  "key": "coala",
+  "source": "CoALA: Cognitive Architectures for Language Agents (arXiv:2309.02427)",
+  "urls": [
+   "https://arxiv.org/abs/2309.02427",
+   "https://arxiv.org/html/2309.02427",
+   "https://ar5iv.labs.arxiv.org/html/2309.02427"
+  ],
+  "claims": [
+   {
+    "claim": "CoALA prescribes a memory architecture for language agents consisting of a short-term working memory plus three long-term stores: episodic, semantic, and procedural.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Under the CoALA framework, language agents explicitly organize information (mainly textural, but other modalities also allowed) into multiple memory modules, each containing a different form of information. These include short-term working memory and several long-term memories: episodic, semantic, and procedural.",
+     "Section 4.1 Memory: \"Under the CoALA framework, language agents explicitly organize information (mainly textural, but other modalities also allowed) into multiple memory modules, each containing a different form of information. These include short-term working memory and several long-term memories: episodic, semantic, and procedural.\" The section then details exactly these four modules under the headings \"Working memory.\", \"Episodic memory.\", semantic memory, and procedural memory — i.e., one short-term working memory plus three long-term stores, matching the claimed count."
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "CoALA decomposes an agent internal action space into operation classes defined by memory access: retrieval (read from long-term memory), reasoning (update working memory via LLM), and learning (write to long-term memory).",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Internal actions interact with internal memories. Depending on which memory gets accessed and whether the access is read or write, internal actions can be further decomposed into three kinds: retrieval (read from long-term memory; Section 4.3), reasoning (update the short-term working memory with LLM; Section 4.4), and learning (write to long-term memory; Section 4.5).",
+     "Section 4 (Conceptual Framework): \"Internal actions interact with internal memories. Depending on which memory gets accessed and whether the access is read or write, internal actions can be further decomposed into three kinds: retrieval (read from long-term memory; Section 4.3), reasoning (update the short-term working memory with LLM; Section 4.4), and learning (write to long-term memory; Section 4.5).\" This matches the claim exactly: three operation classes defined by memory access (which memory, read vs. write), with the three definitions stated verbatim."
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "CoALA asserts that self-modification via writes to procedural memory is categorically riskier than writes to episodic or semantic memory.",
+    "status": "refuted",
+    "votes": "0 confirmed / 3 refuted / 0 unverifiable",
+    "evidence": [],
+    "corrections": [
+     "CoALA states that learning new actions by writing to procedural memory is significantly riskier (not 'categorically' riskier) than writing to episodic or semantic memory, because it can easily introduce bugs or allow an agent to subvert its designers' intentions.",
+     "CoALA asserts that learning new actions by writing to procedural memory is significantly riskier than writing to episodic or semantic memory, as it can easily introduce bugs or allow an agent to subvert its designers' intentions.",
+     "CoALA asserts that learning new actions by writing to procedural memory is significantly riskier than writing to episodic or semantic memory, because it can easily introduce bugs or allow an agent to subvert its designers' intentions."
+    ]
+   }
+  ]
+ },
+ {
+  "key": "hipporag",
+  "source": "HippoRAG (arXiv:2405.14831, NeurIPS 2024)",
+  "urls": [
+   "https://arxiv.org/abs/2405.14831",
+   "https://arxiv.org/html/2405.14831",
+   "https://ar5iv.labs.arxiv.org/html/2405.14831"
+  ],
+  "claims": [
+   {
+    "claim": "HippoRAG implements long-term memory for LLMs by combining LLMs, knowledge graphs, and the Personalized PageRank algorithm in an architecture explicitly modeled on the hippocampal indexing theory of human memory, with the knowledge graph acting as the hippocampal index.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Title: \"HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models\". Abstract: \"we introduce HippoRAG, a novel retrieval framework inspired by the hippocampal indexing theory of human long-term memory ... HippoRAG synergistically orchestrates LLMs, knowledge graphs, and the Personalized PageRank algorithm to mimic the different roles of neocortex and hippocampus in human memory.\" Body: \"Our novel design first models the neocortex's ability to process perceptual input by using an LLM to transform a corpus into a schemaless knowledge graph (KG) as our artificial hippocampal index.\" and \"It is therefore natural to define our artificial hippocampal index as this open KG, which is built on the whole retrieval corpus passage-by-passage.\" All components of the claim — long-term memory for LLMs, the three combined ingredients (LLMs, KGs, Personalized PageRank), explicit modeling on hippocampal indexing theory, and the KG serving as the hippocampal index — are literally stated in the source.",
+     "Abstract: \"we introduce HippoRAG, a novel retrieval framework inspired by the hippocampal indexing theory of human long-term memory ... HippoRAG synergistically orchestrates LLMs, knowledge graphs, and the Personalized PageRank algorithm to mimic the different roles of neocortex and hippocampus in human memory.\" Full text (Sec. 1): \"we propose HippoRAG, a RAG framework that serves as a long-term memory for LLMs by mimicking this model of human memory. Our novel design first models the neocortex's ability to process perceptual input by using an LLM to transform a corpus into a schemaless knowledge graph (KG) as our artificial hippocampal index.\" Full text (Sec. 2): \"It is therefore natural to define our artificial hippocampal index as this open KG, which is built on the whole retrieval corpus passage-by-passage.\""
+    ],
+    "corrections": []
+   },
+   {
+    "claim": "Single-step retrieval with HippoRAG matches or beats iterative retrieval methods like IRCoT while being roughly 10-30x cheaper and 6-13x faster.",
+    "status": "confirmed",
+    "votes": "3 confirmed / 0 refuted / 0 unverifiable",
+    "evidence": [
+     "Abstract: \"Single-step retrieval with HippoRAG achieves comparable or better performance than iterative retrieval like IRCoT while being 10-30 times cheaper and 6-13 times faster.\" Body (Results): \"Notably, single-step HippoRAG is on par or outperforms IRCoT while being 10-30 times cheaper and 6-13 times faster during online retrieval (Appendix G).\" Introduction: \"HippoRAG's online retrieval process is 10 to 30 times cheaper and 6 to 13 times faster than current iterative retrieval methods like IRCoT, while still achieving comparable performance.\" Appendix G: \"retrieval costs for IRCoT are 10 to 30 times higher than HippoRAG ... HippoRAG can be 6 to 13 times faster than IRCoT, depending on the number of retrieval rounds.\" The claim's \"matches or beats\" maps to the source's \"comparable or better\" / \"on par or outperforms\", and \"roughly 10-30x cheaper and 6-13x faster\" matches the figures stated repeatedly in abstract, intro, results, and appendix. (Minor note: one HTML rendering of the abstract reads \"10-20 times cheaper\", but the abs-page abstract and all body/appendix statements consistently say 10-30.)",
+     "Abstract: \"Single-step retrieval with HippoRAG achieves comparable or better performance than iterative retrieval like IRCoT while being 10-30 times cheaper and 6-13 times faster, and integrating HippoRAG into IRCoT brings further substantial gains.\" The claim's numbers (10-30x cheaper, 6-13x faster) and qualifier (\"matches or beats\" = \"comparable or better\") are exact matches."
+    ],
+    "corrections": []
+   }
+  ]
+ }
+]

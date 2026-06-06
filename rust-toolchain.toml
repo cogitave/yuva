@@ -1,0 +1,20 @@
+# Pinned toolchain for reproducible boot bring-up.
+#
+# - nightly: required for -Zbuild-std and custom JSON target specs
+#   (https://docs.rust-embedded.org/embedonomicon/custom-target.html).
+# - The channel is >= 1.88.0, which is where `#[unsafe(naked)]` + `naked_asm!`
+#   and `global_asm!` are stable (KERNEL-FOUNDATION-SPEC.md §1, verified:
+#   naked-fn stabilization 2025-06-26 / Rust 1.88.0). Bump the date freely; keep
+#   it nightly and keep the two components below.
+# - rust-src: lets cargo's -Zbuild-std recompile core + compiler_builtins for
+#   our none-class targets (rustup component add rust-src).
+# - llvm-tools: ships llvm-objcopy/objdump/readelf etc. used to inspect the ELF
+#   (e.g. confirm the XEN_ELFNOTE_PHYS32_ENTRY note is present) in BUILD.md.
+#
+# We deliberately list NO `targets`: x86_64-tabos-none / aarch64-tabos-none are
+# not rustup targets; they are built from /targets/*.json via build-std.
+
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "llvm-tools"]
+profile = "minimal"

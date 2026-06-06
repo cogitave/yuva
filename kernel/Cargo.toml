@@ -1,0 +1,18 @@
+# tabos-kernel: the M0 boot image.
+#
+# `#![no_std] #![no_main]` binary whose entry (`_start`) is provided by tb-hal's
+# per-arch boot trampoline; tb-hal then calls our `rust_main`. The DoD marker
+# "hello from rust_main\n" is emitted from src/main.rs over tb-hal serial.
+
+[package]
+name = "tabos-kernel"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Default binary target is src/main.rs with name = package name ("tabos-kernel"),
+# so the ELF lands at target/<triple>/<profile>/tabos-kernel — the path the
+# scripts/run-*.sh runners receive as $1.
+
+[dependencies]
+tb-hal = { path = "../crates/tb-hal" }

@@ -1,0 +1,128 @@
+{
+ "area": "aios-letta-e2b",
+ "findings": [
+  {
+   "topic": "AIOS core architecture: LLM syscalls + centralized scheduler (FIFO/RR), measured 2.1x speedup",
+   "summary": "AIOS (arXiv:2403.16971, COLM 2025, v5 Aug 2025) splits agent serving into application layer (SDK) and an 'AIOS kernel' sitting above the host OS. Agent queries are decomposed into categorized syscalls — LLM processing, memory access, storage operations, tool usage — each syscall bound to a separate Python thread (SysCall extends Thread, fields: pid, status, time_limit, created/start/end_time). All queues are centralized in the scheduler module (not per-manager), implementing FIFO and Round Robin; RR is the default and relies on the context-interrupt mechanism. Motivation: without scheduling, frameworks like AutoGen/LangChain do trial-and-error GPU loading until CUDA OOM exceptions force retries. Measured: up to 2.1x throughput (Reflexion agents on Llama-3.1-8b, HumanEval, single RTX A5000 24GB, max 250 worker threads); scalability test 250→2000 concurrent agents shows approximately linear execution/waiting time growth; SR% maintained or improved on HumanEval, MINT, GAIA, SWE-Bench-Lite (GAIA gains from pre-execution regex parameter validation and conflict-resolution hashmaps).",
+   "designImplication": "The four-category syscall taxonomy (infer/memory/storage/tool) is the right shape for a greenfield agent-native kernel ABI, but it must be a real kernel ABI, not a Python thread-per-request daemon: thread binding caps concurrency at ~hundreds and gives no isolation. A greenfield kernel should make inference capacity a first-class schedulable resource (like CPU time) with kernel-level queues, and treat tool-concurrency limits like device driver semantics. The 2.1x number shows scheduling alone justifies kernel mediation of LLM access even before isolation benefits.",
+   "sources": [
+    "https://arxiv.org/abs/2403.16971",
+    "https://arxiv.org/html/2403.16971v5"
+   ]
+  },
+  {
+   "topic": "AIOS context manager: preemptible LLM inference via snapshot-and-restore (text-based and logits-based)",
+   "summary": "AIOS implements time-sliced preemption of in-flight LLM generation: if the scheduler suspends a syscall mid-generation (after at least one decoded token in its time slice), the context manager snapshots intermediate state and later resumes from the suspension point, 'eliminating redundant computation.' Two modes: text-based (for closed-source/API LLMs without logits access — saves decoded output so far) and logits-based (preserves intermediate beam-search tree structure for finer-grained restore; illustrated with beam width 1). SimpleContextManager exposes generate_response_with_interruption(pid, time_limit), load_context(pid), clear_context(pid) over OpenAI/HuggingFace backends with streaming and enforced time limits — this is what makes RR scheduling possible at all.",
+   "designImplication": "Context snapshot/restore is the agent-native analog of a CPU context switch and must be a kernel primitive, not an SDK feature. A greenfield kernel needs a dual-backend design from day one to stay LLM-agnostic: text/prompt-level checkpoints for remote APIs (Claude etc.) and KV-cache/logits-level checkpoints for local inference (vLLM/llama.cpp). Open cost question AIOS does not measure: text-based resume re-sends the prompt to API providers, so preemption has token-billing cost — the kernel scheduler should be billing-aware, preferring preemption on local cores and run-to-completion on metered remote cores.",
+   "sources": [
+    "https://arxiv.org/html/2403.16971v5",
+    "https://arxiv.org/abs/2403.16971"
+   ]
+  },
+  {
+   "topic": "AIOS memory/storage managers: tiered eviction (LRU-K at 80% threshold) + versioned semantic storage",
+   "summary": "AIOS's memory manager handles agent interaction histories (conversation logs, tool results) in RAM; when an agent's usage exceeds its block limit ('e.g., 80% of allocation', configurable), LRU-K eviction transfers items to disk via the storage manager — items accessed at least K times recently stay in RAM. Memory API is CRUD + retrieval (add/remove/update/get/retrieve_memory over MemoryNote objects, thread-safe). The storage manager combines local files with a vector DB (chromadb), provides per-file locks, version control with rollback (default max_versions=20), and syscalls sto_create_file, sto_create_directory, sto_mount(collection_name, root_dir), sto_retrieve(collection, query_text, k=3, keywords), sto_rollback(file_path, n, time), sto_share. The GitHub repo notes the LSFS 'LLM-based Semantic File System' paper (ICLR 2025) is integrated as the Terminal UI, and A-MEM (arXiv:2502.12110) as agentic memory; terminal rollback requires a Redis server.",
+   "designImplication": "Directly validates our 'default persistent tiered memory' requirement: AIOS already ships RAM-tier + disk-tier with a default eviction policy and a semantic (vector) retrieval path in the storage layer. A greenfield kernel should promote this to a kernel-managed memory hierarchy with per-agent quotas and configurable eviction (LRU-K as default policy), and make the filesystem natively semantic+versioned (vector index and rollback in the VFS layer, not bolted on via chromadb + Redis in userspace). sto_mount of a 'collection' is the right mount metaphor for knowledge bases.",
+   "sources": [
+    "https://arxiv.org/html/2403.16971v5",
+    "https://github.com/agiresearch/AIOS"
+   ]
+  },
+  {
+   "topic": "AIOS access manager is rudimentary — privilege-group hashmap + manual user confirmation",
+   "summary": "AIOS's access manager does two things: (1) cross-agent access control by assigning each agent to a privilege group and checking a hashmap of agent ID → privilege group before cross-agent reads/writes (agents can only touch resources of agents 'within their shared privilege domain'); API is add_privilege(sid, tid)/check_access(sid, tid); (2) a user-intervention interface mandating explicit human confirmation before irreversible operations (deletion, overwrite, privilege modification). There is no capability model, no sandboxing of tool execution, no resource quota enforcement beyond memory blocks; access-related syscalls bypass the scheduler entirely.",
+   "designImplication": "This is the weakest part of AIOS and a major greenfield justification: group-based ACL in a userspace hashmap cannot protect agents from each other or the host from agents. An agent-native kernel should use capability-based security at the kernel boundary (every syscall — infer, tool, storage, memory — carries an unforgeable capability with budget/scope), with the human-in-the-loop confirmation pattern preserved as a kernel-enforced policy hook (irreversibility classes on operations) rather than an application courtesy.",
+   "sources": [
+    "https://arxiv.org/html/2403.16971v5"
+   ]
+  },
+  {
+   "topic": "AIOS is not actually a kernel: Python/uvicorn daemon, Cerebrum SDK, and 'ongoing' modes expose the gap",
+   "summary": "Per the GitHub repo, the AIOS 'kernel' launches as `uvicorn runtime.launch:app --host 0.0.0.0 --port 8000` — a Python 3.10/3.11 FastAPI process on the host OS. The SDK lives in a separate repo (agiresearch/Cerebrum, NAACL 2025 paper: 'Cerebrum (AIOS SDK): A Platform for Agent Development, Deployment, Distribution, and Discovery') with an agent hub for publish/download/share. Deployment Modes 1 (Local Kernel) and 2 (Remote Kernel) are supported; Mode 3 (Personal Remote Kernel: per-user persistent AIOS with synced long-term data) and Mode 4 (Personal Remote Virtual Kernel: multiple users' AIOS kernels co-existing on one machine via virtualization with scheduling/resource allocation across VMs) are explicitly 'ongoing.' An 'early experimental' Rust scaffold (aios-rs) exists with placeholder trait implementations, 'NOT feature-parity.' LLM cores supported: Anthropic, OpenAI, Deepseek, Gemini, Groq, HuggingFace, ollama, vLLM, Novita. Computer-use (LiteCUA) redesigns the Tool Manager into a VM Controller + MCP Server.",
+   "designImplication": "The features AIOS defers — per-user persistent kernels, kernel virtualization, real isolation, performance (hence the Rust rewrite attempt) — are precisely what a greenfield kernel/unikernel provides natively. Adopt from AIOS: the syscall taxonomy, multi-backend LLM core registry (vLLM/ollama/API parity matches our LLM-agnostic requirement), and the SDK/kernel split with an agent package hub (Cerebrum ≈ the OS package manager). Reject: building atop a host OS in a GC'd runtime. Their Mode 4 roadmap is effectively our product.",
+   "sources": [
+    "https://github.com/agiresearch/AIOS",
+    "https://arxiv.org/abs/2403.16971"
+   ]
+  },
+  {
+   "topic": "arXiv:2504.16736 is 'A Survey of AI Agent Protocols' — taxonomy for the kernel's communication ABI",
+   "summary": "arXiv:2504.16736 (v3, Jun 2025) is the first comprehensive survey of agent communication protocols, proposing a two-dimensional classification: context-oriented protocols (agent↔tool/data, e.g., MCP — 49 mentions in the paper) versus inter-agent protocols (agent↔agent, e.g., A2A — 33 mentions, ANP — 27, Agora, AITP, agents.json, LMOS), and general-purpose versus domain-specific. It comparatively analyzes protocols on security, scalability, and latency, and identifies next-generation requirements: adaptability, privacy preservation, group-based interaction, layered architectures, and 'collective intelligence infrastructures.' Not an AIOS-ecosystem paper, but directly relevant infrastructure analysis.",
+   "designImplication": "A greenfield kernel should not invent a proprietary IPC dialect: the syscall boundary should natively speak one context-oriented protocol (MCP as default tool/data plane) and one inter-agent protocol class (A2A-style) — with the survey's layered-architecture trend mapped as kernel-level transport/identity/auth plus pluggable userspace semantics. The security/scalability/latency comparison dimensions should become kernel conformance tests for any pluggable protocol module. Group-based interaction (one-to-many agent sessions) should be a first-class kernel object, matching our multi-agent-per-session requirement.",
+   "sources": [
+    "https://arxiv.org/abs/2504.16736",
+    "https://arxiv.org/html/2504.16736v3"
+   ]
+  },
+  {
+   "topic": "Letta memory blocks: always-in-context, self-editing, shareable memory segments — with a last-write-wins hazard",
+   "summary": "Letta's core abstraction is the memory block: a labeled context-window segment with four fields (label, description, value, limit-in-characters), rendered into the prompt as XML with live metadata (chars_current/chars_limit, e.g. 128/5000). Blocks are agent-managed (self-editing via built-in memory tools), can be read_only, and — critically — are shareable: one block attached to N agents appears in all their context windows simultaneously ('update once, visible everywhere'), used for multi-agent coordination (e.g., parent agents watching subagent result blocks update in real time). The description field is load-bearing: it's what teaches the agent how to use the block. Documented failure mode: block update 'completely replaces the entire block content... last write wins and overwrites all earlier changes' under concurrent modification — Letta's mitigations are read-only flags and application-level discipline.",
+   "designImplication": "Memory blocks are the strongest existing design for the 'pinned' tier of our default memory structure and should become kernel objects: named, quota'd, ACL'd context segments mappable into multiple agents' context windows — the agent-native analog of shared memory pages. A kernel can fix what Letta cannot at the library level: versioned/CAS writes or CRDT merge semantics on concurrent block updates, kernel-enforced character/token quotas, and change-notification (watch) primitives instead of polling. The description-drives-behavior insight means block metadata is part of the ABI, not decoration.",
+   "sources": [
+    "https://docs.letta.com/guides/core-concepts/memory/memory-blocks",
+    "https://docs.letta.com/tutorials/multi-agent",
+    "https://github.com/letta-ai/letta"
+   ]
+  },
+  {
+   "topic": "Letta's full memory hierarchy: blocks (pinned) + conversation search (automatic recall) + archival (curated vector DB)",
+   "summary": "Letta (formerly MemGPT) ships a three-tier default: (1) memory blocks always in context; (2) conversation search over full message history — automatic, no agent curation, for 'what was said'; (3) archival memory — an agent-curated, semantically searchable vector DB with agent tools archival_memory_insert(content, tags) and archival_memory_search(query, tags, page), 'unlimited storage,' agent-immutable entries (agents can't easily modify/delete; developers can via SDK), tag-based organization. Docs cite production agents with 30k+ and 32k+ archival passages. Explicit guidance on tier choice: always-visible/frequently-changing state → blocks; intentional long-term facts → archival; historical recall → conversation search.",
+   "designImplication": "This is the closest existing match to our 'DEFAULT persistent tiered memory structure' and should be the baseline: a greenfield kernel ships pinned-block tier + message-log tier + archival vector tier as kernel-managed services with this exact division of labor, default-on for every agent, with the embedding model pluggable (LLM-agnostic). Letta implements this in a server over Postgres; a kernel can do better by unifying the archival tier with the (semantic) filesystem — one storage manager serving both file and memory-passage retrieval, as AIOS hints at — and enforcing tier quotas per agent at the kernel level.",
+   "sources": [
+    "https://docs.letta.com/guides/core-concepts/memory/archival-memory",
+    "https://docs.letta.com/guides/core-concepts/memory/memory-blocks"
+   ]
+  },
+  {
+   "topic": "Letta AgentFile (.af): a portable agent serialization standard — the 'ELF format' precedent for agents",
+   "summary": "AgentFile (.af) is Letta's open standard for serializing complete stateful agents: model configuration (context window limit, model name, embedding model), complete message history with per-message in_context flags, system prompt, memory blocks, tool rules (sequencing/constraint definitions), environment variables, and full tool definitions including source code and JSON schemas. Schema also has fields for groups, files, sources (folders), and mcp_servers. Used for checkpointing, version control, portability across Letta servers, and reproducible evals (fresh agent instance per test case). Gaps acknowledged in docs: archival memory passages are roadmap-only (so a .af is NOT a full state snapshot), and secrets are nulled on export.",
+   "designImplication": "A greenfield kernel needs an agent image format playing the role ELF + core-dump play in Linux: the unit of install, fork, suspend, migrate, and reproducible eval. Adopt .af's inventory (it's the best-documented enumeration of 'what is agent state') but fix its gaps at kernel level: include all memory tiers (archival passages included) so checkpoint = full state; treat secrets as capability references resolved at load time rather than nulled values; make in_context flags a kernel-maintained property of the context manager rather than serialized application data. Import/export compatibility with .af is a cheap ecosystem win.",
+   "sources": [
+    "https://docs.letta.com/guides/core-concepts/agent-file",
+    "https://github.com/letta-ai/letta"
+   ]
+  },
+  {
+   "topic": "Letta sleep-time compute: background memory-refining agents — measured 5x test-time compute reduction",
+   "summary": "Letta's sleep-time agents (enable_sleeptime: true) automatically create a multi-agent group: a primary agent (with conversation_search/archival_memory_search) plus a background sleep-time agent sharing its memory blocks, which asynchronously rewrites them into 'learned context' derived from conversation history/data sources. Trigger frequency: every N primary-agent steps (default 5, configurable via sleeptime_agent_frequency); docs warn high frequency 'can be expensive (due to high token usage) and has diminishing returns.' The underlying research (arXiv:2504.13171) measures: ~5x reduction in test-time compute for same accuracy on Stateful GSM-Symbolic/AIME; +13% (GSM-Symbolic) and +18% (AIME) accuracy from scaling sleep-time compute; 2.5x lower average cost per query when amortized across related queries; efficacy correlates with query predictability.",
+   "designImplication": "This is empirical proof that our 'self-improvement as a native OS service' subsystem pays for itself, and it dictates the mechanism: an idle-time scheduler class. The kernel should natively schedule memory-consolidation/reflection agents onto idle inference capacity (local cores at low utilization, off-peak API budget), with kernel-level triggers (every-N-steps, on-idle, on-memory-pressure) instead of Letta's userspace group manager. Shared memory blocks as the producer/consumer channel between waking and sleeping agents confirms that block-level concurrency control must be in the kernel. Token-budget governance for background compute is a kernel resource-limit problem (cgroup analog).",
+   "sources": [
+    "https://docs.letta.com/guides/agents/architectures/sleeptime",
+    "https://arxiv.org/abs/2504.13171"
+   ]
+  },
+  {
+   "topic": "E2B: Firecracker microVM sandboxes with 80-200ms starts and ~1s resume — the isolation substrate benchmark",
+   "summary": "E2B runs AI-generated code in Firecracker microVMs ('a microVM made to run untrusted workflows' — full isolation per sandbox). Concrete numbers from e2b.dev: sandboxes in the same region as the client start in 'less than 200 ms' (one section claims 80 ms) with 'no cold starts'; sessions run up to 24 hours (Pro tier; 1 hour Hobby); default connect timeout 5 minutes, extendable at runtime via setTimeout. Persistence: pausing saves filesystem AND memory state — 'all running processes, loaded variables, data' — at ~4 seconds per 1 GiB of RAM; resuming takes ~1 second; paused sandboxes are retained indefinitely with no TTL; lifecycle states are Running/Paused/Snapshotting/Killed with auto-pause on timeout and auto-resume on request. API surface: sandbox.commands.run(), sandbox.files.list/read/write, runCode() (Jupyter-kernel code interpreter), templates defining the start environment, volumes, MCP gateway, sandbox public URLs. Used at 'tens of thousands of concurrent sandboxes' for RL workloads (Hugging Face Open R1 quote); self-hostable via Terraform on GCP/AWS. Marketing claims 88-94% of Fortune 100 usage.",
+   "designImplication": "E2B sets the performance bar a greenfield kernel must beat or match: <200ms cold start, ~1s resume, whole-VM memory snapshots. It validates microVM/unikernel-grade isolation as the right execution substrate for agent tool-work — exactly the lane for a unikernel design, which can plausibly beat Firecracker+full-Linux-guest on boot time and memory footprint by shipping no human-desktop legacy. The pause-cost asymmetry (4s/GiB save, 1s restore) means kernel-level agent hibernation is cheap enough to be the default idle behavior — agents should hibernate, not terminate, making 'indefinitely retained paused agents' the persistence default.",
+   "sources": [
+    "https://e2b.dev/",
+    "https://e2b.dev/docs/sandbox/persistence",
+    "https://e2b.dev/docs/sandbox",
+    "https://github.com/e2b-dev/E2B",
+    "https://e2b.dev/docs/quickstart"
+   ]
+  },
+  {
+   "topic": "E2B's gap: it snapshots the computer, not the agent — cognition and execution state live in disjoint systems",
+   "summary": "E2B is deliberately compute-only: 'E2B provides isolated sandboxes that let agents safely execute code, process data, and run tools.' The agent's reasoning loop, LLM calls, context window, and memory all live outside the sandbox in the caller's application (every cookbook example runs the LLM client on the host and ships only generated code into the sandbox). E2B's persistence therefore snapshots VM RAM/filesystem but knows nothing of the agent's conversational/memory state; conversely Letta checkpoints agent state (.af) but has no execution sandbox state; AIOS schedules LLM calls but runs tools in-process (its computer-use variant bolts a VM Controller + MCP Server onto the Tool Manager). No surveyed system can atomically suspend/resume/migrate 'agent + its computer' as one unit. E2B's control plane is a cloud API (self-host = Terraform on GCP/AWS, beta), with per-tier runtime caps (24h/1h) imposed by the platform rather than by workload semantics.",
+   "designImplication": "This is the sharpest greenfield justification across all three systems: an agent-native kernel should make the schedulable, snapshottable, migratable unit be {context window + memory tiers + in-flight inference state + sandboxed processes + filesystem} together — one 'agent process' object. Kernel-level unification enables atomic checkpoints (no torn state between brain and hands), capability flow from reasoning to tool execution without leaving the kernel, and a single resource accounting domain (tokens + CPU + RAM + disk). E2B/Letta/AIOS each own one fragment; the kernel's reason to exist is owning the join.",
+   "sources": [
+    "https://e2b.dev/docs",
+    "https://github.com/e2b-dev/E2B",
+    "https://e2b.dev/docs/sandbox/persistence",
+    "https://github.com/agiresearch/AIOS",
+    "https://docs.letta.com/guides/core-concepts/agent-file"
+   ]
+  }
+ ],
+ "openQuestions": [
+  "AIOS Table 2 (the full syscall catalog with arguments) is rendered as an image/table stripped from the HTML version — the live syscall ABI should be verified against the agiresearch/AIOS source tree (aios/ modules) before we finalize our own syscall naming.",
+  "E2B's startup latency claims vary across its own pages (80 ms vs <200 ms in-region, and 88% vs 94% Fortune-100); no p50/p99 distribution or methodology is published — needs independent benchmarking (self-hosted infra repo) before using it as our performance target.",
+  "Does AIOS's RR preemption of remote-API LLM calls actually save money? Text-based snapshot resume re-sends accumulated prompt tokens to metered APIs; the paper measures throughput/latency only, never token cost — our scheduler design needs a billing-aware preemption model.",
+  "Letta publishes no token-cost numbers for sleep-time agents (docs only say 'expensive... diminishing returns' above default frequency 5) — we need an empirical budget model before making idle-time self-improvement default-on.",
+  "Cerebrum (NAACL 2025) agent-hub packaging/distribution/discovery mechanics were not deep-read — directly relevant to our OS package-manager design and worth a dedicated pass.",
+  "How Letta implements shared-block consistency server-side (locking? last-write-wins at DB level?) is undocumented; inspecting letta/schemas/agent_file.py and the block update path in the letta repo would inform our kernel block-object concurrency semantics.",
+  "Whether Firecracker (5 MiB overhead class, but full Linux guest) or a true unikernel guest is the better execution substrate for tool sandboxes — E2B proves the former works at 'tens of thousands' concurrent scale; no production evidence found for unikernel agent sandboxes."
+ ]
+}

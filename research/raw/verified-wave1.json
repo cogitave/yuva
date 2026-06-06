@@ -1,0 +1,45 @@
+{
+ "_note": "1. dalga (deep-research, wf_5ad6e721-ae6) adversarial dogrulamasindan SAG CIKAN 3 iddia. 22 iddianin dogrulamasi API 500 hatalariyla yarim kaldi ve 2. dalgada (verified.json) yeniden kosuldu. Bu dosya 1. dalganin onaylanan kayitlarini arsivler.",
+ "confirmed": [
+  {
+   "claim": "The foundational design vocabulary for an agent-native OS comes from the AIOS/LLMOS vision paper (Ge et al., 'LLM as OS, Agents as Apps', arXiv:2312.03815, Dec 2023), which formalizes a conceptual framework via explicit one-to-one analogies between LLM components and traditional OS primitives: LLM maps to OS kernel, context window to main memory, external storage to file system, hardware tools to peripheral devices, software tools to programming libraries, and user prompts to user commands. This gives the greenfield kernel a principled answer to 'what are the resources' — context windows, storage tiers, and tools become first-class schedulable/managed OS objects rather than application concerns.",
+   "confidence": "high",
+   "sources": [
+    "https://arxiv.org/abs/2312.03815"
+   ],
+   "evidence": "Verbatim from the arXiv abstract: 'LLM is likened to OS kernel, context window to memory, external storage to file system, hardware tools to peripheral devices, software tools to programming libraries, and user prompts to user commands.' Verified directly against the primary source by the adversarial verifier; the paper is correctly identified as the conceptual/vision paper, distinct from the same group's later AIOS implementation paper (arXiv:2403.16971).",
+   "vote": "3-0 unanimous (claims [0] and [1] merged: same primary source, complementary aspects of one framework)"
+  },
+  {
+   "claim": "The same paper proposes a four-layer architecture for the AIOS-Agent paradigm — LLM at system level, agents at application level, natural language at the user/programming-interface level, and tools at the hardware/middleware level — which implies the agent OS 'syscall interface' is natural language rather than a binary ABI. The paper's full text (Section 2.1.2) states this explicitly: 'the system calls can be formulated as natural language prompts to instruct the LLM for task execution.' For the project's syscall design (recall(), remember(), reflect(), spawn_agent(), send(), learn()), this argues for a prompt/structured-NL hybrid ABI rather than a numeric trap interface — while noting the group's later implementation (AIOS, arXiv:2403.16971) moved to structured SDK-level 'LLM syscalls', suggesting the practical ABI is structured calls with NL payloads.",
+   "confidence": "high",
+   "sources": [
+    "https://arxiv.org/abs/2312.03815"
+   ],
+   "evidence": "Verbatim from the abstract: 'featured by several main concepts: LLM as OS (system-level), Agents as Applications (application-level), Natural Language as Programming Interface (user-level), and Tools as Devices/Libraries (hardware/middleware-level).' The hedged inference about the NL syscall interface is explicitly confirmed in the paper's Section 2.1.2. Verified against both abstract and full text of the primary source.",
+   "vote": "3-0 unanimous"
+  },
+  {
+   "claim": "seL4's MCS (mixed-criticality systems) model is a direct, production-grade architectural precedent for treating compute — and by analogy tokens/context-window budget/inference time — as capability-metered, schedulable resources in an agent OS. MCS extends capability-based access control to processor time itself: a component can only obtain CPU time by holding a scheduling-context capability encoding a time budget and period, allowing untrusted high-priority components to be hard-bounded (the whitepaper's own worked example caps a driver at 30% CPU via 3us budget / 10us period) while guaranteeing critical components' deadlines. For the agent kernel this suggests: per-agent 'token-context capabilities' (budget tokens per period), kernel-enforced bounds on untrusted/spawned agents, and deadline guarantees for critical agent sessions — all without the kernel needing to trust the agent.",
+   "confidence": "high",
+   "sources": [
+    "https://sel4.systems/About/seL4-whitepaper.pdf",
+    "https://docs.sel4.systems/Tutorials/mcs.html"
+   ],
+   "evidence": "Verbatim from the official seL4 Foundation whitepaper (MCS chapter): 'seL4's capabilities for processor time are called scheduling-context capabilities. A component can only obtain processor time if it holds such a capability, and the amount of processor time it can use is encoded in the capability.' Budget+period encoding, the 30% cap example, and the untrusted-component isolation framing are all verbatim in the whitepaper; independently corroborated by docs.sel4.systems MCS tutorial (sporadic-server algorithm, budget/period upper bound). Backed by the peer-reviewed mechanism paper (Lyons, McLeod, Almatary, Heiser, EuroSys 2018). The token-analogy sentence is the researcher's clearly-labeled inference, resting on an accurate mechanism description. Qualification: MCS extensions are in mainline seL4 (KernelIsMCS) but are still undergoing formal verification — do not claim they inherit seL4's proved-correct status.",
+   "vote": "2-0"
+  }
+ ],
+ "stats": {
+  "angles": 5,
+  "sourcesFetched": 23,
+  "claimsExtracted": 115,
+  "claimsVerified": 25,
+  "confirmed": 3,
+  "killed": 22,
+  "afterSynthesis": 3,
+  "urlDupes": 3,
+  "budgetDropped": 4,
+  "agentCalls": 105
+ }
+}

@@ -1,0 +1,1198 @@
+[
+ {
+  "area": "targets-boot",
+  "decisions": [
+   {
+    "decision": "Target the Linux x86_64 64-bit boot protocol on x86_64 and BUILD the kernel ELF (vmlinux-style) WITHOUT a XEN_ELFNOTE_PHYS32_ENTRY note, so Firecracker takes its LinuxBoot path and NOT the PVH path.",
+    "rationale": "Firecracker's setup_regs/configure_segments_and_sregs for BootProtocol::LinuxBoot hands the vCPU a CPU that is ALREADY in 64-bit long mode: it sets EFER.LME|LMA, CR0.PG|PE, CR4.PAE, programs cr3 to an identity-mapped first 1 GiB (PML4@0x9000 -> PDPTE@0xa000 -> 512x2MiB PDE@0xb000, each 0x83 present+writable+PS), and loads a flat GDT. The PVH path instead sets cr0 = PE|ET only, cr4 = 0, NO EFER long-mode bits and NO page tables -> the vCPU enters in 32-bit protected mode with paging OFF and rbx=0x6000 (hvm_start_info). Choosing PVH would FORCE us to hand-write a 32-bit->64-bit trampoline (build page tables, set EFER.LME, enable CR0.PG, far-jump to a 64-bit CS) in the audited foundation - precisely the assembly we are trying to delete. LinuxBoot eliminates it entirely. Firecracker auto-selects PVH whenever the ELF carries the PHYS32 note (load_kernel checks PvhBootCapability::PvhEntryPresent), so we simply must not emit that note.",
+    "assemblyUnits": [
+     "No mode-transition trampoline needed on x86_64 (deleted work-unit): foundation does NOT build early page tables, does NOT toggle EFER/CR0.PG, does NOT do a real-mode->protected->long-mode bringup.",
+     "Link script / build flag work-unit: ensure the ELF has no PHYS32_ENTRY note so Firecracker stays on LinuxBoot."
+    ],
+    "perArch": "x86_64 only. On aarch64 there is no PVH-vs-Linux choice; the PE/Linux Image path is the only one.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/pvh.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/mod.rs"
+    ]
+   },
+   {
+    "decision": "On x86_64, link the kernel image to load and enter at 1 MiB (0x0010_0000); take the boot_params/zero-page pointer from RSI (=0x7000) and the NUL-terminated command line from 0x20000.",
+    "rationale": "Firecracker get_kernel_start() returns HIMEM_START = 0x0010_0000 and loads the ELF there; setup_regs(LinuxBoot) sets rip = ELF e_entry, rsp = rbp = BOOT_STACK_POINTER = 0x8ff0, rsi = ZERO_PAGE_START = 0x7000, rflags = 0x2. configure_64bit_boot writes the zero page at 0x7000 (hdr.header = 0x53726448 'HdrS', boot_flag = 0xaa55, type_of_loader = 0xff, cmd_line_ptr = CMDLINE_START = 0x20000, an e820 map, and acpi_rsdp_addr = 0xe0000); the cmdline (max 2048 bytes) is written at 0x20000. This matches kernel.org's 64-bit boot protocol verbatim: '%rsi must hold the base address of the struct boot_params ... CPU must be in 64-bit mode with paging enabled.' We therefore read RAM size/holes from the e820 table in the zero page rather than probing.",
+    "assemblyUnits": [
+     "_start preamble: preserve RSI (zero page) across BSS-clear and stack setup; it is the sole boot input on x86_64.",
+     "Linker script: place .text entry at 0x100000, 16 MiB (KERNEL_MIN_ALIGNMENT) alignment is honored by FC's hdr.kernel_alignment but not required for an ELF e_entry load."
+    ],
+    "perArch": "x86_64: input is the zero page in RSI + cmdline at 0x20000. aarch64 equivalent input is the FDT in x0 (no zero page, no e820).",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/layout.rs",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html"
+    ]
+   },
+   {
+    "decision": "On aarch64, ship a 64-bit arm64 PE/Linux Image (64-byte header, magic 0x644d5241 'ARM\\x64' at offset 0x38) loaded 2 MiB above DRAM start; enter at the first instruction with the FDT pointer in x0, at EL1h with DAIF masked and the MMU OFF.",
+    "rationale": "Firecracker loads via linux_loader::loader::pe::PE and get_kernel_start() = DRAM_MEM_START(0x8000_0000) + SYSTEM_MEM_SIZE(0x20_0000) = 0x8020_0000 (2 MiB above DRAM base, satisfying the arm64 'text_offset bytes from a 2MB aligned base' rule). setup_boot_regs sets PSTATE = PSTATE_FAULT_BITS_64 = 0x3c5 (M[3:0]=0b0101 EL1h, plus D|A|I|F all masked - confirmed by the FC unit test asserting reg value \"0x3c5\"), PC = the Image load address, and x0 = get_fdt_addr() (the DTB, placed in the top FDT_MAX_SIZE=2 MiB of DRAM, 8-byte aligned, <=2 MiB). This is exactly kernel.org arm64 booting.txt: x0 = physical address of the DTB; x1=x2=x3=0; CPU in non-secure EL1 (or EL2); all DAIF masked; MMU off; entry at the first Image instruction.",
+    "assemblyUnits": [
+     "arm64 Image header work-unit: emit the 64-byte header (code0 branch-to-stext, code1, text_offset, image_size, flags=LE+4K-page, magic 0x644d5241) so Firecracker's PE loader accepts the image.",
+     "_start: do NOT assume MMU/caches; keep x0 (FDT) untouched as AAPCS64 arg0 into rust_main."
+    ],
+    "perArch": "aarch64-specific. x86 uses an ELF + zero page; aarch64 uses a PE/Linux Image + FDT. aarch64 enters with MMU OFF (we set up translation in Rust later); x86 enters with paging already ON.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/mod.rs",
+     "https://www.kernel.org/doc/Documentation/arm64/booting.txt"
+    ]
+   },
+   {
+    "decision": "Boot single-vCPU on both arches, consuming the VMM-provided primary-vCPU state as-is, and defer ALL secondary-CPU bringup (x86 INIT-SIPI-SIPI, aarch64 PSCI CPU_ON) out of the v1 foundation.",
+    "rationale": "This realizes the already-adopted Mirage one-vCPU-per-microVM decision and is exactly how Firecracker stages CPUs. On aarch64 KvmVcpu::new powers off every vCPU with index>0 (kvi.features |= 1<<KVM_ARM_VCPU_POWER_OFF) and enables PSCI 0.2 by default (KVM_ARM_VCPU_PSCI_0_2); only vCPU 0 gets PC/x0 set. Secondaries therefore sit parked until a PSCI CPU_ON (ARM DEN 0022A) - which the v1 kernel never issues. On x86_64 secondaries would require the kernel to drive the local-APIC INIT-SIPI-SIPI sequence and a real-mode AP trampoline; by staying single-vCPU we write zero AP-bringup assembly.",
+    "assemblyUnits": [
+     "NO AP trampoline (deleted work-unit on both arches): no 16-bit real-mode SIPI stub on x86, no PSCI CPU_ON entry shim on aarch64.",
+     "Reserve a single boot stack only; no per-AP stack array in the foundation."
+    ],
+    "perArch": "x86_64 future SMP = local-APIC INIT/SIPI + sub-1MiB real-mode trampoline. aarch64 future SMP = PSCI CPU_ON HVC calls (cpus parked, enable-method 'psci' in FDT). Both explicitly out of v1.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs",
+     "https://www.kernel.org/doc/Documentation/arm64/booting.txt",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+    ]
+   },
+   {
+    "decision": "Treat the Firecracker contract as REMOVING, vs bare metal: the real-mode->protected->long-mode trampoline and A20/GDT bootstrap (x86), BIOS/UEFI firmware and its services, ACPI/MPTable enumeration as a BOOT requirement, and PCI bus scanning - none are needed to reach rust_main.",
+    "rationale": "Firecracker is a minimal virtio/MMIO machine, not a PC. On x86_64 LinuxBoot the vCPU is delivered in long mode with paging + a flat GDT already loaded, so the classic 3-stage CPU bringup and A20 gate vanish. There is no BIOS/UEFI: the VMM loads our ELF/Image directly and jumps to it. Device discovery is by cmdline (x86) or FDT (aarch64), so no ACPI namespace walk and no PCI config-space probe are required to boot - FC explicitly notes PCI is OFF unless --enable-pci is passed, and even then it only exists for ACPI init, with VirtIO defaulting to the MMIO transport. The legacy device model FC exposes is tiny: serial, an i8042 reset stub, PIC/IOAPIC/PIT (x86) or GIC/PL011/PL031 (aarch64).",
+    "assemblyUnits": [
+     "Deleted: A20 enable, GDT-from-scratch in real mode, CR0.PE flip, far-jump pipeline flush sequence (x86).",
+     "Deleted: BIOS INT calls / E820 BIOS query (x86) - we read e820 from the zero page instead.",
+     "Deleted: PCI ECAM/config-cycle bring-up in the foundation (both arches)."
+    ],
+    "perArch": "x86_64 keeps a 64-bit GDT reload + IDT build in Rust (FC's GDT/IDT are throwaway). aarch64 keeps a VBAR_EL1 vector install. Neither needs firmware.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/kernel-policy.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+    ]
+   },
+   {
+    "decision": "On x86_64, discover virtio-MMIO transports by parsing 'virtio_mmio.device=<size>@<base>:<irq>' tokens from the kernel command line at 0x20000; do NOT implement an ACPI table parser in v1.",
+    "rationale": "Firecracker's legacy boot path advertises each VirtIO device on the cmdline (Linux's CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES), which is a trivially parseable ASCII contract - a few-hundred-byte tokenizer in #![forbid(unsafe_code)] Rust above the foundation. The modern alternative is ACPI (MADT for the IOAPIC/interrupts, plus DSDT entries), but FC's own docs state ACPI 'supersedes the legacy way ... via MPTable and command line parameters' while requiring CONFIG_PCI for ACPI init and shipping a full table set (FADT/XSDT/MADT/DSDT). A DSDT/AML interpreter is far beyond a 15 kSLOC budget. We accept the legacy cmdline mechanism, which FC still supports during deprecation, and also reuse the cmdline for our own kernel parameters. The default FC cmdline already disables the noisy legacy probes ('8250.nr_uarts=0 i8042.* nomodule swiotlb=noforce', plus 'pci=off' when PCI is disabled).",
+    "assemblyUnits": [
+     "None in assembly. _start only forwards the zero-page pointer (RSI); the cmdline pointer is read from boot_params.hdr.cmd_line_ptr in safe Rust."
+    ],
+    "perArch": "x86_64-specific (cmdline tokens). aarch64 uses the FDT instead (next decision). RISC-V (future) would also be FDT-based.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/kernel-policy.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/mod.rs"
+    ]
+   },
+   {
+    "decision": "On aarch64, discover memory, the GIC, the architected timer, the PL011 serial / PL031 RTC, the command line, and every virtio-MMIO transport by walking the Flattened Device Tree whose pointer arrives in x0; implement a minimal read-only FDT walker in safe Rust.",
+    "rationale": "On aarch64 the FDT is the mandatory and only discovery channel - Firecracker's configure_system_for_boot builds the DTB (fdt::create_fdt) with the memory node, virtio-MMIO nodes (reg = base/size, interrupts = GIC SPI), the GIC node (v2 or v3), PL011 serial, PL031 RTC, the chosen/bootargs cmdline, and a psci node, then writes it to the top of DRAM and passes its address in x0. The MMIO device window starts at MMIO32_MEM_START = 0x4000_0000 (1 GiB) with serial/RTC/boot devices laid out just above the GIC. A DTB is a compact big-endian blob with a simple structure block; a bounded parser is small and pure-safe-Rust, fitting the framekernel layering.",
+    "assemblyUnits": [
+     "None in assembly. _start preserves x0 (already AAPCS64 arg0) and hands it to rust_main, which runs the FDT walker."
+    ],
+    "perArch": "aarch64-specific. The FDT also carries the SPI/IRQ wiring (GIC) that x86 instead encodes as the ':<irq>' field on the cmdline token / IOAPIC GSIs.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/mod.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/layout.rs",
+     "https://www.kernel.org/doc/Documentation/arm64/booting.txt"
+    ]
+   },
+   {
+    "decision": "Provide a minimal x86_64 _start in the foundation that: loads OUR own GDT (do not trust FC selectors), reloads data segments and far-loads CS, sets RSP to a reserved boot stack, zeroes .bss, then calls rust_main(zero_page) passing RSI as the System V first argument (mov rdi, rsi); install a real IDT in early Rust.",
+    "rationale": "Firecracker's GDT (4 entries at 0x500: CS=0x08 long-mode code 0xa09b, DS=0x10 0xc093, TSS) and its IDT (a single zero qword at 0x520) are scaffolding - FC's selectors differ from Linux's __BOOT_CS(0x10)/__BOOT_DS(0x18), so we must not hardcode them; we reload our own GDT immediately. Critically the FC IDT is effectively null: any exception before we install handlers triple-faults the microVM, so building an IDT is the first Rust job. The System V AMD64 ABI passes the first integer argument in RDI while the boot_params pointer arrives in RSI, so the handoff needs one 'mov rdi, rsi' (or the kernel reads RSI directly in the naked stub).",
+    "assemblyUnits": [
+     "x86_64 _start (global_asm/naked): lgdt our GDT; reload SS/DS/ES/FS/GS; far-jump/retfq to reload CS; lea rsp, BOOT_STACK_TOP; rep stosb to clear .bss (save/restore RSI around it); mov rdi, rsi; call rust_main.",
+     "Early Rust (not asm): build + lidt a real IDT with at least a triple-fault-avoiding double-fault and exception handlers.",
+     "Reserve BOOT_STACK symbol in .bss with a guard-sized stack."
+    ],
+    "perArch": "x86_64-only. The RSI->RDI shuffle exists because the boot ABI register (RSI) differs from the C arg0 register (RDI); on aarch64 the boot register x0 IS arg0, so no shuffle.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html"
+    ]
+   },
+   {
+    "decision": "Provide a minimal aarch64 _start in the foundation that: sets SP to a reserved boot stack, zeroes .bss, sets VBAR_EL1 to our exception vector table, then calls rust_main(fdt) with x0 untouched (FDT is already AAPCS64 arg0); leave the MMU off until Rust installs translation tables.",
+    "rationale": "Firecracker delivers vCPU0 at EL1h with DAIF masked, MMU off, x0 = FDT, PC = Image entry. AAPCS64 passes the first integer argument in x0, and the boot contract already places the FDT there, so rust_main(fdt: *const u8) needs no register move. DAIF is already masked, so we do not re-mask; we just install VBAR_EL1 (the architecture leaves it UNKNOWN, and FC/KVM does not set a guest vector base) before enabling any interrupts. CNTFRQ_EL0 is readable for the architected timer (FC exposes arch_sys_counter as the aarch64 clocksource). We keep the MMU off through _start and set up TTBR0/TTBR1_EL1 + MAIR + TCR in Rust afterward.",
+    "assemblyUnits": [
+     "aarch64 _start (global_asm): adr/ldr SP <- BOOT_STACK_TOP; zero .bss loop (x0 preserved); ldr a vector-table address and msr VBAR_EL1; isb; b/bl rust_main (x0 still = FDT).",
+     "Provide a 2 KiB-aligned EL1 exception vector table (16 entries x 0x80) symbol referenced by VBAR_EL1.",
+     "Optionally read CNTFRQ_EL0 once for the timer; do NOT touch DAIF (already masked)."
+    ],
+    "perArch": "aarch64-only. No GDT/segment concept; instead VBAR_EL1 + (later) TTBR/MAIR/TCR. No arg shuffle (x0 = FDT = arg0). MMU starts OFF here vs paging already ON on x86.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs",
+     "https://www.kernel.org/doc/Documentation/arm64/booting.txt",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "x86_64 LinuxBoot vCPU state set by Firecracker setup_regs: rip = ELF e_entry, rsp = rbp = 0x8ff0 (BOOT_STACK_POINTER), rsi = 0x7000 (ZERO_PAGE_START / boot_params), rflags = 0x2; setup_sregs sets CR0.PE|PG, CR4.PAE, EFER.LME|LMA and identity-maps VA [0,1GiB) via PML4@0x9000, PDPTE@0xa000, 512x2MiB PDE@0xb000 (entries 0x83); GDT@0x500 (CS sel 0x08 = 0xa09b long-mode code, DS sel 0x10 = 0xc093), IDT@0x520 is a single zero qword (null/non-functional).",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "x86_64 kernel loads at HIMEM_START = 0x0010_0000 (1 MiB); cmdline at CMDLINE_START = 0x20000, max 2048 bytes; zero page hdr.header = 0x53726448, boot_flag = 0xaa55, type_of_loader = 0xff, acpi_rsdp_addr = 0xe0000; e820 map written into the zero page.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/layout.rs"
+   },
+   {
+    "fact": "Firecracker selects PVH (32-bit protected mode, paging OFF, cr0=PE|ET, cr4=0, rbx=0x6000 hvm_start_info) ONLY when the loaded ELF contains the XEN_ELFNOTE_PHYS32_ENTRY note (PvhBootCapability::PvhEntryPresent); otherwise it uses LinuxBoot (64-bit long mode). An image without that note is guaranteed the long-mode entry.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/mod.rs"
+   },
+   {
+    "fact": "aarch64 boot vCPU0 state set by Firecracker setup_boot_regs: PSTATE = 0x3c5 (EL1h with D,A,I,F all masked - asserted as \"0x3c5\" in FC's own test), PC = Image load address = get_kernel_start() = 0x8020_0000 (DRAM_MEM_START 0x8000_0000 + SYSTEM_MEM_SIZE 0x20_0000), x0 = FDT address placed in the top FDT_MAX_SIZE = 0x20_0000 (2 MiB) of DRAM; MMU off; vCPUs with index>0 are created POWER_OFF with PSCI 0.2 enabled.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs"
+   },
+   {
+    "fact": "arm64 PE/Linux Image header is 64 bytes: code0/code1 (branch to stext), u64 text_offset, u64 image_size, u64 flags (bit0 endian, bits1-2 page size, bit3 placement), reserved, u32 magic = 0x644d5241 ('ARM\\x64'), u32 PE-COFF offset. Boot contract: x0 = DTB phys addr, x1=x2=x3=0, MMU off, DAIF masked, EL2 (recommended) or non-secure EL1, DTB 8-byte aligned and <= 2 MiB.",
+    "source": "https://www.kernel.org/doc/Documentation/arm64/booting.txt"
+   },
+   {
+    "fact": "Linux x86 64-bit boot protocol requires entry in 64-bit mode with paging enabled, a GDT with flat 4G __BOOT_CS(0x10)/__BOOT_DS(0x18), interrupts disabled, and %rsi = base address of struct boot_params. (Firecracker uses selectors 0x08/0x10 but identical flat descriptors; the kernel must reload its own GDT.)",
+    "source": "https://www.kernel.org/doc/html/latest/arch/x86/boot.html"
+   },
+   {
+    "fact": "aarch64 MMIO map: MMIO32 window starts at 0x4000_0000 (1 GiB); GIC below it; boot/RTC/serial devices laid out from MMIO32_MEM_START upward (RTC = PL031, serial = PL011); DRAM at 0x8000_0000. Firecracker builds the FDT (create_fdt) carrying memory, virtio-MMIO (reg+SPI interrupts), GIC, PL011, PL031, chosen/bootargs, and psci nodes.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/layout.rs"
+   },
+   {
+    "fact": "Default Firecracker guest cmdline: 'reboot=k panic=1 nomodule 8250.nr_uarts=0 i8042.noaux i8042.nomux i8042.dumbkbd swiotlb=noforce' (+ 'pci=off' when PCI is not enabled). VirtIO-over-MMIO devices are advertised on the cmdline (CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES) on x86_64; FC notes ACPI now supersedes this legacy mechanism but still supports it. FC does not support PCI devices (PCI exists only for ACPI init / optional --enable-pci).",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/kernel-policy.md"
+   }
+  ]
+ },
+ {
+  "area": "abi-asm",
+  "decisions": [
+   {
+    "decision": "x86_64 VOLUNTARY (cooperative) context switch is a `#[unsafe(naked)] extern \"C\"` function that saves ONLY the System V callee-saved integer set {rbx, rbp, r12, r13, r14, r15} plus the stack pointer; RIP is carried by the call/ret boundary and RFLAGS is NOT saved.",
+    "rationale": "Per AMD64 psABI Figure 3.4 the only callee-saved GPRs are rbx, rbp, rsp, r12-r15; rax/rcx/rdx/rsi/rdi/r8-r11 are caller-saved so the compiler already treats them as clobbered across the call into the switch routine - re-saving them is dead work. The psABI also states 'The direction flag DF ... must be clear (forward) on function entry and return. Other user flags have no specified role ... and are not preserved across calls', so a function-boundary switch needs no PUSHFQ/POPFQ. This is 6 GPRs + rsp = 7 quadwords per task, the minimal correct set.",
+    "assemblyUnits": [
+     "ctx_switch_x86_64(prev: *mut TaskCtx, next: *const TaskCtx) [naked, extern \"C\"]: push rbx; push rbp; push r12; push r13; push r14; push r15; mov [rdi], rsp; mov rsp, [rsi]; pop r15; pop r14; pop r13; pop r12; pop rbp; pop rbx; ret",
+     "TaskCtx layout (x86_64): single `rsp` slot pointing at the saved-register stack image (callee-saved-on-stack model), 16-byte aligned"
+    ],
+    "perArch": "x86_64 only. The cooperative-switch register count differs from aarch64 (6 GPR vs 12 GPR) because SysV has fewer callee-saved integer registers than AAPCS64.",
+    "sources": [
+     "AMD64 psABI 1.0 (2025-03-12), Figure 3.4 Register Usage (callee-saved = rbx,rsp,rbp,r12-r15)",
+     "AMD64 psABI 1.0 §3.2.1: 'The direction flag DF ... must be clear ... on function entry and return. Other user flags ... are not preserved across calls'"
+    ]
+   },
+   {
+    "decision": "aarch64 VOLUNTARY context switch is a `#[unsafe(naked)] extern \"C\"` function that saves the AAPCS64 callee-saved set x19-x28 plus x29(FP) and x30(LR) plus SP; resume is via `ret` to the restored x30, and NZCV is NOT saved.",
+    "rationale": "AAPCS64 Table 2 + prose: 'Registers r19-r29 and SP are Callee-saved. All 64 bits ... are Callee-saved.' x30(LR) holds the return address (the resume PC for the outgoing task), so it must be banked into TaskCtx; x29(FP) is callee-saved. x0-x18 are caller-saved and need not be saved at a function boundary. NZCV 'flags are undefined on entry to and return from a public interface', so no flag save. That is x19-x30 (12 GPRs) + SP.",
+    "assemblyUnits": [
+     "ctx_switch_aarch64(prev: *mut TaskCtx, next: *const TaskCtx) [naked, extern \"C\"]: stp x19,x20 / x21,x22 / x23,x24 / x25,x26 / x27,x28 / x29,x30 into a frame; mov x9, sp; str x9,[x0,#offset_sp]; ldr x9,[x1,#offset_sp]; mov sp, x9; ldp ... restore x19-x30; ret",
+     "TaskCtx layout (aarch64): saved x19-x30 image + one SP slot, 16-byte aligned (SP mod 16 = 0)"
+    ],
+    "perArch": "aarch64 only. Note the structural difference from x86_64: the resume address lives in a register (x30/LR) not on the stack, so LR must be explicitly banked; x86_64 leaves RIP implicit on the stack via call/ret.",
+    "sources": [
+     "AAPCS64 (abi-aa/aapcs64.rst) Table 2: r19-r28 callee-saved, r29=FP, r30=LR, SP",
+     "AAPCS64: 'Registers r19-r29 and SP are Callee-saved. All 64 bits of each value stored in r19-r29 are Callee-saved'",
+     "AAPCS64: 'The N, Z, C and V flags are undefined on entry to and return from a public interface'"
+    ]
+   },
+   {
+    "decision": "ASYNCHRONOUS x86_64 trap/IRQ/exception stubs save the COMPLETE integer register file (rax, rcx, rdx, rbx, rbp, rsi, rdi, r8-r15), on top of the CPU-pushed frame (SS, RSP, RFLAGS, CS, RIP, and the error code where the vector pushes one), then call a safe-Rust handler; they MUST NOT rely on the red zone.",
+    "rationale": "An interrupt is not a call boundary - it steals a running context that expects EVERY register (including caller-saved rax/rcx/.../r11 and rdi/rsi) intact, so the caller-saved/callee-saved split does not apply and the full GPR file must be preserved. The CPU auto-pushes the iret frame; vectors #DF,#TS,#NP,#SS,#GP,#PF,#AC and #CP push an additional error code that the stub must normalize. The psABI red zone ('The 128-byte area beyond %rsp ... shall not be modified by signal or interrupt handlers') is eliminated by building for x86_64-unknown-none ('extern \"C\" uses the standard System V calling convention, without red zones'), so the stub may write at rsp directly.",
+    "assemblyUnits": [
+     "isr_common_x86_64 [global_asm! / naked]: push all GPRs in fixed order -> TrapFrame; mov rdi, rsp (TrapFrame* as 1st SysV arg); call rust_trap_dispatch; pop all GPRs; add rsp,8 (drop error code); iretq",
+     "Per-vector thunks (0..=255): push dummy error-code for no-error-code vectors to normalize TrapFrame, push vector number, jmp isr_common_x86_64",
+     "TrapFrame struct (x86_64): {r15..r8, rbp, rdi, rsi, rdx, rcx, rbx, rax, vector, error_code, rip, cs, rflags, rsp, ss} matching the push order + CPU frame"
+    ],
+    "perArch": "x86_64: CPU pushes SS/RSP/RFLAGS/CS/RIP and optional error code; return via iretq. Distinct from the cooperative switch which saves only 6 GPRs. Build target x86_64-unknown-none removes the red zone hazard.",
+    "sources": [
+     "AMD64 psABI 1.0 §3.2.2: 'The 128-byte area beyond ... %rsp ... shall not be modified by signal or interrupt handlers ... This area is known as the red zone'",
+     "rustc platform-support x86_64-unknown-none (Tier 2): 'extern \"C\" uses the standard System V calling convention, without red zones'",
+     "AMD64 psABI 1.0 Figure 3.4 (full GPR enumeration)"
+    ]
+   },
+   {
+    "decision": "ASYNCHRONOUS aarch64 exception entry (from VBAR_EL1 vectors) saves the full x0-x30 GPR file plus SP_EL0 and the exception link/state registers ELR_EL1 and SPSR_EL1 into a TrapFrame, reads ESR_EL1 for dispatch, and returns via `eret`.",
+    "rationale": "As on x86, an asynchronous exception preempts an arbitrary context so all of x0-x30 (not just callee-saved x19-x30) must be banked. AArch64 has no auto-push: the stub manually stores x0-x30 with stp pairs. The resume PC and PSTATE are in ELR_EL1/SPSR_EL1 (banked by hardware on exception entry) and must be saved/restored around any nested-exception window; SP_EL0 is the interrupted user/kernel stack. ESR_EL1 carries the syndrome that the safe-Rust dispatcher switches on.",
+    "assemblyUnits": [
+     "exc_common_aarch64 [global_asm!]: sub sp,#272; stp x0,x1 ... x28,x29; str x30; mrs tmp, sp_el0 / elr_el1 / spsr_el1 -> store; mov x0, sp (TrapFrame* as 1st AAPCS64 arg); bl rust_exception_dispatch; restore; eret",
+     "vbar_el1_table [global_asm!]: 2KB-aligned table of 16 entries (4 groups x {Sync, IRQ, FIQ, SError}) each branching to a typed exc_common entry; install via msr VBAR_EL1",
+     "TrapFrame struct (aarch64): {x0..x30, sp_el0, elr_el1, spsr_el1, esr_el1} 16-byte aligned"
+    ],
+    "perArch": "aarch64: software-saved full GPR file, hardware-banked ELR_EL1/SPSR_EL1, eret return, 2KB-aligned VBAR_EL1 vector table - structurally unlike x86's CPU-pushed iret frame and 256-entry IDT.",
+    "sources": [
+     "AAPCS64 Table 2 (x0-x30 enumeration; x30=LR)",
+     "AAPCS64 Universal stack constraints: 'SP mod 16 = 0. The stack must be quad-word aligned'",
+     "Arm ARM exception model (VBAR_EL1 vector table, ELR_EL1/SPSR_EL1/ESR_EL1) - architecture baseline assumed by AAPCS64 public-interface rules"
+    ]
+   },
+   {
+    "decision": "Fix the foundation<->safe-Rust ABI boundary as `extern \"C\"`: every naked stub passes the TrapFrame/TaskCtx pointer in the 1st integer argument register (x86 rdi / aarch64 x0); handlers return status in rax / x0. Second/third args use rsi,rdx,rcx,r8,r9 (x86) and x1-x7 (aarch64).",
+    "rationale": "Pinning the boundary to the C ABI lets safe `#![forbid(unsafe_code)]` Rust handlers be plain `extern \"C\" fn(frame: *mut TrapFrame)` with no further unsafe glue. psABI integer-arg order is rdi,rsi,rdx,rcx,r8,r9 with returns in rax then rdx; AAPCS64 uses x0-x7 for parameters/results. This single convention also governs how _start hands control to rust_main and how the syscall stub marshals up to 6 register arguments without touching memory.",
+    "assemblyUnits": [
+     "Boundary contract: trap stubs do `mov rdi, rsp` (x86) / `mov x0, sp` (aarch64) before the call so the handler's first parameter is the frame pointer",
+     "syscall entry stub: marshal user args already in SysV/AAPCS64 arg registers straight through to the extern \"C\" syscall router (no repack on the fast path)",
+     "Return-value convention: rax/x0 carries the syscall/handler result back to the restore sequence"
+    ],
+    "perArch": "x86_64 args rdi,rsi,rdx,rcx,r8,r9 / return rax,rdx. aarch64 args x0-x7 / return x0,x1. The 1st-arg register is the only cross-arch difference the dispatch glue must template on.",
+    "sources": [
+     "AMD64 psABI 1.0 §3.2.3: INTEGER args use sequence %rdi,%rsi,%rdx,%rcx,%r8,%r9; integer returns in %rax then %rdx",
+     "AAPCS64 Table 2: r0-r7 'Parameter/result registers'; 'The first eight registers, r0-r7, are used to pass argument values ... and to return result values'"
+    ]
+   },
+   {
+    "decision": "Write ALL context-switch and trap stubs as `#[unsafe(naked)] extern \"C\"` functions whose body is a single `core::arch::naked_asm!`, reserve `core::arch::global_asm!` for the boot `_start` entry and the aarch64 vector table, use `core::arch::asm!` only for inline privileged-instruction wrappers, and pin the toolchain to Rust >= 1.88.0. All of this lives in the OSTD-style foundation crate; every higher layer is `#![forbid(unsafe_code)]`.",
+    "rationale": "Rust 1.88.0 (released 2025-06-26) stabilized naked functions: 'A naked function is marked with the #[unsafe(naked)] attribute, and its body consists of a single naked_asm! call ... the compiler does not add any special handling for arguments or return values.' This is exactly the no-prologue/no-epilogue guarantee a context switch needs, and the release note names 'operating systems' as the target use-case. Naked functions are 'a more ergonomic alternative to defining functions in a global_asm! block', so prefer them for the switch/trap routines and keep global_asm! for the entry point and table that have no Rust signature. Pinning >=1.88.0 makes the unsafe surface auditable and bounded.",
+    "assemblyUnits": [
+     "All ctx_switch_* and isr/exc stubs declared `#[unsafe(naked)] extern \"C\" fn(...)` + single `core::arch::naked_asm!(\"...\")`",
+     "global_asm! _start (x86_64) and _start (aarch64): the only non-naked-function assembly",
+     "asm! wrappers for privileged ops (lidt/lgdt/wrmsr/cli/sti/hlt on x86; msr/mrs/wfi/dsb/isb on aarch64) with explicit options(nomem,nostack,preserves_flags) where applicable",
+     "Toolchain pin: rust-toolchain.toml channel >= 1.88.0; CI gate forbids `#[unsafe(naked)]`/naked_asm! outside the foundation crate"
+    ],
+    "perArch": "Toolchain/facility decision is arch-independent; the same naked_asm! mechanism emits per-arch bodies selected by #[cfg(target_arch = ...)].",
+    "sources": [
+     "Rust 1.88.0 release blog (2025-06-26): 'Naked functions ... marked with the #[unsafe(naked)] attribute, and its body consists of a single naked_asm! call ... used in low-level settings like ... operating systems'",
+     "Rust nightly reference, Inline assembly: 'Support for inline assembly is provided via the asm!, naked_asm!, and global_asm! macros'; 'The naked_asm! macro is only allowed in naked functions'"
+    ]
+   },
+   {
+    "decision": "v1 kernel uses NO floating-point/SIMD: build x86_64 for the `x86_64-unknown-none` target (default: no vector/FP registers, no red zone) and aarch64 for the soft-float `aarch64-unknown-none-softfloat` target, and the foundation saves/restores ZERO FP/SSE/NEON state in either the cooperative switch or the trap path.",
+    "rationale": "The rustc target page states x86_64-unknown-none 'does not use any vector or floating-point registers (e.g. SSE, AVX) ... such as kernels, which may need to avoid the use of such registers'. With the kernel and v1 userspace both soft-float, no xmm/v register can be live across a trap, so eager FP save is pure overhead and lazy-FP machinery is unnecessary for v1 (consistent with the single-vCPU Mirage start and LLM engines living out-of-kernel behind drivers). This also sidesteps the AAPCS64 subtlety that v8-v15 low-64 bits are callee-saved and the SysV rule that NO xmm register is callee-saved.",
+    "assemblyUnits": [
+     "No fxsave/xsave/fxrstor in x86_64 stubs; TrapFrame has no xmm area",
+     "No NEON stp/ldp of v8-v15 in aarch64 stubs; TrapFrame has no v-register area",
+     "Build config: x86_64-unknown-none + aarch64-unknown-none-softfloat in .cargo/config; assert no SSE/NEON feature flags leak in",
+     "Future hook (deferred, documented not implemented): lazy-FP trap on first user FP use, gated behind a capability when user FP threads are admitted"
+    ],
+    "perArch": "x86_64: SSE/AVX disabled by target default + red zone removed. aarch64: choose the -softfloat none variant so NEON/FP is off (the plain aarch64-unknown-none enables FP/NEON by default - must NOT be used for the kernel). riscv64 (future): pick the no-F/D ABI variant by the same principle.",
+    "sources": [
+     "rustc platform-support x86_64-unknown-none: 'Rust code generated for this target does not use any vector or floating-point registers (e.g. SSE, AVX) ... environments, such as kernels, which may need to avoid the use of such registers'",
+     "AAPCS64: 'Registers v8-v15 are Callee-saved ... only the bottom 64 bits of each value stored in v8-v15 need to be Callee-saved' (the subtlety being avoided)",
+     "AMD64 psABI Figure 3.4: all %xmm registers marked not callee-saved"
+    ]
+   },
+   {
+    "decision": "Enforce stack-alignment invariants in the foundation: x86_64 stubs guarantee RSP is 16-byte aligned immediately before any `call` into Rust (re-aligning after the CPU/`call` 8-byte return-address push), and aarch64 stubs keep SP mod 16 = 0 at every public-interface call; rely on x86_64-unknown-none's red-zone-free codegen so interrupt entry need not skip 128 bytes.",
+    "rationale": "psABI: 'the stack needs to be 16 (32 or 64) byte aligned immediately before the call instruction is executed.' A naive trap stub that has only pushed an odd number of 8-byte slots will violate this and crash SSE-using or alignment-checking Rust codegen. AAPCS64 Universal stack constraints: 'SP mod 16 = 0. The stack must be quad-word aligned.' Getting this wrong is a classic silent #GP/alignment-fault source, so it is a hard invariant the multi-agent build must assert.",
+    "assemblyUnits": [
+     "x86_64 isr_common: ensure total pushed bytes make RSP 16-aligned before `call rust_trap_dispatch` (pad with a dummy push if the vector+error-code count is odd)",
+     "aarch64 exc_common: sub sp by a multiple of 16; maintain the FP/LR frame record (two 64-bit values) per AAPCS64 so backtraces chain",
+     "_start (both arches): set SP to a 16-byte-aligned top-of-stack before the first Rust call; clear BSS; jump to rust_main",
+     "Debug assertion / CI check: static analysis or runtime canary that RSP&0xF==0 at dispatch entry"
+    ],
+    "perArch": "x86_64: 16-byte alignment is 'before call' (so on handler entry RSP%16==8); red zone removed by target. aarch64: SP%16==0 at all times at public interfaces; maintain 2-word frame record.",
+    "sources": [
+     "AMD64 psABI 1.0 §3.2.2: 'the stack needs to be 16 (32 or 64) byte aligned immediately before the call instruction is executed'",
+     "AAPCS64 Universal stack constraints: 'SP mod 16 = 0. The stack must be quad-word aligned'",
+     "AAPCS64: 'Each frame shall link to the frame of its caller by means of a frame record of two 64-bit values on the stack'"
+    ]
+   },
+   {
+    "decision": "The boot entry is a `global_asm!` `_start` per arch that establishes a 16-byte-aligned stack, zeroes BSS, and tail-jumps to `extern \"C\" fn rust_main() -> !`; on aarch64 it additionally installs the VBAR_EL1 vector table and (single-vCPU) makes no AP/PSCI CPU_ON calls.",
+    "rationale": "Firecracker/KVM hands the guest a minimal machine with a defined entry; with the Mirage single-vCPU decision there is no AP bring-up, so _start is straight-line. x86_64 enters in the VMM-defined mode and only needs stack+BSS+jump (no BIOS/ACPI). aarch64 must point VBAR_EL1 at the vector table before enabling interrupts. Keeping _start in global_asm! (not a naked fn) is correct because it has no Rust-callable signature and is the program entry symbol.",
+    "assemblyUnits": [
+     "_start_x86_64 [global_asm!]: lea rsp, [stack_top]; and rsp, -16; xor-fill BSS [__bss_start,__bss_end); call rust_main; hlt-loop",
+     "_start_aarch64 [global_asm!]: mov sp, stack_top (16-aligned); adr xN, vbar_el1_table; msr VBAR_EL1, xN; isb; zero BSS; b rust_main; wfi-loop",
+     "linker script symbols: __bss_start/__bss_end, stack_top; entry = _start",
+     "Single-vCPU note: NO secondary-core spin-table / PSCI CPU_ON path emitted in v1"
+    ],
+    "perArch": "x86_64: GDT/IDT load can be deferred to Rust after _start (or minimal in asm); no vector table in asm. aarch64: VBAR_EL1 install is mandatory in/near _start before unmasking. riscv64 (future): equivalent would set stvec + clear BSS, deferred.",
+    "sources": [
+     "Firecracker docs (github.com/firecracker-microvm/firecracker/docs) - minimal microVM machine model (no legacy BIOS/ACPI), informing the straight-line entry",
+     "AAPCS64 Universal stack constraints (SP mod 16 = 0) for the initial SP",
+     "Arm ARM: VBAR_EL1 holds the EL1 vector base (architecture baseline)"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "x86_64 System V callee-saved GPRs = {rbx, rbp, rsp, r12, r13, r14, r15}; caller-saved/temporary = {rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11}. r10 = static chain pointer, r11 = scratch (neither preserved nor used for args). r16-r31 (APX) are NOT callee-saved.",
+    "source": "AMD64 psABI 1.0 (2025-03-12), Figure 3.4 Register Usage, callee-saved column"
+   },
+   {
+    "fact": "x86_64 integer argument registers in order = rdi, rsi, rdx, rcx, r8, r9; integer return = rax then rdx; %al carries the vector-register count for variadic calls.",
+    "source": "AMD64 psABI 1.0 §3.2.3 Parameter Passing / Returning of Values"
+   },
+   {
+    "fact": "x86_64: the direction flag DF must be clear (forward) on function entry and return; other user flags have no specified role and are not preserved across calls (so a function-boundary context switch need not save RFLAGS).",
+    "source": "AMD64 psABI 1.0 §3.2.1 (text immediately above the Stack Frame section)"
+   },
+   {
+    "fact": "x86_64: stack must be 16-byte aligned immediately before a `call`; a 128-byte red zone exists below %rsp that signal/interrupt handlers must not modify - and x86_64-unknown-none disables the red zone and uses no SSE/AVX registers by default (Tier 2).",
+    "source": "AMD64 psABI 1.0 §3.2.2; rustc book platform-support/x86_64-unknown-none ('extern \"C\" ... without red zones'; 'does not use any vector or floating-point registers')"
+   },
+   {
+    "fact": "aarch64 AAPCS64 callee-saved = x19-x28, x29(FP), and SP ('Registers r19-r29 and SP are Callee-saved; all 64 bits'); x30 = LR (return address); caller-saved = x0-x18 (x0-x7 params/results, x8 indirect result, x9-x15 caller-saved, x16/x17 IP0/IP1, x18 platform/caller-saved).",
+    "source": "AAPCS64 (ARM-software/abi-aa) Table 2, General-purpose registers and AAPCS64 usage"
+   },
+   {
+    "fact": "aarch64 SIMD/FP: v0-v7 = params/results, v8-v15 callee-saved but ONLY the bottom 64 bits, v16-v31 caller-saved; NZCV flags undefined across a public interface; FPSR not preserved.",
+    "source": "AAPCS64 §SIMD and Floating-Point registers: 'Registers v8-v15 are Callee-saved ... only the bottom 64 bits ... need to be Callee-saved'"
+   },
+   {
+    "fact": "aarch64 stack alignment: SP mod 16 = 0 (quad-word aligned) at all public interfaces; the frame record is two 64-bit values (FP,LR) on the stack.",
+    "source": "AAPCS64 Universal stack constraints: 'SP mod 16 = 0. The stack must be quad-word aligned'"
+   },
+   {
+    "fact": "Naked functions were stabilized in Rust 1.88.0, released 2025-06-26: marked `#[unsafe(naked)]`, body is a single `core::arch::naked_asm!` call, compiler emits no prologue/epilogue and no arg/return handling; release note explicitly names operating systems as the use-case. naked_asm! is only allowed inside naked functions; asm!/global_asm! are the other two macros.",
+    "source": "Rust 1.88.0 announcement blog (blog.rust-lang.org/2025/06/26/Rust-1.88.0); Rust reference Inline assembly chapter"
+   },
+   {
+    "fact": "x86_64-unknown-none is Tier 2 and by default generates code with no vector/FP registers and no red zone, with extern \"C\" = standard System V; this is the basis for the no-FP-save + red-zone-free trap stub decision. (aarch64 equivalent for soft-float is the aarch64-unknown-none-softfloat variant - the plain aarch64-unknown-none enables FP/NEON by default and must be verified before selection.)",
+    "source": "rustc book, platform-support/x86_64-unknown-none.html (Tier 2 requirements section)"
+   }
+  ]
+ },
+ {
+  "area": "traps-privilege",
+  "decisions": [
+   {
+    "decision": "v1 runs ALL scheme daemons in-image as single-privilege-level (x86 ring0 / aarch64 EL1), single-address-space `#![forbid(unsafe_code)]` safe Rust; the ring3/EL0 hardware-userspace boundary is explicitly deferred to v2. Isolation in v1 is provided by Rust type+memory safety plus unforgeable capability tokens, NOT by CPU rings.",
+    "rationale": "Theseus proves the model: 'everything runs in a single address space (SAS) and single privilege level (SPL)... Protection and isolation are provided by means of compiler- and language-ensured type safety and memory safety.' This deletes the entire syscall/sysret + EL0-transition asm surface from v1, directly serving the <=15 kSLOC / minimal-asm goal, and matches the established framekernel philosophy where the trusted base is the audited foundation crate, not a hardware ring. Capability unforgeability is a Rust newtype invariant, enforceable in safe code.",
+    "assemblyUnits": [
+     "NONE added in v1: explicitly do NOT emit STAR/LSTAR/SFMASK init, swapgs syscall paths, or EL0 eret paths",
+     "Single kernel stack per vCPU (single-vCPU per Mirage decision) — boot _start sets RSP/SP_EL0 once; no per-ring stack table needed except TSS-IST (see x86 IDT decision)"
+    ],
+    "perArch": "x86_64: no IA32_EFER.SCE, no STAR/LSTAR/SFMASK, no swapgs in v1. aarch64: only the 'Current EL with SPx' vector quadrant is live; SPSR/ELR are still saved (faults/IRQs taken at EL1) but no SP_EL0 user-stack swap. riscv64 (future): same SPL stance, S-mode only.",
+    "sources": [
+     "https://www.theseus-os.com/Theseus/book/design/design.html",
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/x86_64/syscall.S"
+    ]
+   },
+   {
+    "decision": "x86_64: at boot replace Firecracker's transient boot GDT with a permanent minimal flat 64-bit GDT — null descriptor, one ring0 64-bit code descriptor (access 0x9A, L=1), one ring0 data descriptor (access 0x92) — plus a 64-bit TSS descriptor; load with lgdt, reload CS via far-return, reload DS/ES/SS/FS/GS, then ltr the TSS.",
+    "rationale": "Firecracker hands the guest control already in 64-bit long mode per the Linux 64-bit boot protocol: 'a GDT must be loaded with the descriptors for selectors __BOOT_CS(0x10) and __BOOT_DS(0x18); both descriptors must be 4G flat segment... CS must be __BOOT_CS and DS, ES, SS must be __BOOT_DS; interrupt must be disabled; %rsi must hold the base address of the struct boot_params.' That boot GDT is transient/owned by the loader, so the kernel must install its own. A TSS is mandatory in 64-bit mode for the IST mechanism even with no ring change, since ltr is the only way to arm IST stacks.",
+    "assemblyUnits": [
+     "global_asm! gdt64: 3 quadword descriptors + 16-byte TSS descriptor",
+     "lgdt [gdtr]; long-jump or retfq to reload CS=0x08; mov ax,0x10; load ds/es/ss/fs/gs",
+     "Static TSS struct (rsp0 + ist1..ist3 pointers); ltr 0x28"
+    ],
+    "perArch": "x86_64 only. aarch64 has no GDT/segmentation — the equivalent boot step is just setting VBAR_EL1 + per-vector stacks (see aarch64 decisions).",
+    "sources": [
+     "https://docs.kernel.org/arch/x86/boot.html",
+     "https://www.felixcloutier.com/x86/sysret"
+    ]
+   },
+   {
+    "decision": "x86_64: install a 256-entry IDT of 16-byte 64-bit interrupt-gate descriptors. Route the critical aborts — #DF (vector 8), NMI (vector 2), #MC (vector 18) — through dedicated TSS IST stacks (ist1..ist3); every other vector runs on the current kernel stack. Mask interrupts (cli) until the IDT and a virtio/timer IRQ handler exist.",
+    "rationale": "In single-privilege v1 an interrupt/exception causes NO CPL change, so the CPU does NOT auto-switch stacks — it pushes SS:RSP/RFLAGS/CS:RIP[+errcode] onto the CURRENT stack. A stack overflow or corrupt RSP would then double-fault on the same bad stack; IST forces a known-good stack. Intel SDM (via felixcloutier SYSRET notes) explicitly recommends 'the interrupt stack table (IST) mechanism for gate 2 (NMI)' and 'the IST mechanism for gate 13 (#GP)'. Firecracker also surfaces KVM's PIC/IOAPIC/PIT and an i8042 reset device, so real device IRQs arrive and need gates.",
+    "assemblyUnits": [
+     "256 naked entry stubs: vectors without a CPU error code push a dummy 0; all push their vector number; jmp __alltraps",
+     "IDT descriptor array builder (offset split lo16/mid16/hi32, selector=0x08, type=0x8E interrupt gate, IST index 1..3 for vectors 8/2/18)",
+     "lidt [idtr]"
+    ],
+    "perArch": "x86_64 only; the aarch64 analogue is the 16-entry EL1 vector table (next decisions). Per-vector IST has no aarch64 equivalent (aarch64 selects SP_EL1 vs SP_EL0 via SPSel, not per-vector stacks).",
+    "sources": [
+     "https://www.felixcloutier.com/x86/sysret",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+    ]
+   },
+   {
+    "decision": "x86_64 trap-entry asm marshals a full TrapFrame on the kernel stack — push rax..r15 (15 GPRs) below the CPU-pushed RIP/CS/RFLAGS/RSP/SS + vector + error code — then calls the Rust handler with the SysV64 ABI passing rdi = &mut TrapFrame, and on return pops the GPRs, drops vector+errcode, and iretq. No swapgs in v1.",
+    "rationale": "The trapframe-rs x86_64 __from_kernel path is the exact, proven shape: it pushes r15..rax, does `mov rdi, rsp; call trap_handler`, then a symmetric pop and `add rsp, 24` to skip padding/trap_num/error_code before `iretq`. A trap interrupts arbitrary code, so the full GPR set must be saved; the SysV64 psABI makes rdi the first integer arg, so &TrapFrame goes in rdi and rax/rcx/rdx/rsi/rdi/r8-r11 are caller-saved scratch the handler may clobber.",
+    "assemblyUnits": [
+     "__alltraps common: push rax,rbx,rcx,rdx,rsi,rdi,rbp, computed rsp, r8..r15",
+     "mov rdi, rsp ; call trap_handler (extern \"sysv64\")",
+     "trap_return: pop GPRs in reverse; add rsp,24 (skip pad/vector/errcode); iretq",
+     "(v2-reserved, NOT in v1) swapgs on the user-entry/exit edges + TSS.rsp0 swap"
+    ],
+    "perArch": "x86_64 only. Frame layout differs from aarch64 because the CPU pushes the iret frame (SS/RSP/RFLAGS/CS/RIP) automatically, whereas aarch64 only updates ELR_EL1/SPSR_EL1 and software must save them.",
+    "sources": [
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/x86_64/trap.S"
+    ]
+   },
+   {
+    "decision": "aarch64: install one EL1 exception vector table at a 2KB-aligned VBAR_EL1 containing 16 entries of 128 bytes each = {Current-EL-SP0, Current-EL-SPx, Lower-EL-AArch64, Lower-EL-AArch32} x {Sync, IRQ, FIQ, SError}. In v1 only the Current-EL-SPx quadrant is functional (Sync=faults, IRQ=virtio/timer); the Lower-EL quadrant is a reserved stub for v2 EL0.",
+    "rationale": "trapframe-rs encodes the architectural geometry exactly: `.global __vectors / .align 11` (2048-byte/2KB-aligned table base = VBAR alignment) with 16 `HANDLER` macros each at `.align 7` (128 bytes). Each entry only has room for a short trampoline, so each does `stp lr, x0, [sp,#-16]!; mov x0,#source; movk x0,#kind,lsl#16; b __alltraps`, encoding which of the 16 slots fired into x0. Firecracker boots the guest at EL1 (see boot-protocol fact), so EL1 is the kernel's resident level and this is the only vector table needed.",
+    "assemblyUnits": [
+     "global_asm! __vectors at .align 11; 16 x (.align 7 HANDLER source kind) trampolines",
+     "msr vbar_el1, x_ during boot",
+     "Lower-EL-AArch64 sync slot left as a stub branch to a v2 EL0 entry (placeholder)"
+    ],
+    "perArch": "aarch64 only. The 16x128B table is the structural counterpart to the x86 256-entry IDT, but cause is in ESR_EL1 (one register) rather than per-vector gates + error code.",
+    "sources": [
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/aarch64/trap.S",
+     "https://docs.kernel.org/arch/arm64/booting.html"
+    ]
+   },
+   {
+    "decision": "aarch64 trap-entry asm saves x0-x30 plus ELR_EL1 and SPSR_EL1 into a TrapFrame (also reserving SP_EL0/TPIDR slots for the v2 EL0 path), branches to the Rust handler, then restores via msr elr_el1/spsr_el1 + ldp of all GPRs and eret.",
+    "rationale": "trapframe-rs __alltraps saves x29 then stp-pairs x27..x1, reads `mrs x2,spsr_el1; mrs x1,elr_el1; stp x1,x2`, calls `bl trap_handler`, and trap_return restores spsr_el1/elr_el1 and ldp's x1..x30/x0 before `eret`. AAPCS64 mandates the full save: x19-x28 are 'Callee-saved registers', x0-x7 are parameter/result, x8 is the indirect-result register, x16/x17 are IP0/IP1 intra-procedure temporaries, x18 is the platform register, x29=FP, x30=LR — a trap preempts arbitrary code mid-routine so every GPR plus the exception-return pair (ELR/SPSR) must be preserved. eret consumes ELR_EL1 (return PC) and SPSR_EL1 (restored PSTATE).",
+    "assemblyUnits": [
+     "__alltraps: stp/str save block for x0-x30; mrs+stp of ELR_EL1/SPSR_EL1",
+     "mov x0, sp ; bl trap_handler (extern \"C\")",
+     "trap_return: ldp ELR/SPSR -> msr; ldp x1..x30,x0; eret",
+     "(v2-reserved) SP_EL0/TPIDR_EL0 save+restore for the Lower-EL path"
+    ],
+    "perArch": "aarch64 only. eret replaces iretq; SPSR_EL1/ELR_EL1 are explicit system registers software must save, unlike x86 where the iret frame is on the stack.",
+    "sources": [
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/aarch64/trap.S",
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/aarch64/mod.rs"
+    ]
+   },
+   {
+    "decision": "The entry asm decodes NOTHING about the trap cause; cause decoding lives in the Rust handler. x86: the handler reads the asm-pushed vector index + 32-bit CPU error code. aarch64: the handler reads ESR_EL1 and switches on EC = ESR_EL1[31:26] (e.g. 0x24/0x25 data abort from lower/current EL, 0x20/0x21 instruction abort, and 0x15 SVC64 reserved for v2). The foundation crate exposes a thin `read_esr_el1()` accessor; the stub passes only the 2-bit source + 2-bit kind from the vector slot.",
+    "rationale": "Linux esr.h (authoritative mirror of the ARM ARM) fixes the encoding: `ESR_ELx_EC_SHIFT (26)`, width 6; `ESR_ELx_EC_DABT_LOW 0x24`, `ESR_ELx_EC_DABT_CUR 0x25`, `ESR_ELx_EC_IABT_LOW 0x20`, `ESR_ELx_EC_IABT_CUR 0x21`, `ESR_ELx_EC_SVC64 0x15`; ISS in bits [24:0], IL at bit 25. Keeping the decode in Rust means the fault-classification logic (and any future emulation) is in safe, testable Rust, not in unaudited asm — the asm stays a fixed-shape marshaller.",
+    "assemblyUnits": [
+     "aarch64: stub only encodes slot via `mov x0,#source; movk x0,#kind,lsl#16` — ESR_EL1 is read by Rust, not the stub",
+     "x86: stub pushes synthesized vector number so Rust can index a dispatch table; CPU error code already on stack"
+    ],
+    "perArch": "x86 cause = (vector, error_code) pushed on stack; aarch64 cause = ESR_EL1.EC + ISS read in Rust. Both converge on a single Rust dispatch function.",
+    "sources": [
+     "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/esr.h",
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/aarch64/trap.S"
+    ]
+   },
+   {
+    "decision": "Capability checks sit entirely in the safe-Rust trap/dispatch handler, never in asm. In v1 a capability invocation is an ordinary safe-Rust call guarded by an unforgeable capability-token type, so it is NOT a trap at all — v1 traps carry only CPU faults + device IRQs. The asm contract is strictly 'save registers -> call Rust -> restore'; the Rust handler performs the capability-table lookup and dispatch.",
+    "rationale": "This is the framekernel invariant: the asm must contain zero policy so it can be audited once and frozen. Because v1 daemons are in-image safe Rust (decision 1), IPC/capability invocation is a normal monomorphized Rust call protected by Rust's type system, avoiding the trap round-trip entirely — strictly faster and smaller than a syscall path. When v2 adds ring3/EL0, the capability check moves into the syscall trap handler but STAYS in safe Rust, still off the asm fast-path. The trapframe-rs handlers (`call trap_handler` / `bl trap_handler`) already model this clean asm->Rust boundary.",
+    "assemblyUnits": [
+     "NONE: asm stub contains no comparison, no table walk, no privilege logic — only the marshal/call/restore frame",
+     "Rust-side (not asm): capability-table lookup + dispatch in #![forbid(unsafe_code)] crate"
+    ],
+    "perArch": "Identical contract on both arches: the only per-arch difference is the marshalling shape (decisions 4 and 6), not the policy location.",
+    "sources": [
+     "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/x86_64/trap.S",
+     "https://www.theseus-os.com/Theseus/book/design/design.html"
+    ]
+   },
+   {
+    "decision": "Confine 100% of trap/boot/privileged asm to the single OSTD-style foundation crate using Rust 1.88+ `#[unsafe(naked)]` + `naked_asm!` for the fixed-shape entry stubs and `global_asm!` for the GDT/IDT/vector tables; pin the toolchain to >=1.88.0. Every crate above the foundation is `#![forbid(unsafe_code)]`.",
+    "rationale": "Rust 1.88.0 (released 2025-06-26) stabilized naked functions: 'A naked function is marked with the #[unsafe(naked)] attribute, and its body consists of a single naked_asm! call... Naked functions are used in low-level settings like Rust's compiler-builtins, operating systems, and embedded applications.' This is the ergonomic, in-language home for trap stubs (no compiler-generated prologue/epilogue to corrupt the frame), keeping all unsafe+asm inside one audited crate per the framekernel pattern. global_asm! (stable since 1.59) hosts the descriptor tables that have no callable prologue.",
+    "assemblyUnits": [
+     "foundation crate modules: arch/x86_64/{boot,gdt,idt,trap}.rs and arch/aarch64/{boot,vectors,trap}.rs holding all naked_asm!/global_asm! blocks",
+     "Toolchain pin (rust-toolchain.toml channel >= 1.88.0) so #[unsafe(naked)] is available",
+     "CI gate: cargo-geiger / grep ensuring no `unsafe` or asm! outside the foundation crate"
+    ],
+    "perArch": "Same crate structure both arches; cfg(target_arch) selects the module. The naked-function/global_asm mechanism is arch-independent.",
+    "sources": [
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+    ]
+   },
+   {
+    "decision": "Reserve — but do NOT implement in v1 — the ring3/EL0 syscall fast-path as named, tracked work-units so v2 can light it up without touching v1's fault path. x86: program IA32_EFER.SCE=1, STAR (CS/SS selectors), LSTAR (entry RIP), SFMASK (RFLAGS mask), plus swapgs kernel-GS and TSS.rsp0 stack swap. aarch64: route SVC #0 from EL0 through the Lower-EL-AArch64 Sync vector slot with SP_EL0/SPSR_EL1/ELR_EL1 save and eret-to-EL0.",
+    "rationale": "Intel SDM (via felixcloutier) fixes the x86 requirements: SYSCALL '#UD if IA32_EFER.SCE = 0', loads RIP from IA32_LSTAR, saves RFLAGS->R11 and masks via IA32_FMASK (MSR C0000084H), derives CS/SS from IA32_STAR[47:32], and 'does not save the stack pointer (RSP)'; SYSRET derives CS/SS from IA32_STAR[63:48] and raises #GP(0) 'if the return is to 64-bit mode and RCX contains a non-canonical address'. aarch64 EL0 SVC surfaces as ESR_EL1.EC=0x15 (SVC64) on the Lower-EL vector; trapframe-rs run_user/trap_from_user already demonstrates the SP_EL0/eret round-trip. Naming these now lets the multi-agent build slot them in for v2 against a stable v1 fault path.",
+    "assemblyUnits": [
+     "(v2) x86 syscall_entry: swapgs; load rsp<-TSS.sp0; build frame; call Rust; sysretq path with canonical-RCX guard",
+     "(v2) x86 MSR init: wrmsr EFER.SCE, STAR, LSTAR, SFMASK",
+     "(v2) aarch64 EL0 sync handler in Lower-EL slot: save SP_EL0/SPSR/ELR; bl handler; eret",
+     "(v2) aarch64 run_user: enter EL0 via eret with SPSR_EL1.M=EL0t"
+    ],
+    "perArch": "x86 uses SYSCALL/SYSRET + MSR plumbing + swapgs; aarch64 uses SVC/eret + SP_EL0 banking. Both feed the same safe-Rust capability dispatcher (decision 8). riscv64 (future) would use ecall + sret + sscratch.",
+    "sources": [
+     "https://www.felixcloutier.com/x86/syscall",
+     "https://www.felixcloutier.com/x86/sysret"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "aarch64 ESR_EL1 exception-syndrome layout: EC (exception class) is bits [31:26] (ESR_ELx_EC_SHIFT=26, 6 bits wide); EC=0x15 SVC64, 0x24 data-abort-from-lower-EL, 0x25 data-abort-at-current-EL, 0x20 instruction-abort-lower, 0x21 instruction-abort-current; IL at bit 25, ISS in [24:0]. The Rust handler switches on these.",
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/esr.h"
+   },
+   {
+    "fact": "aarch64 EL1 exception vector table is 16 entries x 128 bytes, base 2KB-aligned in VBAR_EL1: {Current-EL-SP0, Current-EL-SPx, Lower-EL-AArch64, Lower-EL-AArch32} x {Sync, IRQ, FIQ, SError}. trapframe-rs encodes this as `__vectors: .align 11` (table) with each HANDLER at `.align 7` (128 bytes).",
+    "source": "https://raw.githubusercontent.com/rcore-os/trapframe-rs/master/src/arch/aarch64/trap.S"
+   },
+   {
+    "fact": "x86_64 SYSCALL requires IA32_EFER.SCE=1 (else #UD); it loads RIP from IA32_LSTAR, saves RFLAGS into R11 then masks RFLAGS using IA32_FMASK (MSR C0000084H), loads CS/SS selectors from IA32_STAR[47:32] with fixed descriptor caches, sets CPL:=0, and does NOT save RSP. SYSRET loads CS/SS from IA32_STAR[63:48], sets CPL:=3, and raises #GP(0) if returning to 64-bit mode with non-canonical RCX. (Deferred to v2 — verify against Intel SDM Vol 2/3 before shipping the v2 syscall path.)",
+    "source": "https://www.felixcloutier.com/x86/syscall"
+   },
+   {
+    "fact": "x86_64 boot entry state from Firecracker (Linux 64-bit boot protocol): CPU is in 64-bit long mode with paging enabled; a GDT is loaded with __BOOT_CS(0x10) and __BOOT_DS(0x18) as 4G flat segments; CS=__BOOT_CS, DS/ES/SS=__BOOT_DS; interrupts disabled; %rsi holds the struct boot_params base. The guest must install its own GDT+TSS+IDT over this transient boot GDT.",
+    "source": "https://docs.kernel.org/arch/x86/boot.html"
+   },
+   {
+    "fact": "aarch64 boot entry state (Linux arm64 booting, used by Firecracker/KVM): the guest is entered at EL1 (or EL2) in non-secure state with the MMU off and all PSTATE.DAIF interrupts masked; x0 = physical address of the device-tree blob, x1=x2=x3=0; the Image has a 64-byte header with magic 0x644d5241 ('ARM\\x64').",
+    "source": "https://docs.kernel.org/arch/arm64/booting.html"
+   },
+   {
+    "fact": "Rust 1.88.0 (released 2025-06-26) stabilized naked functions: a naked function is marked `#[unsafe(naked)]` and its body is a single `naked_asm!` call with no compiler-generated prologue/epilogue; the release notes name operating systems as a target use case. (global_asm! has been stable since Rust 1.59.) This is what hosts the frozen trap/boot asm inside the foundation crate.",
+    "source": "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+   },
+   {
+    "fact": "AAPCS64 register roles (drive the aarch64 trap save-set): x0-x7 parameter/result (caller-saved), x8 indirect-result-location, x9-x15 caller-saved, x16/x17 IP0/IP1 intra-procedure-call temporaries, x18 platform register, x19-x28 callee-saved, x29 FP, x30 LR. A trap must preserve x0-x30 because it preempts arbitrary AAPCS64 code.",
+    "source": "https://raw.githubusercontent.com/ARM-software/abi-aa/main/aapcs64/aapcs64.rst"
+   },
+   {
+    "fact": "aarch64 secondary CPUs are brought into the kernel via PSCI CPU_ON (ARM DEN 0022A) with a 'psci' enable-method node; spin-table is the alternative. Per the Mirage single-vCPU decision, v1 boots one vCPU and issues NO CPU_ON, so no PSCI/AP-bringup asm is needed in v1.",
+    "source": "https://docs.kernel.org/arch/arm64/booting.html"
+   },
+   {
+    "fact": "Firecracker architecture: each process encapsulates exactly one microVM; vCPU thread(s) run the KVM_RUN loop. On x86_64 the guest additionally sees KVM-provided PIC/IOAPIC/PIT plus an i8042 controller (used only to signal guest-requested reboot); devices are virtio. So real device IRQs (timer, virtio) arrive and require IDT/vector handlers even in single-privilege v1.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+   },
+   {
+    "fact": "x86_64 same-privilege interrupt/exception does NOT switch stacks automatically (no CPL change in single-ring v1) — the CPU pushes SS:RSP/RFLAGS/CS:RIP[+error code] onto the current stack; only the TSS IST mechanism forces a fresh stack. Intel SDM (via felixcloutier SYSRET guidance) recommends the IST mechanism for NMI (gate 2) and #GP (gate 13); the kernel must therefore load a TSS via ltr and assign ist1..ist3 to #DF/NMI/#MC.",
+    "source": "https://www.felixcloutier.com/x86/sysret"
+   }
+  ]
+ },
+ {
+  "area": "mmu",
+  "decisions": [
+   {
+    "decision": "Confine the entire privileged MMU surface to the foundation crate as a fixed, enumerable set of `unsafe fn` wrappers written with `core::arch::asm!` in-tree (do NOT pull general-purpose HAL crates like `x86_64`/`aarch64-cpu` into the audited boundary). The surface is exactly: x86_64 = {read/write CR3, invlpg, CR4.PGE toggle, wrmsr IA32_EFER, wrmsr IA32_PAT}; aarch64 = {msr/mrs TTBR0_EL1, TTBR1_EL1, TCR_EL1, MAIR_EL1, SCTLR_EL1, tlbi *, dsb, isb}. Every layer above this (page-table walking, descriptor construction, mapping policy) is `#![forbid(unsafe_code)]` safe Rust.",
+    "rationale": "Rust stabilized `core::arch::asm!`/`global_asm!` in 1.59.0 (2022-02-24) for x86, x86-64, ARM, AArch64 and RISC-V, so all v1 targets are covered with stable inline asm and no nightly. There are NO stable `core::arch` intrinsics for INVLPG, CR3 access, or AArch64 system-register/TLBI/barrier ops, so inline asm is the only stable mechanism. Asterinas (an OSTD/framekernel) reaches these ops via the `x86_64` crate, but for TABOS's 'ALL assembly in a tiny audited foundation crate' invariant that crate's asm would be outside the audited boundary; hand-rolling ~12 asm wrappers keeps the auditable asm surface minimal and in-tree. The surface is tiny precisely because page tables are just memory (see D2).",
+    "assemblyUnits": [
+     "foundation::arch::x86_64::mmu: read_cr3 (`mov {}, cr3`), write_cr3 (`mov cr3, {}`), invlpg (`invlpg [{}]`), tlb_flush_global (CR4.PGE clear/set RMW), wrmsr_efer, wrmsr_pat",
+     "foundation::arch::aarch64::mmu: msr_ttbr0_el1, msr_ttbr1_el1, msr_tcr_el1, msr_mair_el1, rmw_sctlr_el1, tlbi (vae1/vale1/vmalle1 +is variants), dsb(barrier), isb — each a single-instruction `unsafe fn`",
+     "One audit checklist enumerating exactly these units; CI lint asserting no other `asm!`/`unsafe` appears outside `foundation::arch::*mmu`"
+    ],
+    "perArch": "x86_64 needs 6 privileged units; aarch64 needs ~9 (more because it must also bring the MMU up from cold — see D4). riscv64 (future) would add satp/sfence.vma analogues but is not built in v1.",
+    "sources": [
+     "https://blog.rust-lang.org/2022/02/24/Rust-1.59.0/",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/mm/mod.rs"
+    ]
+   },
+   {
+    "decision": "Implement page-table ENTRY/TABLE manipulation (allocate a table frame, index it, read/modify/write descriptors, walk levels, split/coalesce huge pages) as plain safe Rust over a typed page-table abstraction. Perform every PTE load/store through `core::sync::atomic::AtomicUsize` (load `Acquire`, store `Release`) cast over the descriptor pointer — NOT inline asm and NOT plain `*mut` writes. Emit ZERO assembly for this layer.",
+    "rationale": "Asterinas proves this boundary: its entire generic page-table engine (`PageTable`, `Cursor`, `PteScalar`, `PteTrait`) is ordinary Rust, and the only mapping-time `unsafe` is `load_pte`/`store_pte`, which are literally `AtomicUsize::from_ptr(ptr.cast())` + `.load(ordering)`/`.store(new, ordering)` — no asm. A PTE is a `usize`-sized scalar (x86_64 PTE = 8 bytes; AArch64 descriptor = 8 bytes), so a single naturally-aligned atomic store is sufficient for a coherent update and gives the hardware page-table walker a tear-free view. Acquire/Release ordering matches the MMU walk: a child table's contents must be published (Release) before the parent descriptor that points to it becomes visible.",
+    "assemblyUnits": [
+     "NONE — explicitly. This layer compiles to ordinary loads/atomic stores; any `asm!` here is a boundary violation and must fail the D1 CI lint."
+    ],
+    "perArch": "Descriptor bit layouts differ (x86: PRESENT/RW/US/PWT/PCD/A/D/PS(HUGE)/G/NX@63; aarch64: VALID/TABLE-or-page/AttrIndx/SH/AP/AF/nG/UXN/PXN/Contiguous), but both are expressed as safe `bitflags` round-tripped through a single architecture-agnostic `PteScalar` enum {Absent, PageTable(pa,flags), Mapped(pa,prop)}. The atomic-store mechanism is identical across arches.",
+    "sources": [
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/mm/page_table/mod.rs",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/mm/mod.rs"
+    ]
+   },
+   {
+    "decision": "On x86_64, boot via the Linux 64-bit boot protocol and INHERIT Firecracker's boot page tables rather than re-enabling paging. The early foundation reads CR3 to adopt the firmware identity map, builds the real kernel tables in safe Rust, then publishes the new address space with a single `mov cr3`. Treat `mov cr3` as the one and only x86 address-space-switch primitive.",
+    "rationale": "Firecracker's LinuxBoot path enters the guest already in 64-bit long mode with paging ON: it writes PML4 at guest-phys 0x9000, PDPTE at 0xa000, PDE at 0xb000, identity-maps VA[0,1GiB) with 512 2MiB pages (PDE[i] = (i<<21)|0x83 = PRESENT|RW|PS), and sets CR3=0x9000, CR4.PAE, CR0.PG, EFER.LME|LMA before the first guest instruction. So paging-enable asm (the classic CR0.PG/EFER dance) is unnecessary on x86. Per Intel SDM (via the instruction reference), MOV to CR3 is CPL-0 and a serializing instruction; a plain CR3 reload invalidates all non-global TLB entries and paging-structure caches — exactly the semantics wanted for a context switch (kernel global mappings survive). Asterinas mirrors this: `current_page_table_paddr()` reads CR3 and `activate_page_table()` writes CR3.",
+    "assemblyUnits": [
+     "read_cr3 — adopt Firecracker's boot PML4 at early init (Asterinas `BootPageTable::from_current_pt`)",
+     "write_cr3 — address-space switch / context switch; implicitly flushes non-global TLB + paging-structure caches (serializing, no extra fence needed)",
+     "Optional: write_cr3 with PCD/PWT bits for root-table cache policy (Asterinas passes Cr3Flags for WB/WT/UC)"
+    ],
+    "perArch": "x86_64 ONLY. Because the boot map covers just the low 1GiB with 2MiB pages, the kernel must still build 4KiB/higher-half mappings itself (safe Rust per D2) before relying on them. PVH boot is explicitly NOT chosen: Firecracker's PVH path enters 32-bit protected mode with paging OFF (CR0=PE|ET, CR4=0), which would force us to write the paging-enable + long-mode-transition asm ourselves.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs",
+     "https://www.felixcloutier.com/x86/mov-1",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/mm/page_table/boot_pt.rs"
+    ]
+   },
+   {
+    "decision": "On aarch64, accept that Firecracker hands the vCPU the MMU OFF at EL1 and make MMU bring-up a mandatory foundation-crate assembly unit: program MAIR_EL1 (attribute table), TCR_EL1 (T0SZ/T1SZ, TG0/TG1 granule, IPS, SH/IRGN/ORGN), build the initial L0 table in safe Rust, write TTBR0_EL1 (and TTBR1_EL1 if using a split high/low map), ISB, then set SCTLR_EL1.M (with C and I), and ISB again before executing translated code.",
+    "rationale": "Firecracker's aarch64 `setup_boot_regs` sets ONLY PSTATE (= EL1h with D/A/I/F all masked), PC=kernel entry, and x0=FDT address; it programs no TTBR/TCR/MAIR/SCTLR and builds no tables (the TTBR1_EL1/TCR_EL1 sysreg IDs it defines are only for snapshot save/restore via KVM_GET/SET_ONE_REG). The Linux arm64 boot protocol that Firecracker follows states verbatim 'The MMU must be off' at kernel entry. This is the central x86-vs-arm asymmetry: x86 inherits live paging (D3); aarch64 must cold-start address translation in asm. The trailing ISB is architecturally required so the context-synchronizing effect of the SCTLR_EL1.M write is observed before subsequent (now-translated) fetches, and an ISB is needed after TTBR/TCR writes for the same reason. Hermit's aarch64 `init()` confirms the shape: it reads ID_AA64MMFR0_EL1 for PARange/TGran support and assumes tables already staged, then finalizes.",
+    "assemblyUnits": [
+     "msr_mair_el1 — install memory-type indices (e.g. idx0=Device-nGnRnE, idx1=Normal-WB-inner/outer, idx2=Normal-NC)",
+     "msr_tcr_el1 — configure 4KiB granule (TG0/TG1=0), 48-bit VA (T0SZ/T1SZ=16), IPS from ID_AA64MMFR0_EL1.PARange, inner-shareable WB cacheable walks",
+     "msr_ttbr0_el1 (+ optional msr_ttbr1_el1) — install root table physical base",
+     "isb — after TTBR/TCR/MAIR writes",
+     "rmw_sctlr_el1 — set M (bit0), C (bit2), I (bit12)",
+     "isb — context-synchronize after enabling the MMU",
+     "read ID_AA64MMFR0_EL1 (mrs) — assert TGran4 + read PARange at boot (Hermit pattern)"
+    ],
+    "perArch": "aarch64 ONLY — this entire unit is N/A on x86_64 where Firecracker already enabled paging. The early window between entry and SCTLR.M=1 runs with VA==PA, so the bring-up code must be position-correct in the identity region.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs",
+     "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst",
+     "https://raw.githubusercontent.com/hermit-os/kernel/main/src/arch/aarch64/mm/paging.rs"
+    ]
+   },
+   {
+    "decision": "Implement single-page TLB invalidation as: x86_64 = one `invlpg [addr]`; aarch64 = the barrier-bracketed template `DSB ISHST; TLBI VALE1, Xt; DSB ISH; ISB` where Xt = VA>>12 (leaf-only `vale1` for last-level changes, `vae1` when a walk-cache/table entry may change). Expose this as `flush_page(vaddr)` in the foundation; callers in safe Rust decide when to call it after an atomic PTE store (D2).",
+    "rationale": "Intel SDM (instruction reference) specifies INVLPG is CPL-0 and flushes the TLB entries for the page containing the operand, including global entries for that page, and 'may flush more' but never fewer — so a single instruction with no surrounding fence is correct (INVLPG is ordered w.r.t. the preceding store on the same processor). The Linux arm64 canon codifies the AArch64 sequence as 'DSB ISHST // ensure prior page-table writes completed; TLBI ...; DSB ISH // ensure invalidation completed; ISB if instruction/kernel mappings changed', with the VA operand pre-shifted >>12 and ASID in bits[63:48]; Hermit's `flush_from_tlb` uses exactly `dsb(ISHST); tlbi vale1is; dsb(ISH); isb(SY)`.",
+    "assemblyUnits": [
+     "x86_64: invlpg [addr] (single instruction; reused from D1)",
+     "aarch64: dsb(ishst) -> tlbi vale1is/vae1is, Xt -> dsb(ish) -> isb (4-instruction template wrapped as one `unsafe fn`)"
+    ],
+    "perArch": "x86: no barriers needed (INVLPG self-orders). aarch64: barriers are mandatory and the choice of shareability matters — because TABOS is single-vCPU (Mirage one-vCPU-per-microVM), there is no cross-CPU shootdown, so the cheaper non-shareable local variants `tlbi vale1, Xt; dsb nsh` are sufficient and preferred; the inner-shareable `*is` variants remain correct (just broadcast to an empty set) and are the safe default if SMP is ever enabled. x86 likewise needs no shootdown IPI under single-vCPU.",
+    "sources": [
+     "https://www.felixcloutier.com/x86/invlpg",
+     "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/tlbflush.h",
+     "https://raw.githubusercontent.com/hermit-os/kernel/main/src/arch/aarch64/mm/paging.rs"
+    ]
+   },
+   {
+    "decision": "Implement full-address-space TLB flush two-tier: x86_64 = `mov cr3` reload (flushes non-global) as the default, plus a CR4.PGE clear/set toggle when global kernel entries must also be evicted; aarch64 = `DSB ISHST; TLBI VMALLE1(is); DSB ISH; ISB`.",
+    "rationale": "Per Intel SDM, reloading CR3 invalidates all non-global TLB entries and paging-structure caches; modifying CR4.PGE (and PG/PAE/PSE) flushes ALL entries including global. Asterinas encodes precisely this split: `tlb_flush_all_excluding_global()` = `tlb::flush_all()` (CR3 reload) and `tlb_flush_all_including_global()` = toggle CR4.PAGE_GLOBAL off then on. Linux arm64 `flush_tlb_all()` = `dsb(ishst); tlbi vmalle1is; dsb(ish); isb`, and `local_flush_tlb_all()` = the `nsh`/`vmalle1` local form.",
+    "assemblyUnits": [
+     "x86_64: write_cr3(read_cr3()) — non-global full flush (reuses D3 units)",
+     "x86_64: cr4_pge_toggle — clear then set CR4.PGE to also drop global entries",
+     "aarch64: dsb(ishst) -> tlbi vmalle1is (or vmalle1 local) -> dsb(ish/nsh) -> isb"
+    ],
+    "perArch": "x86 distinguishes global vs non-global (kernel image mapped global to survive CR3 switches); the global flush is a 2-write CR4 RMW. aarch64 `vmalle1` covers the current translation regime in one op; nG bit governs which entries an ASID switch keeps. Single-vCPU again removes IPI/shootdown coordination on both arches.",
+    "sources": [
+     "https://www.felixcloutier.com/x86/mov-1",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/mm/mod.rs",
+     "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/tlbflush.h"
+    ]
+   },
+   {
+    "decision": "For aarch64, make Break-Before-Make (BBM) the mandatory protocol whenever a LIVE valid descriptor's output address or memory attributes change: (1) atomic-store an invalid descriptor, (2) TLBI + barriers for that VA, (3) atomic-store the new descriptor, (4) barrier. Keep the BBM sequencing logic in safe Rust (it is just ordered atomic stores from D2 interleaved with the D5 flush primitive); only the TLBI/DSB/ISB are foundation asm. On x86_64 do NOT use BBM — atomically rewrite the present PTE in place and issue a single trailing `invlpg`.",
+    "rationale": "AArch64 VMSA forbids changing a live block/page descriptor's OA or attributes with a single store: the architecture permits a TLB conflict / amalgamation and UNPREDICTABLE behavior unless the entry is first made invalid and the TLB cleaned. Hermit's `map_page_in_this_table` documents and implements this: when an entry is already present it sets the entry to invalid, `flush_from_tlb()`, writes the real entry, then `flush_from_tlb()` again, noting 'The reference manual suggests to replace the entry with an invalid entry first ... heavily reinforced with memory barrier instructions' and cites the ARM ARM (ARMv8-A, Issue C.a) D4.3.3. x86 has no analogous BBM rule for a present->present attribute change; the previously-not-present case needs no flush at all, and an existing-entry change just needs INVLPG.",
+    "assemblyUnits": [
+     "aarch64: reuses D5 flush_page (dsb/tlbi/dsb/isb) twice around the descriptor swap; no new asm",
+     "x86_64: reuses D5 invlpg once after the in-place atomic PTE rewrite; no BBM, no double flush"
+    ],
+    "perArch": "aarch64: BBM is mandatory for OA/attr changes of valid entries (and for splitting a block into a table); a not-present->valid install needs only the post-write DSB+TLBI-of-stale-not-present is unnecessary. x86_64: single atomic store + single invlpg; not-present->present needs no flush because x86 does not architecturally cache not-present translations in a way that requires it for that transition.",
+    "sources": [
+     "https://raw.githubusercontent.com/hermit-os/kernel/main/src/arch/aarch64/mm/paging.rs",
+     "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/tlbflush.h"
+    ]
+   },
+   {
+    "decision": "Use `core::sync::atomic` for all ordinary memory ordering (PTE publication via Release/Acquire stores per D2, and `compiler_fence`/`fence` for producer-consumer ordering of table contents vs the descriptor that points to them). Emit raw `dsb`/`isb` (aarch64) ONLY where the architecture mandates translation-structure synchronization — i.e. inside the TLBI templates (D5/D6) and after MAIR/TCR/TTBR/SCTLR writes (D4). On x86 add NO separate paging fence: MOV-CR3 and INVLPG already self-serialize; reserve `mfence` for DMA/MMIO ordering, not paging.",
+    "rationale": "On AArch64 a `core::sync::atomic::fence` lowers to a `DMB` (a memory-ordering barrier), never to `DSB` (completion barrier) or `ISB` (context-synchronization / pipeline flush). Translation-table maintenance specifically requires DSB to guarantee the page-table write or TLBI has COMPLETED (not merely ordered) and ISB to discard instructions fetched under a stale translation — semantics `atomic::fence` cannot express. Linux's TLB template uses `dsb`/`isb` exactly, never `dmb`, for this reason. On x86, the SDM marks MOV-to-CR* (except CR8) as serializing and INVLPG self-orders, so the privileged ops are their own fences and an extra `mfence` is wrong/wasteful for paging.",
+    "assemblyUnits": [
+     "aarch64: dsb(sy|ish|ishst|nsh) and isb wrappers (already enumerated in D1; consumed by D4/D5/D6)",
+     "x86_64: NONE specific to paging — `mfence`/`sfence`/`lfence` belong to the DMA/MMIO area, not MMU"
+    ],
+    "perArch": "aarch64 carries the heavyweight barrier surface (dsb/isb) because translation enable and TLB maintenance demand completion + context-sync semantics. x86_64 paging needs no explicit barriers beyond the implicit serialization of CR3/INVLPG. Both rely on `core::sync::atomic` for the cross-layer PTE publication ordering.",
+    "sources": [
+     "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/tlbflush.h",
+     "https://www.felixcloutier.com/x86/mov-1",
+     "https://blog.rust-lang.org/2022/02/24/Rust-1.59.0/"
+    ]
+   },
+   {
+    "decision": "On x86_64, before any PTE uses the NX bit or non-default cache policy, the foundation must set EFER.NXE via WRMSR and program IA32_PAT via WRMSR during early init — Firecracker does not do this. On aarch64, encode all memory types via MAIR_EL1 indices set up in D4; PTEs then carry only the 3-bit AttrIndx, requiring no per-mapping privileged op.",
+    "rationale": "x86 PTE bit 63 (NO_EXECUTE) is reserved and faults unless EFER.NXE=1; Firecracker's LinuxBoot path sets only EFER.LME|LMA (long mode), leaving NXE clear, so W^X enforcement requires the kernel to set NXE itself. Asterinas `enable_essential_features()` does exactly this: `configure_pat()` (WRMSR IA32_PAT) plus `Efer::update(|e| e |= NO_EXECUTE_ENABLE)`. On aarch64 cacheability/device-ness is selected by MAIR index rather than per-PTE cache bits, so once MAIR_EL1 is programmed the safe-Rust descriptor layer just writes a 3-bit AttrIndx — no extra asm per mapping.",
+    "assemblyUnits": [
+     "x86_64: wrmsr_efer — set IA32_EFER.NXE (bit 11) once at boot",
+     "x86_64: wrmsr_pat — program IA32_PAT entries for WB/WT/UC/WC cache policies (Asterinas configure_pat)",
+     "aarch64: none beyond the D4 msr_mair_el1 (memory types are table-driven, not per-PTE asm)"
+    ],
+    "perArch": "x86 needs two WRMSRs (EFER.NXE, PAT) because Firecracker leaves them unset and cache policy lives in per-PTE PWT/PCD/PAT bits indexing IA32_PAT. aarch64 folds all of this into the single MAIR_EL1 programmed during MMU bring-up; per-mapping cost is zero asm.",
+    "sources": [
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/mm/mod.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "Firecracker x86_64 LinuxBoot enters the guest in 64-bit long mode with paging ALREADY enabled: it writes PML4@0x9000, PDPTE@0xa000, PDE@0xb000, identity-maps VA[0,1GiB) with 512 2MiB pages (PDE[i]=(i<<21)|0x83 = PRESENT|RW|PS), and sets sregs.cr3=0x9000(PML4_START), cr4|=PAE, cr0|=PG, efer|=LME|LMA.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs (fn setup_page_tables / configure_segments_and_sregs)"
+   },
+   {
+    "fact": "Firecracker x86_64 PVH boot enters 32-bit protected mode with paging OFF (sregs.cr0 = X86_CR0_PE|X86_CR0_ET, sregs.cr4 = 0). Choosing PVH would force the guest to write its own paging-enable + long-mode-transition asm; LinuxBoot avoids it.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs (BootProtocol::PvhBoot arm)"
+   },
+   {
+    "fact": "Firecracker aarch64 sets ONLY PSTATE (PSTATE_FAULT_BITS_64 = EL1h | A | F | I | D, i.e. EL1h with all DAIF masked), PC=kernel entry, and x0=FDT address in setup_boot_regs; it programs no TTBR/TCR/MAIR/SCTLR and builds no page tables. The arm64 Linux boot protocol it follows states 'The MMU must be off' at kernel entry. => aarch64 kernel must cold-start the MMU itself.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs + https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst"
+   },
+   {
+    "fact": "`core::arch::asm!` and `global_asm!` were stabilized in Rust 1.59.0 (2022-02-24) with stable inline-asm support on x86, x86-64, ARM, AArch64, and RISC-V — covering both v1 targets with no nightly. No stable core::arch intrinsic exists for INVLPG, CR3 access, or AArch64 sysreg/TLBI/barrier ops, so inline asm is required.",
+    "source": "https://blog.rust-lang.org/2022/02/24/Rust-1.59.0/"
+   },
+   {
+    "fact": "INVLPG is a CPL-0 (privileged) instruction that flushes TLB entries for the page containing the operand address, including any GLOBAL entries for that page regardless of PCID; it may flush more (never fewer). Ref Intel SDM Vol 3A 4.10.4.1. It self-orders, so no surrounding fence is required.",
+    "source": "https://www.felixcloutier.com/x86/invlpg"
+   },
+   {
+    "fact": "MOV to/from CR* is CPL-0; MOV CR* (except CR8) are SERIALIZING instructions. Reloading CR3 invalidates non-global TLB entries + paging-structure caches; changing CR0.PG/CR4.PAE/CR4.PSE flushes ALL entries incl. global; if CR4.PCIDE=1, bit63 of the MOV-CR3 source selects whether invalidation occurs. Ref Intel SDM Vol 3A 4.10.4.1.",
+    "source": "https://www.felixcloutier.com/x86/mov-1"
+   },
+   {
+    "fact": "AArch64 TLB-maintenance template (Linux/ARM canon): `DSB ISHST` (ensure prior page-table writes completed) -> `TLBI <op>` -> `DSB ISH` (ensure invalidation completed) -> `ISB` only if instruction/kernel mappings changed. The TLBI VA operand is VA>>12 with ASID in bits[63:48]; leaf-only ops are vale1/vale1is, full-VA ops vae1/vae1is, whole-regime vmalle1/vmalle1is. Cites ARM DDI 0487J.a C5.5.60.",
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/include/asm/tlbflush.h"
+   },
+   {
+    "fact": "AArch64 requires Break-Before-Make to change a live valid descriptor's output address or attributes: write invalid -> TLBI+barriers -> write new -> barriers; a single store risks UNPREDICTABLE/TLB-conflict behavior. Cites ARM Architecture Reference Manual ARMv8-A, Issue C.a, section D4.3.3. x86 has no equivalent BBM rule (in-place atomic rewrite + single INVLPG).",
+    "source": "https://raw.githubusercontent.com/hermit-os/kernel/main/src/arch/aarch64/mm/paging.rs (map_page_in_this_table + flush_from_tlb)"
+   },
+   {
+    "fact": "In a framekernel the generic page-table engine is safe Rust: Asterinas' only mapping-time unsafe, load_pte/store_pte, is `AtomicUsize::from_ptr(ptr.cast())` + atomic load/store with Acquire/Release — no inline asm; PTEs are usize-sized scalars round-tripped through an arch-agnostic PteScalar {Absent, PageTable, Mapped}.",
+    "source": "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/mm/page_table/mod.rs"
+   },
+   {
+    "fact": "x86 PTE bit 63 (NO_EXECUTE) requires EFER.NXE=1; Firecracker leaves EFER.NXE clear (sets only LME|LMA). The kernel must WRMSR EFER to set NXE and WRMSR IA32_PAT for cache policy; Asterinas does this in enable_essential_features (configure_pat + EFER NO_EXECUTE_ENABLE).",
+    "source": "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/mm/mod.rs"
+   }
+  ]
+ },
+ {
+  "area": "rust-asm-integration",
+  "decisions": [
+   {
+    "decision": "Confine ALL unsafe, assembly, and arch-specific code to one foundation crate `tb-hal`; every crate layered above it is compiled with `#![forbid(unsafe_code)]`. `tb-hal` exposes ONLY a safe `trait Hal` (plus safe newtypes like `TaskContext`, `TrapFrame`, `PhysFrame`) and is the sole place where `core::arch::asm!`, `global_asm!`, and `naked_asm!` may appear. This is the framekernel/OSTD boundary, ported to TABOS.",
+    "rationale": "The framekernel paper measures Asterinas' memory-safety TCB at ~14.0% of the codebase precisely because all unsafe lives in OSTD and the 210+ syscalls / drivers above are safe Rust; the paper notes existing Rust OSes leak unsafe everywhere (Theseus 32%, RedLeaf 62%, Tock 93% of crates use unsafe). Mirroring this means TABOS's auditable TCB is just `tb-hal`, keeping the <=15 kSLOC budget reviewable. OSTD physically realises this with an `ostd/src/arch/{x86,riscv,loongarch}` tree where every unsafe primitive (context switch, traps, page tables, IO ports) sits behind a safe API.",
+    "assemblyUnits": [
+     "tb-hal crate skeleton: src/lib.rs (safe re-exports), src/arch/mod.rs (`#[cfg(target_arch)]` dispatch), src/arch/x86_64/, src/arch/aarch64/",
+     "Safe wrapper types that own the only `unsafe` blocks: TaskContext, TrapFrame, PageTableEntry, Mmio<T>, Port<T>"
+    ],
+    "perArch": "Identical crate boundary for both; the cfg-split happens only inside tb-hal/src/arch. No higher crate gains an arch cfg or an unsafe block.",
+    "sources": [
+     "https://arxiv.org/abs/2506.03876",
+     "https://api.github.com/repos/asterinas/asterinas/contents/ostd/src/arch",
+     "https://api.github.com/repos/asterinas/asterinas/contents/ostd/src/arch/x86"
+    ]
+   },
+   {
+    "decision": "Organise the assembly as: (a) `core::arch::global_asm!(include_str!(\"foo.S\"))` for every multi-instruction blob (boot trampoline, trap/vector tables, context switch); (b) `#[unsafe(naked)] ... core::arch::naked_asm!(...)` for single-entry leaf stubs; (c) `core::arch::asm!` for register/IO one-liners. Use ONLY the Rust/LLVM integrated assembler that `global_asm!` already drives. Do NOT add a `cc` crate + build.rs + external `.S` compile step, and do NOT use a separate assembler such as NASM.",
+    "rationale": "Asterinas does exactly this: `ostd/src/arch/x86/task/mod.rs` is `core::arch::global_asm!(include_str!(\"switch.S\"))` and declares the entry as `unsafe extern \"C\" fn context_switch(...)`. Hubris keeps its entire ARM kernel arch in one `sys/kern/src/arch/arm_m.rs` using inline/`global_asm!` (no external assembler). Naked functions became stable in Rust 1.88.0 (2025-06-26) via `#[unsafe(naked)]` + `naked_asm!`, described by the release as 'a more ergonomic alternative to a global_asm! block' for OS/embedded code, so TABOS can use them on its pinned stable toolchain. Theseus shows the path we reject: it ships hand-written NASM `.asm` files (ap_boot.asm, ap_realmode.asm, common.asm) requiring a nasm build step; dropping that removes a host-toolchain dependency and keeps the build hermetic and the asm in-tree/auditable. `global_asm!` supports the GAS directives we need (`.code32`/`.code64`, `.align`, `.global`).",
+    "assemblyUnits": [
+     "x86_64: tb-hal/src/arch/x86_64/{boot.S, switch.S, trap_entry.S} included via global_asm!",
+     "aarch64: tb-hal/src/arch/aarch64/{boot.S, switch.S, vectors.S} included via global_asm!",
+     "naked_asm! leaf stubs for per-vector IDT entries (x86) where macro expansion is cleaner than a .S loop",
+     "asm! one-liners: rdmsr/wrmsr, in/out, cli/sti/hlt (x86); mrs/msr, wfi, dsb/isb (aarch64)"
+    ],
+    "perArch": "x86 .S blocks declare `.code32`/`.code64` (Asterinas switch.S uses `.code64`); aarch64 vector table needs `.align 11` (2 KB) for VBAR_EL1. Same macro toolchain both arches.",
+    "sources": [
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/task/mod.rs",
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/",
+     "https://api.github.com/repos/oxidecomputer/hubris/contents/sys/kern/src/arch",
+     "https://api.github.com/repos/theseus-os/Theseus/contents/kernel/nano_core/src/asm"
+    ]
+   },
+   {
+    "decision": "Split the arch implementation as `tb-hal/src/arch/x86_64/` and `tb-hal/src/arch/aarch64/` selected by `#[cfg(target_arch = ...)]`, each implementing the same `trait Hal`. The trait API is fixed at: `context_switch(prev,next)`, `install_trap_table()`, `local_irq_save/restore/enable/disable`, `flush_tlb_page(va)` / `flush_tlb_all()`, `set_page_table_root(frame)`, `wait_for_interrupt()`, `serial_write(bytes)`, `per_cpu_base()`, `arm_timer(deadline)`, `shutdown()`.",
+    "rationale": "Every studied Rust kernel uses a per-arch directory selected by cfg and exposing a uniform interface: Redox `src/arch/{aarch64,x86_64,x86_shared,riscv64}`, Hermit `src/arch/{aarch64,x86_64,riscv64}`, Asterinas OSTD `ostd/src/arch/{x86,riscv,loongarch}`. The OSTD x86 subtree (boot, cpu, task, trap, mm, irq, timer, serial, io, power) is the concrete enumeration of the primitives a guest microkernel needs and maps 1:1 to the trait methods above. A named trait (rather than free functions) lets the safe upper kernel be generic/testable and makes the asm surface a closed, reviewable list.",
+    "assemblyUnits": [
+     "One asm-backed impl per trait method per arch (the methods are the work-unit checklist a multi-agent build tracks)",
+     "x86_64/mod.rs and aarch64/mod.rs: `impl Hal for Arch` wiring each method to its global_asm!/asm! symbol"
+    ],
+    "perArch": "x86: flush via invlpg / CR3 reload, per-cpu via GS base (swapgs/IA32_KERNEL_GS_BASE), serial via 0x3F8 port IO. aarch64: flush via tlbi+dsb+isb, per-cpu via TPIDR_EL1, serial via PL011 MMIO, timer via CNTV_* generic timer.",
+    "sources": [
+     "https://api.github.com/repos/redox-os/kernel/contents/src/arch",
+     "https://api.github.com/repos/hermit-os/kernel/contents/src/arch",
+     "https://api.github.com/repos/asterinas/asterinas/contents/ostd/src/arch/x86"
+    ]
+   },
+   {
+    "decision": "On x86_64, boot TABOS via the PVH boot protocol: emit an ELF `PHYS32_ENTRY` note and own a single `pvh_start` entry that runs in 32-bit protected mode, then own a 32->64 long-mode trampoline. We own only `_start`/the trampoline, no GRUB/Limine/bzImage. (The Firecracker `LinuxBoot` 64-bit path is the explicit fallback.)",
+    "rationale": "Firecracker's `src/vmm/src/arch/x86_64/regs.rs` shows the exact entry contract for `BootProtocol::PvhBoot`: rip=ELF PHYS32 entry, `rbx = PVH_INFO_START` (pointer to hvm_start_info), rflags=0x2, CR0 = PE|ET (paging OFF), CR4=0, flat 4 GB code/data GDT — i.e. 32-bit protected mode. PVH is chosen over LinuxBoot because hvm_start_info is a clean, versioned struct (magic/version/cmdline_paddr/memmap_paddr/rsdp_paddr) versus the legacy zero-page boot_params, and PVH is the cross-VMM standard (Firecracker, Cloud Hypervisor, QEMU microvm) giving portability beyond Firecracker. The cost is one bounded, auditable trampoline (~50 lines). The LinuxBoot alternative (regs.rs) instead enters already in 64-bit long mode with identity paging of the first 1 GB via 2 MB pages and `rsi`=zero page, which needs less asm but couples us to the legacy zero-page; we keep it as the documented fallback only.",
+    "assemblyUnits": [
+     "ELF note section `.note.Xen` carrying XEN_ELFNOTE_PHYS32_ENTRY = address of pvh_start (placed via linker script)",
+     "pvh_start (.code32): establish a tiny boot stack, save %ebx (hvm_start_info ptr)",
+     "long-mode trampoline (.code32->.code64): build boot PML4/PDPT/PDE identity map (2 MB pages), load CR3, set CR4.PAE, wrmsr EFER.LME (0xC000_0080), set CR0.PG|PE, lgdt 64-bit GDT, ljmp to 64-bit CS",
+     "rust handoff (.code64): set final SP, zero .bss, move saved hvm_start_info ptr into rdi, call rust_main"
+    ],
+    "perArch": "x86_64 ONLY. aarch64 has no equivalent mode switch (see aarch64 boot decision).",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs",
+     "https://github.com/firecracker-microvm/firecracker/blob/main/docs/kernel-policy.md",
+     "https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
+    ]
+   },
+   {
+    "decision": "On aarch64, ship a flat kernel `Image` with the 64-byte ARM64 boot header (magic 0x644d5241) and a single `_start` that assumes the ARM64 Linux boot contract: entered at EL1 with the MMU OFF, all interrupts masked in PSTATE.DAIF, and x0 = physical address of the device-tree blob (FDT) Firecracker generated. `_start` parses nothing in asm beyond saving x0, then jumps to safe Rust.",
+    "rationale": "The ARM64 booting.rst contract is exact: primary CPU enters with x0=dtb phys addr, x1=x2=x3=0, MMU off, I-cache may be on, DAIF (Debug/SError/IRQ/FIQ) all masked, CPU in non-secure EL2 (recommended) or EL1; the decompressed Image carries a 64-byte header whose magic is 0x644d5241 ('ARM\\x64'). Firecracker passes the FDT to the guest (its aarch64 machine is device-tree, not ACPI), so x0 must be threaded into the Rust FDT parser. Because the VMM hands us an MMU-off environment, turning the MMU on is our trampoline (unlike x86 where Firecracker can pre-page in LinuxBoot).",
+    "assemblyUnits": [
+     "64-byte Image header block (global_asm!): code0/code1 branch-to-_start, text_offset, image_size, flags, magic=0x644d5241",
+     "_start (.text): mask DAIF (defensive), save x0(FDT) to a static, set SP from reserved boot stack, zero .bss, bl rust_main",
+     "mmu_enable trampoline: program MAIR_EL1, TCR_EL1, TTBR0_EL1/TTBR1_EL1 (boot identity tables), then msr SCTLR_EL1 (set M) + isb",
+     "set VBAR_EL1 to the vector table (see trap decision)"
+    ],
+    "perArch": "aarch64 ONLY. Confirm entry EL at runtime (EL2 vs EL1) and, if EL2, drop to EL1 before MMU bring-up; Firecracker enters guest at EL1 so the drop path is normally inert.",
+    "sources": [
+     "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst",
+     "https://github.com/firecracker-microvm/firecracker/blob/main/docs/kernel-policy.md"
+    ]
+   },
+   {
+    "decision": "Implement `context_switch` to save/restore ONLY the ABI callee-saved set plus the return address/SP; rely on the soft-float/no-SIMD kernel target so NO floating-point or vector state is saved on context switch or trap.",
+    "rationale": "Asterinas' switch.S/TaskContext stores exactly rsp, rbx, rbp, r12, r13, r14, r15 and rip — the System V AMD64 callee-saved set — using the fallthrough trick (context_switch saves cur, falls through into first_context_switch which restores nxt; the return address is moved, not pushed, for stack balance). AAPCS64 Table 2 defines the aarch64 callee-saved set as r19-r28, with r29=FP and r30=LR, plus SP. The `x86_64-unknown-none` target by default 'does not use any vector or floating-point registers (e.g. SSE, AVX)', so the kernel never dirties XMM/NEON state and the switch path stays tiny; the matching aarch64 soft-float target removes d8-d15 from the live set.",
+    "assemblyUnits": [
+     "x86_64 switch.S: save/restore {rsp, rbx, rbp, r12, r13, r14, r15, rip}; context_switch + first_context_switch (fallthrough) + kernel_task_entry_wrapper (.cfi_undefined rip to terminate unwind)",
+     "aarch64 switch.S: save/restore {x19-x28, x29(fp), x30(lr), sp}; first-entry wrapper that loads the new task entry into the link path",
+     "TaskContext #[repr(C)] struct in Rust mirroring the .S field offsets (Asterinas: rip at offset 56)"
+    ],
+    "perArch": "x86 callee set = rbx/rbp/r12-r15 (+rsp,rip); aarch64 callee set = x19-x28 (+fp,lr,sp). Both skip FP/SIMD due to soft-float targets.",
+    "sources": [
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/task/switch.S",
+     "https://raw.githubusercontent.com/ARM-software/abi-aa/main/aapcs64/aapcs64.rst",
+     "https://doc.rust-lang.org/rustc/platform-support/x86_64-unknown-none.html"
+    ]
+   },
+   {
+    "decision": "Build the trap/interrupt path as macro/`global_asm!`-generated entry stubs that push a `#[repr(C)] TrapFrame` (caller-saved GPRs + vector/error-code) and call a single safe Rust dispatcher, then restore and return (iretq / eret). `install_trap_table` loads IDT (x86) / VBAR_EL1 (aarch64).",
+    "rationale": "This is the OSTD `arch/x86/trap` model: a small asm shim per vector that normalises CPU state into a frame, then hands a safe value to Rust. The paper explicitly flags that architectural UBs (spoofed interrupts corrupting trap handlers, DMA, stack overflow) are beyond what safe Rust catches, so the trap shim is exactly the kind of code that must live in the audited tb-hal and present a sound frame to the safe layer. x86 needs 256 IDT vectors, distinguishing the ~8 vectors that push a hardware error code from those that do not (the stub equalises the frame). aarch64 needs the fixed 16-entry VBAR_EL1 table (4 exception classes x 4 originating states), each slot 128 bytes, table 2 KB-aligned.",
+    "assemblyUnits": [
+     "x86_64 trap_entry.S: 256 vector stubs (macro), dummy-error-code push for non-error vectors, save caller-saved GPRs, call rust trap dispatch, restore, iretq; build+load IDT",
+     "aarch64 vectors.S: 16-entry VBAR_EL1 table at `.align 11`, each entry saves GPRs to TrapFrame, branches to rust dispatch, eret; msr VBAR_EL1",
+     "TrapFrame #[repr(C)] definitions per arch shared with the safe layer"
+    ],
+    "perArch": "x86: IDT + error-code asymmetry + (future) swapgs on privilege change. aarch64: single VBAR_EL1 table, exception syndrome read from ESR_EL1 in Rust, no error-code asymmetry.",
+    "sources": [
+     "https://api.github.com/repos/asterinas/asterinas/contents/ostd/src/arch/x86",
+     "https://arxiv.org/abs/2506.03876",
+     "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst"
+    ]
+   },
+   {
+    "decision": "Ship v1 as single-vCPU per microVM (Mirage multikernel): build NO application-processor bring-up assembly. Explicitly do not write the x86 real-mode INIT-SIPI-SIPI AP trampoline nor an aarch64 PSCI CPU_ON secondary entry; per-CPU state collapses to a single static instance.",
+    "rationale": "The framekernel paper's Invariant 8 ('A Task runs on at most one CPU at any given time'), enforced via a per-task is_running flag checked before context switch, is satisfied trivially when there is one vCPU, removing a class of SMP data-race UB from the TCB. The ARM64 boot doc's secondary-CPU machinery (spin-table / PSCI CPU_ON, cpu-release-addr, secondary x0-x3=0) is therefore out of scope for v1. This deletes the single largest and most error-prone asm asset in other kernels: Theseus's ap_realmode.asm is ~14.8 KB of 16-bit->64-bit AP trampoline; TABOS writes none of it.",
+    "assemblyUnits": [
+     "DELIBERATELY ABSENT (tracked as 'not built' so agents do not add them): x86 ap_realmode/ap_boot trampoline; aarch64 PSCI CPU_ON secondary _start; multi-CPU GDT/IDT/TSS arrays",
+     "Per-CPU base setup stays (GS base / TPIDR_EL1) but initialises exactly one instance"
+    ],
+    "perArch": "x86: skip APIC AP startup + 16-bit trampoline. aarch64: skip PSCI CPU_ON path; keep a single PSCI SYSTEM_OFF/RESET wrapper for shutdown. riscv64 (future) would defer SBI HSM hart-start similarly.",
+    "sources": [
+     "https://arxiv.org/abs/2506.03876",
+     "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst",
+     "https://api.github.com/repos/theseus-os/Theseus/contents/kernel/nano_core/src/asm"
+    ]
+   },
+   {
+    "decision": "Target two tuples derived from the upstream Tier-2 bare-metal targets `x86_64-unknown-none` and `aarch64-unknown-none-softfloat`, materialised as pinned custom JSON specs (via `rustc -Z unstable-options --print target-spec-json`) so the linker script (PVH note + load address on x86; Image header + load address on aarch64), `relocation-model: static`, code model, and atomics width are frozen. Set `panic = \"abort\"` (Cargo profile + spec), keep red zone disabled and SSE/NEON off, and pin the exact rustc/Ferrocene toolchain version.",
+    "rationale": "The embedonomicon prescribes exactly this workflow: copy a built-in spec via --print target-spec-json, set `panic-strategy: abort` (else you must provide eh_personality), choose atomics, and build with `-Z build-std`. The `x86_64-unknown-none` target already delivers the kernel-correct defaults we need: 'does not use any vector or floating-point registers', 'kernel code model by default', and System V 'without red zones' — so the x86 spec only overrides linker/layout. Custom JSON (vs using the built-ins raw) freezes these against upstream drift, which matters for a frozen-capability kernel. Qualification scope is asymmetric: Ferrocene currently qualifies `aarch64-unknown-none` (Armv8-A bare-metal, hard-float, cross-compiled from x86-64 Linux) but lists NO x86_64 bare-metal target — only `x86_64-unknown-linux-gnu` — so an aarch64 safety-qualification path exists while x86_64-none does not, a gap the spec must record.",
+    "assemblyUnits": [
+     "Linker scripts (not asm, but they place the asm): x86_64 link.ld puts the PVH `.note.Xen` + entry and sets the load/phys base; aarch64 link.ld puts the 64-byte Image header first and sets the 2 MB-aligned base",
+     "Cargo `.cargo/config.toml` build-std=core,alloc + per-target rustflags pinning"
+    ],
+    "perArch": "x86_64-unknown-none: red zone off, SSE/AVX off, kernel code model already default. aarch64-unknown-none-softfloat: soft-float removes d8-d15 from switch; if safety qualification is later required, migrate aarch64 to Ferrocene-qualified `aarch64-unknown-none` (hard-float) with FP codegen disabled.",
+    "sources": [
+     "https://docs.rust-embedded.org/embedonomicon/custom-target.html",
+     "https://doc.rust-lang.org/rustc/platform-support/x86_64-unknown-none.html",
+     "https://public-docs.ferrocene.dev/main/user-manual/targets/index.html"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "Rust 1.88.0 (released 2025-06-26) stabilized naked functions: `#[unsafe(naked)]` attribute + a body of a single `core::arch::naked_asm!` call, described as a more ergonomic alternative to a `global_asm!` block, targeted at OS/embedded use. This is the floor for TABOS's pinned stable toolchain if it wants naked_asm! instead of pure global_asm!.",
+    "source": "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+   },
+   {
+    "fact": "Firecracker x86_64 PVH entry register contract (from setup_regs/configure_segments_and_sregs): rip = ELF PHYS32 entry, rbx = PVH_INFO_START (hvm_start_info ptr), rflags = 0x2, CR0 = PE|ET with paging OFF, CR4 = 0, flat 4 GB code(0xc09b)/data(0xc093) GDT — i.e. 32-bit protected mode, kernel must build its own page tables and enter long mode.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "Firecracker x86_64 LinuxBoot alternative enters in 64-bit long mode: CR0.PE + EFER.LME|LMA set, CR3=PML4 with Firecracker-built identity tables mapping VA [0,1GB) via 512 x 2MB pages, CR4.PAE, rsp=rbp=BOOT_STACK_POINTER, rsi = ZERO_PAGE_START (boot_params). Fewer asm lines but couples to the legacy zero-page.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "ARM64 Linux boot contract (primary CPU): x0 = physical address of dtb, x1=x2=x3=0; MMU OFF; all interrupts masked in PSTATE.DAIF; CPU in non-secure EL2 (recommended) or EL1; decompressed Image has a 64-byte header with magic 0x644d5241 ('ARM\\x64'). Secondary CPUs use spin-table or PSCI CPU_ON (deferred under single-vCPU).",
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst"
+   },
+   {
+    "fact": "x86_64 System V callee-saved set for context switch = rbx, rbp, r12, r13, r14, r15 (+ rsp, rip), exactly as stored in Asterinas OSTD switch.S / TaskContext (rip at struct offset 56). The 128-byte red zone must be disabled in kernel code; `x86_64-unknown-none` confirms extern \"C\" is System V 'without red zones', uses the kernel code model, and emits no SSE/AVX by default.",
+    "source": "https://raw.githubusercontent.com/asterinas/asterinas/main/ostd/src/arch/x86/task/switch.S"
+   },
+   {
+    "fact": "AAPCS64 callee-saved (call-preserved) general-purpose registers = r19-r28; r29 = FP (frame pointer), r30 = LR (link register), plus SP; r18 is the platform register (else caller-saved). Under a soft-float kernel target the otherwise callee-saved d8-d15 are not live, so the aarch64 context switch saves x19-x28 + fp + lr + sp only.",
+    "source": "https://raw.githubusercontent.com/ARM-software/abi-aa/main/aapcs64/aapcs64.rst"
+   },
+   {
+    "fact": "Firecracker requires an UNCOMPRESSED kernel (x86_64: vmlinux ELF; aarch64: PE/flat Image), implements no guest power management (guest `reboot` gracefully shuts the microVM down), and exposes no PCI bus unless launched with `--enable-pci` (default transport is virtio-MMIO) — so v1 needs no ACPI/PCI/legacy-BIOS enumeration asm.",
+    "source": "https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md"
+   },
+   {
+    "fact": "Toolchain/target availability: `x86_64-unknown-none` is an upstream Tier-2 built-in (FP off, kernel code model, no red zone, ELF). Ferrocene's qualified bare-metal targets include `aarch64-unknown-none` (Armv8-A, hard-float, qualified only when cross-compiled from x86-64 Linux glibc) and thumbv7em-none-eabi(hf), but list NO x86_64 bare-metal target (only x86_64-unknown-linux-gnu, full std) — x86_64-none has no Ferrocene qualification path today.",
+    "source": "https://public-docs.ferrocene.dev/main/user-manual/targets/index.html"
+   },
+   {
+    "fact": "Asterinas reports its memory-safety TCB at ~14.0% of the codebase because all unsafe is confined to OSTD; OSTD's unsafe/asm is physically partitioned under ostd/src/arch/{x86,riscv,loongarch} with x86 split into boot, cpu, task(context switch, switch.S via global_asm!), trap, mm, irq, timer, serial, io, power. Invariant 8: a Task runs on at most one CPU at any time (trivially held under single-vCPU).",
+    "source": "https://arxiv.org/abs/2506.03876"
+   }
+  ]
+ },
+ {
+  "area": "asm-standards",
+  "decisions": [
+   {
+    "decision": "Classify inline asm and naked functions as OUTSIDE the Ferrocene normatively-qualified subset, and subject every asm unit to the Ferrocene Safety Manual section 9 unsafe-code discipline as a hard, tracked constraint: unsafety localized to a single module that does exactly one task, with assertions/pre/post/invariants in BOTH the asm wrapper and its callers, safety comments on both sides, code review of the WHOLE module by >=2 senior engineers (or a third-party review), and both unit and integration tests.",
+    "rationale": "The Ferrocene qualification scope is rustc 1.98.0 'limited to the Rust language as described in the FLS, and according to the requirements and restrictions outlined in this safety manual.' But FLS Chapter 22 (Inline Assembly), which is the ONLY place asm!/global_asm!/naked_asm! are specified, opens with 'Note: The contents of this section are informational.' i.e. it is non-normative and carries no requirement traceability, unlike the rest of the language. So asm cannot lean on the tool qualification and instead inherits exactly the manual measures the Safety Manual prescribes for unsafe code (section 9 'Handling Unsafety' verbatim list). This converts the FLS gap into a concrete checklist the build agents can track per asm unit.",
+    "assemblyUnits": [
+     "Per-arch foundation crate `arch/asm/` module that is the sole holder of asm! / global_asm! / naked_asm! (every other crate is #![forbid(unsafe_code)])",
+     "A SAFETY/contract doc-block template enforced on _start, the long-mode trampoline, context-switch, trap/exception entry, and early_putc"
+    ],
+    "perArch": "aarch64: Armv8-A bare-metal (hard-float) IS a Ferrocene-qualified TARGET, so aarch64 asm runs nearer the qualified envelope. x86_64: Ferrocene qualifies x86-64 only as a Linux glibc host/target, NOT bare-metal, so the x86_64 PVH foundation runs entirely outside even the host-qualified target set -> extra scrutiny weighting on x86_64 asm. riscv64: future, no Ferrocene target.",
+    "sources": [
+     "https://public-docs.ferrocene.dev/main/safety-manual/scope.html",
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/unsafety.html",
+     "https://public-docs.ferrocene.dev/main/specification/inline-assembly.html"
+    ]
+   },
+   {
+    "decision": "Require a 3-part machine-checkable header on EVERY asm unit: (a) a pre/postcondition comment contract, (b) a register-clobber + ABI annotation that names the chosen clobber_abi and any explicit clobbers and restates the FLS hard rules it must uphold, and (c) the name of the paired test that exercises it.",
+    "rationale": "seL4's proofs explicitly ASSUME the correctness of assembly code and boot code, and the seL4 Foundation states 'this is where manual validation and scrutiny can focus on' - so the unverifiable surface must be self-documenting and testable. Ferrocene section 9 already requires assertions/pre/post/invariants plus safety comments in unsafe code. FLS Chapter 22 gives the exact obligations the ABI annotation must encode: a register not declared as output MUST hold the same value on exit (22.1:4) else it is undefined behavior (22.1:72); the stack pointer must be restored on exit; on x86 the EFLAGS direction flag DF MUST be cleared on exit (22.4:9) else it is undefined behavior (22.4:10). The clobber_abi tables (22.5) enumerate exactly which registers 'C'/'sysv64'/'win64'/'aapcs' clobber, which is the canonical content of annotation (b).",
+    "assemblyUnits": [
+     "Contract header instances on _start (x86_64+aarch64), the 32->64 long-mode trampoline (x86_64), context-switch save/restore, trap/exception entry, early_putc",
+     "A clippy/CI lint or doc-test that fails the build when an asm unit lacks the (a)(b)(c) header"
+    ],
+    "perArch": "x86_64: annotation must list the sysv64 clobber set (ax,cx,dx,si,di,r8-r11,xmm0-31,k0-7,mm0-7,st0-7,tmm0-7) and the DF-cleared-on-exit postcondition. aarch64: must list the aapcs/'C' clobber set (x0-17, x18 when not reserved, x30, v0-31, p0-15, ffr) and respect x18 (platform reg), x29 (frame ptr), x30 (lr) constraints.",
+    "sources": [
+     "https://sel4.systems/Verification/",
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/unsafety.html",
+     "https://public-docs.ferrocene.dev/main/specification/inline-assembly.html"
+    ]
+   },
+   {
+    "decision": "Boot x86_64 via PVH direct boot (emit the XEN_ELFNOTE_PHYS32_ENTRY ELF note) and aarch64 via the Linux arm64 Image boot protocol; the only hand-written boot asm is a single `_start` naked function per arch carrying the documented entry-register contract.",
+    "rationale": "Firecracker supports PVH direct boot for x86 kernels and documents it as 'simpler than the Linux boot mode.' The Xen PVH ABI fixes the entry state: 32-bit protected mode, CR0 bit0 (PE) set with all other writable bits clear, paging off, CR4 all-clear, flat 0..0xFFFFFFFF segments, and ebx = physical address of the hvm_start_info struct, with 'The OS is in charge of setting up its own stack, GDT and IDT' (start_info.rsdp_paddr gives the ACPI RSDP). The Linux arm64 protocol fixes the aarch64 entry: x0 = physical address of the DTB, x1-x3 = 0, all interrupts masked in PSTATE.DAIF, non-secure EL1/EL2, MMU off, 64-byte Image header magic 0x644d5241. Naked functions are now stable (Rust 1.88.0, 2025-06-26: #[unsafe(naked)] + core::arch::naked_asm!), so the boot stub is a naked fn living INSIDE the audited foundation crate rather than an external .S file.",
+    "assemblyUnits": [
+     "x86_64 `_start` naked fn: build a 64-bit GDT, build identity-mapped PML4/PDPT/PD, set CR4.PAE, set EFER.LME, load CR3, set CR0.PG|PE, far-jump into the 64-bit code segment, clear BSS, load RSP, call rust_main(hvm_start_info ptr from ebx)",
+     "aarch64 `_start` naked fn: load SP, set VBAR_EL1 to the exception-vector table, clear BSS, (optional) program TTBR0/TCR/SCTLR to enable MMU, call rust_main(x0=dtb)",
+     "ELF PHYS32_ENTRY note section (x86_64) and the 64-byte arm64 Image header (aarch64) emitted via global_asm!/linker script"
+    ],
+    "perArch": "x86_64 performs a 32-bit->64-bit mode transition inside _start (paging+long mode must be enabled by the kernel); aarch64 is already 64-bit at EL1 with no mode switch but MMU is off. riscv64 (future): SBI hands off with a0=hartid, a1=dtb in S-mode - note only.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/pvh.md",
+     "https://raw.githubusercontent.com/xen-project/xen/master/docs/misc/pvh.pandoc",
+     "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst",
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+    ]
+   },
+   {
+    "decision": "Define a two-phase early-boot model and FORBID TigerStyle assert!() until Phase 1; Phase 0 (from `_start` until SP is loaded and BSS cleared) may only spin (hlt/wfe) on fault and optionally poke a single raw byte to the UART. Phase 1 (SP+BSS+UART-writer+#[panic_handler] established) is the earliest point assertions and serial-debug become available.",
+    "rationale": "TigerStyle mandates a minimum of two assertions per function and asserting all arguments/preconditions, but assert!() formats a message and drives the panic machinery, which needs a stack, a panic handler, and an output sink - none of which exist at the architectural entry point (PVH spec: 'the OS is in charge of setting up its own stack'; arm64: SP is undefined on entry). Therefore the discipline must be staged: Phase 0 has no stack so it can carry no assertions and no formatting and must route any fault to a minimal halt loop; Phase 1 begins the instant SP, cleared BSS, a UART writer, and a #[panic_handler] exist, and from there TigerStyle density and serial debug apply. Firecracker exposes a legacy serial console (16550-class) plus an i8042 reset device, giving exactly one pre-stack debug primitive: a single-byte UART poke.",
+    "assemblyUnits": [
+     "`early_putc` leaf: write one byte to the platform UART usable before a stack exists (x86_64 COM1 I/O port via out; aarch64 PL011 data register via MMIO store)",
+     "The SP-load + BSS-zeroing unit whose completion is the Phase-0 -> Phase-1 boundary",
+     "`hang`/panic-spin units: x86_64 `cli; hlt` loop, aarch64 `msr daifset,#0xf; wfe` loop"
+    ],
+    "perArch": "x86_64: pre-stack debug is an `out` to the 16550 COM1 port; halt is cli;hlt. aarch64: pre-stack debug is an MMIO store to the PL011 DR; halt is DAIF-mask + wfe. Both must run before the kernel enables paging/MMU so they use physical addresses.",
+    "sources": [
+     "https://raw.githubusercontent.com/tigerbeetle/tigerbeetle/main/docs/TIGER_STYLE.md",
+     "https://raw.githubusercontent.com/xen-project/xen/master/docs/misc/pvh.pandoc",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+    ]
+   },
+   {
+    "decision": "Track unsafe-and-asm as a hard CI budget metric: assert #![forbid(unsafe_code)] on every non-foundation crate, count unsafe blocks and asm statement-lines in the foundation crate against a committed budget file, confine 100% of unsafe+asm to that one crate, and fail the build on any increase without two-reviewer sign-off.",
+    "rationale": "Asterinas' framekernel architecture confines ALL unsafe Rust to a small auditable framework (OSTD) with the rest in safe Rust, explicitly so that 'the memory safety of the kernel can be reduced to that of the OS Framework, thus minimizing the Trusted Computing Base', and lists 'Minimalism - the framework should be kept as small as possible. No functionality should be implemented inside the framework if doing it outside is possible' as a core requirement. Ferrocene constraint RUSTC_CSTR_0100_UNSAFETY plus section 9 require identifying and evaluating EVERY instance of unsafe code. Making both counts a committed, diffable number turns the framekernel TCB into an enforced gate, keeping the <=15 kSLOC kernel's trusted surface visibly bounded and giving the multi-agent build an objective regression signal.",
+    "assemblyUnits": [
+     "No new asm, but the budget enumerates the trusted asm inventory to count: _start x2 arch, x86_64 long-mode trampoline, context-switch, trap entry, early_putc, plus any barrier/atomic/MSR-access intrinsics",
+     "A CI gate script (counts `unsafe {`, asm! / global_asm! / naked_asm! statements) comparing against budget.toml"
+    ],
+    "perArch": "Counts are maintained per-arch because the asm inventory is arch-split; x86_64 carries the extra long-mode trampoline that aarch64 does not.",
+    "sources": [
+     "https://asterinas.github.io/book/kernel/the-framekernel-architecture.html",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/README.md",
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/constraints.html"
+    ]
+   },
+   {
+    "decision": "Pin a single rustc and make the whole build (including asm) bit-reproducible via a Nix flake; keep ALL asm as in-language naked_asm!/global_asm! compiled by that pinned rustc (no external .S, no separate assembler to pin), and verify the per-arch linker scripts under the Ferrocene build constraints.",
+    "rationale": "Reproducibility is what lets an auditor re-derive the trusted binary, and the Ferrocene Safety Manual already pins the build envelope: RUSTC_CSTR_0030 (inspect build logs / confirm correct tool versions and options), RUSTC_CSTR_0040 (clean the build environment of former artifacts), RUSTC_CSTR_0020 + the Degraded-Environment list (clean disallowed env vars), RUSTC_CSTR_0050 (treat warnings as errors on the final build), and RUSTC_CSTR_0120 (ensure linker scripts are interpreted correctly by rust-lld). Ferrocene qualifies exactly one compiler version (rustc 1.98.0 in current scope), so TABOS pins one rustc in a Nix flake; emitting asm as in-language global_asm!/naked_asm! means it is produced by that same pinned compiler, eliminating a second toolchain from the trusted base and keeping the asm inside the audited crate. Asterinas demonstrates the pattern with a Nix-based reproducible build/test image.",
+    "assemblyUnits": [
+     "A checked-in linker script per arch (x86_64 places the PVH ELF note + identity sections; aarch64 emits the Image header + text_offset layout), each verified per RUSTC_CSTR_0120 against rust-lld",
+     "All global_asm!/naked_asm! blocks built only by the pinned rustc",
+     "Nix flake pinning rustc + rust-lld + target.json"
+    ],
+    "perArch": "Separate target spec + linker script per arch: x86_64 needs the XEN_ELFNOTE_PHYS32_ENTRY note section and a 2-stage (32/64-bit) layout; aarch64 needs the 64-byte Image header and 2MB-aligned text_offset.",
+    "sources": [
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/constraints.html",
+     "https://public-docs.ferrocene.dev/main/safety-manual/scope.html",
+     "https://raw.githubusercontent.com/asterinas/asterinas/main/README.md"
+    ]
+   },
+   {
+    "decision": "Encode the layout/ABI facts the asm depends on as compile-time const assertions (struct offsets, GDT/IDT descriptor values, page-table bit positions, UART register offsets) so drift breaks COMPILATION not boot; from Phase 1 on, apply TigerStyle runtime assertion density and crash-on-violation, with paired asserts straddling each asm FFI boundary.",
+    "rationale": "TigerStyle: 'Assertions detect programmer errors... the only correct way to handle corrupt code is to crash'; minimum two assertions per function; pair assertions across two different code paths; assert the positive space you expect AND the negative space you do not; and 'Assert the relationships of compile-time constants... Compile-time assertions are extremely powerful because they are able to check a program's design integrity before the program even executes.' The asm units read/write fields at fixed offsets (context-switch touches a saved-register struct; _start writes GDT/IDT/page-table entries) - encoding each offset/bit as a const { assert!(...) } makes a layout change a build error rather than a triple-fault. Wrapping each asm! call site with an input assertion before and an output assertion after satisfies the pair-assertion rule on the most dangerous boundary.",
+    "assemblyUnits": [
+     "const-asserted offset table consumed by the context-switch save/restore asm",
+     "const-asserted GDT/IDT/page-table-entry constant blocks consumed by x86_64 _start",
+     "Pre-asm input asserts and post-asm output asserts wrapping every asm! invocation in Phase-1 code"
+    ],
+    "perArch": "x86_64: const-assert GDT entry encodings, PML4/PDPT/PD entry bits, IDT gate layout. aarch64: const-assert VBAR_EL1 alignment, translation-table descriptor bits, PSTATE/DAIF mask values.",
+    "sources": [
+     "https://raw.githubusercontent.com/tigerbeetle/tigerbeetle/main/docs/TIGER_STYLE.md",
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/unsafety.html"
+    ]
+   },
+   {
+    "decision": "Gate every asm unit on a named paired test that executes it in BOTH the real VMM (Firecracker) and QEMU per arch in CI, asserting a Phase-1 serial marker; because v1 is single-vCPU (Mirage one-vCPU-per-microVM), no AP-bringup asm or test ships in v1 and the PSCI CPU_ON / PVH VCPUOP_up paths are explicitly deferred and tracked.",
+    "rationale": "seL4 leaves assembly and boot code to 'manual validation and scrutiny' because the proof cannot reach them; TABOS substitutes executable tests as that validation. Ferrocene section 9 requires unit AND integration testing of unsafe code, and constraint RUSTC_CSTR_0070_TEST requires integration testing 'on the final application... using build protocols as close as possible to those used for the final build.' Firecracker is the real target VMM, so the boot-path asm (_start, trampoline) is validated by actually booting under Firecracker plus a QEMU microvm/virt smoke test, with a Phase-1 serial byte as the pass condition; leaf asm (context-switch, trap entry, early_putc) gets focused QEMU integration tests. Starting single-vCPU (a fixed TABOS decision) means AP startup asm is simply absent in v1, so its tests are scoped out rather than stubbed.",
+    "assemblyUnits": [
+     "CI harness that launches Firecracker with a minimal microVM config + the TABOS kernel and waits for the serial marker",
+     "QEMU smoke target: `-machine microvm` (x86_64) and `-machine virt` (aarch64), single vCPU",
+     "A serial-marker emit at the Phase-0->Phase-1 boundary used as the universal boot-pass assertion"
+    ],
+    "perArch": "x86_64: boot PVH image under Firecracker and QEMU microvm. aarch64: boot Image under Firecracker and QEMU virt. Both single-vCPU. Deferred (tracked): x86_64 PVH VCPUOP_up and aarch64 PSCI CPU_ON (ARM DEN 0022A) AP-bringup asm + tests.",
+    "sources": [
+     "https://sel4.systems/Verification/",
+     "https://public-docs.ferrocene.dev/main/safety-manual/rustc/constraints.html",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "FLS Chapter 22 'Inline Assembly' (the only specification of asm!/global_asm!/naked_asm!) is explicitly marked 'Note: The contents of this section are informational' - i.e. non-normative. This is the load-bearing basis for treating asm as outside the normatively-qualified subset; the inference 'informational FLS section => excluded from the qualified-subset verification' must be adversarially confirmed against the Ferrocene traceability-matrix/qualification-report, since the Safety Manual does not contain an explicit 'inline assembly is excluded' constraint.",
+    "source": "https://public-docs.ferrocene.dev/main/specification/inline-assembly.html (+ cross-check https://public-docs.ferrocene.dev/main/qualification/traceability-matrix.html)"
+   },
+   {
+    "fact": "Ferrocene current qualified scope = rustc 1.98.0, qualified targets include Armv8-A bare-metal (hard-float) and Armv7E-M, but x86-64 is qualified ONLY as x86-64 Linux glibc host/target (no bare-metal x86-64). Verify exact version and target list for the specific Ferrocene release TABOS pins, as scope changes per release.",
+    "source": "https://public-docs.ferrocene.dev/main/safety-manual/scope.html"
+   },
+   {
+    "fact": "Naked functions were stabilized in Rust 1.88.0 (2025-06-26) as #[unsafe(naked)] + core::arch::naked_asm!; inline asm! and global_asm! were stabilized in Rust 1.59.0 (2022-02-24) for x86, x86-64, ARM, AArch64, and RISC-V. The pinned toolchain must therefore be >= 1.88 to use naked fns for _start.",
+    "source": "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/ ; https://blog.rust-lang.org/2022/02/24/Rust-1.59.0/"
+   },
+   {
+    "fact": "x86_64 PVH entry state (Xen PVH ABI, used by Firecracker via XEN_ELFNOTE_PHYS32_ENTRY): 32-bit protected mode, CR0.PE=1 with all other writable bits clear, paging OFF, CR4=0, ebx = physical address of hvm_start_info, flat 0..0xFFFFFFFF code/data segments, OS must build its own stack/GDT/IDT; start_info.rsdp_paddr locates ACPI RSDP. Confirm Firecracker actually selects PVH (not Linux 64-bit boot) for the ELF kernel image type TABOS ships.",
+    "source": "https://raw.githubusercontent.com/xen-project/xen/master/docs/misc/pvh.pandoc ; https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/pvh.md"
+   },
+   {
+    "fact": "aarch64 entry state (Linux arm64 boot protocol): primary CPU x0 = physical address of DTB, x1=x2=x3=0; all interrupts masked in PSTATE.DAIF; non-secure EL2 (recommended) or EL1; MMU off; 64-byte Image header with magic 0x644d5241 ('ARM\\x64'); secondary CPUs brought up via PSCI CPU_ON (ARM DEN 0022A). Verify the exact EL Firecracker enters the guest at (expected EL1) and that it passes a DTB rather than ACPI on aarch64.",
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/arch/arm64/booting.rst"
+   },
+   {
+    "fact": "FLS undefined-behavior rules the asm ABI annotations must encode: a register not declared as an output register must hold its entry value on exit (22.1:4) else it is UB (22.1:72); the stack pointer must be restored on exit (sp is an unsupported explicit operand for this reason); on x86 the EFLAGS direction flag DF must be cleared on exit (22.4:9) else UB (22.4:10). clobber_abi register sets per arch are tabulated in 22.5 (sysv64/win64/aapcs/etc.).",
+    "source": "https://public-docs.ferrocene.dev/main/specification/inline-assembly.html"
+   },
+   {
+    "fact": "seL4's machine-checked proofs assume (do NOT verify) the correctness of: assembly code, boot code, the machine/hardware interface, hardware behavior, and DMA - and the seL4 Foundation states these are 'where manual validation and scrutiny can focus on.' This is the precedent for TABOS substituting documented contracts + executable tests for the unverifiable asm/boot surface.",
+    "source": "https://sel4.systems/Verification/"
+   },
+   {
+    "fact": "Firecracker's machine model exposes a serial console (16550-class) and an i8042 partial keyboard controller (used only to signal guest-requested reboot); clocksources are x86_64 tsc/kvm-clock and aarch64 arch_sys_counter. The exact early-debug UART addresses used by early_putc (x86_64 COM1 I/O port, conventionally 0x3F8; aarch64 PL011 MMIO base) are NOT given in design.md and must be confirmed against Firecracker's arch device layout/source before hardcoding them in Phase-0 asm.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md"
+   }
+  ]
+ },
+ {
+  "area": "asm-test-verify",
+  "decisions": [
+   {
+    "decision": "Split testing into two tiers: (a) hosted `cargo test` on the host triple for every `#![forbid(unsafe_code)]` safe-Rust layer (capability algebra, page-table index/permission math, scheduler bookkeeping), and (b) an on-target custom runner that boots the real no_std image in a VM for everything touching asm/MMIO/privileged state. Foundation asm is validated ONLY by tier (b); it is never linked into a host cargo test.",
+    "rationale": "phil-opp shows the std `test` crate cannot link in no_std (`error[E0463]: can't find crate for test`, because `test` depends on libstd), so kernel-internal code needs a bare-metal harness; meanwhile the framekernel pattern guarantees the upper layers contain zero asm and are pure logic, so they are sound (and ~100x faster) as ordinary host unit tests. This matches Firecracker's own split: pytest for VM-level behaviour plus native-Rust integration tests under `cargo test`.",
+    "assemblyUnits": [
+     "(none new) — this decision DEFINES that all foundation asm units listed under D3/D5/D6/D9 are gated exclusively by the on-target runner, never by host cargo test"
+    ],
+    "perArch": "Host tests are arch-neutral (run on the CI box's native triple). The on-target tier is per-arch, built for x86_64-unknown-none and aarch64-unknown-none custom targets.",
+    "sources": [
+     "https://os.phil-opp.com/testing/",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/tests/README.md"
+    ]
+   },
+   {
+    "decision": "Build the on-target runner on the phil-opp pattern (Testable trait, per-test serial `name ... [ok]` line, runner writes pass/fail to the platform exit device then halts) BUT register tests via a stable linker-section distributed slice (linkme-style `link_section` + `#[used]`), NOT the nightly `custom_test_frameworks` feature, so the test image builds on the same pinned Ferrocene/stable toolchain as the shipped kernel.",
+    "rationale": "phil-opp's harness relies on `#![feature(custom_test_frameworks)]`, `#[test_case]`, and `reexport_test_harness_main` — all nightly-only — and the x86-interrupt ABoI it uses is likewise experimental (`issue #40180`). TABOS targets a Ferrocene-qualified stable toolchain, so a nightly feature in the build path is disqualifying; a linker-section registry reproduces the same collect-and-run shape on stable. Serial is chosen as the result channel because it is the one output portable across both QEMU and Firecracker (phil-opp drives a 16550 UART at COM1 0x3F8).",
+    "assemblyUnits": [
+     "serial putchar primitive: write one byte to the platform UART (poll TX-ready, store byte)",
+     "platform exit/halt primitive invoked by the runner after the last test"
+    ],
+    "perArch": "Collection mechanism is arch-neutral. The serial putchar and exit primitives diverge per arch (see D4): x86 16550 port I/O vs aarch64 PL011-class MMIO.",
+    "sources": [
+     "https://os.phil-opp.com/testing/",
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+    ]
+   },
+   {
+    "decision": "Make the boot bring-up test the executable Definition-of-Done for the per-arch `_start`: a CI job builds the no_std image, boots it under QEMU `microvm` (x86_64) / QEMU `virt` (aarch64), and asserts a serial line `hello from rust_main` plus a fixed 64-bit magic marker, followed by a clean VM exit inside a hard timeout. Firecracker boot is a SECONDARY smoke test on `.metal` runners using a dev/debug Firecracker build with the serial console enabled.",
+    "rationale": "QEMU `microvm` is explicitly 'inspired by Firecracker and constructed after its machine model' (no PCI, no ACPI, ISA serial + virtio-mmio), so it reproduces the Firecracker machine on any CI box without KVM or a bare-metal `.metal` host. Firecracker is the secondary (not primary) gate because production Firecracker builds 'do not expose the serial console port' — the serial-marker DoD therefore requires a dev build of Firecracker, whereas QEMU always exposes ttyS0. The marker proves `_start` set the stack, cleared BSS, and reached `rust_main`.",
+    "assemblyUnits": [
+     "`_start` entry trampoline: set SP to the top of the boot stack, zero the BSS, (x86) reload a flat GDT / confirm long mode, (aarch64) confirm EL1 + stash the FDT pointer from x0, then call `rust_main`",
+     "serial putchar (reused) to emit the marker"
+    ],
+    "perArch": "x86_64: QEMU `-M microvm` (this machine type is x86-only). aarch64: QEMU `-M virt`. Both arches additionally bootable under Firecracker. riscv64: future, not gated.",
+    "sources": [
+     "https://www.qemu.org/docs/master/system/i386/microvm.html",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/getting-started.md"
+    ]
+   },
+   {
+    "decision": "Standardize a per-arch deterministic VM-exit channel so tests fail-closed with an exit STATUS, not only by serial scraping, and bound every on-target test with a hard wall-clock timeout (set 60 s; phil-opp default is 300 s). x86_64 under QEMU uses `isa-debug-exit` (out to port 0xf4); under Firecracker it triggers a deliberate CPU reset; aarch64 uses PSCI `SYSTEM_OFF`/`SYSTEM_RESET` via `hvc`, with QEMU semihosting `SYS_EXIT` as the QEMU-virt fallback.",
+    "rationale": "phil-opp: cargo treats any nonzero process exit as failure, so the runner maps `isa-debug-exit` success 0x10 to host exit 33 then to 0; and endless boot loops (bad load, or an uncaught exception that triple-faults and resets) MUST be bounded by a timeout or they hang CI forever. Firecracker has no isa-debug-exit, but its actions doc states plainly 'Firecracker exits on CPU reset' (i8042/SendCtrlAltDel or a triple fault), giving an equivalent termination signal. QEMU microvm doc confirms a guest-initiated triple-fault plus host `-no-reboot` makes QEMU 'terminate its own execution gracefully'.",
+    "assemblyUnits": [
+     "x86_64: port-out exit primitive (`out 0xf4, eax`) for QEMU isa-debug-exit",
+     "x86_64: deliberate-reset primitive for Firecracker termination (triple fault / i8042 pulse)",
+     "aarch64: PSCI call primitive (`hvc #0` with function id SYSTEM_OFF/SYSTEM_RESET)",
+     "halt-loop primitive after exit (`hlt`/`wfi` in an infinite loop, since the exit device's effect is not visible to the compiler)"
+    ],
+    "perArch": "x86_64 isa-debug-exit (QEMU) vs CPU-reset (Firecracker); aarch64 PSCI hvc (Firecracker + QEMU virt) or semihosting (QEMU). riscv64 future: SBI SRST extension.",
+    "sources": [
+     "https://os.phil-opp.com/testing/",
+     "https://www.qemu.org/docs/master/system/i386/microvm.html",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/api_requests/actions.md"
+    ]
+   },
+   {
+    "decision": "Gate the context-switch asm with a canary test: spawn two kernel tasks that yield to each other at least 1000 times; assert (a) deterministic A,B,A,B... alternation via a shared counter, AND (b) that a unique sentinel pre-loaded by task A into EVERY ABI callee-saved register is bit-for-bit intact after control returns through `context_switch`. Either failure is a hard fail.",
+    "rationale": "The context-switch asm's entire contract is 'save the callee-saved set into prev, restore from next, swap stacks and PC'. The exact set is ABI-fixed and falsifiable: x86_64 System V callee-saved = rbx, rbp, rsp, r12, r13, r14, r15 (phil-opp's preserved-register table, from the System V psABI); AArch64 AAPCS64 callee-saved = r19-r28 plus r29(FP)/r30(LR) and SP, plus the low 64 bits of v8-v15. The canary is the only direct proof the asm saved/restored exactly that set and nothing leaked.",
+    "assemblyUnits": [
+     "`context_switch(prev: *mut Ctx, next: *const Ctx)` as a `#[unsafe(naked)]` function: push callee-saved regs + SP + return address into prev, pop them from next, return into next",
+     "first-switch task entry trampoline that establishes an initial fake frame so a brand-new task can be `context_switch`-ed into"
+    ],
+    "perArch": "x86_64 saves rbx,rbp,r12-r15 + rsp + rip(via the pushed return address). aarch64 saves x19-x30 + sp (and optionally d8-d15 low halves for FP tasks). riscv64 future: s0-s11, ra, sp.",
+    "sources": [
+     "https://os.phil-opp.com/cpu-exceptions/",
+     "https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst"
+    ]
+   },
+   {
+    "decision": "Gate the trap path with three on-target assertions per arch: (a) execute a breakpoint (`int3` / `brk #0`) and assert the handler ran AND execution resumed; (b) deliberately fault (write to an unmapped address / `udf`) and assert the handler decoded the correct cause; (c) provoke a kernel stack overflow and assert it is caught on a dedicated fault stack instead of triple-faulting. The handler must surface the correct fault class to a test-observable location.",
+    "rationale": "phil-opp's breakpoint test (`int3` -> handler -> resume) and stack-overflow test (endless recursion -> guard-page page fault -> double fault taken on an IST stack, asserted via exit_qemu success) transpose directly. Fault decode is per-arch and falsifiable: x86_64 uses the IDT vector number + pushed error code + CR2 (page-fault address); aarch64 uses ESR_EL1's EC (exception-class) field + FAR_EL1 (faulting VA). The stack-overflow case requires a known-good fault stack — x86 an IST entry in the 64-bit TSS, aarch64 a dedicated SP_EL1 handler stack — exactly the 'switch to a predefined known-good stack at hardware level' that phil-opp's double-fault post sets up.",
+    "assemblyUnits": [
+     "x86_64: build the 16-byte-entry IDT + `lidt`; set up TSS with an IST entry + `ltr`; per-vector naked trap stubs that save the GPR frame and call the extern \"C\" Rust handler, returning via `iretq`",
+     "aarch64: a 2KB-aligned, 16-entry exception vector table (0x80 byte stride) installed via `msr VBAR_EL1`; per-entry naked trampoline that saves x0-x30 + SP + ELR_EL1 + SPSR_EL1, reads ESR_EL1/FAR_EL1, calls the Rust handler, then `eret`"
+    ],
+    "perArch": "x86_64 COULD use nightly `extern \"x86-interrupt\"` (phil-opp), but TABOS uses `#[unsafe(naked)]` stubs (stable since 1.88) on BOTH arches, because aarch64 has no interrupt calling convention and Ferrocene forbids nightly features. riscv64 future: `stvec`, `scause`/`stval`.",
+    "sources": [
+     "https://os.phil-opp.com/cpu-exceptions/",
+     "https://os.phil-opp.com/double-fault-exceptions/",
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+    ]
+   },
+   {
+    "decision": "Run the entire on-target suite (boot, context-switch, trap) as a CI matrix across {x86_64, aarch64} x {QEMU primary, Firecracker secondary}, gating merges on BOTH arches. Any foundation function with a `#[cfg(target_arch)]` split must carry a test that executes on each arch it compiles for.",
+    "rationale": "The asm is the most arch-divergent code in the kernel; a green x86_64 run says nothing about the aarch64 vector table or PSCI exit. Firecracker supports exactly x86_64 and aarch64 Linux (getting-started / kernel-policy), which is precisely the v1 target set, so the matrix is two columns wide and no broader. riscv64 is noted but explicitly NOT gated in v1.",
+    "assemblyUnits": [
+     "(none new) — executes the D3/D5/D6 asm units on each arch under each backend"
+    ],
+    "perArch": "Identical test source, two arches, two VMM backends; QEMU microvm for x86_64 and QEMU virt for aarch64, Firecracker for both on .metal runners.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/getting-started.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/tests/README.md",
+     "https://www.qemu.org/docs/master/system/i386/microvm.html"
+    ]
+   },
+   {
+    "decision": "Scope formal verification to the SAFE Rust only: apply Kani (bounded model checking) and/or Verus proof harnesses to page-table index arithmetic, address-translation round-trips, capability-derivation monotonicity, and bitflag well-formedness; explicitly mark all naked asm, `_start`, the trap stubs, and `context_switch` as OUT of formal scope and covered empirically by D5/D6. Record this 'asm is tested, not proven' boundary in the framekernel audit document.",
+    "rationale": "Kani 'uses model checking to analyze Rust programs' and checks undefined behavior + correctness properties, but it reasons about Rust, not raw inline/naked assembly or hardware side effects (its documented limitations exclude features like concurrency); so the trust story for asm is empirical, never formal. Making the boundary explicit prevents the audit from mistaking a verified safe layer for a verified unsafe foundation — the foundation's correctness rests on the on-target tests above.",
+    "assemblyUnits": [
+     "(none) — this decision defines the NEGATIVE space: every asm unit in D3/D5/D6 is explicitly excluded from proof obligations and assigned to test coverage instead"
+    ],
+    "perArch": "Arch-neutral: the proven page-table/capability logic is shared safe Rust; the per-arch asm it excludes (vector tables, context switch) is the same set enumerated per arch above.",
+    "sources": [
+     "https://model-checking.github.io/kani/",
+     "https://os.phil-opp.com/testing/"
+    ]
+   },
+   {
+    "decision": "Build every on-target test as its own bare `#![no_std] #![no_main]` binary (one DoD per test, phil-opp integration-test style) against checked-in custom target JSONs (`x86_64-tabos-none.json`, `aarch64-tabos-none.json`) using the pinned Ferrocene/stable toolchain, `-Z build-std=core,alloc`, and the SAME linker script as the production image. Tests that cannot continue past the event under test (stack overflow, double fault, should-panic) declare `harness = false` and run single-shot.",
+    "rationale": "phil-opp: integration tests are 'completely separate executables', each defining its own `_start` and panic handler, and the stack-overflow / should-panic tests set `harness = false` precisely because execution cannot continue after the fault. Building each test with the identical target spec + linker script means it exercises the REAL `_start`, relocation, and section layout, not a host approximation — closing the gap between what CI proves and what ships.",
+    "assemblyUnits": [
+     "per-test `_start` trampoline that shares the production `_start` path then jumps into the single test body",
+     "test panic handler that emits serial `[failed]` + the panic info, then invokes the D4 exit primitive"
+    ],
+    "perArch": "Two target JSONs (x86_64 / aarch64), one suite; same linker script per arch as the shippable kernel.",
+    "sources": [
+     "https://os.phil-opp.com/testing/",
+     "https://os.phil-opp.com/double-fault-exceptions/",
+     "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "AArch64 AAPCS64 callee-saved set (the registers the context-switch canary test must check): r19-r28 are callee-saved general-purpose registers; r29(FP), r30(LR) and SP are callee-saved with special roles; SIMD/FP v8-v15 are callee-saved but only their bottom 64 bits ('Registers r19-r29 and SP are Callee-saved... Registers v8-v15 are Callee-saved and the remaining registers (v0-v7, v16-v31) are Caller-saved').",
+    "source": "https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst"
+   },
+   {
+    "fact": "x86_64 System V callee-saved (preserved) registers: rbx, rbp, rsp, r12, r13, r14, r15; scratch (caller-saved): rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11.",
+    "source": "https://os.phil-opp.com/cpu-exceptions/ (System V psABI; cross-check gitlab.com/x86-psABIs/x86-64-ABI)"
+   },
+   {
+    "fact": "Naked functions are stable as of Rust 1.88.0 (released 2025-06-26): `#[unsafe(naked)]` attribute + a single `core::arch::naked_asm!` body, 'used in low-level settings like Rust's compiler-builtins, operating systems'. By contrast `custom_test_frameworks` and the `abi_x86_interrupt` calling convention remain nightly-only (x86-interrupt is tracked under issue #40180).",
+    "source": "https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/ ; https://os.phil-opp.com/cpu-exceptions/"
+   },
+   {
+    "fact": "QEMU isa-debug-exit semantics: writing value v to the iobase port (phil-opp uses iobase=0xf4, iosize=0x04) makes QEMU exit with status (v<<1)|1; the runner uses success code 0x10 -> exit 33 -> bootimage remaps to host 0. The `microvm` machine has no PCI and no ACPI, provides an ISA bus + one (optional) ISA 16550 serial + up to 8 virtio-mmio devices, and is 'inspired by Firecracker and constructed after its machine model'; it is x86-only.",
+    "source": "https://os.phil-opp.com/testing/ ; https://www.qemu.org/docs/master/system/i386/microvm.html"
+   },
+   {
+    "fact": "Firecracker termination + serial constraints: 'Firecracker exits on CPU reset', and a guest reset can be driven via the emulated i8042 (SendCtrlAltDel) — Firecracker has NO isa-debug-exit device. Critically, 'In production builds, Firecracker does not expose the serial console port', so the serial-marker boot DoD requires a dev/debug Firecracker build. Firecracker supports exactly x86_64 and aarch64 Linux.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/api_requests/actions.md ; https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/design.md ; https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/getting-started.md"
+   },
+   {
+    "fact": "x86 trap-test facts: breakpoint is vector 3 (`int3`), double fault is vector 8; each IDT entry is 16 bytes; the IST is 7 stack pointers held in the 64-bit TSS and selected per-handler via IDT options bits 0-2; a kernel stack overflow hitting the guard page escalates page-fault -> double-fault -> triple-fault (reset) unless the double-fault handler is given a separate IST stack.",
+    "source": "https://os.phil-opp.com/cpu-exceptions/ ; https://os.phil-opp.com/double-fault-exceptions/"
+   },
+   {
+    "fact": "aarch64 trap-test decode facts ASSERTED FROM DOMAIN KNOWLEDGE, NOT YET FETCHED FROM AN AUTHORITATIVE ARM SOURCE THIS PASS — MUST be verified before shipping: synchronous-exception cause is in ESR_EL1 (EC = exception-class field), faulting address in FAR_EL1; the exception vector base is VBAR_EL1, a 2KB-aligned table of 16 entries at 0x80-byte stride; `brk` raises a breakpoint and `udf` an undefined-instruction trap. Verify against ARM ARM (DDI 0487) — wiki.osdev.org/AArch64_Exception_Handling was Cloudflare-blocked (HTTP 403).",
+    "source": "UNVERIFIED — fetch ARM Architecture Reference Manual DDI 0487 (developer.arm.com) and Firecracker aarch64 vCPU setup source to confirm ESR_EL1/FAR_EL1/VBAR_EL1 layout"
+   },
+   {
+    "fact": "Per-arch serial device for the boot marker: x86_64 Firecracker/QEMU console is ttyS0 = 16550 COM1 at port 0x3F8 (confirmed: Firecracker getting-started uses `console=ttyS0`; phil-opp drives 0x3F8). aarch64 Firecracker exposes a serial console (PL011-class MMIO UART) — the PL011 identity and its MMIO base were NOT confirmed from source this pass and MUST be verified.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/docs/getting-started.md ; aarch64 PL011 base UNVERIFIED — fetch Firecracker src/vmm aarch64 device layout"
+   }
+  ]
+ }
+]

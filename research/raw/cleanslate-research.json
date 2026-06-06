@@ -1,0 +1,742 @@
+[
+ {
+  "area": "unavoidable-vs-choice",
+  "decisions": [
+   {
+    "decision": "Obey the CPU instruction set, register file, and privilege model verbatim; run the frozen microkernel at the silicon-privileged level (x86_64 ring0 / aarch64 EL1 under the VMM) and users at ring3 / EL0. This boundary is silicon-given, NOT a Linux inheritance. tb-hal isolates the asm but cannot invent a privilege model.",
+    "category": "silicon-unavoidable",
+    "rationale": "Intel SDM Vol 3A speaks of accesses 'accessible from the current privilege level (CPL) at which the processor is operating' (§4197) and dedicates §5.5 to PRIVILEGE LEVELS; the AArch64 'exception model is made up of a number of exception levels (EL0-EL3)' per the Arm-authored kernel.org booting doc. Every OS (Linux, Windows, seL4, Theseus) obeys the identical rings/ELs because Intel/ARM silicon defines them. TABOS owns WHAT runs in ring0/EL1; it does not own the existence of the ring.",
+    "sources": [
+     "Intel SDM Vol 3A §5.5 Privilege Levels and §4197 CPL (cdrdv2-public.intel.com/671190/253668-sdm-vol-3a.pdf, fetched)",
+     "kernel.org arch/arm64/booting.html (Arm/Will Deacon: EL0-EL3 exception model)"
+    ]
+   },
+   {
+    "decision": "Emit the architectural page-table FORMAT unchanged from tb-hal; own only the mapping policy above it. x86_64: the CR3-rooted 4-level/5-level PML4E hierarchy. aarch64: VMSAv8-64 translation-table descriptors. The MMU walks these structures in hardware, so TABOS cannot define its own PTE bit layout - but the address-space abstraction, frame allocator, and capability->mapping policy are 100% TABOS-owned.",
+    "category": "silicon-unavoidable",
+    "rationale": "Intel SDM Vol 3A §4.3 verbatim: 'A logical processor uses 32-bit paging if CR0.PG = 1... paging uses a hierarchy of paging structures to produce a translation for a linear address. CR3 is used to locate the first paging-structure'; §4.5 '4-LEVEL PAGING AND 5-LEVEL PAGING' and Table 4-15 'Format of a PML4 Entry (PML4E)'. CR0.PG 'Enables paging when set'. The hardware page-walker dictates the format; this is silicon, not Linux. The arm64 entry doc confirms the OS controls MMU state ('The MMU must be off' at entry), i.e. silicon owns the walker, software owns when/what to map.",
+    "sources": [
+     "Intel SDM Vol 3A §4.3 / §4.5 / Table 4-15 PML4E, CR0.PG (fetched)",
+     "ARM ARM DDI0487 D8 VMSAv8-64 (canonical authority for aarch64 descriptors)",
+     "kernel.org arch/arm64/booting.html ('The MMU must be off')"
+    ]
+   },
+   {
+    "decision": "Reject the Linux/x86 boot protocol (real-mode setup header, 'zero page' struct boot_params, %rsi handoff) as the guest entry contract. The boot handoff is a VMM-CHOSEN contract, not silicon and not Linux code. Default to PVH (XEN_ELFNOTE_PHYS32_ENTRY) - the neutral protocol Firecracker already speaks - and remain free to define a thin tb-boot contract since TABOS co-owns the guest<->VMM ABI.",
+    "category": "tabos-owns-it",
+    "rationale": "Choosability is proven: PVH (Xen) enters in 32-bit protected mode with paging OFF, CR0.PE set, %ebx -> hvm_start_info; Multiboot2 (GNU) enters with EAX=0x36d76289, EBX -> info struct, paging off; Linux/x86 enters in 64-bit mode paging ON, %rsi -> boot_params. Same silicon, three incompatible register contracts => the handoff is a free choice. kernel.org DOCUMENTS a protocol anyone can implement (Linux itself imports the non-Linux PVH note); it is not Linux-code we must run. linux-loader: 'much of the boot process remains the VMM's responsibility.'",
+    "sources": [
+     "xenbits.xen.org/docs/unstable/misc/pvh.html (PHYS32_ENTRY, %ebx=start_info, PE set/paging off)",
+     "kernel.org arch/x86/boot.html (64-bit protocol: %rsi=boot_params)",
+     "GNU multiboot2 spec §3.3 I386 machine state (EAX=0x36d76289, EBX=info)",
+     "github.com/rust-vmm/linux-loader README"
+    ]
+   },
+   {
+    "decision": "Honor the silicon trap/interrupt and MMU-state ENTRY preconditions exactly in tb-hal's entry stub, then fill the mandated structures with TABOS's own handlers. aarch64: enter with MMU off, IRQ/FIQ/SError/Debug masked in PSTATE.DAIF, caches clean to PoC, at EL1/EL2. x86: a GDT with flat CS/DS, interrupts disabled. The IDT/GDT/GIC/APIC are silicon-mandated containers; their CONTENTS are TABOS-owned.",
+    "category": "silicon-unavoidable",
+    "rationale": "kernel.org arm64/booting.html (Arm-authored) lists hard silicon preconditions: 'All forms of interrupts must be masked in PSTATE.DAIF', 'The MMU must be off', caches 'cleaned to the PoC', enter 'in EL2 (RECOMMENDED) or in EL1'. x86 64-bit boot requires 'a GDT must be loaded with the descriptors for selectors __BOOT_CS(0x10) and __BOOT_DS(0x18)... interrupt must be disabled.' These are CPU/architecture requirements every OS satisfies; TABOS provides its OWN exception vectors and interrupt-controller programming inside the silicon-required frame.",
+    "sources": [
+     "kernel.org arch/arm64/booting.html (PSTATE.DAIF, MMU off, EL1/EL2, GIC/PSCI)",
+     "kernel.org arch/x86/boot.html (GDT __BOOT_CS/__BOOT_DS, interrupts disabled)"
+    ]
+   },
+   {
+    "decision": "Adopt virtio as the SOLE device model and obey its OASIS ring/wire format; write all drivers as TABOS code. Implement virtio-mmio (and/or modern virtio-pci) for net/block/vsock. Ignore the emulated PC-legacy device model (i8042/PIT/PS2/PIC) beyond the single register Firecracker needs to signal reset.",
+    "category": "open-standard-neutral",
+    "rationale": "virtio is an OASIS Standard produced by the OASIS Virtual I/O Device (VIRTIO) TC, with driver/device feature-bit negotiation ('the device offers all the features it knows about, and the driver acknowledges those it understands') and multiple transports - owned by no OS. Firecracker exposes exactly 'VirtIO Net and VirtIO Block devices... a serial console and partial keyboard controller [i8042]... used by guests to reset the VM'. The wire format is a neutral standard TABOS must match; the driver implementation and device subset are TABOS choices.",
+    "sources": [
+     "OASIS virtio v1.3 §1 Introduction / feature bits / transports (docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html, fetched)",
+     "github.com/firecracker-microvm/firecracker docs/design.md (Machine Model: virtio net/block/vsock, i8042 reset, PIC/IOAPIC/PIT via KVM)"
+    ]
+   },
+   {
+    "decision": "Take hardware topology from neutral standards, not Linux-specific tables: parse a DTB on aarch64 (pointer in x0) and the PVH hvm_start_info memmap + ACPI RSDP on x86. tb-hal owns the parser; the formats are vendor/OS-neutral.",
+    "category": "open-standard-neutral",
+    "rationale": "devicetree is 'a data structure for describing hardware' published by devicetree.org under a TSC with public GitHub releases - OS-neutral, not Linux. arm64 entry mandates 'x0 = physical address of device tree blob (dtb)'. On x86 PVH, 'A pointer to the position of the RSDP in memory... can be fetched from the start info structure (field rsdp_paddr)'; ACPI is a UEFI-Forum standard. TABOS writes its own DTB/start_info reader; it inherits no Linux discovery code.",
+    "sources": [
+     "devicetree.org/specifications (DeviceTree Spec, TSC-governed)",
+     "kernel.org arch/arm64/booting.html (x0 = dtb physical address)",
+     "xenbits.xen.org/docs/unstable/misc/pvh.html (start_info rsdp_paddr, ACPI tables)"
+    ]
+   },
+   {
+    "decision": "Choose the kernel image CONTAINER freely - ship an ELF image carrying a PHYS32_ENTRY ELFNOTE for PVH; the loader, entry stub, and in-memory layout are TABOS's. Reject Linux's bzImage/real-mode-setup container. ELF is a System V gABI convenience, not a Linux mandate.",
+    "category": "open-standard-neutral",
+    "rationale": "linux-loader 'offers support for loading raw ELF (vmlinux)... on x86_64 and PE (Image) kernel images on aarch64' - the VMM only needs an entry point, and the container is interchangeable (ELF vs PE vs bzImage). ELF is the System V gABI, not Linux-specific. PVH is selected purely by the presence of XEN_ELFNOTE_PHYS32_ENTRY in the ELF. So TABOS picks the simplest neutral container and owns everything past the entry note.",
+    "sources": [
+     "github.com/rust-vmm/linux-loader README (raw ELF vmlinux on x86_64, PE Image on aarch64; PVH via ELFNOTE)",
+     "xenbits.xen.org/docs/unstable/misc/pvh.html (XEN_ELFNOTE_PHYS32_ENTRY selects the ABI)"
+    ]
+   },
+   {
+    "decision": "Discard the entire Linux/Unix runtime convention layer: the syscall ABI numbering, the fork/exec process model, the VFS namespace, errno/POSIX, and ELF-as-process-loader. None of these are silicon or open standards - they are pure Unix convention TABOS is free to reject, carrying none of their legacy bugs.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Nothing in Intel SDM, ARM ARM, OASIS virtio, devicetree, or any boot protocol requires fork(), a VFS, a POSIX errno space, or Linux's syscall table - these exist nowhere in the fetched silicon/standard sources and appear only as Unix tradition. The directive's premise holds: the academic substrate (seL4, Theseus, Hubris, Asterinas) shows capability/component kernels that reject POSIX wholesale. TABOS inherits zero of it.",
+    "sources": [
+     "Absence across all fetched authorities: Intel SDM Vol 3A, kernel.org boot/booting docs (protocol only, no runtime ABI), OASIS virtio, devicetree.org",
+     "seL4 / Hubris (oxide) / Asterinas capability+component model as design precedent"
+    ]
+   },
+   {
+    "decision": "Define TABOS's own frozen capability-invocation syscall surface with zero ambient authority - object-capability handles, no global namespace, explicit memory-grant transfer - as the kernel's NOVEL structure replacing the rejected POSIX surface. The trap instruction (syscall/svc) is silicon; the verbs invoked through it are entirely TABOS's invention.",
+    "category": "tabos-novel",
+    "rationale": "The silicon only provides a trap door (x86 SYSCALL/INT, aarch64 SVC into EL1) and a register convention for arguments; it imposes no semantics on what a system call MEANS. That semantic layer is where TABOS exercises maximum own-structure: a small, frozen set of capability-invoke operations (a la seL4 endpoints) chosen to make ambient authority unrepresentable and to support the memory-first, self-improvement goals. This is new TABOS design, not inherited from any source.",
+    "sources": [
+     "Intel SDM Vol 3A (SYSCALL/IA-32e gates provide only the trap mechanism, no semantics)",
+     "kernel.org arch/arm64/booting.html (EL boundary = the only silicon-given trap surface)",
+     "TABOS directive (Arda, 2026-06-07): frozen capability microkernel, zero ambient authority"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "The x86-64 page-table entry layout (PML4E/PDPTE/PDE/PTE) is defined by Intel and the logical processor walks the CR3-rooted hierarchy in hardware: '32-bit paging uses a hierarchy of paging structures to produce a translation for a linear address. CR3 is used to locate the first paging-structure.' Identical under every OS => silicon, not Linux.",
+    "source": "Intel SDM Vol 3A §4.3 / §4.5 '4-LEVEL PAGING AND 5-LEVEL PAGING' / Table 4-15 'Format of a PML4 Entry' (fetched cdrdv2-public.intel.com/671190/253668-sdm-vol-3a.pdf)"
+   },
+   {
+    "fact": "The CPU privilege model is silicon: x86 accesses are checked against 'the current privilege level (CPL) at which the processor is operating' (SDM §5.5); aarch64 'exception model is made up of a number of exception levels (EL0-EL3)'. No OS, including TABOS, can remove rings/ELs.",
+    "source": "Intel SDM Vol 3A §5.5 Privilege Levels (fetched); kernel.org arch/arm64/booting.html"
+   },
+   {
+    "fact": "PVH is a XEN-defined boot ABI that Linux itself adopts via XEN_ELFNOTE_PHYS32_ENTRY: entry in 32-bit protected mode, 'cr0: bit 0 (PE) must be set', paging implicitly off, 'ebx: contains the physical memory address where the loader has placed the boot start info structure.' Proves the boot register contract is not Linux-owned and is choosable.",
+    "source": "xenbits.xen.org/docs/unstable/misc/pvh.html (x86/HVM direct boot ABI, fetched)"
+   },
+   {
+    "fact": "Boot protocols disagree on the handoff register AND CPU mode for the same silicon: Linux/x86 = %rsi -> boot_params, 64-bit mode, paging ON; Multiboot2 = EAX=0x36d76289 + EBX -> info, 32-bit, paging OFF; PVH = %ebx -> start_info; arm64 = x0 -> DTB, MMU off. A free contract chosen by the loader, never dictated by the CPU.",
+    "source": "kernel.org arch/x86/boot.html §1.14; GNU multiboot2 §3.3 I386 machine state; xenbits PVH; kernel.org arch/arm64/booting.html (all fetched)"
+   },
+   {
+    "fact": "rust-vmm linux-loader states the register handoff is the VMM's job, not a fixed library/Linux artifact: 'much of the boot process remains the VMM's responsibility' and 'The VMM sets up initial registry values in this phase, without using linux-loader.'",
+    "source": "github.com/rust-vmm/linux-loader README (fetched raw)"
+   },
+   {
+    "fact": "virtio is an OASIS Standard produced by the OASIS Virtual I/O Device (VIRTIO) TC, with driver/device feature-bit negotiation and multiple transports - owned by no operating system. TABOS must obey the ring/wire format but writes its own drivers.",
+    "source": "OASIS virtio v1.3 §1 (docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html; front matter 'OASIS Standard', VIRTIO TC; fetched 3.0 MB HTML)"
+   },
+   {
+    "fact": "devicetree is an OS-neutral 'data structure for describing hardware' published by devicetree.org under a TSC with public GitHub releases; arm64 entry passes 'x0 = physical address of device tree blob (dtb)'. It is not Linux; the format and the x0 pointer are both choosable/standard, not silicon.",
+    "source": "devicetree.org/specifications (fetched); kernel.org arch/arm64/booting.html (x0=dtb)"
+   },
+   {
+    "fact": "aarch64 silicon entry preconditions are ARM-defined and OS-agnostic: 'The MMU must be off', 'All forms of interrupts must be masked in PSTATE.DAIF', caches cleaned to PoC, enter at EL1 or EL2. These are hardware requirements TABOS must satisfy before any Rust runs - not Linux policy.",
+    "source": "kernel.org arch/arm64/booting.html (fetched)"
+   },
+   {
+    "fact": "Firecracker's guest device surface is VMM-chosen, not standard-mandated: virtio Net/Block/Vsock plus a minimal legacy model (PIC/IOAPIC/PIT via KVM; i8042 'partial keyboard controller' only to signal reset). Only the virtio format is the open standard TABOS must obey; the legacy PC devices are discardable convention.",
+    "source": "github.com/firecracker-microvm/firecracker docs/design.md, Machine Model section (fetched raw)"
+   }
+  ]
+ },
+ {
+  "area": "boot-handoff-demystified",
+  "decisions": [
+   {
+    "decision": "Accept the ISA + CPU reset/mode contract as the ONLY truly unavoidable inheritance, and confine it entirely to tb-hal. tb-hal must emit x86_64/aarch64 machine code and obey silicon-defined formats: x86 long-mode prerequisites (CR0.PG, CR4.PAE, EFER.LME/LMA, page-table-entry layout, GDT descriptor + segment-selector format) and aarch64 exception levels (EL0-EL3), MMU-off-at-entry, translation-table format, and PSTATE.DAIF masking. None of this is Linux; Linux merely obeys the same silicon. Inheriting the ISA is NOT inheriting Linux.",
+    "category": "silicon-unavoidable",
+    "rationale": "The arm64 boot doc enumerates silicon-mandated entry state ('The MMU must be off', 'All forms of interrupts must be masked in PSTATE.DAIF', enter 'in non-secure state, either in EL2 ... or in EL1'). The x86 64-bit protocol entry requires the CPU 'in 64-bit mode with paging enabled' with a GDT holding 4G-flat code/data descriptors. These are CPU-architecture requirements (Intel SDM Vol.3 / ARM ARM), independent of which OS runs. Everything ABOVE this layer (register conventions, struct layouts, magic numbers) is convention, not silicon — so the silicon floor is small and isolable in one crate.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (CPU mode/Caches/MMUs: 'The MMU must be off', PSTATE.DAIF masking, EL2/EL1)",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html (§1.14 64-bit Boot Protocol: 'CPU must be in 64-bit mode with paging enabled', GDT __BOOT_CS=0x10/__BOOT_DS=0x18)",
+     "Intel SDM Vol.3 / ARM Architecture Reference Manual (silicon definition of the above)"
+    ]
+   },
+   {
+    "decision": "Do NOT adopt the Linux x86_64 'zero-page' (struct boot_params) as TABOS's native handoff. Reclassify it as ONE legacy loader ABI we can parse via the linux-loader crate purely so stock Firecracker can boot us during bootstrap. It is a 4096-byte struct whose setup_header is only 119 bytes (capped at 144); a minimal guest reads ~3 things and ignores the rest.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Concretely: boot_params 'proper is limited to 4096 bytes'; 'setup_header is permanently limited to 144 bytes ... It is currently 119 bytes long'. A microVM guest needs only the e820 map (zero-page off 0x1E8 = e820_entries, off 0x2D0 = e820_table), the command line (cmd_line_ptr / ext_cmd_line_ptr off 0x0C8), and acpi_rsdp_addr (off 0x070). Filling/reading ~30 of these fields is 'filling a struct a loader expects', NOT running Linux code — there is zero Linux kernel logic in the contract. Because it carries DOS-era real-mode baggage (the doc itself calls it 'a rather complicated boot convention' that 'evolved ... due to historical aspects'), TABOS should not enshrine it as canonical.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/x86/zero-page.html (offsets: 070 acpi_rsdp_addr, 0C8 ext_cmd_line_ptr, 1E8 e820_entries, 2D0/A00 e820_table)",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html (§1.4: boot_params ≤ 4096 bytes; setup_header 119 bytes, cap 144; §1.0 'rather complicated boot convention ... historical aspects')",
+     "https://github.com/rust-vmm/linux-loader (setup_header/boot_params structs + LinuxBootConfigurator)"
+    ]
+   },
+   {
+    "decision": "Treat the pointer-carrying register/magic as pure software convention that TABOS owns outright — NOT a silicon constraint. The owned VMM sets the guest's initial register file directly (it writes the vCPU state), so TABOS picks its own handoff register and struct.",
+    "category": "open-standard-neutral",
+    "rationale": "Four shipping protocols use four DIFFERENT registers/magics for the same job: Linux x86_64 puts boot_params in %rsi; Multiboot2 puts magic 0x36d76289 in EAX and the info pointer in EBX; PVH/Xen puts hvm_start_info in EBX; arm64 Linux puts the DTB pointer in x0. If silicon dictated it, they could not differ. Under hardware virtualization the VMM owns the initial VMCS/vCPU register state, so nothing forces RSI — that choice is 100% convention TABOS is free to redefine.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html (§1.14: '%rsi must hold the base address of the struct boot_params')",
+     "https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html (§3.3 I386 machine state: EAX=0x36d76289, EBX=info structure)",
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html (ebx = boot start info structure)",
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (x0 = physical address of DTB)"
+    ]
+   },
+   {
+    "decision": "Adopt as a settled premise: boot handoff is a FREE design surface, proven by four mutually-incompatible non-Linux boot protocols, each owned by a non-Linux community. This is the decisive evidence authorizing a TABOS-owned contract.",
+    "category": "open-standard-neutral",
+    "rationale": "Multiboot2 (GNU/FSF, copyright Bryan Ford/Erich Boleyn/FSF): header magic 0xE85250D6, hands off in 32-bit protected mode with paging OFF (CR0.PG cleared, PE set). PVH (Xen/'x86-HVM direct boot ABI'): signaled by XEN_ELFNOTE_PHYS32_ENTRY, hands off in 32-bit, CR0.PE set, paging off, CR4=0. Limine (Limine community): hands off in 64-bit LONG mode with paging ENABLED, its own GDT (CS=0x28, DS/ES/SS/FS/GS=0x30), an HHDM, and info via an in-executable requests/responses section rather than one struct pointer. arm64 Image (Linux): 64-byte header, magic 0x644d5241 'ARM\\x64'. Same hardware, same ISA, four different contracts → the contract is chosen, not silicon-dictated, and none of these is owned by the Linux kernel.",
+    "sources": [
+     "https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html (§3.1.2 magic 0xE85250D6; §3.3 CR0 PG cleared/PE set)",
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html (XEN_ELFNOTE_PHYS32_ENTRY; cr0 PE set, cr4 cleared)",
+     "https://github.com/limine-bootloader/limine-protocol/blob/trunk/PROTOCOL.md (x86-64: 64-bit mode, GDT CS=0x28/DS=0x30, PG/PAE/LME/LMA enabled, requests section)",
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (64-byte header, magic 0x644d5241)"
+    ]
+   },
+   {
+    "decision": "Build TABOS's sovereign VMM on the rust-vmm crate set (kvm-ioctls/kvm-bindings, vm-memory, linux-loader, vm-superio, virtio-queue, vm-allocator, vm-device, vmm-sys-util, event-manager). This is a neutral shared-ownership community, not Linux, and it lets TABOS define its boot contract END-TO-END (loader side + guest side both owned).",
+    "category": "open-standard-neutral",
+    "rationale": "rust-vmm is 'a shared effort, shared ownership open-source project' with contributors from Alibaba, AWS, Cloud Base, Crowdstrike, Intel, Google, Linaro, Red Hat. It was created specifically to share components between CrosVM (Google) and Firecracker (AWS); Cloud Hypervisor also integrated it. So it is the SAME crate set the reference Firecracker/crosvm/Cloud Hypervisor VMMs use, governed by a vendor-neutral community, licensed Apache-2.0 OR BSD-3-Clause. Owning both ends of the handoff is the only way to achieve TABOS's zero-ambient-authority/capability goals at boot.",
+    "sources": [
+     "https://github.com/rust-vmm/community (shared ownership; Alibaba/AWS/Intel/Google/Red Hat/Linaro; share components between CrosVM and Firecracker; Cloud Hypervisor integrated; crate list; Apache-2.0/BSD-3)",
+     "https://github.com/rust-vmm/linux-loader (Apache-2.0 OR BSD-3-Clause)"
+    ]
+   },
+   {
+    "decision": "Make an OWNED thin rust-vmm VMM the sovereign target (the Mirage single-vCPU profile), and demote stock Firecracker to merely ONE compatible bootstrapping loader. Precedent is established, not speculative.",
+    "category": "tabos-owns-it",
+    "rationale": "uhyve is 'a minimal, special-purpose hypervisor for the Hermit kernel' — direct precedent for an OS project shipping its OWN thin Rust/KVM hypervisor instead of inheriting a general-purpose one. rust-vmm's own vmm-reference is explicitly 'a starting point in the creation of tailor-made VMMs that users build according to their needs ... fork ... mix and match ... minimal attack surface and resource footprint', and its default profile is 1 vCPU / 256 MiB — exactly TABOS's Mirage single-vCPU memory-first profile. So an owned thin VMM is a documented, supported path, and Firecracker becomes one of several loaders that can satisfy our contract, not the master of it.",
+    "sources": [
+     "https://github.com/hermit-os/uhyve (minimal special-purpose hypervisor for Hermit kernel; Rust; KVM/Hypervisor.framework; Apache-2.0/MIT)",
+     "https://github.com/rust-vmm/vmm-reference (consists of rust-vmm crates + minimal glue; fork/tailor for minimal attack surface; default 1 vCPU / 256 MiB)"
+    ]
+   },
+   {
+    "decision": "For the bootstrap phase (riding a STOCK rust-vmm/Firecracker-class loader before the owned VMM is ready), prefer the PVH protocol over the Linux zero-page, because linux-loader gives PVH for free and PVH carries none of the real-mode/zero-page legacy.",
+    "category": "open-standard-neutral",
+    "rationale": "linux-loader 'ELF support includes the Linux and PVH boot protocols' and notes it 'is not yet fully independent ... much of the boot process remains the VMM’s responsibility' — i.e. the VMM (us) defines the contract regardless. PVH is signaled by a single ELFNOTE (XEN_ELFNOTE_PHYS32_ENTRY), passes a clean hvm_start_info struct in EBX, and does NOT drag in the 4 KiB zero-page or DOS-era real-mode fields. It is a documented vendor-neutral direct-boot ABI used across KVM VMMs. This minimizes legacy surface during bootstrap while we stand up the owned protocol.",
+    "sources": [
+     "https://github.com/rust-vmm/linux-loader (supports Linux + PVH; 'much of the boot process remains the VMM’s responsibility'; exports hvm_start_info)",
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html (XEN_ELFNOTE_PHYS32_ENTRY; hvm_start_info in ebx; rsdp_paddr field)"
+    ]
+   },
+   {
+    "decision": "On aarch64, honor only the ARM-silicon entry state in tb-hal; REJECT the Linux 64-byte Image header (magic 0x644d5241) as TABOS's native image format (keep it only as an optional compat shim for stock loaders), and OPTIONALLY reuse the vendor-neutral DTB as hardware-description input rather than inventing one.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Split honestly: (a) silicon — MMU-off, clean caches to PoC, DAIF masked, EL2/EL1 entry, CNTFRQ/CNTVOFF programming are ARM-ARM mandated and belong in tb-hal. (b) Linux convention — the 64-byte Image header and the x0=DTB register choice are pure Linux kernel conventions (arch/arm64/include/asm/image.h); the CPU does not require them, and our owned VMM can jump straight to our entry with our own register contract. (c) open standard — the DTB format itself is governed by devicetree.org, owned by no OS, so reusing it as a hardware-description input is neutral, not Linux-inheritance. linux-loader already emits arm64_image_header, so a compat shim is cheap if we ever need stock-loader compatibility.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (64-byte header u32 magic=0x644d5241; x0=DTB phys addr, x1-x3=0; MMU off; caches clean to PoC; DAIF masked)",
+     "https://github.com/rust-vmm/linux-loader (emits arm64_image_header / loads PE Image + device tree blobs on aarch64)",
+     "Devicetree Specification, devicetree.org (DTB is a vendor-neutral open standard)"
+    ]
+   },
+   {
+    "decision": "Define 'TABOS Boot Contract v0' as the canonical, frozen, capability-oriented handoff that the owned VMM produces and tb-hal consumes; downgrade boot_params, PVH hvm_start_info, and the arm64 Image header to mere IMPORT SHIMS into this one internal type.",
+    "category": "tabos-novel",
+    "rationale": "Because every prior protocol is convention (Decisions 3-4) and we own both ends (Decisions 5-6), TABOS should specify ONE typed struct in a documented register: (i) memory as TYPED capability regions (not a raw e820/DTB dump), (ii) an ACPI-RSDP or DTB pointer for hw description, (iii) command line / config, (iv) the root of the initial capability space (zero ambient authority from instruction zero), (v) boot entropy. Entry is in 64-bit long mode (x86) or EL2/EL1 (arm), with the owned VMM responsible for placing the guest there — exactly the placement freedom Limine demonstrates. This makes the handoff a first-class, self-improvable TABOS interface; stock-loader ABIs are adapters translated INTO it, never the source of truth. This is the maximal own-structure outcome that remains honest about silicon (the ISA/long-mode floor still lives, unchanged, in tb-hal).",
+    "sources": [
+     "https://github.com/limine-bootloader/limine-protocol/blob/trunk/PROTOCOL.md (precedent: a modern non-Linux protocol freely defines 64-bit entry, own GDT, HHDM, structured requests/responses)",
+     "https://github.com/rust-vmm/vmm-reference (owning the VMM lets us define the guest-facing contract)",
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html (hvm_start_info as one importable shape, incl. rsdp_paddr)"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "struct boot_params (the x86_64 'zero-page') is at most 4096 bytes, and its setup_header is currently 119 bytes long, permanently capped at 144 bytes. In the 64-bit boot protocol the kernel is entered at (loaded-kernel-start + 0x200) with the CPU ALREADY in 64-bit mode with paging enabled, a 4G-flat GDT (__BOOT_CS=0x10, __BOOT_DS=0x18), interrupts disabled, and %rsi holding the boot_params base. Implementing this is 'filling a struct', not running Linux code.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/x86/boot.html (§1.4 sizes; §1.14 64-bit Boot Protocol)"
+   },
+   {
+    "fact": "A minimal guest needs only a handful of zero-page fields: e820_entries at offset 0x1E8 and the e820_table at 0x2D0 (size 0xA00), cmd_line_ptr (ext at 0x0C8), and acpi_rsdp_addr at 0x070. All the rest (screen_info, apm_bios_info, hd0/hd1_info marked OBSOLETE, edd, etc.) can be left zero/ignored.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/x86/zero-page.html (offset table)"
+   },
+   {
+    "fact": "Multiboot2 is an FSF/GNU-owned, vendor-neutral protocol (copyright Bryan Ford, Erich Boleyn, Free Software Foundation): OS-image header magic = 0xE85250D6; on i386 handoff the loader puts magic 0x36d76289 in EAX and the info-structure physical address in EBX, with the CPU in 32-bit protected mode and paging OFF (CR0.PG cleared, PE set). It is explicitly NOT Linux-specific.",
+    "source": "https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html (§3.1.2 header magic; §3.3 I386 machine state)"
+   },
+   {
+    "fact": "PVH ('x86/HVM direct boot ABI', a Xen-originated but VMM-portable ABI) is signaled by the XEN_ELFNOTE_PHYS32_ENTRY ELF note; the domain builder enters at that note's address with EBX = physical address of the hvm_start_info structure, CR0.PE set, all other writable CR0 bits and all of CR4 cleared (32-bit, paging off). The start_info carries rsdp_paddr for ACPI. No zero-page, no real-mode legacy.",
+    "source": "https://xenbits.xen.org/docs/unstable/misc/pvh.html (§1 entry state; rsdp_paddr)"
+   },
+   {
+    "fact": "The Limine protocol (owned by the Limine community, repo limine-bootloader/limine-protocol) hands off DIFFERENTLY from all of the above: in 64-bit LONG mode with paging ENABLED, a bootloader-provided GDT (CS=0x28; DS/ES/SS/FS/GS=0x30; full 16/32/64-bit descriptor set), PG/PAE/LME/LMA/NX enabled, a Higher-Half Direct Map, and information passed via an in-executable 'requests/responses' section rather than a single struct pointer. Proof that even the privilege mode and data-passing mechanism at handoff are freely chosen.",
+    "source": "https://github.com/limine-bootloader/limine-protocol/blob/trunk/PROTOCOL.md (### x86-64 entry machine state)"
+   },
+   {
+    "fact": "The arm64 Linux boot contract: a 64-byte Image header whose magic is 0x644d5241 ('ARM\\x64'); at entry x0 = physical address of the DTB and x1-x3 = 0; the MMU must be OFF, caches clean to PoC, all interrupts masked in PSTATE.DAIF, entry at EL2 (recommended) or EL1. The MMU/EL/cache requirements are ARM silicon; the 64-byte Image header and x0=DTB register choice are Linux conventions (arch/arm64/include/asm/image.h), not silicon.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (§4 header + register state + CPU mode/Caches/MMUs)"
+   },
+   {
+    "fact": "rust-vmm is a vendor-neutral, shared-ownership open-source project (contributors from Alibaba, AWS, Cloud Base, Crowdstrike, Intel, Google, Linaro, Red Hat plus individuals), created explicitly to share components between CrosVM (Google) and Firecracker (AWS); Cloud Hypervisor also integrated it. Crates include kvm-ioctls, kvm-bindings, vm-memory, linux-loader, vm-superio, virtio-queue, vm-allocator, vm-device, vmm-sys-util, event-manager — licensed Apache-2.0 OR BSD-3-Clause. It is NOT the Linux kernel and is owned by no single OS.",
+    "source": "https://github.com/rust-vmm/community (README: governance, contributors, crate list, license)"
+   },
+   {
+    "fact": "The linux-loader crate supports BOTH the Linux and the PVH boot protocols (loads vmlinux ELF + bzImage on x86_64, PE Image on aarch64/riscv64), and its README states it 'is not yet fully independent and self-sufficient, and much of the boot process remains the VMM's responsibility' — i.e. the VMM (which TABOS owns) defines the actual boot contract.",
+    "source": "https://github.com/rust-vmm/linux-loader (README: supported protocols + 'VMM's responsibility')"
+   },
+   {
+    "fact": "Owned-thin-VMM precedent is concrete: uhyve is 'a minimal, special-purpose hypervisor for the Hermit kernel' (Rust, KVM on Linux / Hypervisor.framework on macOS, Apache-2.0/MIT). And rust-vmm's vmm-reference is explicitly intended as 'a starting point in the creation of tailor-made VMMs that users build according to their needs' (fork, mix-and-match, minimal attack surface), with a default profile of 1 vCPU / 256 MiB — matching TABOS's single-vCPU Mirage profile.",
+    "source": "https://github.com/hermit-os/uhyve (README) + https://github.com/rust-vmm/vmm-reference (README: Design + default config)"
+   }
+  ]
+ },
+ {
+  "area": "virtio-devices",
+  "decisions": [
+   {
+    "decision": "Adopt virtio as an OASIS open standard, NOT as a Linux inheritance. Treat the virtio spec as a vendor-neutral I/O contract (like USB or PCIe), implemented by a clean-room TABOS driver crate. Do not couple any kernel structure to the fact that Linux also implements virtio.",
+    "category": "open-standard-neutral",
+    "rationale": "The virtio v1.2 spec is OASIS 'Committee Specification 01' (01 July 2022), produced by the 'OASIS Virtual I/O Device (VIRTIO) TC', 'Copyright OASIS Open 2022', published under the 'Non-Assertion Mode of the OASIS IPR Policy' (royalty-free). The abstract states its purpose is a 'straightforward, efficient, standard and extensible mechanism for virtual devices, rather than boutique per-environment or per-OS mechanisms' - i.e. explicitly OS-neutral. Governance is OASIS, not kernel.org; many OSes and VMMs implement it. Adopting virtio is adopting an open standard, exactly as TABOS adopts the x86_64/aarch64 ISA.",
+    "sources": [
+     "https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.pdf (front matter p1: Committee Specification 01, OASIS VIRTIO TC, Copyright OASIS Open 2022, Standards Track Work Product)",
+     "virtio v1.2 PDF lines 69-73: 'This specification is provided under the Non-Assertion Mode of the OASIS IPR Policy' + IPR.md at github.com/oasis-tcs/virtio-admin",
+     "virtio v1.2 Abstract: 'rather than boutique per-environment or per-OS mechanisms'"
+    ]
+   },
+   {
+    "decision": "Use the virtio-MMIO transport and explicitly REJECT virtio-PCI. The CPU load/store that hits a device register, and the hypervisor's stage-2/EPT trap of it, are silicon; the MMIO register layout (MagicValue 0x74726976 at offset 0x000, Version, DeviceID, QueueNotify, etc.) is OASIS-defined. Implement that register block in tb-hal; never pull in a PCI(e) enumeration stack.",
+    "category": "open-standard-neutral",
+    "rationale": "virtio v1.2 §4.2: 'Virtual environments without PCI support... might use simple memory mapped device (virtio-mmio) instead of the PCI device.' Firecracker is virtio-over-MMIO (design.md: vCPUs 'execute synchronous I/O and memory-mapped I/O operations on devices models'), so MMIO gives stock-Firecracker compatibility with zero PCI complexity. The trap mechanism is silicon (VT-x EPT / ARM stage-2 MMU intercept of a normal guest load/store); the register semantics are an open standard. PCI is pure added legacy we do not need.",
+    "sources": [
+     "virtio v1.2 §4.2 'Virtio Over MMIO' (PDF line 3591) + §4.2.2 MMIO Device Register Layout, MagicValue=0x74726976 (PDF lines 3615-3795)",
+     "Firecracker design.md: 'memory-mapped I/O operations on devices models' + device-api.md device matrix (virtio-block/net/vsock/rng/pmem/mem)"
+    ]
+   },
+   {
+    "decision": "Implement ONLY modern virtio 1.x non-transitional (little-endian) devices/drivers. Reject the transitional/legacy virtio interface entirely. This is the single concrete spot where virtio still carries Linux-era baggage, and we discard it without losing the open standard.",
+    "category": "linux-legacy-rejected",
+    "rationale": "The spec's 'legacy interface' mandates guest-NATIVE endianness and other quirks inherited from pre-standardization Linux virtio: §5.1.6.1 / §5.1.6.5.2.3 'When using the legacy interface, transitional devices and drivers MUST format the fields... according to the native endian of the guest rather than... little-endian.' Modern non-transitional devices (no legacy compatibility, VIRTIO_F_VERSION_1, all fields little-endian le16/le32/le64) are the clean OASIS contract. Since TABOS is new (no install base to be bug-compatible with), we negotiate VIRTIO_F_VERSION_1 and refuse legacy - dropping Linux baggage while keeping the standard.",
+    "sources": [
+     "virtio v1.2 PDF line 1014: 'Devices or drivers with no legacy compatibility are referred to as non-transitional'",
+     "virtio v1.2 §5.1.6.5.2.3 (PDF lines 5567-5570): legacy = guest native endian; §1.4 le16/le32/le64 little-endian; VIRTIO_F_VERSION_1 detection (PDF line 1190)"
+    ]
+   },
+   {
+    "decision": "Own a tiny TABOS device-discovery path: on aarch64 parse the minimal flattened devicetree (DTB) Firecracker hands us with our own ~200-line FDT reader in tb-hal; on x86_64 use Firecracker's fixed virtio-mmio memory map. REJECT the Linux 'virtio_mmio.device=<size>@<addr>:<irq>' kernel-cmdline probing convention and the Linux Open Firmware (OF) framework.",
+    "category": "tabos-owns-it",
+    "rationale": "virtio v1.2 §4.2.1: 'Unlike PCI, MMIO provides no generic device discovery mechanism... the guest OS will need to know the location of the registers and interrupt(s)', suggesting either a DTB binding (compatible='virtio,mmio', reg, interrupts) OR 'static, well known addresses'. DTB is a vendor-neutral standard governed by the devicetree.org community ('a community effort by many companies and individuals'), descended from IEEE-1275 OpenFirmware/ePAPR - NOT Linux. The cmdline 'virtio_mmio.device=' string-probing is a Linux-kernel parameter convention we are free to discard; we read the DTB or hardcode the Firecracker map directly. The FDT parser is small enough to own outright rather than inherit Linux's OF subsystem.",
+    "sources": [
+     "virtio v1.2 §4.2.1 MMIO Device Discovery (PDF lines 3599-3610): DTB binding example + 'static, well known addresses'",
+     "https://www.devicetree.org/ : 'community effort by many companies and individuals'; used by OpenFirmware, OPAL, PAPR, standalone FDT; current release v0.4",
+     "Firecracker design.md (machine model, fixed device layout)"
+    ]
+   },
+   {
+    "decision": "Define the mandatory device set as virtio-net + virtio-rng (entropy), with virtio-block OPTIONAL and absent by default - TABOS is memory-first/diskless, root state lives in RAM, persistence is a network/object-store capability, not a block device. For the early console on stock Firecracker, drive the legacy 16550/PL011 UART (NOT virtio-console, which stock Firecracker does not expose).",
+    "category": "tabos-owns-it",
+    "rationale": "An agent OS needs network (to reach the LLM and the world) and good entropy (for capability tokens/keys); it does not inherently need a block disk. Firecracker's device-api.md marks every device 'Optional' at the API level and exposes virtio-block/net/vsock/rng/pmem/mem PLUS a separate non-virtio 'serial console' and 'keyboard' column. design.md confirms the console is a legacy serial UART + i8042 keyboard (for reset), not virtio-console - so virtio-console is unavailable on stock Firecracker and would require an owned/cloud-hypervisor VMM. We choose the minimal honest set and treat block as a pluggable optional driver.",
+    "sources": [
+     "Firecracker device-api.md: device matrix columns 'serial console' and 'keyboard' are separate from virtio-block/net/vsock/rng/pmem/mem; all endpoints marked Optional",
+     "Firecracker design.md: 'exposes a serial console and partial keyboard controller... the purpose of the I8042 device is to signal the microVM that the guest has requested a reboot'",
+     "Solo5 solo5.h: net/block are independently acquired capabilities (solo5_net_acquire / solo5_block_acquire), block is optional"
+    ]
+   },
+   {
+    "decision": "Implement the split virtqueue (descriptor table + available ring + used ring in guest RAM) per OASIS as the data-plane, encapsulating the REQUIRED memory-ordering barriers (DMB on aarch64, the implied fence on x86_64) inside tb-hal. Be honest: the ring layout is an open standard, but the producer/consumer ordering fences are silicon-mandated and unavoidable.",
+    "category": "open-standard-neutral",
+    "rationale": "The virtqueue split-ring is defined by virtio v1.2 (§2.6/§2.7) as guest-memory data structures shared with the device; this is an OASIS contract, not Linux code. However, correctness of the avail/used ring handoff depends on CPU memory-consistency: the guest MUST fence before signalling the device and after observing used entries. Those fences (and the cache-coherency model) are dictated by the ISA memory model (ARMv8 / x86-TSO), so they are silicon-unavoidable and belong in the one crate (tb-hal) allowed to hold asm. Everything above the fences is portable Rust we own.",
+    "sources": [
+     "virtio v1.2 §2.6-2.7 Split Virtqueues (descriptor/avail/used rings)",
+     "virtio v1.2 §2.6.13 / driver notification + memory barrier requirements; ISA memory models (Intel SDM Vol 3A ch.8 ordering; ARM ARM B2 memory model) drive the fence choice"
+    ]
+   },
+   {
+    "decision": "Make the notification model poll/yield-first, interrupt-optional. Primary path: a Solo5-style cooperative yield/poll loop plus an ioeventfd-style 'kick' (a trapped MMIO/PIO write that signals the host WITHOUT a full VM-exit). Support the virtio-mmio interrupt line, but do not make interrupt-driven I/O a structural requirement. If interrupts ARE used, the GIC (aarch64) / APIC (x86_64) delivery is silicon.",
+    "category": "tabos-owns-it",
+    "rationale": "Solo5's architecture removes interrupts and scheduling entirely ('removal of interrupts implies more deterministic behaviour... no interrupts or preemptive scheduling') and its hvt ABI uses a PIO/MMIO 'kick' via ioeventfd that 'does NOT cause a VM exit'. This proves interrupt-driven I/O is a DESIGN CHOICE, not silicon-mandated, and fits TABOS's single-vCPU (Mirage) determinism goal. Whether to accept an interrupt is ours to choose; the act of taking one (vector/exception entry, GIC/APIC EOI) is silicon when we opt in.",
+    "sources": [
+     "Solo5 docs/architecture.md Non-goals: 'no interrupts or preemptive scheduling, in fact no scheduling at all'",
+     "Solo5 hvt_abi.h: hvt_ring_kick via ioeventfd PIO 0x600 / aarch64 MMIO 'does NOT cause a VM exit'; solo5.h solo5_yield(deadline, ready_set) poll model",
+     "GIC/APIC interrupt delivery: ARM GICv3 spec / Intel SDM APIC = silicon when used"
+    ]
+   },
+   {
+    "decision": "Keep the kernel-internal device model TABOS-native and capability-typed: a frozen 'acquire a typed, unforgeable device handle' interface (à la Solo5's net/block handles) sits above the drivers, and virtio-mmio is ONE replaceable driver behind it. No virtio type ever leaks into the kernel's capability ABI, scheduler, or memory model.",
+    "category": "tabos-novel",
+    "rationale": "This is the structural sovereignty move: virtio becomes a leaf driver, not a load-bearing abstraction. Solo5 demonstrates the pattern - its public API (solo5.h) is device-typed handles (solo5_net_acquire/solo5_block_acquire returning solo5_handle_t) that are backend-agnostic; Solo5 implements that same API over hvt hypercalls, seccomp/spt, muen, xen AND virtio as interchangeable bindings. TABOS mirrors this with capability handles (zero ambient authority): a device is a capability, and whether it is serviced by a virtio-mmio driver or a future native hypercall driver is invisible above the HAL. This guarantees virtio is never a structural commitment.",
+    "sources": [
+     "Solo5 docs/architecture.md: bindings implement one public API (solo5.h) across many targets incl. a 'virtio target' - virtio is just one backend",
+     "Solo5 solo5.h: solo5_handle_t typed device handles; solo5_net_acquire/solo5_block_acquire capability-acquire model"
+    ]
+   },
+   {
+    "decision": "Reserve a sovereign long-term path: a TABOS-owned VMM (or cloud-hypervisor-class host) that exposes a minimal TABOS-native paravirtual device ABI - a Solo5/hvt-style hypercall interface (a handful of hypercalls: walltime, puts, poll, net/block read/write, halt) dispatched via a trapped PIO/MMIO instruction - so the guest can drop virtio for an even thinner, fully owned contract while virtio remains the Firecracker-compatibility driver.",
+    "category": "tabos-novel",
+    "rationale": "Firecracker is virtio-only, so virtio is the price of stock-Firecracker compatibility today. But Solo5's hvt_abi.h shows the sovereign alternative concretely: an 8-entry hypercall enum (HVT_HYPERCALL_WALLTIME/PUTS/POLL/BLOCK_*/NET_*/HALT, ABI version 2) dispatched on x86_64 by 'outl' to PIO base 0x500 and on aarch64 by 'str' to an MMIO base - orders of magnitude thinner than virtio's negotiation/virtqueue machinery, with no PCI, no feature-bit handshake, no device-config space. TABOS keeps virtio as a compatibility driver now and can later own the host side to present this minimal ABI, making virtio fully optional rather than foundational.",
+    "sources": [
+     "Solo5 hvt_abi.h: enum hvt_hypercall {WALLTIME,PUTS,POLL,BLOCK_WRITE,BLOCK_READ,NET_WRITE,NET_READ,HALT}; x86 PIO 0x500 outl, aarch64 MMIO str; HVT_ABI_VERSION 2",
+     "Solo5 docs/architecture.md: hvt tender 'loosely equivalent to QEMU' but 'several orders of magnitude smaller'; legacy-free/thin design goal vs QEMU full-system VM"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "virtio is governed by OASIS, not Linux: the spec is 'Virtual I/O Device (VIRTIO) Version 1.2, Committee Specification 01, 01 July 2022', produced by the 'OASIS Virtual I/O Device (VIRTIO) TC', 'Copyright OASIS Open 2022 - Standards Track Work Product', released under the 'Non-Assertion Mode of the OASIS IPR Policy' (royalty-free). Adopting virtio is adopting an OASIS open standard, equivalent in nature to adopting USB or PCIe.",
+    "source": "https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.pdf - front matter p1 + PDF lines 69-73 (IPR Non-Assertion Mode); IPR.md at github.com/oasis-tcs/virtio-admin"
+   },
+   {
+    "fact": "virtio-MMIO is a memory-mapped register block, NOT silicon and NOT Linux: the register layout (MagicValue=0x74726976 'virt' at offset 0x000, Version 0x2, DeviceID, QueueNotify, Status...) is OASIS-defined in §4.2.2. What IS silicon is the underlying mechanism: a normal guest load/store instruction whose physical address is intercepted by the hypervisor via VT-x EPT / ARM stage-2 translation.",
+    "source": "virtio v1.2 §4.2 'Virtio Over MMIO' + §4.2.2 'MMIO Device Register Layout' (PDF lines 3591-3795); Intel SDM Vol 3C (EPT) / ARM ARM (stage-2) for the trap mechanism"
+   },
+   {
+    "fact": "virtio-MMIO has NO self-discovery; device addresses come either from a flattened devicetree (DTB) binding (compatible='virtio,mmio', reg, interrupts) or from 'static, well known addresses'. DTB itself is a vendor-neutral standard owned by the devicetree.org community (descended from IEEE-1275 OpenFirmware / ePAPR; current release v0.4), used by OpenFirmware/OPAL/PAPR/standalone-FDT - it is NOT a Linux artifact, though Linux is its biggest consumer.",
+    "source": "virtio v1.2 §4.2.1 'MMIO Device Discovery' (PDF lines 3599-3610); https://www.devicetree.org/ ('community effort by many companies and individuals', v0.4) and /specifications/"
+   },
+   {
+    "fact": "The ONLY genuinely Linux-flavored baggage in virtio is the 'legacy/transitional' interface, which mandates guest-NATIVE endianness. Modern virtio 1.x 'non-transitional' devices/drivers are strictly little-endian (le16/le32/le64) and gated by feature bit VIRTIO_F_VERSION_1. TABOS can reject legacy/transitional and implement non-transitional only, discarding the Linux-era quirks while keeping the open standard.",
+    "source": "virtio v1.2 §5.1.6.1 / §5.1.6.5.2.3 'legacy... native endian of the guest rather than little-endian' (PDF lines 5567-5570); definition of non-transitional (PDF line 1014); VIRTIO_F_VERSION_1 (PDF line 1190)"
+   },
+   {
+    "fact": "Firecracker's guest device model is virtio-over-MMIO (Net, Block, Vsock, rng, pmem, mem) PLUS a non-virtio LEGACY serial UART console and an i8042 keyboard controller (used only to signal guest-requested reboot). Therefore virtio-console is NOT available on stock Firecracker; the early/bring-up console must be the legacy 16550-class UART (PL011 on aarch64). A virtio-console requires an owned or cloud-hypervisor-class VMM.",
+    "source": "Firecracker docs/design.md (Machine Model: 'exposes a serial console and partial keyboard controller... I8042 device... signal the microVM that the guest has requested a reboot'; VirtIO Net/Block/Vsock); docs/device-api.md (separate 'serial console' and 'keyboard' columns vs virtio devices)"
+   },
+   {
+    "fact": "A sovereign, non-virtio paravirtual device interface is proven viable: Solo5 defines its OWN device ABI in solo5.h (capability-style handles: solo5_net_acquire/read/write, solo5_block_acquire/read/write, solo5_console_write, solo5_yield, solo5_clock_*) and a minimal hypercall ABI in hvt_abi.h (8 hypercalls: WALLTIME, PUTS, POLL, BLOCK_WRITE/READ, NET_WRITE/READ, HALT; ABI v2) dispatched via x86_64 'outl' to PIO 0x500 or aarch64 'str' to an MMIO base. Solo5 implements that single API across many backends (hvt/KVM, spt/seccomp, muen, xen, AND virtio) - i.e. virtio is just one interchangeable binding, exactly the TABOS 'virtio-as-replaceable-driver' model.",
+    "source": "github.com/Solo5/solo5 include/solo5.h (public API) + include/hvt_abi.h (hypercall enum, PIO/MMIO dispatch, HVT_ABI_VERSION 2) + docs/architecture.md (bindings/ implement solo5.h per target; scripts/ for the virtio target)"
+   },
+   {
+    "fact": "Interrupt-driven I/O is a CHOICE, not silicon-mandated. Solo5 explicitly removes interrupts and scheduling ('no interrupts or preemptive scheduling, in fact no scheduling at all') and notifies the host via an ioeventfd 'kick' - a trapped PIO/MMIO write that, per hvt_abi.h, 'does NOT cause a VM exit'. A poll/yield model is therefore a legitimate, deterministic alternative for single-vCPU TABOS; GIC/APIC interrupt delivery only becomes silicon-relevant if/when we opt into interrupts.",
+    "source": "Solo5 docs/architecture.md (Non-goals: 'no interrupts or preemptive scheduling'); Solo5 include/hvt_abi.h (hvt_ring_kick via ioeventfd, 'does NOT cause a VM exit'); solo5.h solo5_yield(deadline, ready_set)"
+   }
+  ]
+ },
+ {
+  "area": "sovereign-kernel-precedents",
+  "decisions": [
+   {
+    "decision": "Reject the POSIX/Unix syscall ABI as the kernel's user-facing surface. The TABOS frozen microkernel exposes ONLY capability-invocation primitives (a CNode/CSpace-equivalent for naming authority, Endpoints for protected procedure call, an Untyped-retype-equivalent for memory provisioning) and holds zero policy. There is no syscall-number table, no errno, no file-descriptor namespace baked into the kernel.",
+    "category": "linux-legacy-rejected",
+    "rationale": "seL4 is the existence proof that a complete, verified kernel needs none of the Unix syscall surface: per the seL4 whitepaper, 'What the kernel mostly provides is isolation ... and ... a protected procedure call (PPC) mechanism, which is a form of inter-process communication (IPC),' and applications interact purely through capabilities (Endpoints, Frames, Untypeds, CNodes). The whitepaper states POLA 'is impossible to achieve with the way access control happens in mainstream systems such as Linux or Windows.' The POSIX syscall ABI is Unix convention, not silicon and not a neutral standard; it is exactly the 'old bug' the directive lets us discard. Theseus reinforces that the API shape is free: it 'does not base its structure on any aspect of the underlying hardware.'",
+    "sources": [
+     "https://sel4.systems/About/seL4-whitepaper.pdf",
+     "https://www.theseus-os.com/Theseus/book/design/design.html"
+    ]
+   },
+   {
+    "decision": "Adopt object-capability security with zero ambient authority (POLA) as the TABOS security foundation. This is a vendor-neutral model owned by no OS (KeyKOS/EROS/seL4 lineage), so TABOS inherits the MODEL without inheriting any Linux structure. Every authority an agent holds is an explicit, unforgeable, delegable capability; nothing is granted by default identity or position in a namespace.",
+    "category": "open-standard-neutral",
+    "rationale": "The seL4 whitepaper defines capabilities concretely (Endpoints, Notifications, Frames, Interrupt objects, and Untypeds that are 'retyped' into other objects) and grounds them in 'the principle of least privilege (also called principle of least authority, POLA) ... a core design principle of highly secure system.' Capabilities are a decades-old neutral security primitive, not a Linux artifact (Linux/Windows use ambient ACL/uid authority, which the whitepaper calls out as the thing POLA fixes). HONEST divergence note: Hubris, also from-scratch, deliberately uses NO capabilities ('Speaking of capabilities, in the security sense, Hubris doesn't use any') - so capability security is a CHOICE TABOS owns, demonstrably not mandatory even among sovereign Rust kernels.",
+    "sources": [
+     "https://sel4.systems/About/seL4-whitepaper.pdf",
+     "https://oxidecomputer.github.io/hubris/reference/"
+    ]
+   },
+   {
+    "decision": "Discard the Unix process model wholesale: no fork, no exec, no PID, no kernel-resident 'process table,' no copy-on-write address-space cloning. The kernel knows only capability-holding execution contexts (TABOS tasks/agents), not Unix processes.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Two independent from-scratch kernels prove the process model is discardable convention, not silicon. Hubris: 'Hubris does not support creating new tasks at runtime or destroying existing tasks. This is on purpose ... you cannot write a fork-bomb without fork,' eliminating an entire DoS class and making peak memory checkable at compile time. Theseus goes further structurally: 'everything runs in a single address space (SAS) and single privilege level (SPL),' the unit of modularity is a 'cell' (== a Rust crate), and 'Theseus OS does not base its structure on any aspect of the underlying hardware, unlike the above three system designs.' fork/exec/PID is Bell-Labs Unix heritage carried by Linux; TABOS, whose principals are native agents with no legacy binaries to clone, owes it nothing.",
+    "sources": [
+     "https://oxidecomputer.github.io/hubris/reference/",
+     "https://www.theseus-os.com/Theseus/book/design/design.html"
+    ]
+   },
+   {
+    "decision": "Make task/agent creation a DYNAMIC but capability-gated kernel primitive that TABOS owns - diverging deliberately from Hubris's all-static model. A self-improving, agent-spawning OS must create execution contexts at runtime; but creation requires presenting a capability (no ambient/ungated spawn), preserving Hubris's 'no fork-bomb' guarantee without freezing the task set at build time.",
+    "category": "tabos-owns-it",
+    "rationale": "Hubris fixes its task set and priorities 'at build time' and ships 'integral firmware images, containing a set of tasks and the kernel built at the same time' - correct for deeply-embedded MCUs, wrong for TABOS's self-improvement and dynamic-agent goals. The lesson we keep is the THREAT model ('Task creation is a common source of hard-to-account-for dynamic resource usage, which can enable denial of service attacks'), and we neutralize it via capability-gated spawn rather than via staticness. We also keep Hubris's split where crash recovery lives OUTSIDE the kernel: 'Hubris itself does not restart faulted tasks. Instead, a designated task called the supervisor ... ask[s] the kernel to reinitialize the failed task' - TABOS likewise puts restart/self-improvement policy in a userspace supervisor capability-holder, kernel stays mechanism-only.",
+    "sources": [
+     "https://oxidecomputer.github.io/hubris/reference/"
+    ]
+   },
+   {
+    "decision": "Treat the user/unprivileged vs kernel/privileged split as the ONE silicon-mandated mechanism in this area and use it honestly: the TABOS frozen microkernel runs at the guest's privileged level (ring 0 / EL1 under the VMM), agents run unprivileged. What is silicon is ONLY the existence of the privilege boundary and the CPU's mode-switch; the API exposed across it (capability invocations, decision 1) is freely chosen.",
+    "category": "silicon-unavoidable",
+    "rationale": "Every sovereign kernel surveyed leans on the CPU privilege split because the silicon enforces it, and they all agree it is the hardware, not the OS, drawing the line. seL4 whitepaper: 'Applications only ever execute in user mode and can only access hardware as permitted by the OS.' Hubris: tasks are 'programs that run in the processor's unprivileged mode, subject to memory isolation ... tasks cannot directly stomp on memory owned by the kernel, or each other.' This is the truthful silicon floor: TABOS cannot and should not pretend to avoid the ring/EL privilege boundary - but Theseus's SAS/SPL design shows even the NUMBER of privilege levels used is a software choice layered on top, so the silicon only forces availability, not usage.",
+    "sources": [
+     "https://sel4.systems/About/seL4-whitepaper.pdf",
+     "https://oxidecomputer.github.io/hubris/reference/"
+    ]
+   },
+   {
+    "decision": "Confine ALL unsafe and inline-asm to a single small, auditable foundation crate (tb-hal), keeping the rest of the kernel in safe Rust - the framekernel/OSTD pattern. Adopt the PATTERN (it is a neutral Rust engineering technique, owned by no OS) while explicitly REJECTING the goal that motivated its most prominent user.",
+    "category": "tabos-owns-it",
+    "rationale": "Asterinas formalizes this as the 'framekernel architecture, combining monolithic-kernel performance with microkernel-inspired separation. Unsafe Rust is confined to a small, auditable framework called OSTD, while the rest of the kernel is written in safe Rust, keeping the memory-safety TCB intentionally minimal.' This maps one-to-one onto the TABOS plan where tb-hal 'holds all unsafe+asm.' The pattern is sound and language-driven, NOT a Linux inheritance. We take it and leave behind Asterinas's purpose (next decision). Theseus is the complementary precedent: it achieves isolation 'by means of compiler- and language-ensured type safety' rather than hardware, validating safe-Rust-as-isolation.",
+    "sources": [
+     "https://github.com/asterinas/asterinas",
+     "https://www.theseus-os.com/Theseus/book/design/design.html"
+    ]
+   },
+   {
+    "decision": "Decline Linux-ABI / POSIX source-compatibility as a goal - the explicit OPPOSITE of Asterinas and Redox. TABOS ships no Linux syscall emulation, no POSIX libc target, no /proc-/sys personality. The decision criterion is 'what do you want compatibility WITH'; TABOS agents are native and LLM-driven with zero legacy binaries, so the answer is 'nothing Unix-shaped.'",
+    "category": "linux-legacy-rejected",
+    "rationale": "The counter-examples are sharp and self-described. Asterinas: 'A Linux ABI-Compatible, Rust-Based Framekernel OS' that 'supports 230+ Linux system calls' and aims to be 'a production-grade, memory-safe Linux alternative ... with performance that matches Linux.' Redox: 'a complete Unix-like microkernel-based operating system ... Offering source compatibility ... Partial POSIX compatibility ... Source compatibility with Linux/BSD programs.' Both pay a permanent structural tax to run existing apps. TABOS has no such constraint, so importing POSIX would be importing 'old bugs' for zero benefit. Rejecting it is the single highest-leverage sovereignty decision: it is what frees decisions 1 and 3.",
+    "sources": [
+     "https://github.com/asterinas/asterinas",
+     "https://www.redox-os.org/"
+    ]
+   },
+   {
+    "decision": "Adopt a fully-asynchronous, message-passing microkernel-plus-servers I/O architecture as a TABOS-owned design, taking managarm's async-first structure while declining its (optional, chosen) Linux userspace compat layer. Drivers and services live in userspace capability-holders; the kernel mediates async IPC, not blocking Unix read/write semantics.",
+    "category": "tabos-owns-it",
+    "rationale": "managarm proves the kernel structure and the compat target are fully separable: it 'runs its own kernel that does not originate from Linux ... does not share any source code (or binaries) with the Linux kernel,' is 'based on a microkernel,' and 'uses a completely asynchronous API for I/O' - yet 'provides good compatibility with Linux at the user space level' as a deliberate property, not an inherited one. TABOS keeps the async-first microkernel design (well-suited to single-vCPU Mirage + virtio event-driven I/O) and simply omits the Linux personality managarm chose to build. This also aligns driver placement with seL4/Hubris ('Drivers live in tasks, not the kernel').",
+    "sources": [
+     "https://github.com/managarm/managarm",
+     "https://oxidecomputer.github.io/hubris/reference/"
+    ]
+   },
+   {
+    "decision": "Define the native TABOS execution principal as the LLM agent - a capability-holding, memory-first component - rather than a Unix process (Redox/managarm), an seL4 thread, a Hubris static task, or a Theseus cell. No surveyed sovereign kernel targets an LLM agent as its first-class principal; TABOS's abstraction (agent identity == capability set + memory state, schedulable on the single Mirage vCPU, LLM-agnostic) is genuinely new and is the reason TABOS owes nothing to Unix shape.",
+    "category": "tabos-novel",
+    "rationale": "The precedent survey yields a clean decision rule: every from-scratch kernel's structure is dictated by 'what do you want compatibility WITH.' seL4 wants verifiable isolation (threads + capabilities); Hubris wants static deeply-embedded reliability (build-time tasks); Theseus wants live-evolution (cells == crates); managarm and Redox want to run Linux/Unix apps (processes). TABOS wants to run native agents - a principal type none of them modeled - so it freely defines its own. This is the synthesis that converts 'we reject Linux' from posture into a derived consequence: with native agents as principals and no legacy binaries, the Unix process/syscall/ABI stack has no customer inside TABOS. HONEST scope: the agent principal still rides the silicon privilege split (decision 5) and a chosen capability microkernel (decisions 1-2); the novelty is the principal abstraction and its LLM/memory-first semantics, not a claim to have escaped the CPU.",
+    "sources": [
+     "https://www.usenix.org/conference/osdi20/presentation/boos",
+     "https://www.theseus-os.com/Theseus/book/design/design.html"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "seL4's entire user-facing API is capability-based (CNodes/CSpace for authority naming, Endpoints/Notifications for IPC, Frames for memory mapping, Interrupt objects, and Untypeds that are 'retyped' into other object types) plus a protected-procedure-call IPC; it provides 'isolation' and PPC but NO Unix syscalls and NO policy. The whitepaper states least-authority (POLA) 'is impossible to achieve with the way access control happens in mainstream systems such as Linux or Windows.' => The capability API is neutral/sovereign, NOT Linux.",
+    "source": "https://sel4.systems/About/seL4-whitepaper.pdf (Heiser, 'The seL4 Microkernel: An Introduction,' rev 1.4, 2025-01-08)"
+   },
+   {
+    "fact": "Theseus runs everything - kernel components, drivers, services, applications - 'in a single address space (SAS) and single privilege level (SPL)'; its modularity unit is a 'cell' that is one-to-one with a Rust crate; and 'Theseus OS does not base its structure on any aspect of the underlying hardware, unlike the above three system designs [monolithic/micro/multikernel].' => The process/address-space-per-process model is a software convention, not silicon.",
+    "source": "https://www.theseus-os.com/Theseus/book/design/design.html"
+   },
+   {
+    "fact": "Hubris 'does not support creating new tasks at runtime or destroying existing tasks ... you cannot write a fork-bomb without fork'; task count and priorities are 'fixed at build time'; applications 'ship as integral firmware images'; and the kernel does not restart faults - 'a designated task called the supervisor' (in userspace) does. => fork/exec/dynamic-process is rejectable Unix convention, and crash-recovery policy can live outside the kernel.",
+    "source": "https://oxidecomputer.github.io/hubris/reference/"
+   },
+   {
+    "fact": "Hubris, though a from-scratch memory-protected message-passing kernel, deliberately uses NO capabilities: 'Speaking of capabilities, in the security sense, Hubris doesn't use any. The only object of note in the system is the task.' => TABOS's capability model is a deliberate CHOICE TABOS owns, not an inevitability even among sovereign Rust kernels.",
+    "source": "https://oxidecomputer.github.io/hubris/reference/"
+   },
+   {
+    "fact": "managarm 'runs its own kernel that does not originate from Linux ... does not share any source code (or binaries) with the Linux kernel,' is microkernel-based with 'a completely asynchronous API for I/O,' yet 'provides good compatibility with Linux at the user space level' as a deliberate, separable property. => Linux-ABI compat is a removable CHOICE layered on a sovereign kernel, not a structural requirement.",
+    "source": "https://github.com/managarm/managarm"
+   },
+   {
+    "fact": "Asterinas is self-described as 'A Linux ABI-Compatible, Rust-Based Framekernel OS' (USENIX ATC 2025), 'supports 230+ Linux system calls,' aims to be a 'memory-safe Linux alternative,' and confines unsafe Rust to a small framework 'OSTD' (the framekernel pattern). => Linux-ABI compatibility is the OPPOSITE of TABOS's goal; the unsafe-confinement PATTERN is neutral and reusable as tb-hal.",
+    "source": "https://github.com/asterinas/asterinas"
+   },
+   {
+    "fact": "Redox is 'a complete Unix-like microkernel-based operating system written in Rust' offering 'Source compatibility with Linux/BSD programs' and 'Partial POSIX compatibility,' intended as 'a complete alternative to Linux and BSD.' => Redox is Unix-like BY CHOICE (counter-example); its POSIX surface is convention TABOS is free to discard since TABOS runs no legacy binaries.",
+    "source": "https://www.redox-os.org/"
+   },
+   {
+    "fact": "The unprivileged(user)/privileged(kernel) CPU mode split is the one silicon-enforced mechanism every sovereign kernel uses: seL4 - 'Applications only ever execute in user mode and can only access hardware as permitted by the OS'; Hubris - tasks 'run in the processor's unprivileged mode, subject to memory isolation.' => The privilege boundary is silicon-unavoidable; the API shape crossing it (and even how many privilege levels are used, per Theseus SAS/SPL) is freely chosen.",
+    "source": "https://sel4.systems/About/seL4-whitepaper.pdf ; https://oxidecomputer.github.io/hubris/reference/"
+   }
+  ]
+ },
+ {
+  "area": "clean-slate-formats-abi",
+  "decisions": [
+   {
+    "decision": "Define .taf as the canonical TABOS agent/executable image format. Do NOT adopt ELF (or PE) as the agent format. ELF stays entirely outside TABOS's own surface; it is only ever a boot-time container the VMM loader parses (see next decision), never the runtime format of a TABOS agent. The .taf schema (header, capability-manifest, memory-first sections, NL metadata) is owned end-to-end by TABOS.",
+    "category": "tabos-novel",
+    "rationale": "ELF is the System V 'Executable and Linking Format' — sco.com gABI ch4 defines it as 'the object file format, called ELF (Executable and Linking Format)' and the document is the 'System V Application Binary Interface', © Santa Cruz Operation / Caldera / Xinuos. It is a cross-Unix standard, not Linux, but it is also still a CHOICE: nothing about our silicon or VMM forces an agent-level format. Because the .taf image is consumed by the TABOS kernel itself (not by an external loader expecting System V semantics), we owe ELF nothing here and invent our own structure with no old bugs (no section/segment dual-view baggage, no dynamic-linking/PLT/GOT machinery).",
+    "sources": [
+     "https://www.sco.com/developers/gabi/latest/ch4.intro.html — 'This chapter describes the object file format, called ELF (Executable and Linking Format).'",
+     "https://www.sco.com/developers/gabi/latest/contents.html — title 'System V Application Binary Interface', © Santa Cruz Operation / Caldera / Xinuos"
+    ]
+   },
+   {
+    "decision": "Accept that the Firecracker/rust-vmm-class loader ingests a cross-OS boot container — raw ELF (vmlinux) on x86_64 and PE (Image) on aarch64 — and emit the TABOS kernel in that container ONLY at the VMM handoff boundary. Treat this as an open, vendor-neutral, selectable standard, not a Linux dependency. Keep the ELF/PE wrapper as a thin tb-hal artifact; it imposes no semantics on the kernel body.",
+    "category": "open-standard-neutral",
+    "rationale": "The rust-vmm linux-loader README states it 'offers support for loading raw ELF (vmlinux) ... on x86_64 and PE (Image) kernel images on aarch64'. ELF here is the System V format (cross-Unix), and PE is the Microsoft/TIS PE-COFF format — neither is Linux-owned. It is a contract with the VMM loader, not an inheritance from an OS: the loader will accept whatever container its parser supports, so this is honestly classified as a neutral standard we elect to satisfy, and it is even arch-dependent (ELF vs PE), underscoring it is a choice, not a law.",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md — 'support for loading raw ELF (vmlinux) and compressed big zImage (bzImage) format kernel images on x86_64 and PE (Image) kernel images on aarch64'",
+     "https://www.sco.com/developers/gabi/latest/contents.html — ELF is the System V ABI object format"
+    ]
+   },
+   {
+    "decision": "Reject the Linux/x86 'zero page' boot protocol (boot_params, setup_header, real-mode setup, cmd_line_magic, EBDA dance) outright. Adopt PVH (XEN_ELFNOTE_PHYS32_ENTRY direct-boot ABI) as TABOS's x86_64 handoff, and the AArch64/RISC-V Image+DTB handoff on aarch64. Boot protocols are demonstrably choosable, so TABOS picks the cleanest non-Linux one.",
+    "category": "linux-legacy-rejected",
+    "rationale": "kernel.org itself concedes the Linux boot protocol is 'a rather complicated boot convention ... evolved partially due to historical aspects ... the complicated PC memory model and ... the effective demise of real-mode DOS' — i.e. pure Linux-specific historical baggage (15+ protocol revisions, 144-byte setup_header limits, 0x90000 segment hacks). It is NOT silicon. Proof of choosability: multiboot2 'specifies an interface between a boot loader and an operating system, such that any complying boot loader should be able to load any complying operating system'; PVH is a Xen-defined ABI keyed by 'XEN_ELFNOTE_PHYS32_ENTRY'; and rust-vmm linux-loader 'ELF support includes the Linux and PVH boot protocols'. We take PVH and discard the zero page.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html — 'the Linux kernel uses a rather complicated boot convention. This has evolved partially due to historical aspects ...'",
+     "https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html — 'any complying boot loader should be able to load any complying operating system'",
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html — 'The presence of the XEN_ELFNOTE_PHYS32_ENTRY note indicates that the kernel supports the boot ABI described in this document.'",
+     "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md — 'ELF support includes the Linux and PVH boot protocols.'"
+    ]
+   },
+   {
+    "decision": "Concede in tb-hal that the CPU machine state at kernel entry is silicon-dictated and identical regardless of OS: on x86_64, long/protected mode with CR0.PE set, flat code/data segment descriptors (base 0, limit 0xFFFFFFFF), a loaded GDT/IDT, a TSS, and defined EFLAGS bits; the mirror on aarch64 (exception level, MMU/SCTLR state). tb-hal must construct this state; it is the one place TABOS genuinely cannot invent its own structure.",
+    "category": "silicon-unavoidable",
+    "rationale": "This is provable from a NON-Linux source, so it is honestly silicon, not Linux convention: the Xen PVH ABI requires at entry 'cr0: bit 0 (PE) must be set', 'cs: must be a 32-bit read/execute code segment with a base of 0 and a limit of 0xFFFFFFFF', 'tr: must be a 32-bit TSS', and specific eflags bits cleared. The Linux 64-bit protocol independently requires 'CPU must be in 64-bit mode with paging enabled ... a GDT must be loaded'. Two unrelated non-Linux/Linux protocols converge on the SAME register/segment/mode contract because x86 silicon mandates it. TABOS owns everything above this line; this line itself is Intel/Arm's, not Linux's.",
+    "sources": [
+     "https://xenbits.xen.org/docs/unstable/misc/pvh.html — 'cr0: bit 0 (PE) must be set ... cs: must be a 32-bit read/execute code segment with a base of 0 and a limit of 0xFFFFFFFF ... tr: must be a 32-bit TSS'",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html — 64-bit Boot Protocol: 'the CPU must be in 64-bit mode with paging enabled ... a GDT must be loaded with the descriptors for selectors __BOOT_CS(0x10) and __BOOT_DS(0x18)'"
+    ]
+   },
+   {
+    "decision": "Define the TABOS kernel-entry mechanism as capability invocation carrying structured + NL payloads. Reject the Linux syscall-number ABI wholesale: no fixed syscall table indexed by integer, no errno return convention, no ioctl multiplexer, no fd-as-small-int. The trap INSTRUCTION (x86_64 syscall/sysret, aarch64 svc) is silicon and is used; the ABI layered on top of it is 100% TABOS's own design.",
+    "category": "tabos-novel",
+    "rationale": "The Linux syscall numbering, errno space, and ioctl/fd integer conventions are an OS-level ABI, not a silicon or psABI requirement — the psABI only governs how arguments land in registers at the C boundary, not what the numbers mean. The x86-64 psABI explicitly scopes the trap-boundary register usage but flags its own Linux-specific pieces (e.g. revision notes 'make /lib64 a Linux specific section', 'Set name of Linux dynamic linker'), demonstrating that the document distinguishes neutral mechanism from Linux policy. TABOS supplies its own policy: capability handles (unforgeable, no ambient authority) instead of integer fds, structured/NL request bodies instead of numbered syscalls, and typed capability errors instead of errno.",
+    "sources": [
+     "https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/abi.tex — revision history flags 'make /lib64 a Linux specific section' and 'Set name of Linux dynamic linker', i.e. the psABI separates neutral convention from Linux-specific policy",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html — the syscall-number/boot_params surface is documented as Linux-specific convention"
+    ]
+   },
+   {
+    "decision": "Obey the platform psABI calling convention ONLY at the tb-hal asm / extern-\"C\" boundary: SysV AMD64 register/stack convention on x86_64, AAPCS64 on aarch64. Classify this as honoring a cross-OS vendor/standards-body contract that LLVM and the silicon's register file impose — explicitly NOT a Linux inheritance. Above the boundary, TABOS uses Rust's own (unstable, freely-chosen) ABI internally.",
+    "category": "open-standard-neutral",
+    "rationale": "The x86-64 convention is the 'System V Application Binary Interface — AMD64 Architecture Processor Supplement (With LP64 and ILP32 Programming Models)', edited by a multi-vendor group (H.J. Lu/Intel, Matz & Jaeger/SUSE, Mitchell/CodeSourcery) and used across Solaris/BSD/illumos/Linux — it is a processor supplement to the System V gABI, not a Linux artifact. The aarch64 convention is the 'Procedure Call Standard for the Arm 64-bit Architecture (AArch64)', © Arm Limited under CC-BY-SA-4.0, 'the Procedure Call Standard used by the Application Binary Interface (ABI) for the Arm 64-bit architecture'. We owe it because LLVM emits to it and the CPU has a fixed register file — a silicon+toolchain reality — but the standard itself is vendor-neutral, so the honest answer to 'is this Linux?' is no.",
+    "sources": [
+     "https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/abi.tex — title 'System V Application Binary Interface — AMD64 Architecture Processor Supplement'; editors from Intel, SUSE, CodeSourcery",
+     "https://raw.githubusercontent.com/ARM-software/abi-aa/main/aapcs64/aapcs64.rst — 'Procedure Call Standard for the Arm 64-bit Architecture (AArch64) ... © Arm Limited ... CC-BY-SA-4.0'"
+    ]
+   },
+   {
+    "decision": "Discard the entire POSIX/Unix personality as Linux-lineage legacy: no signals, no fork/exec, no errno, no integer file descriptors, no ioctl, no /proc text format, and no System V dynamic-linking model (interpreter/.so/PLT/GOT/DT_NEEDED). None of these are silicon or a required neutral standard; all are Unix-family convention TABOS is free to reject.",
+    "category": "linux-legacy-rejected",
+    "rationale": "The dynamic-linking machinery (Program Interpreter, Dynamic Linker, Dynamic Section, GOT/PLT, Shared Object Dependencies) is defined in System V ABI Chapter 5 as the Unix runtime model — TABOS's frozen-capability microkernel with static .taf agents has no use for it. The x86-64 psABI even tags the dynamic-linker path '/lib64' as 'a Linux specific section', confirming these are OS-policy choices, not silicon. fork/exec/signals/errno/ioctl/procfs are Unix process-model conventions with no hardware or VMM mandate. TABOS replaces the lot with capability invocation and static agent images.",
+    "sources": [
+     "https://www.sco.com/developers/gabi/latest/contents.html — Ch.5 'Dynamic Linking: Program Interpreter, Dynamic Linker, Dynamic Section, Global Offset Table, Procedure Linkage Table, Shared Object Dependencies' (the Unix runtime model)",
+     "https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/abi.tex — revision note: 'make /lib64 a Linux specific section'"
+    ]
+   },
+   {
+    "decision": "For hardware description handed to the guest, consume the vendor-neutral open standards the VMM already speaks — devicetree/FDT on aarch64 (and ACPI on x86_64) — but treat them as INPUT to be parsed into TABOS's own internal hardware model. TABOS does not adopt Linux's in-kernel DT bindings or procfs/sysfs reflection of them; it owns the in-memory representation.",
+    "category": "open-standard-neutral",
+    "rationale": "Devicetree is explicitly OS-neutral: devicetree.org states it is 'a community effort by many companies and individuals' and 'a data structure that is passed to the operating system at boot time', used by 'OpenFirmware, OpenPOWER Abstraction Layer (OPAL), Power Architecture Platform Requirements (PAPR) and ... Flattened Device Tree (FDT)'; the spec is Apache-2.0. rust-vmm linux-loader confirms VMMs hand DTBs to aarch64/riscv64 guests ('Loading device tree blobs (aarch64 and riscv64)'). So the wire format is a neutral standard we accept at the boundary, while the parsed model and any introspection surface are TABOS-owned.",
+    "sources": [
+     "https://www.devicetree.org/ — 'Devicetree.org is a community effort by many companies and individuals ... a data structure that is passed to the operating system at boot time ... used by OpenFirmware, OPAL, PAPR and ... Flattened Device Tree (FDT)'",
+     "https://github.com/devicetree-org/devicetree-specification — 'This project is licensed under the Apache V2 license'",
+     "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md — 'Loading device tree blobs (aarch64 and riscv64).'"
+    ]
+   },
+   {
+    "decision": "Own the introspection surface entirely: the synthetic agent tree is TABOS-defined (typed capability namespace, not a /proc text pseudo-filesystem), and process/agent visibility is exposed as capability handles, not as integer fds over a text VFS. There is zero Linux procfs/sysfs/VFS contract; TABOS specifies the schema, naming, and access semantics.",
+    "category": "tabos-owns-it",
+    "rationale": "Nothing in silicon, the VMM contract, the psABI, ELF, or devicetree dictates how an OS exposes self-introspection — Linux's /proc/sysfs text format is pure Linux convention. Because TABOS is capability-first with no ambient authority and no Unix VFS, it defines its own structured agent tree: nodes are typed capabilities, traversal is an explicit capability-derivation operation, and there is no parse-the-text-of-/proc/<pid>/status contract to inherit. This is TABOS policy over a clean slate, owned by us though not a novel primitive per se.",
+    "sources": [
+     "https://www.sco.com/developers/gabi/latest/contents.html — System V ABI defines object/linking, not any /proc or introspection surface (i.e. nothing forces procfs)",
+     "https://www.kernel.org/doc/html/latest/arch/x86/boot.html — confirms the OS-facing surface (boot_params/zero page) is Linux-specific convention, not a mandated contract"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "ELF is the System V 'Executable and Linking Format', defined in the System V Application Binary Interface (the gABI), © Santa Cruz Operation / Caldera / Xinuos — a cross-Unix standard, NOT a Linux invention. So 'using ELF' (if we did) would not make TABOS a Linux system; but we use it only as a boot container, never as the agent format.",
+    "source": "https://www.sco.com/developers/gabi/latest/ch4.intro.html and .../contents.html — 'System V Application Binary Interface ... the object file format, called ELF (Executable and Linking Format)'"
+   },
+   {
+    "fact": "The x86_64 C calling convention is the 'System V ABI — AMD64 Architecture Processor Supplement', a processor supplement to the gABI edited by a multi-vendor group (Intel, SUSE, CodeSourcery), used across Solaris/BSD/Linux. It is a cross-OS psABI, not Linux. The document even tags its few Linux-specific items (e.g. '/lib64 a Linux specific section', 'name of Linux dynamic linker'), proving neutral mechanism is separable from Linux policy.",
+    "source": "https://gitlab.com/x86-psABIs/x86-64-ABI/-/raw/master/x86-64-ABI/abi.tex"
+   },
+   {
+    "fact": "The aarch64 C calling convention is the 'Procedure Call Standard for the Arm 64-bit Architecture (AArch64)', © Arm Limited, licensed CC-BY-SA-4.0 — an Arm vendor/standards-body document, not Linux.",
+    "source": "https://raw.githubusercontent.com/ARM-software/abi-aa/main/aapcs64/aapcs64.rst — 'the Procedure Call Standard used by the Application Binary Interface (ABI) for the Arm 64-bit architecture ... © ... Arm Limited ... CC-BY-SA-4.0'"
+   },
+   {
+    "fact": "The Linux/x86 boot protocol (boot_params 'zero page', setup_header, real-mode setup, EBDA/0x90000 hacks) is self-described by kernel.org as a complicated convention driven by historical PC/DOS baggage — it is Linux-specific legacy and rejectable, not a hardware requirement.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/x86/boot.html — 'the Linux kernel uses a rather complicated boot convention. This has evolved partially due to historical aspects ... and ... the effective demise of real-mode DOS'"
+   },
+   {
+    "fact": "Boot protocols are choosable and OS-neutral: multiboot2 explicitly specifies a bootloader<->OS interface so 'any complying boot loader should be able to load any complying operating system'; PVH is a Xen-defined direct-boot ABI selected by an ELF note (XEN_ELFNOTE_PHYS32_ENTRY). These are existence proofs that a boot protocol is a free choice, not a Linux mandate.",
+    "source": "https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html and https://xenbits.xen.org/docs/unstable/misc/pvh.html"
+   },
+   {
+    "fact": "A Firecracker/rust-vmm-class VMM loader parses a raw ELF vmlinux on x86_64 and a PE Image on aarch64, and explicitly supports BOTH the Linux and the PVH boot protocols — so the boot container AND the handoff protocol are both selectable, and TABOS can pick PVH and avoid all Linux zero-page code.",
+    "source": "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md — 'loading raw ELF (vmlinux) ... on x86_64 and PE (Image) ... on aarch64. ELF support includes the Linux and PVH boot protocols.'"
+   },
+   {
+    "fact": "Devicetree/FDT is a vendor-neutral, multi-company open standard (Apache-2.0) derived from Open Firmware and used by OPAL/PAPR/standalone FDT across many OSes — it is 'passed to the operating system at boot time', i.e. OS-agnostic input, not a Linux artifact (even though its mailing list is hosted on kernel.org infra).",
+    "source": "https://www.devicetree.org/ and https://github.com/devicetree-org/devicetree-specification (Apache V2 license)"
+   },
+   {
+    "fact": "The CPU entry-state contract is silicon-mandated and OS-independent: the NON-Linux Xen PVH ABI requires CR0.PE set, flat code/data segment descriptors (base 0, limit 0xFFFFFFFF), a TSS, and specific EFLAGS bits cleared — the identical mode/segment/GDT contract the Linux 64-bit protocol also requires. This convergence proves it is Intel/Arm silicon, not Linux, that TABOS's tb-hal must satisfy.",
+    "source": "https://xenbits.xen.org/docs/unstable/misc/pvh.html — 'cr0: bit 0 (PE) must be set ... cs ... base of 0 and a limit of 0xFFFFFFFF ... tr: must be a 32-bit TSS'"
+   }
+  ]
+ },
+ {
+  "area": "linux-bugs-we-avoid",
+  "decisions": [
+   {
+    "decision": "Reject ambient authority entirely: every TABOS operation requires presenting an explicit, narrow capability; no task ever acts with 'the full power of the user/process'. This is the foundational invariant the rest of the kernel inherits.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Ambient authority is the named root cause in the capability literature, NOT a silicon constraint. Capsicum defines it exactly: a process 'acts with the full power of the user, has access to all his or her resources (such implicit access is known as ambient authority)' (capsicum.pdf, Intro). The seL4 whitepaper is blunt that the fix is structurally unavailable in Linux: POLA capability access control 'is a core design principle of highly secure system, and is impossible to achieve with the way access control happens in mainstream systems such as Linux or Windows' (sel4wp.pdf S1). It also warns that 'Linux capabilities' are a false friend: 'what Linux calls capabilities ... are really access-control lists (ACLs) with system-call granularity. Linux capabilities, like all ACL schemes, suffer from the confused deputy problem, which is at the root of many security breaches' (sel4wp.pdf S4.1). TABOS's stated 'zero ambient authority' model is therefore not novel-to-us (EROS/Capsicum/seL4 own the idea) but is a deliberate, sourced rejection of the Linux/Windows ACL default. Honest silicon note: nothing in x86_64/aarch64 forces ambient authority; the MMU/ring mechanism is policy-neutral.",
+    "sources": [
+     "Watson, Anderson, Laurie, Kennaway, 'Capsicum: practical capabilities for UNIX', USENIX Security 2010 (capsicum.pdf, fetched usenix.org/legacy/event/sec10) - 'ambient authority' definition",
+     "seL4 whitepaper (sel4.systems/About/seL4-whitepaper.pdf) S1 'impossible to achieve' in Linux; S4.1 Linux capabilities = ACLs + confused deputy",
+     "Capsicum cites EROS [23] / PSOS [16] as the capability provenance for unforgeable tokens of authority"
+    ]
+   },
+   {
+    "decision": "Do not implement fork() (nor Linux clone()). Tasks are declared statically in a manifest and started by a spawn-from-manifest mechanism (Hubris app.toml model); process/component creation takes explicit parameters, never 'copy everything from the parent and selectively unshare'.",
+    "category": "linux-legacy-rejected",
+    "rationale": "The OS-research consensus now treats fork as a mistake, and its recommendation is literally to remove it. Baumann et al.: fork 'was a clever hack ... that has long outlived its usefulness and is now a liability', it is 'a terrible abstraction', 'not thread-safe, it is inefficient and unscalable, and it introduces security concerns', it is 'hostile to user-mode implementation' and 'incompatible with a single address space' / 'heterogeneous hardware'; their explicit call to action is 'Deprecate fork' (fork-hotos19.pdf). Crucially for our security model: 'By default, a forked child inherits everything from its parent ... the inherit-by-default behaviour of fork violates the principle of least [privilege]' - the exact opposite of our capability stance. Windows CreateProcess and posix_spawn() prove process creation needs no fork. Hubris demonstrates the clean-slate alternative working on real silicon: 'Tasks can't be created or destroyed. An application declares all of its tasks in its app.toml config file ... Hubris does not support creating new tasks at runtime ... Put another way, you can't write a fork-bomb without fork' (Hubris Reference S2.4), which also makes peak memory checkable at compile time. fork is software convention, never silicon.",
+    "sources": [
+     "Baumann, Appavoo, Krieger, Roscoe, 'A fork() in the road', HotOS 2019 (fork-hotos19.pdf, fetched microsoft.com/research) - 'liability', 'terrible abstraction', 'violates the principle of least privilege', 'Deprecate fork'",
+     "Oxide Hubris Reference S2.4 'Tasks can't be created or destroyed' / 'you can't write a fork-bomb without fork' / app.toml manifest"
+    ]
+   },
+   {
+    "decision": "No ioctl-style untyped escape hatch and no text-parsing /proc. EVERY operation on a kernel object is a typed capability invocation with a declared method + typed args; all introspection is structured, typed, capability-gated, and model-readable. There is no general 'do-arbitrary-thing-to-this-fd' call and no stringly-typed status surface.",
+    "category": "linux-legacy-rejected",
+    "rationale": "seL4 shows the typed alternative is the whole point of a capability kernel: 'invoking a capability is the one and only way of performing an operation on a system object. In fact, a system call in seL4 is a capability invocation, with arguments specifying what operation to perform on the object referenced by the invoked capability. The kernel will then check whether the capability authorises the requested operation, and immediately abort ... if it is not authorised' - 'this fine-grained, object-oriented nature' is precisely what ioctl's opaque (fd, request, void*) lacks (sel4wp.pdf S4.1). Capsicum independently flags ioctl as inherently dangerous: among 'system management interfaces that must be protected' are '/dev device nodes ... and some ioctl operations on sockets' (capsicum.pdf S2.1) - i.e. ioctl is an unbounded authority surface even in a hardened Unix. The /proc text surface is the same untyped fragility on the read side; replacing it with typed introspection also directly serves the LLM-agnostic / 'structured model-readable' goal. None of this is silicon-mandated - ioctl and /proc are pure Unix convention.",
+    "sources": [
+     "seL4 whitepaper (sel4.systems) S4.1 - 'a system call in seL4 is a capability invocation ... kernel will then check whether the capability authorises the requested operation'",
+     "Capsicum (capsicum.pdf) S2.1 - 'some ioctl operations on sockets' listed among management interfaces that must be protected to maintain isolation"
+    ]
+   },
+   {
+    "decision": "No POSIX signals (no async signal handlers, no async-signal-safety constraint, no signal masks). Asynchronous events are delivered as typed, queued notifications to an explicit endpoint that a task drains synchronously at safe points (Hubris-style notification bits / IPC), never as a forced reentrant jump into handler context.",
+    "category": "linux-legacy-rejected",
+    "rationale": "The Linux man-pages themselves document signals as a structurally broken async primitive: 'An async-signal-safe function is one that can be safely called from within a signal handler. Many functions are not async-signal-safe. In particular, nonreentrant functions are generally unsafe' - and the worked example shows a printf interrupted mid-buffer by a handler that also calls printf yields 'inconsistent data, with unpredictable results' (signal-safety(7), Linux man-pages 6.18). The standard's 'solutions' (call only the ~180 whitelisted functions, or block signals around every critical section) are conceded to be impractical: 'the second choice is difficult in programs of any complexity'. Even errno is fragile: it is only async-signal-safe 'provided that the signal handler saves errno on entry and restores its value before returning'. A clean-slate kernel inherits none of this: signals are a 1970s convention, not silicon. Hubris's notification model (typed bits drained on the task's own schedule) is the structural replacement we adopt.",
+    "sources": [
+     "Linux man-pages 6.18, signal-safety(7) (man7.org/linux/man-pages/man7/signal-safety.7.html) - 'Many functions are not async-signal-safe'; printf reentrancy example; errno save/restore caveat",
+     "Oxide Hubris Reference - notification/IPC delivery model (typed, drained synchronously) as the non-signal async primitive"
+    ]
+   },
+   {
+    "decision": "No path-based ambient access; close the TOCTOU class by construction. There is no global filesystem/PID namespace a task can name. Access is via handles only; designation and authority are coupled in one unforgeable capability ('no designation without authority'). A task can only operate on objects it already holds a capability for - there is no name-it-then-check-it window.",
+    "category": "linux-legacy-rejected",
+    "rationale": "TOCTOU is a direct consequence of separating naming (a path, available to anyone) from authorization (a later check), which Unix's path-based API bakes in. seL4 states the fix as a principle: 'denomination (the reference to the file) and authority (the right to perform operations on the file) must be coupled, a principle called no designation without authority ... This is exactly what a capability system enforces' (sel4wp.pdf S4.1) - removing the confused-deputy / race surface entirely. Capsicum demonstrates the same in practice: capability-mode processes 'are denied access to global namespaces such as the filesystem and PID namespaces'; openat against a directory capability means 'openat(4, \"../etc/passwd\") and openat(4, \"/etc/passwd\") will not [succeed]', and the paper explicitly discusses how lifting the '..' restriction would reintroduce a race where 'two colluding sandboxes ... can race to actively rearrange a tree so that the check always succeeds' - i.e. classic TOCTOU, which the handle-relative design avoids (capsicum.pdf S2.1-2.2). Path-based access is Unix convention; silicon imposes nothing here.",
+    "sources": [
+     "seL4 whitepaper S4.1 - 'no designation without authority'; designation+authority must be coupled",
+     "Capsicum (capsicum.pdf) S2.1/S2.2 - capability mode denies global namespaces; openat refuses absolute and '..' paths; explicit TOCTOU race discussion ('race to actively rearrange a tree')"
+    ]
+   },
+   {
+    "decision": "No global integer file-descriptor table and no forgeable/guessable references. Object references are unforgeable capability handles indexed in a per-task capability space (CSpace), each carrying a narrow rights mask; there is no ambient 'fd 0/1/2 are stdin/out/err' inheritance and no integer-exhaustion or fd-confusion attack surface.",
+    "category": "linux-legacy-rejected",
+    "rationale": "Capsicum observes that Unix fds are already half-capabilities but dangerously over-broad: 'File descriptors already have some properties of capabilities: they are unforgeable tokens of authority ... Unlike pure capabilities, however, they confer very broad rights: even if a file descriptor is read-only, operations on meta-data such as fchmod are permitted' - which is exactly why Capsicum adds a ~60-bit rights mask (CAP_READ, CAP_SEEK, ...) per descriptor (capsicum.pdf S2.2). seL4 generalizes: a capability 'is an object reference; in that sense it is similar to a pointer ... fat pointers ... immutable pointers ... each capability uniquely specifies a particular object' plus an encoded rights set (sel4wp.pdf S4.1). TABOS adopts the strong form: unforgeable handles in a CSpace with minimal rights, not small integers. The integer-fd model (small dense namespace, ambient 0/1/2, EMFILE exhaustion, fd reuse races) is Unix convention, not silicon - the CPU has no notion of a file descriptor.",
+    "sources": [
+     "Capsicum (capsicum.pdf) S2.2 - fds are 'unforgeable tokens of authority' but 'confer very broad rights' (fchmod on read-only fd); ~60 rights-mask bits per capability",
+     "seL4 whitepaper S4.1 - capability as immutable 'fat pointer' (object reference + access rights) uniquely specifying an object"
+    ]
+   },
+   {
+    "decision": "No C-string / errno ABI at any TABOS boundary. The kernel ABI is Rust-native: fallible operations return typed Result values with structured, enumerable, model-readable error variants; there is no thread-local errno, no NUL-terminated string contract, and no out-of-band -1/set-errno convention. (tb-hal confines the only unsafe/asm; the ABI above it is total and typed.)",
+    "category": "tabos-owns-it",
+    "rationale": "This is honestly a TABOS ABI choice rather than a single named paper-critique, but it is grounded: even POSIX concedes errno is fragile state - 'Fetching and setting the value of errno is async-signal-safe provided that the signal handler saves errno on entry and restores its value before returning' (signal-safety(7)), i.e. correctness depends on every caller's discipline. The errno/-1 convention and NUL-terminated C strings are conventions, not silicon, and they are exactly the legacy a Rust-frozen-capability microkernel exists to delete (typed Result<T,E>, slices with length, no ambient global). Choosing typed structured errors also directly serves the LLM-agnostic 'model-readable' requirement: an LLM can pattern-match an enum variant far more reliably than parse errno integers or English strerror strings. We own this surface; we do not inherit it.",
+    "sources": [
+     "Linux man-pages 6.18, signal-safety(7) - errno is only safe with manual save/restore discipline (evidence the errno convention is brittle shared state)",
+     "TABOS scenario - Rust frozen capability microkernel; tb-hal isolates unsafe/asm; ABI above it is typed (own-structure decision, not a Linux inheritance)"
+    ]
+   },
+   {
+    "decision": "Do not adopt the synchronous-blocking syscall model as the only/primary contract. The default is async capability-invocation; long-running LLM/inference work is submitted as a DAG of typed requests and completed asynchronously (memory-first, self-improvement). Blocking is an opt-in convenience built on top, never the substrate.",
+    "category": "tabos-novel",
+    "rationale": "The async/DAG inference-submission structure is genuinely TABOS-novel (it is our own design for the LLM-agnostic, memory-first, single-vCPU Mirage scenario), so I classify it tabos-novel rather than pretend a paper mandates it. Honesty about silicon: the syscall TRAP instruction (x86_64 SYSCALL, aarch64 SVC) and the privilege-level transition ARE silicon-unavoidable - we cannot avoid the instruction set. But the BLOCKING SEMANTICS layered on the trap are pure software convention; Unix chose synchronous-by-default and bolted on epoll/io_uring/AIO afterward. A clean-slate kernel can make async the native shape from day one. Supporting evidence that fork-era synchronous assumptions are exactly what modern designs discard: the fork paper notes 'clean-slate designs' that 'can manipulate any process ... rather than [only] the current process', yielding flexibility the synchronous fork/exec line lacks (fork-hotos19.pdf S6). We own the inference-DAG contract; the trap instruction underneath it we honestly cannot.",
+    "sources": [
+     "TABOS scenario - LLM-agnostic, memory-first, self-improvement; DAG/async inference submission is TABOS's own structure",
+     "Baumann et al., 'A fork() in the road', HotOS 2019 (fork-hotos19.pdf) S6 - clean-slate designs decouple operations from 'the current process' (evidence the synchronous-self model is a discardable convention)",
+     "Silicon boundary (to verify against Intel SDM Vol.2 SYSCALL / ARM ARM SVC): the trap instruction + ring transition are mandated; the blocking semantics on top are not"
+    ]
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "fork() is a Unix/POSIX software API, not a CPU instruction. Windows CreateProcess and POSIX posix_spawn() create processes with no fork, and the HotOS'19 authors' explicit recommendation is 'Deprecate fork'. => Process creation semantics are 100% choosable; rejecting fork costs us no silicon compatibility.",
+    "source": "fork-hotos19.pdf (Baumann et al., HotOS 2019) - 'Deprecate fork'; Windows CreateProcess / posix_spawn cited as fork-free"
+   },
+   {
+    "fact": "The seL4 whitepaper states that principle-of-least-authority capability access control 'is impossible to achieve with the way access control happens in mainstream systems such as Linux or Windows.' => The capability model is structurally NON-Linux; adopting it is a clean break, not a port of a Linux feature.",
+    "source": "seL4 whitepaper, sel4.systems/About/seL4-whitepaper.pdf, Section 1"
+   },
+   {
+    "fact": "What Linux calls 'capabilities' (CAP_NET_ADMIN etc.) 'are really access-control lists (ACLs) with system-call granularity' and 'suffer from the confused deputy problem.' => Object-capabilities (seL4/EROS/Capsicum style) are a DIFFERENT mechanism; we are not inheriting or renaming Linux capabilities.",
+    "source": "seL4 whitepaper, sel4.systems, Section 4.1"
+   },
+   {
+    "fact": "A Unix file descriptor is 'an unforgeable token of authority' but 'confer[s] very broad rights' (e.g. fchmod works even on a read-only fd), which is why Capsicum bolts a ~60-bit rights mask onto each one. => The integer-fd model is a half-capability with ambient over-broad authority; TABOS's narrow-rights CSpace handles are the corrective, and integer fds are not silicon.",
+    "source": "Capsicum paper, capsicum.pdf, Section 2.2"
+   },
+   {
+    "fact": "The Linux man-pages themselves document POSIX signals as structurally unsafe: 'Many functions are not async-signal-safe ... nonreentrant functions are generally unsafe to call from a signal handler,' and blocking-signals-everywhere is 'difficult in programs of any complexity.' => Signals are a discardable broken async primitive, not a hardware-imposed mechanism.",
+    "source": "Linux man-pages 6.18, signal-safety(7), man7.org"
+   },
+   {
+    "fact": "Capsicum lists 'some ioctl operations on sockets' among the dangerous 'system management interfaces that must be protected,' and seL4 makes every operation a typed, authorized capability invocation instead. => ioctl is an untyped authority escape hatch (Unix convention), replaceable by typed cap-invocations with no silicon cost.",
+    "source": "capsicum.pdf S2.1 (ioctl as protected mgmt interface); seL4 whitepaper S4.1 ('a system call in seL4 is a capability invocation')"
+   },
+   {
+    "fact": "TOCTOU arises from Unix separating designation (a path anyone can name) from authority (a later check); seL4's 'no designation without authority' and Capsicum's openat-relative-to-directory-capability (refusing absolute and '..' paths) eliminate the race by construction. => Path-based ambient access is convention; handle/capability access closes the TOCTOU class without hardware support.",
+    "source": "seL4 whitepaper S4.1 ('no designation without authority'); capsicum.pdf S2.2 (openat refuses '/etc/passwd' and '../etc/passwd'; explicit tree-rearrange race)"
+   },
+   {
+    "fact": "Hubris (Oxide's shipping Rust microkernel) runs on real silicon with NO runtime task creation: all tasks are declared in app.toml, so 'you can't write a fork-bomb without fork,' and peak memory is checkable at compile time. => The static spawn-from-manifest model is field-proven, not theoretical.",
+    "source": "Oxide Hubris Reference, Section 2.4 'Tasks can't be created or destroyed'"
+   },
+   {
+    "fact": "MUST-VERIFY silicon boundary (not re-fetched this session): the only genuinely silicon-unavoidable items in this whole area are the syscall TRAP instruction (x86_64 SYSCALL/SYSRET, aarch64 SVC) and the privilege-ring transition. The blocking semantics, errno convention, /proc text surface, and signal delivery built on top of the trap are all software convention. Confirm against Intel SDM Vol.2 (SYSCALL) and ARM ARM (SVC/exception model) before asserting 'this is not Linux.'",
+    "source": "TO VERIFY: Intel SDM Vol.2 SYSCALL/SYSRET; ARM Architecture Reference Manual SVC + AArch64 exception model (developer.arm.com)"
+   }
+  ]
+ }
+]

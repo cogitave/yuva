@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M0 (x86_64).
+#
+# Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
+# modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
+# "hello from rust_main" appears on serial. Fail-closed: a wall-clock timeout
+# always bounds the run (the kernel halts rather than exiting), and a missing
+# marker is a non-zero exit.
+#
+# PVH is selected automatically by QEMU from the XEN_ELFNOTE_PHYS32_ENTRY note
+# in the ELF (see crates/tb-hal/src/arch/x86_64/boot.rs + kernel/linker/x86_64.ld).
+#   refs: https://xenbits.xen.org/docs/unstable/misc/pvh.html
+#         https://www.qemu.org/docs/master/system/i386/microvm.html
+#
+# Usage:   scripts/run-x86_64.sh [path/to/kernel-elf]
+# Env:     QEMU=...  QEMU_TIMEOUT=<secs>  PROFILE=debug|release
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="x86_64-tabos-none"
+PROFILE="${PROFILE:-debug}"
+KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
+MARKER='hello from rust_main'
+TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
+QEMU="${QEMU:-qemu-system-x86_64}"
+
+if ! command -v "${QEMU}" >/dev/null 2>&1; then
+  echo "error: ${QEMU} not found on PATH (install qemu-system-x86 in WSL2)" >&2
+  exit 2
+fi
+if [[ ! -f "${KERNEL}" ]]; then
+  echo "error: kernel image not found: ${KERNEL}" >&2
+  echo "build it first, e.g.:" >&2
+  echo "  cargo build -p tabos-kernel --target ${REPO_ROOT}/targets/${TARGET}.json" >&2
+  exit 2
+fi
+
+# Prefer KVM only when /dev/kvm is actually usable; otherwise pure-TCG so this
+# runs in any WSL2 / CI box without nested virt.
+ACCEL="tcg"
+CPU="qemu64"
+if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+  ACCEL="kvm"
+  CPU="host"
+fi
+
+echo ">> qemu=${QEMU} accel=${ACCEL} cpu=${CPU} timeout=${TIMEOUT_SECS}s" >&2
+echo ">> kernel=${KERNEL}" >&2
+
+set +e
+OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
+  "${QEMU}" \
+    -M microvm,rtc=off \
+    -accel "${ACCEL}" -cpu "${CPU}" -m 256M -smp 1 \
+    -kernel "${KERNEL}" \
+    -no-reboot \
+    -serial stdio -display none 2>&1)"
+RC=$?
+set -e
+
+printf '%s\n' "${OUTPUT}"
+
+if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
+  echo ">> PASS: observed marker '${MARKER}'" >&2
+  exit 0
+fi
+
+echo ">> FAIL: marker '${MARKER}' not seen (qemu/timeout rc=${RC})" >&2
+exit 1

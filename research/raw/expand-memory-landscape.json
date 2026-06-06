@@ -1,0 +1,136 @@
+{
+ "area": "memory-landscape",
+ "findings": [
+  {
+   "topic": "A-MEM memory structure: Zettelkasten-style atomic notes with LLM-enriched attributes",
+   "summary": "A-MEM (arXiv:2502.12110, v11) stores each memory as an atomic note m_i = {c_i original content, t_i timestamp, K_i LLM-generated keywords, G_i LLM-generated tags, X_i LLM-generated contextual description, e_i dense embedding, L_i set of linked memories}. K/G/X are produced by prompting an LLM with the raw interaction + timestamp; the embedding is computed over concat(c,K,G,X) by a text encoder. Notes can belong to multiple 'boxes' (overlapping contexts) simultaneously, unlike single-folder hierarchies. Retrieval is plain top-k cosine similarity between query embedding and note embeddings; linked notes in the same box are co-retrieved.",
+   "designImplication": "The kernel should standardize a memory-record schema (raw content + timestamps + derived semantic fields + embedding + typed links) as the default on-disk format, exactly like an inode standardizes file metadata. What goes into the derived fields (keywords/tags/context) is LLM-generated and model-dependent, so the enrichment step must be a pluggable userspace service the kernel invokes on write, not hardcoded kernel logic. Multi-membership (one note in many boxes) argues against directory-tree namespaces for memory; use tag/link indices as the default organizing primitive.",
+   "sources": [
+    "https://arxiv.org/abs/2502.12110",
+    "https://arxiv.org/html/2502.12110"
+   ]
+  },
+  {
+   "topic": "A-MEM write path: link generation + memory evolution make writes non-append-only",
+   "summary": "On every insert, A-MEM (1) retrieves top-k nearest existing notes by cosine similarity, (2) prompts an LLM to decide which links to create (no predefined rules — LLM judges causal/conceptual connections beyond embedding similarity), and (3) 'memory evolution': for each neighbor m_j in the retrieved set, an LLM decides whether to rewrite that neighbor's context, keywords, and tags; the evolved m_j* replaces the original in storage. Ablation shows removing link generation (LG) and memory evolution (ME) causes substantial degradation, especially Multi-Hop reasoning; LG alone recovers most of it, ME adds further refinement. Cost per memory operation: ~1,200 tokens (85-93% reduction vs LoCoMo/MemGPT baselines at ~16,900 tokens), <$0.0003 per op via API, 5.4 s with GPT-4o-mini or 1.1 s with locally hosted Llama 3.2 1B on a single GPU.",
+   "designImplication": "A memory write is not append-only: it mutates k neighbor records. The kernel must support transactional multi-record updates with versioning/provenance (old note versions recoverable), and must budget LLM inference inside the write path. The 1.1 s local-1B-model figure shows the kernel can ship a small local 'memory model' as the default write-path enricher (LLM-agnostic interface, remote API optional) and run consolidation asynchronously off the agent's critical path.",
+   "sources": [
+    "https://arxiv.org/abs/2502.12110",
+    "https://arxiv.org/html/2502.12110"
+   ]
+  },
+  {
+   "topic": "A-MEM benchmark numbers on LoCoMo and DialSim",
+   "summary": "On LoCoMo (7,512 QA pairs; conversations avg ~9K tokens over up to 35 sessions) with GPT-4o-mini, A-MEM F1 scores: Multi-Hop 27.02, Temporal 45.85, Open-Domain 12.14, Single-Hop 44.65, Adversarial 50.03, using avg 2,520 tokens per answer vs MemGPT 16,977 and full-history LoCoMo baseline 16,910. A-MEM at least doubles multi-hop performance vs baselines on GPT models. On DialSim (TV-show dialogues, ~350,000 tokens, 1,300 sessions), A-MEM F1 3.45 vs LoCoMo 2.55 (+35%) and MemGPT 1.18 (+192%) — note absolute scores are tiny, showing all systems near-fail at this scale. Evaluated across six foundation models (incl. DeepSeek-R1-32B, Claude 3.0/3.5 Haiku).",
+   "designImplication": "Selective tiered retrieval gives ~7x token reduction at equal-or-better accuracy — strong justification for a default OS memory tier instead of raw-log replay. But the DialSim near-zero absolute scores (F1 3.45 at 350K tokens) show current designs collapse at OS-lifetime scales; the kernel design must assume the default memory subsystem degrades and provide raw non-lossy logs for re-indexing/re-consolidation as models improve.",
+   "sources": [
+    "https://arxiv.org/abs/2502.12110",
+    "https://arxiv.org/html/2502.12110"
+   ]
+  },
+  {
+   "topic": "Mem0 two-phase pipeline: LLM-decided ADD/UPDATE/DELETE/NOOP as a memory syscall vocabulary",
+   "summary": "Mem0 (arXiv:2504.19413) processes each message pair (m_{t-1}, m_t) in two phases. Extraction: prompt P = (async-refreshed conversation summary S, last m=10 messages, the new pair) → LLM extracts candidate salient facts Ω. Update: for each fact, retrieve top s=10 semantically similar existing memories via vector embeddings, then the LLM — through a function-calling 'tool call' interface, not a separate classifier — selects one of exactly four operations: ADD (no semantically equivalent memory exists), UPDATE (augment existing), DELETE (memory contradicted by new info), NOOP. The system executes the chosen op (Algorithm 1, Appendix B). All inference used GPT-4o-mini. The conversation summary is refreshed by an asynchronous module independent of the main pipeline.",
+   "designImplication": "ADD/UPDATE/DELETE/NOOP against top-s similar records is a minimal, model-agnostic memory syscall set the kernel can standardize: kernel owns storage, indexing, and op execution; an LLM (any backend) is the policy oracle that picks the op. The async summary refresher is a template for a kernel consolidation daemon (analogous to kswapd/bdflush) that keeps derived state fresh without blocking the agent.",
+   "sources": [
+    "https://arxiv.org/abs/2504.19413",
+    "https://arxiv.org/html/2504.19413"
+   ]
+  },
+  {
+   "topic": "Mem0 LOCOMO numbers: tiered memory vs full-context trade-off quantified",
+   "summary": "On LOCOMO (10 conversations, ~600 dialogues / 26,000 tokens each, ~200 questions per conversation; adversarial category excluded), Mem0 single-hop F1=38.72, B1=27.13, J(LLM-as-Judge)=67.13; multi-hop F1=28.64, J=51.15. Overall J: Mem0 ~67%, Mem0-graph 68.44%, best RAG variant ~61%, full-context ~73% (the accuracy ceiling). Latency: Mem0 search p50 0.148 s / p95 0.200 s, total p50 0.708 s / p95 1.440 s (92% lower than full-context); Mem0g total p50 1.091 s / p95 2.590 s; full-context total p50 9.870 s / p95 17.117 s; LangMem search p50 17.99 s / p95 59.82 s; A-Mem search p50 0.668 s; Zep total p50 1.292 s. Mem0 claims 26% relative J improvement over OpenAI's memory and >90% token cost savings vs full-context. Memory store footprint: Mem0 ~7K tokens/conversation, Mem0g ~14K, raw conversation ~26K.",
+   "designImplication": "Concrete SLO targets for a kernel memory subsystem: sub-200 ms p95 retrieval is achievable and should be the kernel's default retrieval budget. Full-context remains ~5 J-points more accurate, so the kernel should expose an escape hatch: agents can request raw-episode replay (paying 10-17 s latency) for high-stakes queries — i.e., tiered memory as default, lossless tier always addressable.",
+   "sources": [
+    "https://arxiv.org/abs/2504.19413",
+    "https://arxiv.org/html/2504.19413"
+   ]
+  },
+  {
+   "topic": "Mem0-graph variant: when a knowledge-graph tier pays off and when it does not",
+   "summary": "Mem0g extracts entities (with types) and relationship triplets via a two-stage LLM pipeline into Neo4j. On insert it embeds source/destination entities, matches existing nodes above similarity threshold t, and runs LLM-based conflict detection; an 'update resolver' marks obsolete relationships invalid rather than physically deleting them, to enable temporal reasoning. Results: graph memory helps temporal reasoning (F1 51.55, J 58.13 vs base Mem0 J 55.51) and open-domain (J 75.71), but yields a marginal performance DROP on single-hop and no gain on multi-hop vs dense natural-language memories, while doubling storage (7K→14K tokens) and raising search latency p50 0.148→0.476 s.",
+   "designImplication": "The graph tier should be an optional kernel module, not part of the default memory structure: it pays for temporal/relational queries only and costs 2x storage and 3x search latency. The default tier should be dense natural-language fact records; the kernel should standardize the invalidate-don't-delete rule (tombstoning with temporal metadata) across all tiers since both Mem0g and Zep converge on it.",
+   "sources": [
+    "https://arxiv.org/abs/2504.19413",
+    "https://arxiv.org/html/2504.19413"
+   ]
+  },
+  {
+   "topic": "Zep/Graphiti: three-tier temporal knowledge graph with bi-temporal metadata",
+   "summary": "Zep (arXiv:2501.13956) builds G=(N,E,φ) with three hierarchical subgraphs: (1) episode subgraph — raw message/text/JSON episodes as a non-lossy store with bidirectional indices to derived facts (forward/backward traversal for citation); (2) semantic entity subgraph — entities extracted with last n=4 messages of context plus a reflexion-style hallucination check, embedded in 1024-dim vectors, resolved against existing nodes via cosine + full-text candidate search + LLM dedup, written with predefined Cypher (not LLM-generated queries); facts as edges, with hyper-edge support via multi-extraction; (3) community subgraph — label-propagation clustering (chosen over Leiden for cheap dynamic single-step extension; periodic full refreshes still needed) with map-reduce summaries. Bi-temporal model tracks four timestamps per fact edge: t'_created and t'_expired (transaction timeline T') plus t_valid and t_invalid (event timeline T). New edges trigger LLM contradiction comparison against semantically related edges; temporally overlapping contradictions set the loser's t_invalid to the winner's t_valid — history is preserved, never erased.",
+   "designImplication": "Bi-temporal metadata (event-valid time vs transaction time) is the single most kernel-worthy idea here: every memory record in an agent-native OS should carry these four timestamps as mandatory kernel-enforced metadata, like mtime/ctime in POSIX. Episode-tier non-lossiness with bidirectional provenance links should also be kernel-guaranteed; entity/community derivation is LLM-dependent and belongs in pluggable services. Label propagation's incremental-update-plus-periodic-rebuild pattern is the right template for kernel index maintenance.",
+   "sources": [
+    "https://arxiv.org/abs/2501.13956",
+    "https://arxiv.org/html/2501.13956"
+   ]
+  },
+  {
+   "topic": "Zep retrieval pipeline and benchmark results (DMR, LongMemEval)",
+   "summary": "Retrieval f(α)=χ(ρ(φ(α))): φ search runs three parallel methods — cosine similarity, Okapi BM25 (Neo4j Lucene), and breadth-first graph search within n hops (BFS can be seeded with recent episodes) — over fact edges, entity names, and community names; ρ rerank supports RRF, MMR, an episode-mentions reranker (frequency of mention in conversation), a node-distance reranker (graph distance from a centroid node), and cross-encoders; χ constructs a templated context string of facts with validity date ranges plus entity summaries. Benchmarks: DMR 94.8% (gpt-4-turbo) vs MemGPT 93.4% and full-conversation baseline 94.4%; 98.2% with gpt-4o-mini (vs full-conversation 98.0% — paper itself admits DMR is saturated/inadequate, only 60 messages per conversation). LongMemEval_s (avg 115,000-token conversations): accuracy +15.2% (gpt-4o-mini) and +18.5% (gpt-4o) over full-context baseline with ~90% latency reduction; retrieved top-20 edges+nodes. Known regression: single-session-assistant questions dropped 17.7% (gpt-4o) / 9.06% (gpt-4o-mini) vs baseline.",
+   "designImplication": "The kernel should expose retrieval as a composable three-stage pipeline (multi-method candidate search → pluggable reranker → context constructor) rather than a monolithic 'search' syscall — each stage has multiple proven interchangeable implementations. Hybrid lexical+semantic+graph search should be the default because each catches different similarity classes. The single-session-assistant regression warns that summarized/derived tiers lose assistant-side details: the kernel default should index agent outputs, not just user inputs.",
+   "sources": [
+    "https://arxiv.org/abs/2501.13956",
+    "https://arxiv.org/html/2501.13956"
+   ]
+  },
+  {
+   "topic": "Zep operational costs measured adversarially by Mem0: write amplification and ingestion lag",
+   "summary": "Mem0's paper (arXiv:2504.19413, sec 4.5) measured Zep's production system on LOCOMO: Zep's memory graph consumed >600K tokens per ~26K-token conversation (>20x write amplification, vs Mem0's 7K) because it caches a full abstractive summary at every node while also storing facts on edges. They also observed that immediately after adding memories, retrieval often failed to answer queries correctly, while identical searches hours later succeeded — indicating Zep's graph construction involves multiple asynchronous LLM calls and extensive background processing with no read-your-writes guarantee. Mem0's construction completes in under a minute worst-case.",
+   "designImplication": "Two kernel-level requirements emerge: (1) a write-amplification budget/accounting mechanism for memory tiers (token-denominated quotas, like disk quotas), since unbounded LLM-driven derivation can inflate storage 20x; (2) explicit consistency semantics for memory ingestion — the kernel must guarantee at minimum read-your-writes on the raw episodic tier immediately, with derived tiers carrying a visible freshness/epoch marker agents can query before trusting them.",
+   "sources": [
+    "https://arxiv.org/abs/2504.19413",
+    "https://arxiv.org/html/2504.19413",
+    "https://arxiv.org/abs/2501.13956"
+   ]
+  },
+  {
+   "topic": "Generative Agents memory stream: recency x importance x relevance retrieval scoring",
+   "summary": "Park et al. (arXiv:2304.03442) store a memory stream: a list of memory objects each holding a natural-language description, creation timestamp, and most-recent-access timestamp. Retrieval score = α_rec*recency + α_imp*importance + α_rel*relevance with all α=1 after min-max normalization to [0,1]. Recency: exponential decay factor 0.995 per sandbox game-hour since the memory was LAST RETRIEVED (access-driven, not creation-driven). Importance: an integer 1-10 'poignancy' score generated by the LLM once at memory creation (e.g., 'cleaning up the room'=2, 'asking your crush out'=8). Relevance: cosine similarity between memory embedding and query embedding. Top-ranked memories that fit the context window are included in the prompt.",
+   "designImplication": "This is the closest analog to a kernel page-replacement policy for memories: the kernel should maintain last-access timestamps on memory records natively (like page-table accessed bits) and ship the recency*importance*relevance scorer as the default retrieval ranking, with α-weights and decay factor as per-agent tunables. Importance scoring at write time costs one LLM call and is the cheapest signal to standardize; storing it as a fixed-schema integer field makes eviction/compression policies model-independent downstream.",
+   "sources": [
+    "https://arxiv.org/abs/2304.03442",
+    "https://ar5iv.labs.arxiv.org/html/2304.03442"
+   ]
+  },
+  {
+   "topic": "Generative Agents reflection: threshold-triggered consolidation into citation-linked reflection trees",
+   "summary": "Reflections are a second memory type: higher-level abstract thoughts that re-enter the memory stream and participate in retrieval. Trigger: when the sum of importance scores of latest perceived events exceeds 150 (in practice 2-3 times per simulated day). Procedure: feed the 100 most recent memory records to the LLM → ask for the '3 most salient high-level questions' → use each question as a retrieval query → prompt the LLM to extract insights citing the specific evidence records → store each insight as a reflection with pointers to cited memories. Reflections can reflect on reflections, forming trees (leaves=observations, higher nodes=more abstract). Ablation (100 evaluators, TrueSkill ratings): full architecture μ=29.89; no-reflection μ=26.88; no-reflection-no-planning μ=25.64; human crowdworker baseline μ=22.95; no-memory-at-all μ=21.21; effect size vs prior art d=8.16. Common failure modes: failure to retrieve relevant memories, fabricated embellishments, overly formal LLM-inherited speech. Running 25 agents for 2 game days cost thousands of dollars in tokens.",
+   "designImplication": "Consolidation should be a native kernel service with an importance-accumulator trigger (not cron-based): the kernel meters incoming importance scores per agent and schedules a reflection job when the budget threshold trips — directly analogous to dirty-page writeback thresholds. Citation pointers from derived memories to source records must be a first-class kernel link type (enables hallucination audit: the paper verified non-hallucination by locating source dialogue in the stream). The cost figures mandate batching and local-model offload for this service.",
+   "sources": [
+    "https://arxiv.org/abs/2304.03442",
+    "https://ar5iv.labs.arxiv.org/html/2304.03442"
+   ]
+  },
+  {
+   "topic": "Survey taxonomy (Zhang et al.): sources x forms x operations as the design space for a default memory subsystem",
+   "summary": "The survey (arXiv:2404.13501) decomposes agent memory into: SOURCES — inside-trial information ξ_t (current task interactions, incl. time/location context), cross-trial information Ξ (prior trials/tasks, e.g., Reflexion, ExpeL successful-trajectory exemplars), and external knowledge D (Wikipedia/APIs/tools); FORMS — textual (sub-types: complete interactions, recent interactions [locality-principle caches], retrieved interactions [embedding-indexed, e.g., MemoryBank's FAISS dual-tower retrieval], external knowledge) vs parametric (fine-tuning for domain infusion; knowledge editing à la MEND/KnowledgeEditor for targeted fact updates — framed as a forgetting mechanism); OPERATIONS — memory writing (what to extract/store; raw vs summary), memory management (reflection to higher-level memories, merging redundant entries, forgetting unimportant ones; e.g., MemoryBank's Ebbinghaus-inspired daily-event distillation), memory reading (relevance + auxiliary task-oriented factors; SQL in ChatDB, top-K similarity in ExpeL). Trade-offs stated: textual = write-efficient, interpretable, but context-length-bound and low information density; parametric = read-efficient, unlimited capacity, but lossy, costly to write, risks catastrophic forgetting, and unaffordable for online per-step updates. Evaluation splits into direct (subjective human judgment vs objective metrics) and indirect (end-to-end task success).",
+   "designImplication": "This taxonomy maps cleanly onto kernel architecture: the kernel standardizes the three OPERATIONS as syscall families (mem_write, mem_manage, mem_read) and the three SOURCES as provenance labels on every record (inside-trial / cross-trial / external) so cross-agent and cross-task sharing policies can be enforced at the kernel boundary. Textual memory is the default kernel tier; parametric memory (fine-tuning, knowledge editing) maps to the OS's native self-improvement service — write-expensive, batched, offline — and must never sit on the synchronous path. The write-efficiency asymmetry (textual cheap-write/costly-read, parametric costly-write/cheap-read) is exactly a cache-hierarchy argument for the OS shipping both as tiers with promotion policies.",
+   "sources": [
+    "https://arxiv.org/abs/2404.13501",
+    "https://ar5iv.labs.arxiv.org/html/2404.13501"
+   ]
+  },
+  {
+   "topic": "Survey-identified gaps: lifelong learning, multi-agent memory, and principled forgetting are unsolved",
+   "summary": "The survey's Limitations & Future Directions (sec 8) names four open areas: (8.1) parametric memory is 'still under-researched'; (8.2) memory in multi-agent applications (no established model for shared/isolated memory across agents); (8.3) memory-based lifelong learning — temporality causes memory interactions/overlap, vast accumulation requires retrieval at scale 'possibly incorporating a certain mechanism for forgetting' (no concrete mechanism exists); (8.4) humanoid agents whose memory should follow cognitive psychology (Ebbinghaus forgetting curve, memory distortion, knowledge boundaries). Across all five primary systems surveyed here, NONE implements true deletion-based forgetting as a tested mechanism: A-MEM has no forget op at all; Mem0 has LLM-decided DELETE but reports no forgetting-specific evaluation; Zep and Mem0g only invalidate (tombstone); Generative Agents only decays retrieval scores.",
+   "designImplication": "Forgetting/eviction is the area where the greenfield kernel cannot copy prior art — it must define its own: a defensible default is score-decay demotion (Generative Agents) through tiers, tombstoning instead of deletion (Zep/Mem0g consensus), with hard deletion only as an explicit privileged operation (privacy/compliance). Multi-agent shared memory has zero prior-art standardization, so the kernel's memory namespace/permission model (per-agent private tiers, session-shared tiers, world-shared knowledge) is genuine greenfield design territory and a differentiator.",
+   "sources": [
+    "https://arxiv.org/abs/2404.13501",
+    "https://ar5iv.labs.arxiv.org/html/2404.13501",
+    "https://arxiv.org/html/2502.12110",
+    "https://arxiv.org/html/2504.19413",
+    "https://arxiv.org/html/2501.13956"
+   ]
+  }
+ ],
+ "openQuestions": [
+  "Multi-agent shared memory: no source defines isolation, permissions, or conflict semantics when multiple agents in one session write to a shared tier (survey sec 8.2 flags it as open). What namespace/ACL model should the kernel impose — per-agent private + session-shared + world tiers?",
+  "Graph tier value is contested: Zep claims graph wins on LongMemEval (+18.5%), Mem0 measures graphs losing on single/multi-hop and costing 2-3x latency/storage, A-MEM dismisses graph DBs as rigid. Should the default OS memory structure include any graph layer, or only dense fact records + bi-temporal metadata with graph as an opt-in module?",
+  "No system implements evaluated, principled forgetting — only score decay (Generative Agents), tombstoning (Zep/Mem0g), or LLM-decided DELETE (Mem0, untested in isolation). What eviction policy should a kernel default to, and how is it benchmarked?",
+  "All benchmarks (DMR, LOCOMO, LongMemEval, DialSim) are conversational QA; DMR is saturated (full-context 98%) and DialSim absolute scores are near zero (F1 3.45). There is no benchmark for OS-style agent memory: tool-use traces, code tasks, cross-task skill transfer, multi-agent sessions. The project likely needs to define its own evaluation harness.",
+  "Consistency semantics: Mem0 documented hours-long ingestion lag in Zep with no read-your-writes guarantee. What freshness/epoch contract should the kernel expose for derived memory tiers, and is synchronous-raw + async-derived (with visible epoch markers) sufficient?",
+  "LLM-in-the-write-path economics at OS scale: A-MEM shows 1.1 s/op with a local Llama 3.2 1B vs 5.4 s with GPT-4o-mini API. Can the kernel ship a small dedicated local 'memory model' as the default enricher/op-decider, and what accuracy is lost vs frontier models for extraction, dedup, importance scoring, and op selection?",
+  "Parametric memory integration: the survey marks fine-tuning/knowledge-editing memory as under-researched and offline-only. How should the OS self-improvement service interface with the textual memory tiers (promotion criteria from textual to parametric), given catastrophic-forgetting risks?",
+  "Retrieval-time access metadata: Generative Agents' recency uses last-retrieved timestamps (access-driven decay 0.995/hour). Updating access metadata on every read creates write traffic on the read path — does the kernel batch these like atime relatime semantics?"
+ ]
+}

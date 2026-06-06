@@ -1,0 +1,20 @@
+# tb-hal: TABOS Hardware Abstraction Layer.
+#
+# Framekernel rule (ARCHITECTURE.md / KERNEL-FOUNDATION-SPEC.md §1): this is the
+# ONLY crate permitted to contain `unsafe`, `asm!`, `naked_asm!` or
+# `global_asm!`. Everything above it is safe Rust. At M0 it exposes exactly four
+# safe functions (serial_init / serial_write_byte / serial_write_str / halt);
+# the per-arch boot trampolines + UART pokes live in src/arch/<arch>/.
+
+[package]
+name = "tb-hal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# Default rlib; linked into the kernel binary, which pulls in the per-arch
+# global_asm!/_start. No_std is declared in src/lib.rs.
+
+[dependencies]
+# Intentionally empty at M0.

@@ -1,0 +1,22 @@
+{
+ "_note": "Seçilen isim TABOS'un karar-sonrası vetleme kaydı (2026-06-06). Yöntem, naming-round2.json ile aynı: doğrudan registry/RDAP/GitHub API kontrolleri. Tam büyük-motor web taraması YAPILMADI — OPEN-QUESTIONS §G P1.",
+ "name": "tabos",
+ "meaning": "Türkiye's Agent Based Operating System (akronim; Arda'nın kararı)",
+ "verdict": "near-virgin",
+ "checks": [
+  {"check": "npm", "result": "FREE — https://registry.npmjs.org/tabos → 404", "checked_at": "2026-06-06T18:04:45Z"},
+  {"check": "pypi", "result": "FREE — https://pypi.org/pypi/tabos/json → 404", "checked_at": "2026-06-06T18:04:46Z"},
+  {"check": "crates", "result": "FREE — https://crates.io/api/v1/crates/tabos → 404 ('crate tabos does not exist')", "checked_at": "2026-06-06T18:04:47Z"},
+  {"check": "github-org", "result": "TAKEN-DORMANT — github.com/tabos: Organization 'Tabos', created 2019-07-08, 0 public repos, son güncelleme 2020-07-10, 1 takipçi. Ölü squat; org adı için 'tabos-project'/'tabos-os' varyantı veya GitHub name-squatting başvurusu gerekebilir.", "checked_at": "2026-06-06T18:04:47Z"},
+  {"check": "github-repos", "result": "NO ACTIVE CONFLICT — search 'tabos in:name' → total_count=53; en yüksek: flathub/org.tabos.roger (4★, tabos.org grubunun Roger Router flatpak paketi), napalmtorch/Tabos (1★, ölü 2022 hobi OS'u), bms_tabos_battery (1★, TABOS marka batarya ROS2 sürücüsü), kalanlar ≤1★ kişisel/test repoları. AI/agent/OS alanında aktif proje YOK.", "checked_at": "2026-06-06T18:04:48Z"},
+  {"check": "rdap-com", "result": "TAKEN — tabos.com kayıtlı (RDAP 200, Verisign; yanıt 2492 B). Sahip entity lookup'ı yapılmadı. Alternatif: tabos.com.tr / gettabos.com.", "checked_at": "2026-06-06T18:04:49Z"},
+  {"check": "rdap-org", "result": "TAKEN — tabos.org kayıtlı (RDAP 200, PIR; yanıt 7417 B). Sahip: küçük Alman FOSS grubu (flathub org.tabos.* uygulamaları: Roger Router, Saldo, BloodPressure). Karışıklık riski düşük ama izlenmeli. Alternatif: tabos.org.tr.", "checked_at": "2026-06-06T18:04:50Z"},
+  {"check": "web", "result": "NOT SWEPT — büyük-motor (Google/Bing) tam web taraması yapılmadı; 2. turun dersi (Mojeek yetersiz) gereği duyurudan önce zorunlu. OPEN-QUESTIONS §G.", "checked_at": null}
+ ],
+ "topConflicts": [
+  "github.com/tabos org handle'ı ölü hesapta (0 repo, 2019) — varyant ya da başvuru gerekir",
+  "tabos.org = Alman FOSS grubu (org.tabos.* flathub paketleri) — farklı alan, düşük risk",
+  "tabos.com 1996'dan beri kayıtlı — sahibi araştırılmadı"
+ ],
+ "notes": "31 reddedilen adaya kıyasla olağanüstü temiz: üç paket registry'si de boş, GitHub'da AI/agent/OS çakışması yok. Türkiye kimliğiyle .com.tr/.org.tr doğal ve büyük olasılıkla boş. Formal marka taraması (Nice 9/42, TÜRKPATENT/EUIPO/USPTO) yapılmadı — OPEN-QUESTIONS §G P1. Kernel prefix: tb_/TB_."
+}

@@ -1,0 +1,31 @@
+# TABOS Cargo workspace root.
+#
+# Two members only at M0 (boot bring-up):
+#   - crates/tb-hal : the ONLY crate allowed to contain `unsafe` + assembly.
+#   - kernel        : `#![forbid(unsafe_code)]`-class safe Rust (its rust_main +
+#                     #[panic_handler] shim is the sole permitted exception,
+#                     because `#[unsafe(no_mangle)]` is an unsafe *attribute*).
+#
+# Built for the none-class custom targets under /targets via -Zbuild-std; see
+# .cargo/config.toml and BUILD.md.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/tb-hal",
+    "kernel",
+]
+
+# panic = abort everywhere. The custom target specs in /targets already set
+# "panic-strategy": "abort" (so -Zbuild-std rebuilds core without unwinding and
+# we need no eh_personality), but pinning it in the profiles keeps the kernel
+# binary consistent regardless of how it is invoked.
+# Source: https://os.phil-opp.com/minimal-rust-kernel/ (panic-strategy section).
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+# Smaller, deterministic boot image for the M0 DoD serial assertion.
+opt-level = "s"
+lto = true
