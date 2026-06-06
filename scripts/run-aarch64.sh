@@ -15,7 +15,9 @@
 #     not pass both -- `-nographic` *is* the requested serial-on-stdio path.
 set -euo pipefail
 
-KERNEL="${1:?usage: run-aarch64.sh <path-to-kernel-elf>}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROFILE="${PROFILE:-debug}"
+KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
 MARKER="hello from rust_main"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
