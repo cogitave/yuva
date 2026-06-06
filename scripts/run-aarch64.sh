@@ -2,7 +2,7 @@
 # scripts/run-aarch64.sh -- QEMU `virt` first-light runner (milestone M0).
 #
 # Boots the aarch64 tb-os image under QEMU, captures the PL011 serial stream,
-# and asserts the executable Definition-of-Done marker "hello from rust_main".
+# and asserts the executable Definition-of-Done marker "M1: traps OK".
 # Doubles as the cargo runner for target aarch64-tabos-none (cargo passes the
 # freshly built ELF as $1) and is runnable by hand on WSL2.
 #
@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="hello from rust_main"
+MARKER="M1: traps OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

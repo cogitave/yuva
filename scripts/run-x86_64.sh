@@ -3,7 +3,7 @@
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "hello from rust_main" appears on serial. Fail-closed: a wall-clock timeout
+# "M1: traps OK" appears on serial. Fail-closed: a wall-clock timeout
 # always bounds the run (the kernel halts rather than exiting), and a missing
 # marker is a non-zero exit.
 #
@@ -20,7 +20,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='hello from rust_main'
+MARKER='M1: traps OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
