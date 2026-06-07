@@ -42,10 +42,29 @@
 #![no_std]
 #![no_main]
 
+// M5: `alloc` comes online kernel-wide. On nightly this needs NO feature gate
+// (`extern crate alloc` is stable for no_std binaries, and the default
+// alloc-error handler routes OOM to our `#[panic_handler]`), so the only new
+// crate-level line is the `extern crate alloc;` below. The heap itself — the
+// `#[global_allocator]` impl, the `.bss` arena and all raw pointer math — lives
+// in tb-hal; this crate just names the allocator and uses `alloc` types.
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::hint::black_box;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tb_hal::{Task, TaskStack, TrapAction, TrapInfo, TrapKind};
+
+/// The kernel-wide global allocator: a zero-sized handle whose `GlobalAlloc`
+/// impl (and the `.bss` arena behind it) lives entirely in tb-hal. Declaring
+/// this `static` and using `alloc` types is NOT `unsafe`; `heap_init()` lays the
+/// arena down before first use (see `rust_main`).
+#[global_allocator]
+static HEAP: tb_hal::Heap = tb_hal::Heap::new();
 
 /// Ping-pong round-trips (A→B→A counts as one). DoD asks for >= 1000.
 const ROUND_TRIPS: usize = 1000;
@@ -166,6 +185,144 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     } else {
         tb_hal::serial_write_str("M4: FAIL\n");
     }
+
+    // --- M5: bring `alloc` online via a #[global_allocator] over a .bss arena --
+    // tb-hal owns the from-scratch free-list allocator + the fixed static arena
+    // and exposes a SAFE facade; this forbid(unsafe_code)-class crate only lays
+    // the heap down with heap_init(), then exercises the GLOBAL allocator through
+    // real `alloc` types (Box / Vec / BTreeMap / String), proves freed memory is
+    // REUSED, and asserts nothing leaked (used-bytes returns to the post-init
+    // baseline). All raw pointer math + the unsafe GlobalAlloc impl live in
+    // tb-hal. DoD marker: "M5: alloc OK".
+    tb_hal::serial_write_str("alloc-test: bringing heap online\n");
+    tb_hal::heap_init();
+
+    // Local fail helper: emit the M5 failure verdict over serial and park the
+    // core (diverges). Matches the M2 `fail` style; uses only safe serial calls.
+    let m5_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M5: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    // A freshly-initialised heap has handed out zero bytes.
+    let base_used = tb_hal::heap_used_bytes();
+    if base_used != 0 {
+        m5_fail("post-init heap not empty");
+    }
+
+    // Box: a single heap allocation + deref + drop.
+    {
+        let boxed = Box::new(0xABCD_1234_5678_9ABCu64);
+        if *boxed != 0xABCD_1234_5678_9ABC {
+            m5_fail("Box value corrupted");
+        }
+        if tb_hal::heap_used_bytes() == base_used {
+            m5_fail("Box did not allocate");
+        }
+    } // boxed dropped -> its block returns to the free list
+
+    // Vec grown WELL past its first realloc: capacity starts at 0, so 1024 pushes
+    // force several grow-reallocs through GlobalAlloc's (default) realloc path.
+    {
+        let mut v: Vec<u32> = Vec::new();
+        let n: u32 = 1024;
+        let mut k: u32 = 0;
+        while k < n {
+            v.push(k.wrapping_mul(2_654_435_761)); // Knuth multiplicative hash
+            k += 1;
+        }
+        if v.len() != n as usize {
+            m5_fail("Vec length wrong");
+        }
+        if (v.capacity() as u32) < n {
+            m5_fail("Vec never grew past its first allocation");
+        }
+        let mut k2: u32 = 0;
+        while k2 < n {
+            if v[k2 as usize] != k2.wrapping_mul(2_654_435_761) {
+                m5_fail("Vec element corrupted across reallocs");
+            }
+            k2 += 1;
+        }
+    } // v dropped
+
+    // BTreeMap: many internal node allocations + ordered lookups.
+    {
+        let mut map: BTreeMap<u32, u64> = BTreeMap::new();
+        let mut k: u32 = 0;
+        while k < 512 {
+            map.insert(k, ((k as u64).wrapping_mul(1_099_511_628_211)) ^ 0x5A5A);
+            k += 1;
+        }
+        if map.len() != 512 {
+            m5_fail("BTreeMap length wrong");
+        }
+        let mut k2: u32 = 0;
+        while k2 < 512 {
+            match map.get(&k2) {
+                Some(val) if *val == ((k2 as u64).wrapping_mul(1_099_511_628_211)) ^ 0x5A5A => {}
+                _ => m5_fail("BTreeMap lookup wrong"),
+            }
+            k2 += 1;
+        }
+    } // map dropped
+
+    // String: repeated push_str forces reallocating growth of a byte buffer.
+    {
+        let mut s = String::new();
+        let mut k = 0;
+        while k < 128 {
+            s.push_str("tabos-");
+            k += 1;
+        }
+        if s.len() != 128 * 6 {
+            m5_fail("String length wrong");
+        }
+        if !s.starts_with("tabos-") || !s.ends_with("tabos-") {
+            m5_fail("String content wrong");
+        }
+    } // s dropped
+
+    // No-leak: every allocation above was dropped, so used-bytes must be back at
+    // the post-init baseline, while the high-water mark stayed strictly positive.
+    if tb_hal::heap_used_bytes() != base_used {
+        m5_fail("leak: used-bytes above baseline after drops");
+    }
+    if tb_hal::heap_high_water() <= base_used {
+        m5_fail("high-water mark never advanced");
+    }
+
+    // Reuse proof: a freed allocation's address is handed back out for the next
+    // request of the same shape (first-fit over the re-coalesced arena). No
+    // `unsafe`: a shared ref cast to a raw pointer to usize is all safe Rust.
+    let reuse_addr_1 = {
+        let probe = Box::new(0u64);
+        (&*probe) as *const u64 as usize
+    }; // probe dropped -> block freed + coalesced back
+    let reuse_addr_2 = {
+        let probe = Box::new(0u64);
+        (&*probe) as *const u64 as usize
+    };
+    if reuse_addr_1 != reuse_addr_2 {
+        m5_fail("freed block was not reused");
+    }
+    if tb_hal::heap_used_bytes() != base_used {
+        m5_fail("leak after reuse probe");
+    }
+
+    // tb-hal's own low-level self-test (size-0/ZST, over-arena alloc -> null,
+    // aligned alloc/dealloc/realloc reuse, neighbour coalescing) — the raw-pointer
+    // checks this crate cannot do without `unsafe`, all landing back at baseline.
+    if !tb_hal::heap_selftest() {
+        m5_fail("tb_hal::heap_selftest failed");
+    }
+    if tb_hal::heap_used_bytes() != base_used {
+        m5_fail("heap_selftest left bytes allocated");
+    }
+
+    tb_hal::serial_write_str("M5: alloc OK\n"); // <-- the M5 DoD marker
     tb_hal::halt()
 }
 

@@ -3,7 +3,7 @@
 #
 # Boots the SAME kernel ELF the QEMU/PVH path boots, but through tb-vmm + the
 # tb-boot v0 contract (direct 64-bit long mode, NO PVH note, NO A0 trampoline),
-# and asserts the exact marker "M4: user/ring OK" on the guest serial console.
+# and asserts the exact marker "M5: alloc OK" on the guest serial console.
 # Requires a usable /dev/kvm; if absent it SKIPS (exit 0) with a clear message.
 #
 # Usage:   scripts/run-vmm-x86_64.sh [path/to/kernel-elf]
@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M4: user/ring OK'
+MARKER='M5: alloc OK'
 TIMEOUT_SECS="${VMM_TIMEOUT:-30}"
 
 if [[ ! -e /dev/kvm ]]; then

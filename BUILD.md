@@ -143,7 +143,7 @@ Reproduced here for traceability; cite the source in each asm file's header note
 | Flag | Purpose | Source |
 |---|---|---|
 | `kbuild` alias `-Zjson-target-spec` | Recent nightlies error `.json target specs require -Zjson-target-spec` without it | phil-opp Minimal Rust Kernel |
-| `kbuild` alias `-Zbuild-std=core,compiler_builtins` | No precompiled std for none-class targets; rebuild from `rust-src` | phil-opp; embedonomicon; cargo unstable docs |
+| `kbuild` alias `-Zbuild-std=core,compiler_builtins,alloc` | No precompiled std for none-class targets; rebuild core+alloc from `rust-src` (`alloc` added at M5) | phil-opp; embedonomicon; cargo unstable docs |
 | `kbuild` alias `-Zbuild-std-features=compiler-builtins-mem` | Provides `memcpy/memset/memcmp/memmove` (needed the moment we copy/zero memory) | phil-opp Minimal Rust Kernel |
 | `link-arg=-Tkernel/linker/<arch>.ld` | rust-lld (`ld.lld`) uses our script: keep the PVH note, place `.text` at 1 MiB (x86) | embedonomicon custom-target |
 | `runner = ["bash", "scripts/run-<arch>.sh"]` | `cargo run` boots the built ELF in QEMU | cargo config `target.*.runner` |

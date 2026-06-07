@@ -2,7 +2,7 @@
 # scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M4: user/ring boundary).
 #
 # Boots the aarch64 tb-os image under QEMU, captures the PL011 serial stream,
-# and asserts the executable Definition-of-Done marker "M4: user/ring OK" (the
+# and asserts the executable Definition-of-Done marker "M5: alloc OK" (the
 # EL0 round-trip proof: the kernel `eret`s to EL0, the user stub issues
 # `svc #0`, the kernel handles it and returns). M0's hello, M1's trap
 # round-trip, M2's ping-pong, "mmu-test: enabled, serial alive" and "M3: mmu OK"
@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M4: user/ring OK"
+MARKER="M5: alloc OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

@@ -31,6 +31,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod arch;
+mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 
 /// Initialise the early serial console for the current architecture.
@@ -463,4 +464,53 @@ pub fn read_boot_magic(boot_info: usize) -> Option<u64> {
     // pointee is boot RAM that outlives this call.
     let magic = unsafe { (boot_info as *const u64).read_volatile() };
     Some(magic)
+}
+
+// ===========================================================================
+// M5: bring `alloc` online (this milestone)
+// ===========================================================================
+//
+// A from-scratch, intrusive free-list global allocator served from a fixed
+// `.bss` static arena, so Box/Vec/BTreeMap/String work kernel-wide BEFORE any
+// physical frame allocator exists. ALL the unsafe — the static arena, its
+// `unsafe impl Sync`, the `unsafe impl GlobalAlloc`, and every raw pointer /
+// free-list manipulation — lives in `heap.rs`; this file exposes only the safe
+// facade and re-exports the global-allocator type. The kernel declares
+// `#[global_allocator] static HEAP: tb_hal::Heap = tb_hal::Heap::new();`, calls
+// `heap_init()` once, then uses `alloc` types and the stats/self-test fns below.
+// The allocator algebra is reused UNCHANGED by M7 (only the backing store, the
+// arena, changes there).
+
+pub use heap::Heap;
+
+/// Lay the kernel heap down over its fixed `.bss` arena. Idempotent; call once
+/// early (e.g. from `rust_main`, after M4) before using any `alloc` type.
+///
+/// Installs a single free block spanning the arena; subsequent allocations are
+/// served first-fit with splitting and coalescing. All raw work is in `heap.rs`.
+pub fn heap_init() {
+    heap::init();
+}
+
+/// Bytes currently handed out by the global allocator (sum of live allocations'
+/// normalised sizes). Returns to its post-[`heap_init`] baseline once every
+/// allocation is freed — the metric a no-leak assertion checks.
+pub fn heap_used_bytes() -> usize {
+    heap::used_bytes()
+}
+
+/// The maximum [`heap_used_bytes`] ever observed — the heap high-water mark.
+pub fn heap_high_water() -> usize {
+    heap::high_water()
+}
+
+/// Run tb-hal's low-level allocator self-test; `true` = pass.
+///
+/// Performs the raw-pointer checks the `forbid(unsafe_code)`-class kernel cannot
+/// do itself: an over-arena request returns null (handled, not UB); an
+/// over-aligned alloc/dealloc/re-alloc round-trip reuses the freed block at the
+/// same address; and two freed adjacent blocks re-serve as one larger block
+/// (proving coalescing). It leaks nothing — used-bytes ends at the entry value.
+pub fn heap_selftest() -> bool {
+    heap::selftest()
 }

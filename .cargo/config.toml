@@ -22,12 +22,14 @@
 # target (and optionally --release):
 #   cargo kbuild --target targets/x86_64-tabos-none.json
 #   cargo kbuild --release --target targets/aarch64-tabos-none.json
-# Flags: -Zbuild-std recompiles core + compiler_builtins from rust-src (no
-# precompiled std exists for none-class triples); -Zbuild-std-features enables
-# compiler_builtins' mem* intrinsics (needed the moment the kernel copies/zeroes
-# memory); -Zjson-target-spec lets cargo accept a `.json` target file on recent
-# nightlies. Requires the nightly toolchain pinned in rust-toolchain.toml.
-kbuild = "build -p tabos-kernel -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec"
+# Flags: -Zbuild-std recompiles core + compiler_builtins + alloc from rust-src
+# (no precompiled std exists for none-class triples; `alloc` is needed since M5
+# brought a #[global_allocator] online, so the kernel's `extern crate alloc`
+# resolves); -Zbuild-std-features enables compiler_builtins' mem* intrinsics
+# (needed the moment the kernel copies/zeroes memory); -Zjson-target-spec lets
+# cargo accept a `.json` target file on recent nightlies. Requires the nightly
+# toolchain pinned in rust-toolchain.toml.
+kbuild = "build -p tabos-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec"
 
 # ---- x86_64: PVH ELF, loads at 1 MiB, links with kernel/linker/x86_64.ld ----
 # `[target.<stem>]` matches `--target targets/x86_64-tabos-none.json` by the

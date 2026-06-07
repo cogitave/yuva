@@ -3,7 +3,7 @@
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M4: user/ring OK" appears on serial (the user/ring round-trip proof: the
+# "M5: alloc OK" appears on serial (the newest cumulative-boot milestone; the
 # kernel drops to ring 3, the user stub issues `int 0x80`, the kernel handles it
 # and returns). M0's hello, M1's trap round-trip, M2's ping-pong and M3's
 # "M3: mmu OK" all print earlier in the same boot, so one run proves every
@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M4: user/ring OK'
+MARKER='M5: alloc OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
