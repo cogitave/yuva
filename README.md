@@ -13,9 +13,12 @@ which AI agents are first-class citizens.
 
 ## Status: the kernel boots and runs
 
-The v1 kernel-foundation chain **M0 → M4 is complete and green on both
-architectures** (x86_64 + aarch64), verified by booting under QEMU on every
-change. A successful boot prints this cumulative self-test over serial:
+The v1 kernel-foundation chain **M0 → M4 is complete**, plus **L1 sovereignty**
+(the project's own VMM `tb-vmm` + the `tb-boot v0` contract) and the first v2
+milestone **M5** (a from-scratch kernel heap / `alloc`) — all **green on both
+architectures** (x86_64 + aarch64) under QEMU *and* under `tb-vmm` on `/dev/kvm`,
+verified by booting on every change. A successful boot prints this cumulative
+self-test over serial:
 
 ```
 hello from rust_main          # M0  boot + serial
@@ -24,14 +27,17 @@ M2: context-switch OK         # M2  cooperative task switch (1000-round + regist
 M3: mmu OK                    # M3  MMU bring-up + own page tables
 syscall from user: arg=0xcafe # M4  trapped back from user mode...
 M4: user/ring OK              # M4  ...privilege separation works
+M5: alloc OK                  # M5  from-scratch heap: Box/Vec/BTreeMap/String, no leak, reuse + coalescing
 ```
 
 The kernel boots, catches hardware traps and runs the policy in
 `#![forbid(unsafe_code)]` safe Rust, switches between tasks, manages its own
-virtual memory, and can drop code to an unprivileged level (ring 3 / EL0) and be
-re-entered safely via a syscall — the hardware foundation for running agents at
-lower privilege. See [docs/MILESTONES.md](docs/MILESTONES.md) for the full
-breakdown, and [BUILD.md](BUILD.md) to build and run it yourself.
+virtual memory, can drop code to an unprivileged level (ring 3 / EL0) and be
+re-entered safely via a syscall, and now allocates on its own kernel heap — the
+foundation for the v2 agent-native layers ([docs/ROADMAP-V2.md](docs/ROADMAP-V2.md),
+M5→M18). It boots fast, too: see [docs/BENCHMARKS.md](docs/BENCHMARKS.md). See
+[docs/MILESTONES.md](docs/MILESTONES.md) for the full breakdown, and
+[BUILD.md](BUILD.md) to build and run it yourself.
 
 ## What is TABOS?
 
@@ -95,7 +101,9 @@ research/raw/       raw research and code-generation provenance (JSON)
 
 | Document | Contents |
 |---|---|
-| [docs/MILESTONES.md](docs/MILESTONES.md) | The M0→M4 chain, executable DoDs, the dev pipeline, build/run, what's next |
+| [docs/MILESTONES.md](docs/MILESTONES.md) | The kernel chain (M0→M5 + L1 done), executable DoDs, the dev pipeline, build/run, what's next |
+| [docs/ROADMAP-V2.md](docs/ROADMAP-V2.md) | The v2 agent-native milestone chain M5→M18 (canonical, tracked): exact DoD marker + framekernel unsafe-placement + deps + risks per milestone |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Boot-time benchmarks — TABOS measured (`scripts/bench-boot.sh`) vs cited, metric-matched competitors (microVMs / unikernels / containers); why a from-scratch PVH/`tb-boot` kernel starts ahead |
 | [docs/RESEARCH-REPORT.md](docs/RESEARCH-REPORT.md) | Cited deep-research report — 26 arXiv papers + 20 system docs; 25 core claims adversarially verified, 100 area findings |
 | [docs/VISION.md](docs/VISION.md) | Rationale, five design principles, gap analysis, success criteria, roadmap |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Kernel decision (capability core + unikernel body + exokernel spirit), object model, namespaces, syscall surface, schedulers, security |

@@ -1,0 +1,295 @@
+{
+ "systems": [
+  {
+   "name": "AWS Firecracker (microVM, KVM)",
+   "category": "microVM",
+   "boot_time": "InstanceStart -> guest /sbin/init: <= 125 ms (NSDI: 'boots to application code in less than 125 ms'). Pre-configured boots ~2x faster than QEMU; p99 = 146 ms at 1000 microVMs / 50 launching concurrently. Firecracker's OWN contribution (kernel load + vCPU start = 'InstanceStart' minus the Linux boot) ~38 ms; VMM-launch -> API-socket-ready <= 8 CPU ms (wall-clock ~12 ms typical).",
+   "metric_definition": "NSDI Sec 5.1: wall-clock from when the VMM process is forked until the guest kernel forks its init process (init writes a pre-configured IO port; all VMMs patched to call exit() on that VM-exit). Two variants: END-TO-END (includes process fork + several REST API config calls) and PRE-CONFIGURED (final start-VM API call -> init exec). SPECIFICATION.md restates it as InstanceStart -> start of /sbin/init. No BIOS/UEFI/GRUB: the VMM loads the guest kernel directly (Linux 64-bit boot protocol or PVH) and jumps to it, so the 125 ms contains ZERO firmware/bootloader time.",
+   "setup": "EC2 m5d.metal (2x Xeon Platinum 8175M, HT disabled, 384 GB, NVMe) / also M6G.metal Graviton; 1 vCPU, 128-256 MiB RAM; KVM. Guest Linux 4.14.94 minimal microVM kernel (virtio+serial only, no modules), file-backed minimal rootfs, no network, serial-console logging disabled. 500 serial samples + a 50-concurrent / 1000-VM run.",
+   "source_title": "Agache et al., 'Firecracker: Lightweight Virtualization for Serverless Applications', USENIX NSDI 2020, Sec 5.1; Firecracker SPECIFICATION.md (CI-enforced)",
+   "source_url": "https://www.usenix.org/system/files/nsdi20-paper-agache.pdf",
+   "confidence": "high"
+  },
+  {
+   "name": "Intel Cloud Hypervisor (rust-vmm)",
+   "category": "microVM",
+   "boot_time": "Serial: boots 'marginally faster than pre-configured Firecracker' and ~2x faster than QEMU. Concurrency: p99 = 158 ms at 1000 VMs / 50 concurrent (vs FC-pre 146 ms, i.e. FC-pre had the tighter tail). Same ~100-150 ms band as FC-pre on serial boots.",
+   "metric_definition": "Identical NSDI metric to the Firecracker rows: VMM-process fork -> guest kernel forks init (trivial init writes IO port -> VMM exit()). Started directly, so effectively 'pre-configured' style (no separate multi-call API config phase). Like Firecracker, can boot an UNCOMPRESSED kernel, avoiding ~40 ms of decompression QEMU pays.",
+   "setup": "Same harness: EC2 m5d.metal, Xeon Platinum 8175M, KVM; guest Linux 4.14.94 minimal kernel, 1 vCPU, 256 MB. 500 serial samples / 50-concurrent run.",
+   "source_title": "Agache et al., NSDI 2020, Sec 5.1 (Boot Times), Figures 5-6",
+   "source_url": "https://www.usenix.org/system/files/nsdi20-paper-agache.pdf",
+   "confidence": "medium"
+  },
+  {
+   "name": "QEMU (fast-boot microVM-class, stripped + qboot)",
+   "category": "microVM",
+   "boot_time": "~2x slower than pre-configured Firecracker / Cloud Hypervisor on the NSDI harness (roughly the ~250 ms class); end-to-end Firecracker keeps a ~50 ms lead. Unikraft isolates the pure VMM overhead alone: ~40 ms full QEMU, ~10 ms QEMU-microVM, vs ~3 ms Firecracker/Solo5. NSDI cost breakdown: kernel decompression ~+40 ms (QEMU boots a compressed kernel here), a static NIC ~+35 ms; qboot saves ~20 ms vs the default BIOS.",
+   "metric_definition": "Two papers, two spans: (a) NSDI = same VMM-fork -> guest kernel forks init (QEMU patched identically); (b) Unikraft EuroSys'21 = pure VMM startup overhead (the time the monitor takes before the first guest instruction), separated from guest boot.",
+   "setup": "(a) EC2 m5d.metal / KVM, fast-boot QEMU + qboot BIOS, guest Linux 4.14.94 (compressed), 1 vCPU, 256 MB - NOT a default desktop QEMU. (b) helloworld guest, KVM, Unikraft i7-9700K testbed.",
+   "source_title": "Agache et al., NSDI 2020, Sec 5.1; Kuenzer et al., 'Unikraft', EuroSys 2021",
+   "source_url": "https://www.usenix.org/system/files/nsdi20-paper-agache.pdf",
+   "confidence": "high"
+  },
+  {
+   "name": "QEMU 'microvm' machine type (official docs)",
+   "category": "microVM",
+   "boot_time": "No number published. Described as 'a minimalist machine type ... optimized for both boot time and footprint', inspired by Firecracker's machine model: no PCI, no ACPI, uses qboot as BIOS by default for better boot times, up to eight virtio-mmio devices.",
+   "metric_definition": "N/A - qualitative. Positioned as 'a baseline for benchmarking and optimizing both QEMU and guest operating systems' for short-lived guests; states no start/end events or figures.",
+   "setup": "qemu-system-x86_64 -M microvm with -enable-kvm, virtio-mmio devices, qboot BIOS; legacy devices (PIC/PIT/RTC/ISA-serial) optionally disabled to shrink footprint.",
+   "source_title": "QEMU documentation - \"'microvm' virtual platform (microvm)\"",
+   "source_url": "https://www.qemu.org/docs/master/system/i386/microvm.html",
+   "confidence": "medium"
+  },
+  {
+   "name": "QEMU q35 + SeaBIOS Linux boot, per-phase breakdown (Garzarella, qemu-boot-time)",
+   "category": "full-VM",
+   "boot_time": "Process exec -> userspace ~245 ms avg (3-run, min 242 / max ~251). Per-phase (kvm_pio trace, averages): QEMU init ~34 ms; SeaBIOS firmware ~8.9 ms; firmware-jump -> start_kernel (bzImage DMA-load via linuxboot option ROM + self-decompression) ~78.8 ms; start_kernel -> /sbin/init ~122 ms.",
+   "metric_definition": "IO-port trace points captured with perf (kvm:kvm_pio / sched_process_exec): qemu_init_end (first kvm_entry) -> fw_start -> fw_do_boot -> linux_start_boot -> linux_start_kernel (kernel entry) -> linux_start_user (just before init). This is the canonical way to isolate firmware vs decompress/load vs kernel-init. NOTE: GENERIC q35+SeaBIOS path, NOT the boot-optimized microvm+qboot+PVH path, so it is an upper-ish baseline showing WHERE Linux boot time goes.",
+   "setup": "qemu-system-x86_64 -machine q35,accel=kvm; stripped SeaBIOS (config.seabios-256k) + patched optionrom; patched Linux bzImage; KVM; direct -kernel. Host hardware not stated in the README.",
+   "source_title": "Stefano Garzarella (Red Hat), 'How to measure the boot time of a Linux VM with QEMU/KVM' / qemu-boot-time",
+   "source_url": "https://stefano-garzarella.github.io/posts/2019-08-24-qemu-linux-boot-time/",
+   "confidence": "low"
+  },
+  {
+   "name": "Minimal custom Linux kernel on Firecracker (David V., --boot-timer)",
+   "category": "microVM",
+   "boot_time": "Kernel-only (vCPU start -> guest userland MMIO write): 6.0 ms (8.9 ms incl. VM creation), down from ~35 ms for the first working minimal kernel. Stock Firecracker-example 5.10 kernel baseline on the same rig: 1.037 s.",
+   "metric_definition": "vCPU start (kernel entry) -> the instant guest user-space runs, captured by Firecracker's --boot-timer MMIO device (guest writes physical 0xd0000000 when userland starts; Firecracker timestamps it). The cleanest published 'kernel-only, no firmware' number and the closest analogue to a TABOS-style guest. Reductions: disabling SMP (9.1 ms), 2 MiB huge-page backing (5.94 ms), favordynmods cgroup mount.",
+   "setup": "Ryzen 5 7640U laptop (untuned), host kernel 6.2; Firecracker; 1 vCPU, 128 MiB; custom 6.7.3 guest kernel (~1.6 MB bzImage); average of 30 runs per config. KVM.",
+   "source_title": "'Minimizing Linux boot times - Getting Linux to boot in 6ms' (davidv.dev)",
+   "source_url": "https://blog.davidv.dev/posts/minimizing-linux-boot-times/",
+   "confidence": "low"
+  },
+  {
+   "name": "Alpine / real minimal Linux guest on Firecracker (incl. NumaVM end-to-end; stock-kernel delta)",
+   "category": "full-VM",
+   "boot_time": "Alpine on Firecracker ~330 ms (Unikraft'21 cross-measure). End-to-end production pipeline (NumaVM): 1,133 ms 'nothing exists' -> SSH ready, of which Firecracker InstanceStart ~38 ms and guest kernel+init ~560 ms (kernel ~400 ms to /sbin/init); snapshot restore 176 ms. NSDI: swapping the minimal microVM kernel for a stock Ubuntu 18.04 kernel adds ~+900 ms in the SAME Firecracker.",
+   "metric_definition": "Unikraft harness = first guest instruction -> application on Firecracker. NumaVM = full orchestration (host setup + 6 Firecracker API PUTs + InstanceStart + guest Linux boot + custom init + sshd listening). NSDI = VMM-fork -> guest kernel forks init, only the GUEST KERNEL CONFIG changed. Collectively the key cautionary datapoint: the guest kernel/userspace, NOT the VMM, dominates a real-Linux microVM boot.",
+   "setup": "Alpine: Firecracker/KVM, Unikraft i7-9700K testbed (third-party). NumaVM: EC2 Graviton (ARM), Firecracker v1.14.2, Alpine 3.21, 256 MiB, 2 vCPUs, custom init (no systemd/OpenRC), NVMe/XFS reflink, KVM, 5-run +/-25 ms. NSDI: EC2 m5d.metal / KVM, stock Ubuntu kernel (6.7 MB + 44 MB modules) vs 4.0 MB minimal no-modules kernel.",
+   "source_title": "Kuenzer et al., Unikraft EuroSys 2021; 'Benchmarking Firecracker Boot and Restore' (NumaVM blog); Agache et al., NSDI 2020",
+   "source_url": "https://unikraft.org/docs/concepts/performance",
+   "confidence": "medium"
+  },
+  {
+   "name": "Unikraft",
+   "category": "unikernel",
+   "boot_time": "Guest-only (first instruction -> main): tens of microseconds (no NIC) to <1 ms on Firecracker ('~1 ms on top of the VMM time'). Total VM boot incl. VMM: ~3 ms on Solo5 and Firecracker, ~10 ms on QEMU microVM, ~40 ms on plain QEMU. Abstract: ~3-40 ms total (Intro says 2-40 ms - minor internal inconsistency).",
+   "metric_definition": "Guest boot = 'measured from when the first guest instruction is run until main() is invoked' (EXCLUDES the VMM). Total VM boot adds the VMM's own startup. Workload = a helloworld unikernel (<2 MB image), Fig. 10.",
+   "setup": "KVM throughout. Shuttle SH370R6, Intel i7-9700K @3.6 GHz (4.9 GHz Turbo, 8 cores), 32 GB; HT disabled, 4 host cores isolated, one core pinned each to VM/VMM/client, performance governor. VMMs: QEMU, QEMU microVM, Firecracker, Solo5.",
+   "source_title": "Kuenzer et al., 'Unikraft: Fast, Specialized Unikernels the Easy Way', EuroSys 2021 (arXiv 2104.12721 / DOI 10.1145/3447786.3456248)",
+   "source_url": "https://arxiv.org/abs/2104.12721",
+   "confidence": "high"
+  },
+  {
+   "name": "OSv",
+   "category": "unikernel",
+   "boot_time": "Origin (ATC'14): ~0.6 s (600 ms) to boot OSv + Memcached until Memcached starts serving requests (11 MB image, ZFS rootfs; authors note ramfs would cut it). Modern cross-measure (Unikraft'21): ~4-5 ms on Firecracker with a read-only filesystem.",
+   "metric_definition": "ATC'14: VM start -> Memcached begins serving requests (single vCPU; includes the app + ZFS). Unikraft'21: first guest instruction -> main() on Firecracker, read-only rootfs (a much narrower metric - this is why the two numbers differ by ~100x).",
+   "setup": "ATC'14: KVM/QEMU, single vCPU, ZFS. 4-5 ms figure: Firecracker on the Unikraft i7-9700K testbed (third-party).",
+   "source_title": "Kivity et al., 'OSv-Optimizing the Operating System for Virtual Machines', USENIX ATC 2014; 4-5 ms from Unikraft EuroSys 2021",
+   "source_url": "https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity",
+   "confidence": "high"
+  },
+  {
+   "name": "MirageOS",
+   "category": "unikernel",
+   "boot_time": "Jitsu (NSDI'15): ~120 ms end-to-end domain-build+boot on ARM/Xen; ~20 ms on x86 but this is VM-CONSTRUCTION time only, explicitly NOT boot-to-application. Cross-measure (Unikraft'21): ~1-2 ms on Solo5. Context: a vanilla Xen toolstack booted a Linux VM in 3-5 s.",
+   "metric_definition": "Jitsu: time to create+boot a unikernel domain via the optimized Xen toolstack; the paper notes the 20 ms x86 number 'measures only VM construction time, not boot time.' Unikraft'21: first guest instruction -> main() on Solo5.",
+   "setup": "Jitsu: Xen. ARM host = Cubieboard2 (dual-core A20, 1 GB); x86 host = 2.4 GHz quad-core AMD server. 1-2 ms Solo5 figure: Unikraft i7-9700K / KVM testbed (third-party).",
+   "source_title": "Madhavapeddy et al., 'Jitsu: Just-In-Time Summoning of Unikernels', USENIX NSDI 2015; 1-2 ms from Unikraft EuroSys 2021",
+   "source_url": "https://www.usenix.org/conference/nsdi15/technical-sessions/presentation/madhavapeddy",
+   "confidence": "high"
+  },
+  {
+   "name": "Lupine Linux (specialized Linux guest)",
+   "category": "unikernel",
+   "boot_time": "~70 ms on Firecracker with KML; ~18 ms on Firecracker without KML (Unikraft'21 cross-measure). The primary Lupine paper reports fast Firecracker-microVM boot but its exact self-reported ms figure could not be extracted (ACM DL Cloudflare-walled, no arXiv copy).",
+   "metric_definition": "Boot of a manually minimized Linux kernel (~4 MB, Linux 4.0) as a Firecracker microVM to the application. KML = Kernel Mode Linux (runs the app in kernel mode to cut syscall cost). Unikraft metric: boot to application on Firecracker. NOTE: a stripped Linux guest ('a Linux in unikernel clothing'), not a from-scratch unikernel.",
+   "setup": "Firecracker microVM; Lupine = stripped Linux 4.0 config + musl/Alpine userspace. 70/18 ms measured on the Unikraft i7-9700K testbed (third-party).",
+   "source_title": "Kuo/Williams/Koller/Mohan, 'A Linux in Unikernel Clothing', EuroSys 2020 (DOI 10.1145/3342195.3387526); numbers cross-measured in Unikraft EuroSys 2021",
+   "source_url": "https://doi.org/10.1145/3342195.3387526",
+   "confidence": "medium"
+  },
+  {
+   "name": "Hermitux (binary-compatible unikernel)",
+   "category": "unikernel",
+   "boot_time": "~30-32 ms on uHyve (Unikraft'21 cross-measure).",
+   "metric_definition": "Boot to application on uHyve (a lightweight KVM monitor). IMPORTANT: Hermitux is a binary-compatible unikernel (Olivier et al., VEE 2019) and is NOT Hermit/RustyHermit - they only share the uhyve monitor; listed separately to prevent conflation and give a real uHyve-class boot figure.",
+   "setup": "uHyve (KVM) on the Unikraft i7-9700K testbed (third-party measurement).",
+   "source_title": "Unikraft EuroSys 2021 (cross-measure, arXiv 2104.12721); primary: Olivier et al., 'A Binary-Compatible Unikernel', VEE 2019 (DOI 10.1145/3313808.3313817)",
+   "source_url": "https://arxiv.org/abs/2104.12721",
+   "confidence": "medium"
+  },
+  {
+   "name": "Hermit / RustyHermit",
+   "category": "unikernel",
+   "boot_time": "No published, reproducible cold-boot-to-application figure with a defined start/end metric. The project's papers focus on HPC scalability and Rust memory-safety, not a boot benchmark.",
+   "metric_definition": "n/a - no clean boot metric published by the project (README/site/papers give none). Do NOT confuse with Hermitux above (different project, shared uhyve monitor).",
+   "setup": "Runs on uhyve (lightweight KVM monitor, Firecracker-class) and QEMU microvm; targets x86-64 / aarch64 / riscv64. RWTH-Aachen (Rust rewrite of the C unikernel HermitCore).",
+   "source_title": "The Hermit Operating System (project site) + RustyHermit (ISC HPC 2020, DOI 10.1007/978-3-030-59851-8_22) + 'Exploring Rust for Unikernel Development' (PLOS/ROSS 2019)",
+   "source_url": "https://hermit-os.org/",
+   "confidence": "low"
+  },
+  {
+   "name": "NanoVMs / Nanos",
+   "category": "unikernel",
+   "boot_time": "Marketing only: 'Unikernels can boot 2 orders of magnitude faster than docker.' No metric definition, no hardware/VMM setup, not reproducible. No cold-boot millisecond figure with defined start/end events was found. (Quantified site benchmarks are throughput, e.g. 'static content ~2x faster than Linux' on GCE 1 vCPU - not boot time.)",
+   "metric_definition": "Undefined - 'faster than docker' with no start/end events specified. FLAG: marketing, not a measurement.",
+   "setup": "Unspecified for boot claims. Nanos runs as a KVM guest (QEMU/KVM locally, AWS/GCP/Azure) via the OPS tool.",
+   "source_title": "NanoVMs / Nanos marketing site (nanovms.com, nanos.org)",
+   "source_url": "https://nanovms.com/",
+   "confidence": "low"
+  },
+  {
+   "name": "LightVM (unikernel boot floor on Xen)",
+   "category": "microVM",
+   "boot_time": "~2 ms to boot a no-op unikernel with a heavily optimized Xen toolstack (quoted by the Unikraft paper); LightVM's own paper reports few-ms VM boot and thousands of VM creations/sec.",
+   "metric_definition": "Boot of a minimal/no-op unikernel guest on a redesigned Xen toolstack (noxs / chaos). The 2 ms value is quoted verbatim from the Unikraft paper's related-work measurement.",
+   "setup": "Xen, optimized toolstack. SOSP 2017 (Manco et al.).",
+   "source_title": "Manco et al., 'My VM is Lighter (and Safer) than your Container', SOSP 2017 (DOI 10.1145/3132747.3132763); 2 ms quoted in Unikraft EuroSys 2021",
+   "source_url": "https://doi.org/10.1145/3132747.3132763",
+   "confidence": "medium"
+  },
+  {
+   "name": "Zephyr RTOS (boot_time benchmark, method reference only)",
+   "category": "unikernel",
+   "boot_time": "Sample output (QEMU, 25 MHz emulated clock): _start->main() = 96,915 us; _start->first task = 98,037 us; _start->idle = 1,500,159 us. These are EMULATION artifacts, NOT real hardware. On real MCUs (tens-to-hundreds of MHz) _start->main is typically sub-millisecond to a few ms.",
+   "metric_definition": "tests/benchmarks/boot_time (CONFIG_BOOT_TIME_MEASUREMENT) records TSC timestamps: reset -> kernel start (crt0.S __start), kernel start -> main(), -> first task, -> main task idle. Single-binary, single-address-space RTOS (app linked into the kernel image, no firmware, direct boot) - listed as unikernel-class for METHOD reference only, not a VM-guest boot figure.",
+   "setup": "QEMU emulation (25 MHz reported clock), 'default' config of three. Real targets vary by SoC/clock. Test removed from current Zephyr main (cited via ds-kiel/AFHoT mirror).",
+   "source_title": "Zephyr tests/benchmarks/boot_time README + sample output (AFHoT mirror); CONFIG_BOOT_TIME_MEASUREMENT",
+   "source_url": "https://github.com/ds-kiel/AFHoT/blob/master/zephyr/tests/benchmarks/boot_time/README.txt",
+   "confidence": "low"
+  },
+  {
+   "name": "Firecracker PVH / direct-boot (the firmware-skipping mechanism TABOS relies on)",
+   "category": "microVM",
+   "boot_time": "N/A (mechanism, not a time) - eliminates the firmware + legacy-bootloader phase entirely; an uncompressed vmlinux additionally removes bzImage self-decompression.",
+   "metric_definition": "If the kernel ELF carries XEN_ELFNOTE_PHYS32_ENTRY, Firecracker enters at the 32-bit PVH entry point: 'designed for virtualized environments which load the kernel directly ... simpler than the Linux boot mode ... launched from a legacy boot loader.' No SeaBIOS/OVMF, no real-mode stub, no self-decompress. Default in FreeBSD 14 Firecracker support; opt-in for Linux via CONFIG_PVH=y. This is the architectural basis of TABOS's firmware-cost-avoidance claim.",
+   "setup": "x86_64 Firecracker / KVM guest; kernel built with the PVH entry note.",
+   "source_title": "Firecracker docs/pvh.md (PVH boot mode)",
+   "source_url": "https://github.com/firecracker-microvm/firecracker/blob/main/docs/pvh.md",
+   "confidence": "medium"
+  },
+  {
+   "name": "SeaBIOS (default QEMU/KVM x86 firmware - the firmware cost TABOS avoids)",
+   "category": "full-VM",
+   "boot_time": "~8.9 ms firmware-init for a stripped 256k build (Garzarella, measured fw_start->fw_do_boot). Bonzini: stripping everything gets SeaBIOS to ~20 ms. qboot README claims the full default BIOS is ~150 ms slower (older, config-dependent - treat as order-of-magnitude, not a stable measurement).",
+   "metric_definition": "Time inside the x86 BIOS firmware, from first firmware instruction to handing off to the kernel/bootloader (fw_start -> fw_do_boot). Highly config-dependent: option ROMs, USB, ATA/AHCI, PS2 probing dominate the default build. A PVH/direct-boot guest (Firecracker, QEMU microvm) skips this phase entirely.",
+   "setup": "QEMU q35/PC + KVM; SeaBIOS 256k stripped (Garzarella) vs default. The ~150 ms is from the circa-2015 default SeaBIOS (qboot README).",
+   "source_title": "Garzarella, 'How to measure the boot time of a Linux VM'; qboot README (bonzini/qboot) for the ~150 ms claim",
+   "source_url": "https://stefano-garzarella.github.io/posts/2019-08-24-qemu-linux-boot-time/",
+   "confidence": "low"
+  },
+  {
+   "name": "qboot (minimal x86 firmware; default firmware of QEMU 'microvm')",
+   "category": "microVM",
+   "boot_time": "~20 ms from entering qboot to entering Linux (KVM, Simon Glass). README: saves ~150 ms vs the default QEMU BIOS; fw_cfg DMA loading 'pretty much instantaneous'.",
+   "metric_definition": "Firmware entry -> jump to the Linux kernel, via Garzarella's qemu-boot-time perf trace points. qboot = a 64 KiB BIOS doing minimal PCI/setup; QEMU's microvm machine uses it by default 'to obtain better boot times.' Even this minimal firmware is non-zero overhead a true direct/PVH-loaded guest avoids.",
+   "setup": "qemu-kvm -bios bios.bin, direct -kernel; KVM. ~20 ms = Simon Glass's machine; original qboot by Paolo Bonzini (2015).",
+   "source_title": "'Booting into Linux in 100ms' (U-Boot blog, Simon Glass) - measures qboot ~20 ms; bonzini/qboot README",
+   "source_url": "https://blog.u-boot.org/blog/booting-into-linux-in-100ms/",
+   "confidence": "low"
+  },
+  {
+   "name": "OVMF / UEFI (EDK II) on QEMU - the heaviest firmware option",
+   "category": "full-VM",
+   "boot_time": "No clean reproducible primary millisecond figure found; qualitatively the slowest QEMU firmware. Intel/NEMU engineers reported being 'not happy with the OVMF boot latencies we measured, especially in the Kata containers context', which drove them to add qboot support instead.",
+   "metric_definition": "Full UEFI boot SEC -> PEI -> DXE -> BDS, plus decompressing the main firmware volume (MAINFV) from the compressed SEC FV into RAM before DXE runs, then device enumeration + boot manager - all before any kernel loads. The maximal firmware overhead a direct/PVH guest eliminates. Honest: the evidence is the qualitative latency complaint + architectural cost, not a single benchmarked figure.",
+   "setup": "QEMU/KVM x86_64 -bios OVMF (EDK II). Context: Kata Containers / NEMU (Intel) boot-latency evaluation, Nov 2018.",
+   "source_title": "[SeaBIOS] booting time optimization thread (Samuel Ortiz, Intel/NEMU); OvmfPkg/README for the MAINFV decompress step",
+   "source_url": "https://mail.coreboot.org/pipermail/seabios/2018-November/012577.html",
+   "confidence": "low"
+  },
+  {
+   "name": "U-Boot bootloader on QEMU x86_64 (GRUB-class bootloader analogue)",
+   "category": "full-VM",
+   "boot_time": "~83 ms optimized (qemu_init_end -> u_boot_do_boot, KVM). Default/out-of-the-box: 2.9 s - but ~2 s of that is the configurable boot delay and ~800 ms a PXE menu delay.",
+   "metric_definition": "Bootloader entry -> handing control to the Linux kernel, via qemu-boot-time trace points. Lesson transferable to GRUB: a general-purpose bootloader's dominant cost is usually its configurable menu/timeout (GRUB_TIMEOUT, U-Boot bootdelay/PXE), plus device/FS/EFI-loader probing - none of which a direct-booted guest like TABOS incurs. Stripping net/video/CLI/FS/EFI got U-Boot 2.9 s -> ~83 ms.",
+   "setup": "qemu-system-x86_64, KVM; U-Boot with progressive feature-stripping; reproducible via contrib/qemu-boot-timer.sh.",
+   "source_title": "'Booting into Linux in 100ms' (U-Boot official blog, Simon Glass)",
+   "source_url": "https://blog.u-boot.org/blog/booting-into-linux-in-100ms/",
+   "confidence": "low"
+  },
+  {
+   "name": "seL4 microkernel (kernel boot/init)",
+   "category": "microkernel",
+   "boot_time": "No widely-published kernel boot-time figure in ms. seL4's headline metric is IPC latency ('world's fastest microkernel'), not boot. Context: a full multi-component seL4-hypervisor system boot was reduced to 'several seconds' via Asymmetric Init - whole-system, not kernel init.",
+   "metric_definition": "Kernel init runs once at startup: architecture setup, memory detection, creation of initial capabilities, BootInfo construction, then activation of the initial user thread (root task). 'After startup, the kernel never allocates memory' - a bounded deterministic sequence, so kernel-only init is fast, but the project publishes IPC/scheduling microbenchmarks rather than a standardized boot-time number. Any specific seL4 boot-ms figure is setup-specific, not official.",
+   "setup": "Architecture-dependent (ARM/x86/RISC-V); bare-metal or as a hypervisor. No standard boot-time benchmark in sel4bench (which targets IPC, signal, fault, scheduling).",
+   "source_title": "seL4 Reference Manual / seL4 kernel boot and initialization",
+   "source_url": "https://sel4.org/Info/Docs/seL4-manual-latest.pdf",
+   "confidence": "low"
+  },
+  {
+   "name": "Docker / runc (Linux container)",
+   "category": "container",
+   "boot_time": "~1.014 s per container for full create+destroy at steady state (no concurrency); peaks at ~2.6 containers/sec under concurrency. Raw runc process start alone is far lower (tens of ms).",
+   "metric_definition": "'Total setup and teardown time' - the FULL Docker container lifecycle (create AND destroy) churned at steady state. NOT a VM boot and NOT just process start; includes Docker/containerd orchestration + teardown, which dominate. Containers share the host kernel: there is NO guest kernel to boot.",
+   "setup": "Docker + runc (namespaces + cgroups), serial and concurrent. UW-Madison testbed, HotCloud'19.",
+   "source_title": "Young et al., 'The True Cost of Containing: A gVisor Case Study', USENIX HotCloud 2019",
+   "source_url": "https://www.usenix.org/conference/hotcloud19/presentation/young",
+   "confidence": "high"
+  },
+  {
+   "name": "gVisor (runsc) sandbox",
+   "category": "sandbox",
+   "boot_time": "~1.117 s (KVM platform) / ~1.181 s (ptrace platform) per container for full create+destroy at steady state; ~2.3 containers/sec under concurrency. ~10% over runc - most of the ~1 s is Docker orchestration + teardown, not the sandbox itself.",
+   "metric_definition": "Same metric as runc: full container setup+teardown lifecycle via Docker with the runsc runtime. gVisor is a userspace kernel (Sentry) intercepting syscalls, not a VM boot.",
+   "setup": "Docker + runsc, KVM and ptrace platforms; same UW-Madison HotCloud'19 testbed as the runc number (apples-to-apples runc-vs-runsc).",
+   "source_title": "Young et al., 'The True Cost of Containing: A gVisor Case Study', USENIX HotCloud 2019",
+   "source_url": "https://www.usenix.org/conference/hotcloud19/presentation/young",
+   "confidence": "high"
+  },
+  {
+   "name": "Kata Containers (VM-per-pod sandbox)",
+   "category": "sandbox",
+   "boot_time": "No single reproducible headline figure. Runs a full VM per pod over KVM with a swappable VMM (QEMU / Cloud Hypervisor / Firecracker / Dragonball), so the VM-boot component inherits the per-VMM numbers (~3-250 ms); end-to-end pod creation adds guest-kernel boot + kata-agent startup + container create over virtio-vsock. Design doc ranks startup qualitatively (Dragonball ~ Firecracker ~ Cloud Hypervisor 'Excellent' < QEMU 'Good'). Only quantitative official datum: VM templating speeds container creation by 'as much as 38.68%' (relative, 10-container test).",
+   "metric_definition": "End-to-end = CRI/OCI 'create pod sandbox' -> workload process running. Docs pin no single start/end pair to a number; the 38.68% is an average container-creation speedup via containerd shimv2, not a defined boot interval.",
+   "setup": "KVM on Linux; VMM selectable (QEMU q35 / Cloud Hypervisor / Firecracker / Dragonball). Hardware not fixed by the docs.",
+   "source_title": "Kata Containers design doc 'Virtualization' + 'What is VM templating' how-to",
+   "source_url": "https://github.com/kata-containers/kata-containers/blob/main/docs/design/virtualization.md",
+   "confidence": "low"
+  },
+  {
+   "name": "AWS Lambda (cold start)",
+   "category": "sandbox",
+   "boot_time": "'From under 100 ms to over 1 second'; cold starts occur in <1% of invocations. Init phase capped at 10 s; SnapStart restores a memory/disk snapshot instead of booting from scratch.",
+   "metric_definition": "Cold start = Init phase: download function code + set up the execution environment (a Firecracker microVM) + run static/init code OUTSIDE the handler, before the handler runs. Larger than the underlying ~125 ms microVM boot because it adds code download + language-runtime/dependency init. Sits ON TOP of a Firecracker microVM, so it is strictly larger than the VM boot and is workload-dependent.",
+   "setup": "AWS production Lambda (Firecracker microVMs on EC2). A documented range, not a controlled benchmark; depends heavily on runtime, package size, memory setting.",
+   "source_title": "AWS, 'Understanding the Lambda execution environment lifecycle' (Lambda Developer Guide)",
+   "source_url": "https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html",
+   "confidence": "medium"
+  },
+  {
+   "name": "Wasmtime (WebAssembly runtime)",
+   "category": "sandbox",
+   "boot_time": "~5 microseconds to instantiate an already-compiled module (down from ~2 ms, a ~400x improvement). No OS/kernel boot at all.",
+   "metric_definition": "Time to INSTANTIATE a pre-compiled Wasm module - set up runtime-internal state + the heap for a fresh instance - using copy-on-write heap mapping (mmap + madvise) and lazy table/function init. EXCLUDES compilation (done ahead-of-time). Measured on SpiderMonkey.wasm (a multi-MB module).",
+   "setup": "Wasmtime ~1.0 (Sept 2022) on Linux, instantiating SpiderMonkey.wasm; CoW instance allocator + lazy initialization. Official Bytecode Alliance engineering blog with linked PRs/benchmarks.",
+   "source_title": "Bytecode Alliance, 'Wasmtime 1.0: A Look at Performance'",
+   "source_url": "https://bytecodealliance.org/articles/wasmtime-10-performance",
+   "confidence": "medium"
+  },
+  {
+   "name": "WasmEdge (WebAssembly runtime)",
+   "category": "sandbox",
+   "boot_time": "Sub-millisecond instantiation claimed ('fastest Wasm VM'); positioned as orders-of-magnitude faster cold start than Docker. No clean, independently-reproduced figure published - treat as marketing.",
+   "metric_definition": "Vendor positioning: Wasm module instantiation/cold start inside a host process (no OS boot, no VM). The cited IEEE Software / arXiv paper compares Docker-native vs WebAssembly FaaS but does not publish a canonical 'cold start = X us' number.",
+   "setup": "WasmEdge embedded in / launched from a host process; CNCF sandbox. Claim from README + arXiv:2010.07115, not a controlled third-party benchmark.",
+   "source_title": "WasmEdge README ('the fastest Wasm VM') + Long & Tian, 'A lightweight design for serverless FaaS' (arXiv:2010.07115, IEEE Software 2021)",
+   "source_url": "https://github.com/WasmEdge/WasmEdge",
+   "confidence": "low"
+  },
+  {
+   "name": "V8 isolates / Cloudflare Workers",
+   "category": "sandbox",
+   "boot_time": "'Under 5 ms' to warm a Worker isolate; marketed as effectively 'zero' cold start via TLS-handshake preloading; an isolate starts ~100x faster than a Node process on a container/VM. Raw V8 context creation with snapshots is sub-millisecond; the ~5 ms includes script evaluation.",
+   "metric_definition": "Cold start = create a fresh V8 isolate + load/compile the Worker script for its first request - no VM, no container, no OS boot; the isolate spins up inside an already-running runtime process. 'Zero cold start' = eagerly loading the isolate during the TLS ClientHello so warm-up overlaps the handshake RTT.",
+   "setup": "Cloudflare Workers runtime (V8 isolates) on Cloudflare's edge. Official Cloudflare claims (blog + docs), vendor-reported, not an independent benchmark.",
+   "source_title": "Cloudflare, 'Eliminating cold starts with Cloudflare Workers' + 'How Workers works' docs",
+   "source_url": "https://blog.cloudflare.com/eliminating-cold-starts-with-cloudflare-workers/",
+   "confidence": "low"
+  }
+ ],
+ "notes": "HOW THIS DATASET WAS NORMALIZED. Four cluster surveys (microVMs, unikernels, containers/sandboxes, microkernels/firmware) were merged into one list, keeping the best-sourced figure per system. Duplicates collapsed: Firecracker's NSDI'20 paper + CI-enforced SPECIFICATION.md are merged into one row (the Firecracker FAQ '<125 ms' is the same headline but with no stated metric/setup - it is folded in as a marketing caveat, not given its own row). QEMU appears TWICE on purpose because they are genuinely different things: (a) the NSDI fast-boot microVM-class config + qboot, directly comparable on the NSDI harness, and (b) the generic Garzarella q35+SeaBIOS per-phase breakdown, which exists to show WHERE Linux boot time goes. Alpine + the NSDI stock-Ubuntu-kernel +900 ms delta + the NumaVM end-to-end pipeline are merged into one 'real Linux guest on Firecracker' row. The third-party millisecond figures for OSv / MirageOS / Lupine / Hermitux all come from the Unikraft EuroSys'21 same-testbed cross-measurement and are labelled as such (peer-reviewed, but measured by a rival team - possible config bias).\n\nREAD BEFORE PUTTING ANYTHING ON ONE AXIS - the numbers span at least FIVE incompatible start/end definitions, and most of the spread between projects is metric choice, not kernel speed:\n1) GUEST-ONLY kernel boot (Unikraft 'first guest instruction -> main()', David V '--boot-timer' vCPU-start -> userland MMIO write, Zephyr '_start -> main()'): tens of microseconds to low single-digit ms; EXCLUDES the VMM.\n2) VMM-fork -> guest-init (Firecracker / Cloud Hypervisor / QEMU on the NSDI harness): ~100-250 ms, but nearly all of that is a real (minimal) Linux kernel plus the VMM, not a from-scratch kernel.\n3) Per-phase firmware/bootloader trace (Garzarella, qboot, U-Boot, SeaBIOS, OVMF): isolates exactly the phases a PVH/direct guest removes.\n4) End-to-end product orchestration (NumaVM ~1.13 s, AWS Lambda 100 ms-1 s+): host setup + API + boot + app/runtime init.\n5) Container/sandbox lifecycle (runc/gVisor ~1.0-1.18 s full create+destroy) and host-process instantiation (Wasmtime 5 us, V8 isolate <5 ms): these SHARE the host kernel - there is no guest kernel to boot, a fundamentally different boot/security model, included only as fast-startup context.\n\nTHREE APPLES-TO-APPLES BUCKETS (use these as the column groups in the TABOS doc):\n- BUCKET 1 - KERNEL-ONLY, no firmware, guest-first-instruction -> ready: Unikraft sub-ms to ~1 ms (Firecracker), MirageOS 1-2 ms (Solo5), LightVM ~2 ms (Xen), OSv 4-5 ms (Firecracker), minimal custom Linux 6 ms (Firecracker --boot-timer), Hermitux 30-32 ms (uHyve). THIS is TABOS's true peer group and the bar it must clear. (Zephyr's 96,915 us is a 25 MHz QEMU emulation artifact - method reference only, not a hardware datapoint.)\n- BUCKET 2 - FULL-STACK MICROVM/VM, (firmware?) + Linux kernel + init, VMM-start -> /sbin/init or app: Firecracker <=125 ms, Cloud Hypervisor ~same (p99 146/158 ms), Lupine 18-70 ms, QEMU microVM-class ~250 ms, generic QEMU q35+SeaBIOS ~245 ms, Alpine ~330 ms, stock-Ubuntu-on-Firecracker ~1 s. Beating these is TRIVIAL and is NOT a credible TABOS headline, because most of their time is Linux kernel init that a from-scratch kernel simply never runs.\n- BUCKET 3 - CONTAINER / SANDBOX / FaaS / WASM cold start, no guest kernel boot: runc ~1.0 s, gVisor ~1.1 s, Kata (VM-per-pod, inherits the VMM), Lambda 100 ms-1 s+, Wasmtime 5 us, WasmEdge sub-ms (claim), V8/Workers <5 ms. Different model entirely; context only.\n\nTHE FIRMWARE/BOOTLOADER BUDGET - WHY A PVH / TB-BOOT DIRECT-LONG-MODE KERNEL STARTS AHEAD. A legacy SeaBIOS/OVMF + GRUB + compressed-bzImage path spends, BEFORE the kernel's first instruction: SeaBIOS ~9 ms stripped (up to ~150 ms default) OR OVMF (heaviest - SEC/PEI/DXE/BDS plus a MAINFV decompress-into-RAM, no clean ms but the worst), PLUS a bootloader's menu/timeout (U-Boot 2.9 s default, ~83 ms stripped; GRUB's GRUB_TIMEOUT is the identical trap), PLUS bzImage self-decompression (~78 ms in Garzarella's q35 run). A Firecracker / QEMU-microvm / PVH guest collapses that whole budget to ~0-20 ms (qboot ~20 ms; a true PVH/direct uncompressed vmlinux ~0). TABOS is built precisely for this: a PVH/direct long-mode entry means NO SeaBIOS/OVMF, NO real-mode stub, NO GRUB, NO self-decompress (tiny uncompressed image), so its t0 is essentially 'the vCPU starts executing TABOS' - there is no firmware tax to pay at all. For context on the shared floor: Firecracker's own measured contribution to a cold boot is only ~38 ms (InstanceStart = kernel load + vCPU start), and VMM-launch -> API-socket-ready is <=8 CPU ms (~12 ms typical); that VMM floor, NOT firmware, is what bounds any guest on Firecracker.\n\nWHY TABOS SHOULD SIT AT THE FAST END AMONG UNIKERNELS (and where it does NOT win). Within Bucket 1 the determinant of guest-only boot is image size + work-before-ready, not language. A from-scratch no_std kernel with a tiny image, no driver probing, no module loading, no filesystem/ZFS mount, no serial-console logging, and a direct long-mode entry has strictly LESS to do than OSv (ZFS rootfs) or even a minimal Linux (SMP bring-up, ACPI, driver init - David V had to DISABLE SMP and use 2 MiB huge pages just to reach 6 ms). So TABOS's guest-only number should land at Bucket 1's fast end - target tens-to-low-hundreds of microseconds to a serial/MMIO marker, comparable to Unikraft (~1 ms) and MirageOS (1-2 ms), and ORDERS below any full-Linux microVM (Bucket 2's 18-330 ms). What TABOS does NOT beat: the END-TO-END Firecracker floor (~3 ms total on Firecracker/Solo5 per Unikraft; ~38 ms InstanceStart on a less-tuned path) is VMM-bound and SHARED - a 0.3 ms guest cannot make Firecracker's fork + KVM setup + vCPU bring-up disappear. Never headline a guest-only microsecond number against a competitor's end-to-end millisecond number; that exact metric mismatch is what makes most published unikernel boot claims non-comparable.\n\nTHE HONEST TABOS CLAIM TODAY (do not overclaim). TABOS currently boots, runs a boot self-test, and HALTS - it does not yet reach a persistent agent/userspace-ready state. So the only honest metric right now is a single well-defined span: VMM/QEMU process start (or Firecracker InstanceStart) -> the guest writes a SERIAL MARKER (or a --boot-timer-style MMIO write) at the end of the self-test, KVM-ACCELERATED. NEVER report a TCG/emulated number as a boot figure - TCG inflates boot 10-50x and is the single most common way 'microVM boot' numbers become accidentally non-comparable. Report it as exactly what it is: 'TABOS, QEMU/KVM process start -> serial marker after boot self-test, then halt', with median + p99 over >=500 serial runs (plus a concurrent batch, mirroring NSDI's 500 serial + 50-concurrent/1000-VM), and pin everything: exact CPU, host + guest, VMM version, KVM-not-TCG, vCPU/RAM, page backing, run count + variance (the cross-source spread of 6 ms to 1.04 s for 'Linux on Firecracker' is entirely explained by these knobs). Frame the genuine WIN against the firmware + decompress + Linux-kernel-init budget TABOS truly avoids (Bucket 2's tens-to-hundreds of ms), NOT against the shared VMM floor it cannot remove. When TABOS later gains an agent/userspace-ready state, add the SECOND clock (guest-first-instruction -> agent-ready) so it slots directly into Bucket 1 next to Unikraft/OSv - and report BOTH clocks, because for a unikernel the kernel->ready gap is the whole story.\n\nCONFIDENCE / SOURCING RUBRIC. high = peer-reviewed primary measurements (Firecracker NSDI'20, Unikraft EuroSys'21, OSv ATC'14, Jitsu NSDI'15, gVisor HotCloud'19) and the CI-enforced Firecracker SPECIFICATION. medium = official docs/specs that state a range or only a qualitative ranking, or peer-reviewed-but-rival-measured numbers (QEMU microvm docs, Firecracker pvh.md, AWS Lambda lifecycle, Wasmtime engineering blog, the Unikraft cross-measured competitor figures for OSv/Mirage/Lupine/Hermitux, Alpine/NumaVM). low = blogs/READMEs/mailing-lists/marketing (David V 6 ms blog, NumaVM, Garzarella, qboot/SeaBIOS/OVMF/U-Boot firmware figures, NanoVMs '2 orders faster than docker', WasmEdge 'fastest Wasm VM', Cloudflare 'zero cold start', and seL4/Zephyr which publish no VM-comparable boot number). MARKETING FLAGS to never quote bare: Firecracker FAQ '<125 ms' (real but no stated metric/setup), NanoVMs '2 orders faster than docker', WasmEdge 'the fastest Wasm VM', Cloudflare 'zero cold start / under 5 ms', and any Firecracker '125 ms' cited without its stripping caveats (serial-console off saves ~70 ms, uncompressed kernel saves ~40 ms decompress, no modules - the stock Ubuntu kernel is ~900 ms slower on the SAME setup). The most reproducible TEMPLATES for TABOS to copy are Garzarella's qemu-boot-time (perf kvm_pio trace points) and David V's Firecracker --boot-timer MMIO timestamp - both are open tooling with explicit start/end events."
+}

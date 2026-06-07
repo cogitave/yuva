@@ -337,6 +337,17 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 |---|---|
 | M0–M4 (v1 kernel foundation) | ✅ complete, CI-green both arches |
 | L0→L1 sovereignty (tb-vmm + tb-boot v0) | ✅ complete, CI-green on `/dev/kvm` |
-| **M5** (bootstrap heap / `alloc`) | ⏳ **in progress** (next increment) |
-| M6 – M18 | ⬜ planned (this document) |
+| **M5** (bootstrap heap / `alloc`) | ✅ **complete**, CI-green (x86_64 + aarch64 QEMU + tb-vmm/`/dev/kvm`) |
+| **M6** (frame allocator from boot map) | ⏳ **in progress** (next increment) |
+| M7 – M18 | ⬜ planned (this document) |
 | L2 (own Type-1 microhypervisor) | ⬜ parallel north-star track ([SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)) |
+
+Every milestone increment is shipped by the same pipeline — codified as the
+[`tabos-milestone`](../.claude/skills/tabos-milestone/SKILL.md) project skill:
+ultracode generate → 3-lens adversarial review → apply → both-arch `cargo kbuild`
+→ QEMU + tb-vmm boot-assert → **boot-time benchmark** → doc/research/script/roadmap
+updates → commit → CI-green. Boot time is measured on every change and compared,
+with cited sources and matched metrics, in **[BENCHMARKS.md](BENCHMARKS.md)**
+(TABOS is a kernel-only / "Bucket 1" system; its honest win is the firmware +
+bootloader + decompress + Linux-init budget it never pays — orders of magnitude
+below any full-Linux microVM).

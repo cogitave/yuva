@@ -64,6 +64,20 @@ jobs:
         if: env.KVM_OK == '1'
         run: bash scripts/run-vmm-x86_64.sh
 
+      - name: Install QEMU (for the boot-time benchmark)
+        if: env.KVM_OK == '1'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Boot-time benchmark (QEMU, KVM-accelerated)
+        if: env.KVM_OK == '1'
+        run: |
+          FORCE_ACCEL=kvm ITER=20 bash scripts/bench-boot.sh x86_64 | tee bench-x86_64.json
+          {
+            echo "### TABOS boot-time — x86_64, QEMU microvm + KVM (this runner)"
+            echo '```json'; cat bench-x86_64.json; echo '```'
+            echo "_boot-to-first-output = VMM spawn → first guest serial byte; boot+selftest = + the full M0..latest self-test. See docs/BENCHMARKS.md._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Note when KVM was unavailable
         if: env.KVM_OK != '1'
         run: echo "::notice::Skipped tb-vmm boot — /dev/kvm not available on this runner."
