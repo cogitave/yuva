@@ -56,20 +56,31 @@ non-comparable.)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
-| x86_64 (QEMU `microvm`) | **KVM** (CI runner) | _recorded per-run in the `vmm-boot` CI job's **step summary**_ | — | the representative number |
-| aarch64 (QEMU `virt`) | KVM (arm host only) | _CI/host-dependent_ | — | |
-| x86_64 (QEMU `microvm`) | TCG (local WSL2, **not comparable**) | ~26 ms | ~51 ms | emulated; upper bound only |
-| aarch64 (QEMU `virt`) | TCG (local WSL2, **not comparable**) | ~27 ms | ~49 ms | emulated; upper bound only |
+| x86_64 (QEMU `microvm`) | **KVM** (GitHub CI runner, 20 runs) | **~47 ms** (min 46, max 116) | ~64 ms (min 64, max 67; n=4, see below) | nested-virt CI runner; **VMM/host-spawn-bound, not guest-bound** |
+| x86_64 (QEMU `microvm`) | TCG (local WSL2) | ~26 ms (median) | ~51 ms | emulated; **not** a comparable boot figure |
+| aarch64 (QEMU `virt`) | TCG (local WSL2) | ~27 ms | ~49 ms | emulated; **not** a comparable boot figure |
 
-> The KVM row is populated by CI: the `vmm-boot` workflow runs the harness
-> KVM-accelerated (`FORCE_ACCEL=kvm`) on a GitHub `ubuntu-latest` runner with
-> `/dev/kvm` enabled, and writes the JSON to the run's step summary. Under KVM
-> the wall-clock is dominated by **VMM/QEMU process spawn**, not the TABOS
-> kernel — the kernel itself (tiny image, no firmware, direct long-mode entry)
-> is a small fraction. Precise **guest-only** cycle timing (`rdtsc` /
-> `CNTVCT`+`CNTFRQ`) lands at **M8** (the timer milestone), at which point a
-> second clock (guest-first-instruction → ready) is added so TABOS slots
-> directly into metric class 1 next to Unikraft/OSv.
+> **Read these numbers correctly — they measure the harness's t0 (VMM process
+> spawn), not the TABOS kernel.** The clearest evidence: the KVM run on the CI
+> box (~47 ms) is *slower* than local TCG emulation (~26 ms). A faster CPU +
+> hardware virt producing a *larger* number is only possible if the figure is
+> dominated by **QEMU process startup + (on CI) nested-KVM overhead on a
+> contended shared runner**, not by the guest — exactly the methodology trap §1
+> warns about. The TABOS kernel itself (a few-KB uncompressed image, no firmware,
+> no bootloader, no decompress, direct long-mode entry) is a *small fraction* of
+> either number; the wall-clock is the VMM/host floor every guest on that host
+> shares. (Caveat: the harness reliably times first-output but currently captures
+> the final marker on only some fast-KVM runs — `n=4/20` above — because under
+> KVM the whole self-test streams out before the reader settles; this is a
+> harness-robustness limitation, tracked, not a kernel issue.)
+>
+> So a clean, VMM-independent **guest-only** boot figure (the one that places
+> TABOS next to Unikraft/OSv in Bucket 1) requires **in-guest cycle timing**
+> (`rdtsc` / `CNTVCT`+`CNTFRQ`) — which lands at **M8** (the timer milestone),
+> where a second clock (guest-first-instruction → ready) is added. Until then,
+> the honest, defensible TABOS claim is **architectural** (§4): the firmware +
+> bootloader + decompress + Linux-kernel-init budget — tens to hundreds of ms in
+> Bucket 2 — that a from-scratch PVH/`tb-boot` kernel **never executes at all**.
 
 ## 3. The comparison — grouped so it is apples-to-apples
 
