@@ -45,6 +45,7 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -m 128M \
         -nographic \
         -no-reboot \
+        -nic none \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
 QEMU_RC=$?

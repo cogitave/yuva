@@ -57,6 +57,7 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     -accel "${ACCEL}" -cpu "${CPU}" -m 256M -smp 1 \
     -kernel "${KERNEL}" \
     -no-reboot \
+    -nic none \
     -serial stdio -display none 2>&1)"
 RC=$?
 set -e
