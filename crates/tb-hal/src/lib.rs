@@ -1,4 +1,5 @@
-//! `tb-hal` — TABOS Hardware Abstraction Layer (M0 serial + M1 traps + M2 tasks).
+//! `tb-hal` — TABOS Hardware Abstraction Layer (M0 serial + M1 traps + M2
+//! tasks + M3 MMU).
 //!
 //! This crate is the single place where `unsafe` and assembly are allowed in
 //! TABOS (framekernel rule, KERNEL-FOUNDATION-SPEC.md §1). The raw pokes live in
@@ -15,7 +16,7 @@
 //!   * [`set_trap_hook`]  — register the safe dispatch policy hook.
 //!   * [`TrapInfo`] / [`TrapKind`] / [`TrapAction`] — the safe trap-dispatch ABI.
 //!
-//! M2 cooperative tasks (this milestone):
+//! M2 cooperative tasks:
 //!   * [`Task`], [`task_create`], [`yield_to`] — voluntary (cooperative)
 //!     context switch between kernel tasks. Only the ABI callee-saved
 //!     registers plus the stack pointer are switched; the saved SP is the
@@ -27,6 +28,18 @@
 //!     that [`task_create`] requires.
 //!   * [`current_task`] — handle of the task executing right now (slot 0 is
 //!     the bootstrap context that entered `rust_main`).
+//!
+//! M3 MMU (this milestone):
+//!   * [`mmu_init`]     — x86_64: program `EFER.NXE` over the already-live A0
+//!     boot paging; aarch64: bring the MMU up FROM COLD — identity translation
+//!     tables + `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`, `isb`, then
+//!     `SCTLR_EL1.{M,C,I}`, `isb`. Called once from `rust_main`, AFTER
+//!     [`install_traps`].
+//!   * [`mmu_selftest`] — the whole 4 KiB map → write → verify → remap →
+//!     re-verify test lives INSIDE tb-hal (x86: PTE rewrite + `invlpg`;
+//!     aarch64: full Break-Before-Make + `tlbi`); the kernel crate only sees
+//!     the returned `bool`. The typed table layer both backends share is
+//!     `mmu.rs` (`PageTable512` + entry/index math); raw derefs stay per-arch.
 //!
 //! POLICY lives in safe Rust: tb-hal's per-arch assembly marshals a raw
 //! `TrapFrame`, an `extern "C"` handler in tb-hal (the ONLY place that derefs
@@ -40,6 +53,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod arch;
+mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 
 /// Initialise the early serial console for the current architecture.
 ///
@@ -408,4 +422,90 @@ impl<const WORDS: usize> TaskStack<WORDS> {
         let array: &'static mut [usize; WORDS] = unsafe { &mut *self.mem.get() };
         &mut array[..]
     }
+}
+
+// ===========================================================================
+// M3: MMU bring-up + map/remap self-test
+// ===========================================================================
+//
+// Division of labour (framekernel rule upheld): the typed table layer the two
+// backends share is `mmu.rs` (`PageTable512`, `Frame4K`, entry/index math —
+// pure safe Rust); ALL new `unsafe` + `asm!` (CR3/EFER/invlpg wrappers,
+// MAIR/TCR/TTBR0/SCTLR writes, dsb/isb/tlbi, the mapped-VA derefs of the
+// self-test) lives in `arch/x86_64/` and `arch/aarch64/`. The kernel crate
+// only ever sees the two safe functions below.
+//
+// Verified facts (sources re-checked for M3 — do NOT change bit positions
+// without re-reading them):
+//  * Intel SDM Vol 3A §4.5 Table 4-15 paging-entry formats: P = bit 0,
+//    R/W = bit 1, PS = bit 7 (2 MiB at PD level), XD/NX = bit 63 (honoured
+//    only when EFER.NXE = 1). Cross-checked against Linux v6.6
+//    arch/x86/include/asm/pgtable_types.h: `_PAGE_BIT_PRESENT 0`,
+//    `_PAGE_BIT_RW 1`, `_PAGE_BIT_PSE 7`, `_PAGE_BIT_NX 63`.
+//  * IA32_EFER = MSR 0xC000_0080, NXE = bit 11; IA32_PAT = MSR 0x277
+//    (left at its power-on default for M3); CR4.PGE = bit 7 (Linux v6.6
+//    msr-index.h: `MSR_EFER 0xc0000080`, `_EFER_NX 11`,
+//    `MSR_IA32_CR_PAT 0x00000277`; processor-flags.h: `X86_CR4_PGE_BIT 7`).
+//  * `invlpg m` (Intel SDM Vol 2 / felixcloutier): "Invalidates any TLB
+//    entries specified with the source operand … flushes all TLB entries for
+//    that page", privileged (CPL 0), "also invalidates any global TLB entries
+//    for the specified page". Required after changing a LIVE PTE; adding a
+//    brand-new (previously non-present) translation needs no flush
+//    (SDM Vol 3A §4.10.4.3 delayed-invalidation allowance).
+//  * SCTLR_EL1: M = bit 0, C = bit 2, I = bit 12 (Arm ARM DDI 0487; Linux
+//    v6.6 sysreg.h `SCTLR_ELx_M BIT(0)`, `SCTLR_ELx_C BIT(2)`,
+//    `SCTLR_ELx_I BIT(12)`). MAIR attr encodings: Device-nGnRnE = 0x00,
+//    Normal WB RA/WA = 0xFF (sysreg.h `MAIR_ATTR_DEVICE_nGnRnE 0x00`,
+//    `MAIR_ATTR_NORMAL 0xff`), one attribute byte per index
+//    (`MAIR_ATTRIDX(attr, idx) = attr << (idx * 8)`).
+//  * VMSAv8-64 descriptors (Arm ARM; Linux v6.6 pgtable-hwdef.h): block at
+//    L1/L2 = 0b01 (`PMD_TYPE_SECT 1<<0`), table = 0b11 (`PMD_TYPE_TABLE
+//    3<<0`), page at L3 = 0b11 (`PTE_TYPE_PAGE 3<<0`); AF = bit 10
+//    (`PTE_AF 1<<10`) MUST be set on every leaf (no AF-fault handling);
+//    SH[9:8] = 0b11 inner shareable (`PTE_SHARED 3<<8`); AP[7:6] = 0b00 =
+//    EL1 RW (AP[1]=bit6 `PTE_USER`, AP[2]=bit7 `PTE_RDONLY` — both clear);
+//    AttrIndx at bits [4:2] (`PTE_ATTRINDX(t) t<<2`).
+//  * TLBI VA-operand format: VA >> 12 in bits [43:0] (ASID in [63:48], 0 for
+//    vaaE1IS "all ASIDs" forms) — Linux v6.6 tlbflush.h `__TLBI_VADDR`:
+//    `__ta = addr >> 12; __ta &= GENMASK_ULL(43, 0)`.
+
+/// Bring the MMU for the current architecture to the M3 baseline. Call ONCE
+/// from `rust_main`, AFTER [`install_traps`] — a broken mapping then reports
+/// through the trap path (`TrapKind::PageFault`) instead of an opaque hang or
+/// triple fault.
+///
+/// * x86_64: paging is already LIVE (the A0 boot trampoline built the
+///   identity 2 MiB tables and loaded CR3 before `rust_main`); this programs
+///   `EFER.NXE` (MSR `0xC000_0080`, bit 11) so PTE bit 63 (NX) is honoured
+///   from M3 on. `IA32_PAT` (MSR `0x277`) keeps its power-on default.
+/// * aarch64: the MMU is OFF until here. Builds the identity translation
+///   tables while still off (L1[0] = Device-nGnRnE block covering the PL011
+///   UART gigabyte, L1[1] = Normal-WB block covering RAM, AF set on every
+///   leaf), then `dsb ishst` → `MAIR_EL1`/`TCR_EL1` (T0SZ=25, TG0=4K,
+///   IRGN0/ORGN0=WBWA, SH0=inner, IPS=40-bit, EPD1=1) / `TTBR0_EL1` → `isb`
+///   → set `SCTLR_EL1.{M,C,I}` preserving all other bits → `isb`. Serial
+///   keeps working across the enable — that is the device-mapping proof the
+///   kernel prints right after calling this.
+pub fn mmu_init() {
+    arch::mmu_init();
+}
+
+/// Run the in-HAL MMU map/remap self-test; `true` = pass.
+///
+/// The WHOLE test lives inside tb-hal: map `TEST_VA` (x86_64: `0x4000_0000`,
+/// the 1 GiB line — OUTSIDE the boot identity map, PDPT index 1 is empty;
+/// aarch64: `0x8000_0000`, the 2 GiB line — outside the RAM gigabyte, L1
+/// index 2 is empty) to 4 KiB frame A, write a magic value through `TEST_VA`,
+/// verify it through frame A's identity-mapped address; then remap `TEST_VA`
+/// to frame B — x86: rewrite the PTE + `invlpg [TEST_VA]`; aarch64: full
+/// Break-Before-Make (invalid descriptor → `dsb ishst` → `tlbi vaae1is,
+/// VA>>12` → `dsb ish` → `isb` → new descriptor → `dsb ishst` → `isb`) — and
+/// verify a read through `TEST_VA` now observes frame B's value.
+///
+/// Frames and tables are static, 4096-aligned, `.bss`-resident
+/// (`mmu::Frame4K` / `mmu::PageTable512`); every raw pointer deref stays
+/// inside tb-hal's arch backends. The `#![forbid(unsafe_code)]` kernel crate
+/// only branches on the returned `bool`.
+pub fn mmu_selftest() -> bool {
+    arch::mmu_selftest()
 }

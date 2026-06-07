@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M2 (x86_64).
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M3 (x86_64).
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M2: context-switch OK" appears on serial (the cooperative ping-pong proof;
-# M0's hello and M1's trap round-trip still print earlier in the same boot).
+# "M3: mmu OK" appears on serial (the MMU map/remap self-test proof; M0's
+# hello, M1's trap round-trip and M2's ping-pong still print earlier in the
+# same boot, so one run proves every milestone).
 # Fail-closed: a wall-clock timeout always bounds the run (the kernel halts
 # rather than exiting), and a missing marker is a non-zero exit.
 #
@@ -21,7 +22,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M2: context-switch OK'
+MARKER='M3: mmu OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 

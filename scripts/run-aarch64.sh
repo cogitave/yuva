@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M2: context switch).
+# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M3: MMU).
 #
 # Boots the aarch64 tb-os image under QEMU, captures the PL011 serial stream,
-# and asserts the executable Definition-of-Done marker "M2: context-switch OK"
-# (the cooperative ping-pong proof; M0's hello and M1's trap round-trip still
-# print earlier in the same boot).
+# and asserts the executable Definition-of-Done marker "M3: mmu OK" (the
+# MMU-from-cold bring-up + Break-Before-Make remap proof; M0's hello, M1's
+# trap round-trip and M2's ping-pong still print earlier in the same boot, and
+# "mmu-test: enabled, serial alive" right before the marker proves the Device
+# mapping for the UART survived the enable).
 # Doubles as the cargo runner for target aarch64-tabos-none (cargo passes the
 # freshly built ELF as $1) and is runnable by hand on WSL2.
 #
@@ -21,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M2: context-switch OK"
+MARKER="M3: mmu OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

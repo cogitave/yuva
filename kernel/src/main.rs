@@ -1,4 +1,4 @@
-//! TABOS kernel entry shim (M2: cooperative context switch).
+//! TABOS kernel entry shim (M3: MMU bring-up + map/remap self-test).
 //!
 //! Framekernel rule: the kernel crate is otherwise safe Rust. THIS file is the
 //! single permitted exception. It contains no `unsafe {}` blocks; the only
@@ -8,18 +8,32 @@
 //! and the `unsafe_code` lint flags it. All real unsafe + assembly is confined
 //! to tb-hal (KERNEL-FOUNDATION-SPEC.md §1).
 //!
-//! M2 proves the cooperative context switch: two kernel tasks (A and B) on
-//! kernel-owned static stacks voluntarily `yield_to` each other for
-//! `ROUND_TRIPS` strict A,B,A,B round-trips. tb-hal switches only the ABI
+//! M2 (kept verbatim) proves the cooperative context switch: two kernel tasks
+//! (A and B) on kernel-owned static stacks voluntarily `yield_to` each other
+//! for `ROUND_TRIPS` strict A,B,A,B round-trips. tb-hal switches only the ABI
 //! callee-saved registers + SP (x86-64 SysV psABI §3.2.1: {rbx, rbp,
 //! r12..r15}; AAPCS64 §6.1.1: {x19..x28, x29, x30}), so each task carries
 //! locals ACROSS every yield as a REGISTER-INTEGRITY CANARY: if the switch
 //! corrupted a callee-saved register (or the saved SP), the loop counters,
 //! accumulators or rotating patterns diverge and the test prints
-//! "M2: FAIL <why>". On success it prints the DoD marker
-//! "M2: context-switch OK". The M0 serial hello and the M1 breakpoint
-//! round-trip are kept verbatim ahead of it, so one boot still proves all
-//! three milestones.
+//! "M2: FAIL <why>". On success it prints "M2: context-switch OK". The M0
+//! serial hello and the M1 breakpoint round-trip are kept verbatim ahead of
+//! it, so one boot proves every milestone.
+//!
+//! M3 (this milestone) appends the MMU proof. After printing the M2 verdict,
+//! task A hands the CPU BACK to the bootstrap context — one more cooperative
+//! switch over the very machinery M2 just proved — and `rust_main` continues:
+//! `mmu_init()` (x86_64: program EFER.NXE over the already-live A0 boot
+//! tables; aarch64: bring the MMU up from cold — identity tables, then
+//! MAIR/TCR/TTBR0 → isb → SCTLR_EL1.{M,C,I} → isb), a serial line proving the
+//! UART mapping survived the enable, then `mmu_selftest()`: tb-hal maps
+//! TEST_VA (x86_64 0x4000_0000 / aarch64 0x8000_0000 — both OUTSIDE the
+//! identity-mapped region) to 4 KiB frame A, writes magic through TEST_VA,
+//! verifies via frame A's identity address, remaps TEST_VA to frame B (x86:
+//! PTE rewrite + invlpg; aarch64: full Break-Before-Make + tlbi) and verifies
+//! the read through TEST_VA now sees frame B. DoD marker: "M3: mmu OK".
+//! ALL the new MMU unsafe/asm lives in tb-hal; this crate calls two safe
+//! functions and branches on a bool.
 
 #![no_std]
 #![no_main]
@@ -57,6 +71,17 @@ static TASK_A_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Task B's handle as `Task::raw()`, stashed so task A can yield to B.
 static TASK_B_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// Bootstrap context's handle as `Task::raw()` (slot 0), stashed BEFORE the
+/// ping-pong starts so task A can hand the CPU back to `rust_main` after the
+/// M2 verdict — M3 then runs in the bootstrap context, after `install_traps`,
+/// exactly as the milestone spec requires.
+static BOOT_TASK_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Set by task A immediately after it prints the M2 success marker and right
+/// before it yields back to the bootstrap context. `rust_main` refuses to
+/// start M3 without it (fail-closed against any stray resume of slot 0).
+static M2_PASSED: AtomicBool = AtomicBool::new(false);
+
 /// Whose half-round it is: the strict-alternation flag (TURN_A / TURN_B).
 /// Each side asserts it on entry and flips it before yielding.
 static TURN: AtomicUsize = AtomicUsize::new(TURN_A);
@@ -74,7 +99,7 @@ static B_VERIFIED: AtomicBool = AtomicBool::new(false);
 /// on x86_64 = `hvm_start_info` phys addr; AAPCS64 `x0` on aarch64 = FDT blob).
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main(boot_info: usize) -> ! {
-    // M0..M2 ignore boot_info; a later milestone parses hvm_start_info / FDT.
+    // M0..M3 ignore boot_info; a later milestone parses hvm_start_info / FDT.
     let _ = boot_info;
 
     // --- M0 proof (kept verbatim): serial first-light ----------------------
@@ -89,25 +114,49 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     tb_hal::serial_write_str("trap-test: resumed past breakpoint\n");
     tb_hal::serial_write_str("M1: traps OK\n");
 
-    // --- M2: cooperative context-switch ping-pong ---------------------------
+    // --- M2 proof (kept): cooperative context-switch ping-pong -------------
     // Create both tasks on kernel-owned static stacks, publish their handles
     // for cross-task use (handles travel as raw usizes through atomics — the
     // only `'static` channel available to forbid(unsafe_code) code), then hand
-    // the CPU to task A. This bootstrap context is never scheduled again.
+    // the CPU to task A. Task A returns the CPU here exactly once, after the
+    // M2 verdict marker; any M2 failure halts inside fail() and never resumes
+    // this context.
     tb_hal::serial_write_str("ctx-test: starting ping-pong\n");
+    BOOT_TASK_RAW.store(tb_hal::current_task().raw(), Ordering::Release);
     let task_a = tb_hal::task_create(STACK_A.take(), task_a_main);
     let task_b = tb_hal::task_create(STACK_B.take(), task_b_main);
     TASK_A_RAW.store(task_a.raw(), Ordering::Release);
     TASK_B_RAW.store(task_b.raw(), Ordering::Release);
     tb_hal::yield_to(task_a);
 
-    // Task A ends the run with halt() on both verdicts; control must never
-    // return to the bootstrap context.
-    fail("bootstrap context resumed unexpectedly")
+    // Fail-closed gate: the ONLY legal way back here is task A's post-verdict
+    // hand-off. Anything else (a stray yield to slot 0) is an M2 failure.
+    if !M2_PASSED.load(Ordering::Acquire) {
+        fail("bootstrap context resumed before the M2 verdict");
+    }
+
+    // --- M3: MMU bring-up + map/remap self-test ----------------------------
+    // x86_64: EFER.NXE over the already-live A0 boot tables. aarch64: MMU
+    // from cold (identity tables -> MAIR/TCR/TTBR0 -> isb -> SCTLR_EL1.M|C|I
+    // -> isb). The "serial alive" line after mmu_init() is itself a proof:
+    // on aarch64 it only prints if the Device mapping for the PL011 is right.
+    tb_hal::serial_write_str("mmu-test: init\n");
+    tb_hal::mmu_init();
+    tb_hal::serial_write_str("mmu-test: enabled, serial alive\n");
+    // The whole map -> write -> verify -> remap (x86: PTE + invlpg; aarch64:
+    // Break-Before-Make + tlbi) -> re-verify test lives inside tb-hal; this
+    // forbid(unsafe_code)-class crate only branches on the verdict.
+    if tb_hal::mmu_selftest() {
+        tb_hal::serial_write_str("M3: mmu OK\n"); // <-- the M3 DoD marker
+    } else {
+        tb_hal::serial_write_str("M3: FAIL\n");
+    }
+    tb_hal::halt()
 }
 
 /// Task A ("ping"): drives `ROUND_TRIPS` strict A,B,A,B round-trips against
-/// task B, then renders the M2 verdict.
+/// task B, renders the M2 verdict, then hands the CPU back to the bootstrap
+/// context so `rust_main` can run the M3 sequence.
 ///
 /// REGISTER-INTEGRITY CANARY: `i`, `a_loops`, `a_sum` and `a_pat` stay live
 /// ACROSS every `yield_to`. Caller-saved registers are dead at the call, so
@@ -178,7 +227,16 @@ fn task_a_main() {
     }
 
     tb_hal::serial_write_str("M2: context-switch OK\n"); // <-- the M2 DoD marker
-    tb_hal::halt()
+
+    // M3 hand-off: flag the verdict, then return the CPU to the bootstrap
+    // context (slot 0) over the same cooperative-switch machinery this
+    // milestone just proved. rust_main continues with the MMU sequence; this
+    // task is never scheduled again.
+    M2_PASSED.store(true, Ordering::Release);
+    tb_hal::yield_to(Task::from_raw(BOOT_TASK_RAW.load(Ordering::Acquire)));
+
+    // The bootstrap context ends the run in halt(); A must never resume.
+    fail("A: resumed after handing control back to bootstrap")
 }
 
 /// Task B ("pong"): mirror half of the ping-pong, with its own canary locals
@@ -242,7 +300,8 @@ fn task_b_main() {
 }
 
 /// Emit the M2 failure verdict ("M2: FAIL <why>") over serial and park the
-/// core. Never returns; the run scripts then miss the OK marker and fail.
+/// core. Never returns; the run scripts then miss the M3 marker (which is
+/// only ever reached THROUGH a passing M2) and fail.
 fn fail(why: &str) -> ! {
     tb_hal::serial_write_str("M2: FAIL ");
     tb_hal::serial_write_str(why);
@@ -255,7 +314,8 @@ fn fail(why: &str) -> ! {
 ///
 /// tb-hal's per-arch `extern "C"` handler builds this [`TrapInfo`] from the raw
 /// `TrapFrame` and calls us. A [`TrapKind::Breakpoint`] is resumed (prove the
-/// round-trip); any other trap is reported and the core is halted.
+/// round-trip); any other trap is reported and the core is halted — including
+/// any [`TrapKind::PageFault`] a broken M3 mapping would raise.
 fn trap_hook(info: &TrapInfo) -> TrapAction {
     match info.kind {
         TrapKind::Breakpoint => {

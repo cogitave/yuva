@@ -16,6 +16,11 @@
 //! {rbx, rbp, r12-r15} + rsp, callee-saved-on-stack model) and the
 //! initial-frame fabricator that tb-hal's shared `Task`/`task_create`/
 //! `yield_to` layer builds on.
+//! M3 adds the MMU layer: `mmu` holds the privileged paging-register
+//! wrappers (read/write CR3, `invlpg`, CR4.PGE toggle, RDMSR/WRMSR for
+//! IA32_EFER.NXE) plus the in-HAL `mmu_init`/`mmu_selftest` that splice a
+//! new 4 KiB mapping at 0x4000_0000 into the LIVE boot page tables and
+//! verify a remap with `invlpg`.
 
 // `_start`, the PVH note and the 32->64 trampoline live here. The module is
 // pulled into the final link because the linker script's `ENTRY(_start)`
@@ -30,6 +35,11 @@ pub mod trap;
 
 // M2 cooperative switch: naked ctx_switch + new-task stack fabrication.
 pub mod sched;
+
+// M3 MMU: privileged paging-register wrappers (CR3, CR4.PGE, INVLPG,
+// RDMSR/WRMSR for IA32_EFER.NXE) + the in-HAL 4 KiB map/remap self-test that
+// splices a TEST_VA = 0x4000_0000 mapping into the live boot page tables.
+pub mod mmu;
 
 pub use serial::{serial_init, serial_write_byte};
 
@@ -51,6 +61,13 @@ pub use trap::breakpoint;
 // (Same names + signatures as the aarch64 arm, so `arch/mod.rs` re-exports
 // one uniform contract to `lib.rs`.)
 pub use sched::{ctx_switch, task_stack_init};
+
+// M3: the safe MMU surface, re-exported through `arch/mod.rs` so `lib.rs` can
+// expose `tb_hal::mmu_init` / `tb_hal::mmu_selftest`. `mmu_init` programs
+// IA32_EFER.NXE once after `install_traps`; `mmu_selftest` builds, proves and
+// remaps the 4 KiB test mapping entirely inside tb-hal, returning pass/fail.
+// (Same names + signatures as the aarch64 arm, one uniform contract.)
+pub use mmu::{mmu_init, mmu_selftest};
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

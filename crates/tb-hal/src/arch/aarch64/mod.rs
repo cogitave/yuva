@@ -3,9 +3,11 @@
 //! One of the two `#[cfg(target_arch)]` arms re-exported by `arch/mod.rs`. It
 //! exposes the aarch64 primitives the safe `tb-hal` public API (`lib.rs`)
 //! delegates to: [`serial_init`], [`serial_write_byte`], [`halt`] (M0), the
-//! M1 trap surface [`install_traps`] and [`breakpoint`], and the M2
+//! M1 trap surface [`install_traps`] and [`breakpoint`], the M2
 //! cooperative-scheduling primitives [`ctx_switch`] and [`task_stack_init`]
-//! (backing `lib.rs`'s safe `Task` / `task_create` / `yield_to`).
+//! (backing `lib.rs`'s safe `Task` / `task_create` / `yield_to`), and the M3
+//! MMU surface [`mmu_init`] / [`mmu_selftest`] (cold stage-1 bring-up +
+//! 4 KiB map / Break-Before-Make remap self-test).
 //! (`serial_write_str` is composed in `lib.rs` from `serial_write_byte`, so it
 //! is arch-independent.)
 //!
@@ -15,14 +17,19 @@
 //! `boot.rs` owns that entry; `serial.rs` owns the PL011 UART; `vectors.rs`
 //! owns the `VBAR_EL1` table; `trap.rs` owns the Rust trap dispatch;
 //! `sched.rs` owns the M2 context switch (callee-saved x19..x30 + SP) and the
-//! new-task initial-frame fabrication (x30 = entry).
+//! new-task initial-frame fabrication (x30 = entry); `mmu.rs` owns the M3
+//! cold MMU bring-up (the MMU stays OFF until `rust_main` calls
+//! [`mmu_init`] -- identity 1 GiB blocks: Device @ 0 covering the PL011,
+//! Normal WB @ 0x4000_0000 covering RAM).
 
 mod boot; // _start; arms VBAR_EL1; pure side-effect (`global_asm!`) module.
+mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
 mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
+pub use mmu::{mmu_init, mmu_selftest};
 pub use sched::{ctx_switch, task_stack_init};
 pub use serial::{serial_init, serial_write_byte};
 pub use trap::breakpoint;
