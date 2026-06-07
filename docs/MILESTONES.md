@@ -168,10 +168,18 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
   TCB), with the proprietary GPU/CUDA stack quarantined in a confined Linux driver
   VM. This is where "full sovereignty" lands. See
   [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
-- **v2 layers**: the agent-native subsystems proper — the default memory tiers
-  ([MEMORY-SPEC](MEMORY-SPEC.md)), the agent runtime and scheduler
-  ([AGENTS-SPEC](AGENTS-SPEC.md)), the self-improvement service
-  ([SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)), and the inter-agent IPC
-  layer.
+- **v2 — the agent-native milestone chain (M5 → M18)**: the active track. M0–M4
+  built the hardware foundation; v2 turns it into the agent-native OS the four
+  pillars describe — dynamic memory (M5–M7), preemption (M8–M9), address spaces
+  (M10), the capability-based syscall ABI (M11), the agent runtime (M12), the
+  default tiered memory substrate (M13/M15/M17), inter-agent IPC (M14), the
+  LLM-agnostic inference bridge (M16), and the frozen-kernel self-improvement
+  harness (M18). Each is one cumulative serial-marker DoD under the same QEMU +
+  tb-vmm harness. The full, sequenced, risk-analysed plan — with the exact DoD
+  marker and framekernel `unsafe` placement per milestone — is
+  **[ROADMAP-V2](ROADMAP-V2.md)**. Currently building **M5** (`M5: alloc OK`).
+- **L2 — `tb-core`** (the **north-star**, parallel track): TABOS as its own
+  minimal Type-1 microhypervisor; where "full sovereignty" lands. See
+  [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
 - **G0 spec-freeze**: closing the remaining P0 open questions
   ([OPEN-QUESTIONS](OPEN-QUESTIONS.md)) before freezing the v1 ABI.
