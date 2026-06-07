@@ -38,7 +38,7 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
     breakpoint, ctx_switch, halt, install_traps, mmu_init, mmu_selftest, serial_init,
-    serial_write_byte, task_stack_init,
+    serial_write_byte, task_stack_init, user_demo,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -46,7 +46,7 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::{
     breakpoint, ctx_switch, halt, install_traps, mmu_init, mmu_selftest, serial_init,
-    serial_write_byte, task_stack_init,
+    serial_write_byte, task_stack_init, user_demo,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

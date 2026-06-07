@@ -5,9 +5,10 @@
 //! delegates to: [`serial_init`], [`serial_write_byte`], [`halt`] (M0), the
 //! M1 trap surface [`install_traps`] and [`breakpoint`], the M2
 //! cooperative-scheduling primitives [`ctx_switch`] and [`task_stack_init`]
-//! (backing `lib.rs`'s safe `Task` / `task_create` / `yield_to`), and the M3
+//! (backing `lib.rs`'s safe `Task` / `task_create` / `yield_to`), the M3
 //! MMU surface [`mmu_init`] / [`mmu_selftest`] (cold stage-1 bring-up +
-//! 4 KiB map / Break-Before-Make remap self-test).
+//! 4 KiB map / Break-Before-Make remap self-test), and the M4 user/ring
+//! surface [`user_demo`] (drop to EL0, `svc`, trap back into EL1).
 //! (`serial_write_str` is composed in `lib.rs` from `serial_write_byte`, so it
 //! is arch-independent.)
 //!
@@ -20,19 +21,25 @@
 //! new-task initial-frame fabrication (x30 = entry); `mmu.rs` owns the M3
 //! cold MMU bring-up (the MMU stays OFF until `rust_main` calls
 //! [`mmu_init`] -- identity 1 GiB blocks: Device @ 0 covering the PL011,
-//! Normal WB @ 0x4000_0000 covering RAM).
+//! Normal WB @ 0x4000_0000 covering RAM); `user.rs` owns the M4 EL0 excursion
+//! (the EL0 entry/exit asm + the user-page mapping + the round-trip
+//! [`user_demo`]). `vectors.rs`'s "Lower EL using AArch64, Synchronous" slot is
+//! now a REAL handler (`__vec_el0_sync` -> `aarch64_el0_sync_handler` in
+//! `user.rs`); the rest of the Lower-EL quadrant remains a fatal stub.
 
 mod boot; // _start; arms VBAR_EL1; pure side-effect (`global_asm!`) module.
 mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
 mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
+mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
 pub use mmu::{mmu_init, mmu_selftest};
 pub use sched::{ctx_switch, task_stack_init};
 pub use serial::{serial_init, serial_write_byte};
 pub use trap::breakpoint;
+pub use user::user_demo;
 
 // -- install_traps() --------------------------------------------------------
 // (a) PRE : called once from rust_main, after serial_init, at EL1h. POST:

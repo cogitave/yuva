@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M3 (x86_64).
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M4 (x86_64).
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M3: mmu OK" appears on serial (the MMU map/remap self-test proof; M0's
-# hello, M1's trap round-trip and M2's ping-pong still print earlier in the
-# same boot, so one run proves every milestone).
-# Fail-closed: a wall-clock timeout always bounds the run (the kernel halts
+# "M4: user/ring OK" appears on serial (the user/ring round-trip proof: the
+# kernel drops to ring 3, the user stub issues `int 0x80`, the kernel handles it
+# and returns). M0's hello, M1's trap round-trip, M2's ping-pong and M3's
+# "M3: mmu OK" all print earlier in the same boot, so one run proves every
+# milestone. Fail-closed: a wall-clock timeout bounds the run (the kernel halts
 # rather than exiting), and a missing marker is a non-zero exit.
 #
 # PVH is selected automatically by QEMU from the XEN_ELFNOTE_PHYS32_ENTRY note
@@ -22,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M3: mmu OK'
+MARKER='M4: user/ring OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 

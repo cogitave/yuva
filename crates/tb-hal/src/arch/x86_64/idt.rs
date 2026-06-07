@@ -57,6 +57,23 @@ impl IdtEntry {
         self.type_attr = 0x8E;
         self.reserved = 0;
     }
+
+    /// M4: point this gate at `handler` as a DPL=3 64-bit interrupt gate
+    /// (type_attr 0xEE = P=1, DPL=3, Type=0xE), so an `int 0x80` issued from
+    /// ring3 is permitted to invoke it — for a software interrupt the CPU
+    /// requires `CPL <= gate DPL` (Intel SDM Vol.3A §6.12.1.2 "the processor
+    /// checks that the CPL is less than or equal to the DPL of the [gate]";
+    /// Fig 6-8 "64-Bit IDT Gate Descriptors"). The handler still runs in ring0
+    /// via the ring0 code selector; no IST (current/TSS stack).
+    fn set_user(&mut self, handler: u64) {
+        self.offset_low = handler as u16;
+        self.offset_mid = (handler >> 16) as u16;
+        self.offset_high = (handler >> 32) as u32;
+        self.selector = KERNEL_CODE_SEL;
+        self.ist = 0;
+        self.type_attr = 0xEE;
+        self.reserved = 0;
+    }
 }
 
 #[repr(C, align(16))]
@@ -102,5 +119,32 @@ pub(super) fn init() {
             in(reg) addr_of!(idtr),
             options(readonly, nostack, preserves_flags),
         );
+    }
+}
+
+/// M4: install a single DPL=3 64-bit interrupt gate at `vector`, pointing at
+/// `handler`, by rewriting the already-loaded IDT IN PLACE. No `lidt` reload is
+/// needed: the CPU re-reads the IDT from memory on every interrupt, and the
+/// IDTR base is unchanged. Used so the ring3 user stub's `int 0x80` can trap
+/// into tb-hal's `syscall_entry` (`user.rs`).
+///
+/// Replaces whatever `init()` put at `vector` (for 0x80 that was the generic
+/// DPL=0 thunk, never used by M0–M3), so all earlier gates are untouched.
+pub(super) fn set_user_gate(vector: usize, handler: u64) {
+    // (a) PRE: `init()` ran (IDT built + `lidt`'d) and IF=0 (no interrupt can
+    //     race this 16-byte write). POST: gate `vector` is a DPL=3 ring0
+    //     interrupt gate targeting `handler`.
+    // (b) ABI: a single `IdtEntry` structure store through the live IDT; no
+    //     asm, no flags. `vector < 256` (caller passes 0x80).
+    // (c) Tested by: scripts/run-x86_64.sh ("M4: user/ring OK").
+    debug_assert!(vector < 256);
+    // SAFETY: `IDT` is a tb-hal-owned `static`; `vector < 256` keeps the write
+    // inside its 256-entry array; the write happens with interrupts masked, so
+    // no half-written gate can be observed by a concurrent interrupt.
+    unsafe {
+        let entries = addr_of_mut!(IDT) as *mut IdtEntry;
+        let mut entry = IdtEntry::missing();
+        entry.set_user(handler);
+        core::ptr::write(entries.add(vector), entry);
     }
 }

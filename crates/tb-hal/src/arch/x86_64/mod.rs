@@ -21,6 +21,11 @@
 //! IA32_EFER.NXE) plus the in-HAL `mmu_init`/`mmu_selftest` that splice a
 //! new 4 KiB mapping at 0x4000_0000 into the LIVE boot page tables and
 //! verify a remap with `invlpg`.
+//! M4 adds the user/ring boundary: `user` holds the ring3 entry (`iretq`
+//! into a ring3 stub via the DPL3 user GDT descriptors + a valid `TSS.RSP0`),
+//! the DPL=3 `int 0x80` IDT gate, the ring0 syscall entry/handler, and the
+//! `user_demo` round-trip that maps a `U/S=1` code+stack page through the M3
+//! tables, drops to ring3, takes the stub's syscall and returns the verdict.
 
 // `_start`, the PVH note and the 32->64 trampoline live here. The module is
 // pulled into the final link because the linker script's `ENTRY(_start)`
@@ -40,6 +45,12 @@ pub mod sched;
 // RDMSR/WRMSR for IA32_EFER.NXE) + the in-HAL 4 KiB map/remap self-test that
 // splices a TEST_VA = 0x4000_0000 mapping into the live boot page tables.
 pub mod mmu;
+
+// M4 user/ring boundary: DPL3 user GDT descriptors + TSS.RSP0 (gdt.rs), the
+// DPL=3 `int 0x80` gate (idt.rs), and HERE the ring3 stub, `iretq`-to-ring3
+// entry, ring0 syscall entry/handler, and the `user_demo` round-trip that
+// maps a U/S=1 code+stack page and drops to ring3.
+pub mod user;
 
 pub use serial::{serial_init, serial_write_byte};
 
@@ -68,6 +79,12 @@ pub use sched::{ctx_switch, task_stack_init};
 // remaps the 4 KiB test mapping entirely inside tb-hal, returning pass/fail.
 // (Same names + signatures as the aarch64 arm, one uniform contract.)
 pub use mmu::{mmu_init, mmu_selftest};
+
+// M4: the safe user/ring surface, re-exported through `arch/mod.rs` so `lib.rs`
+// can expose `tb_hal::user_demo`. Drops to ring3, runs the stub's `int 0x80`,
+// handles it in ring0 and returns whether the syscall was observed from user
+// mode with the expected arg. (Same name + signature as the aarch64 arm.)
+pub use user::user_demo;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

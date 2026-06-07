@@ -1,11 +1,13 @@
 //! aarch64 EL1 exception vector table (`VBAR_EL1`) and the trap entry/exit path.
 //!
-//! This is unit **A4 / milestone M1** on aarch64. Like `boot.rs` it is compiled
-//! purely for its `global_asm!` side effects: nothing here is referenced from
-//! Rust except by symbol -- the table label `__exception_vectors` (loaded into
-//! `VBAR_EL1` by `boot.rs::_start` and re-armed by `mod.rs::install_traps`) and
-//! the extern `aarch64_trap_handler` (defined in `trap.rs`). The linker keeps
-//! the whole table via `KEEP(*(.text._vectors))` in `kernel/linker/aarch64.ld`.
+//! This is unit **A4 / milestone M1** on aarch64 (extended at **M4**). Like
+//! `boot.rs` it is compiled purely for its `global_asm!` side effects: nothing
+//! here is referenced from Rust except by symbol -- the table label
+//! `__exception_vectors` (loaded into `VBAR_EL1` by `boot.rs::_start` and
+//! re-armed by `mod.rs::install_traps`), the extern `aarch64_trap_handler`
+//! (defined in `trap.rs`, M1), and the extern `aarch64_el0_sync_handler`
+//! (defined in `user.rs`, M4). The linker keeps the whole table via
+//! `KEEP(*(.text._vectors))` in `kernel/linker/aarch64.ld`.
 //!
 //! Layout (verified facts -- obey exactly):
 //!  * `VBAR_EL1` points at a **2 KiB-aligned** table of **16 entries x 128 B**.
@@ -23,9 +25,13 @@
 //!  * The kernel boots and runs at **EL1h** (handler, `SP_EL1` == "SPx"), so a
 //!    synchronous exception from our own code -- e.g. `brk #0` -- is taken
 //!    through the **"Current EL with SPx, Synchronous"** slot: index 4, byte
-//!    offset **0x200**. For M1 that is the only slot with a real handler; every
-//!    other slot routes to a common stub (`__vec_other`) that reports the trap
-//!    as `TrapKind::Other` (the default policy then halts).
+//!    offset **0x200** (M1, real handler -> `trap.rs`).
+//!  * A synchronous exception from **EL0** -- e.g. the M4 user stub's `svc #0`
+//!    -- is taken through the **"Lower EL using AArch64, Synchronous"** slot:
+//!    index 8, byte offset **0x400**. M4 makes this a REAL handler
+//!    (`__vec_el0_sync` -> `aarch64_el0_sync_handler` in `user.rs`). Every
+//!    OTHER slot still routes to the common stub (`__vec_other`), reported as
+//!    `TrapKind::Other` (the default policy then halts).
 //!  * Save / restore mirrors Linux `entry.S` `kernel_entry` / `kernel_exit`:
 //!    push x0..x30 + `ELR_EL1` + `SPSR_EL1`; `mov x0, sp`; `bl` into Rust;
 //!    reload `ELR_EL1`/`SPSR_EL1` (the handler may have advanced `ELR_EL1` by 4
@@ -33,22 +39,25 @@
 //!  * The target spec `targets/aarch64-tabos-none.json` is `abi: softfloat`
 //!    with `-fp-armv8,-neon`, so the V/SIMD registers carry no live state and
 //!    are intentionally NOT part of the frame (FP context save lands with
-//!    preemption / userspace, not M1).
+//!    preemption / userspace FP, not M1/M4).
 
 use core::arch::global_asm;
 
 // -- __exception_vectors + trap entry/exit ----------------------------------
 // (a) PRE : VBAR_EL1 == &__exception_vectors (2 KiB aligned); a synchronous
-//           exception is taken at Current-EL-SPx. POST: a TrapFrame of x0..x30
-//           + ELR_EL1 + SPSR_EL1 is built on the exception stack, Rust dispatch
-//           runs, then state (possibly with ELR_EL1 advanced past `brk`) is
-//           restored and `eret` resumes the interrupted context.
+//           exception is taken at Current-EL-SPx (M1) or Lower-EL-AArch64 (M4).
+//           POST: a TrapFrame of x0..x30 + ELR_EL1 + SPSR_EL1 is built on the
+//           exception stack (SP_EL1 -- the kernel stack), Rust dispatch runs,
+//           then for the EL1 path state is restored and `eret` resumes the
+//           interrupted context; for the EL0 SVC path the handler longjmps
+//           into the kernel instead (see user.rs) and never returns here.
 // (b) ABI  : SP must be 16-aligned on entry (kernel maintains it); the 0x110
-//           frame keeps it aligned across `bl aarch64_trap_handler` (AAPCS64
-//           arg0 = x0 = &TrapFrame, arg1 = x1 = source tag). `bl` clobbers x30,
-//           which was already saved. `eret` restores PSTATE from SPSR_EL1.
-// (c) TEST : scripts/run-aarch64.sh -- breakpoint() takes slot 0x200, the hook
-//           resumes, and the kernel prints "M1: traps OK".
+//           frame keeps it aligned across `bl` (AAPCS64 arg0 = x0 = &TrapFrame,
+//           arg1 = x1 = source tag). `bl` clobbers x30, which was already
+//           saved. `eret` restores PSTATE from SPSR_EL1.
+// (c) TEST : scripts/run-aarch64.sh -- breakpoint() takes slot 0x200 ("M1:
+//           traps OK"); the user stub's `svc` takes slot 0x400 ("M4: user/ring
+//           OK").
 global_asm!(
     r#"
     // ---- context save: x0..x30, ELR_EL1, SPSR_EL1 -> 0x110-byte TrapFrame ----
@@ -119,12 +128,12 @@ __exception_vectors:
     VEC_SLOT __vec_other          // 0x280 IRQ / vIRQ   (masked in M1)
     VEC_SLOT __vec_other          // 0x300 FIQ / vFIQ   (masked in M1)
     VEC_SLOT __vec_other          // 0x380 SError / vSError
-    // --- Lower EL using AArch64 -- no userspace in M1; fatal -----------------
-    VEC_SLOT __vec_other          // 0x400 Synchronous
-    VEC_SLOT __vec_other          // 0x480 IRQ
+    // --- Lower EL using AArch64 (EL0) ---------------------------------------
+    VEC_SLOT __vec_el0_sync       // 0x400 Synchronous  <-- real handler (M4 SVC)
+    VEC_SLOT __vec_other          // 0x480 IRQ          (no EL0 IRQ source yet)
     VEC_SLOT __vec_other          // 0x500 FIQ
     VEC_SLOT __vec_other          // 0x580 SError
-    // --- Lower EL using AArch32 -- no AArch32 in M1; fatal -------------------
+    // --- Lower EL using AArch32 -- no AArch32 guests; fatal ------------------
     VEC_SLOT __vec_other          // 0x600 Synchronous
     VEC_SLOT __vec_other          // 0x680 IRQ
     VEC_SLOT __vec_other          // 0x700 FIQ
@@ -140,6 +149,12 @@ __vec_other:                      // every other vector: unexpected -> fatal
     SAVE_CONTEXT
     mov  x1, #1                   // source = 1: unexpected vector
     b    __trap_dispatch
+__vec_el0_sync:                   // Lower-EL-AArch64 synchronous: EL0 SVC (M4)
+    SAVE_CONTEXT
+    mov  x0, sp                   // AAPCS64 arg0 = &Frame (x0..x30, ELR, SPSR)
+    bl   aarch64_el0_sync_handler // user.rs: records the syscall + longjmps
+                                  //   back into the kernel; `-> !`, no return
+    b    .                        // defensive park: the handler never returns
 __trap_dispatch:
     mov  x0, sp                   // AAPCS64 arg0 = &TrapFrame
     bl   aarch64_trap_handler     // extern "C" in trap.rs; may halt (Halt path)
