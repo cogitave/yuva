@@ -1,0 +1,76 @@
+# TABOS continuous integration.
+#
+# What this proves on every push / PR: the from-scratch kernel still BUILDS and
+# BOOTS on both supported architectures, and the cumulative milestone self-test
+# (M0 boot -> M1 traps -> M2 context switch -> M3 MMU -> M4 user/ring) still
+# prints its final marker over the guest serial port. The per-arch run scripts
+# (scripts/run-<arch>.sh) launch the kernel under QEMU in pure-TCG mode (no KVM
+# required), scrape the serial output for the milestone marker, and exit
+# non-zero (fail-closed) if it never appears or the guest times out.
+#
+# Toolchain note: the kernel is a `no_std` image cross-compiled with
+# `-Zbuild-std` against checked-in custom target specs (targets/*.json), so we
+# need a Rust *nightly* with the `rust-src` and `llvm-tools` components. QEMU is
+# installed headless (`--no-install-recommends` keeps the GUI/audio stack out).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-boot:
+    name: build & boot (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: targets/x86_64-tabos-none.json
+            qemu_pkg: qemu-system-x86
+            run: scripts/run-x86_64.sh
+          - arch: aarch64
+            target: targets/aarch64-tabos-none.json
+            qemu_pkg: qemu-system-arm
+            run: scripts/run-aarch64.sh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Nightly + the components -Zbuild-std needs. rust-toolchain.toml pins the
+      # channel to "nightly"; this action honours it and adds the components.
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Install QEMU (headless)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }}
+
+      - name: Cache cargo registry + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (${{ matrix.arch }})
+        run: cargo build -p tabos-kernel --target ${{ matrix.target }}
+
+      # The run script boots the freshly built ELF under QEMU (TCG), greps the
+      # serial log for the milestone DoD marker, and exits 0 only on a hit.
+      - name: Boot under QEMU and assert milestone marker
+        run: bash ${{ matrix.run }}

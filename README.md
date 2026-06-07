@@ -1,42 +1,121 @@
 # TABOS
 
-**Türkiye's Agent Based Operating System** — AI agent'ların birinci sınıf vatandaş olduğu, sıfırdan tasarlanan işletim sistemi.
+**Turkiye's Agent Based Operating System** — a from-scratch operating system in
+which AI agents are first-class citizens.
 
-> Faz: **0 — Planlama** (yalnızca dökümantasyon; kod yok) · Başlangıç: 2026-06-06
+> License: **PolyForm Noncommercial 1.0.0** — source-available; free for any
+> noncommercial use, commercial use requires permission. See [LICENSE](LICENSE.md).
 >
-> **İsim notu:** "TABOS" bu projenin **kod adıdır** (working title) — nihai marka değildir, değişebilir. İsme bağlı her şey (kernel prefix `tb_`, CLI adları, domain önerileri) placeholder'dır ve hiçbir yerde hardcode edilmez. Nihai isim + rezervasyon kararı: [OPEN-QUESTIONS §G](docs/OPEN-QUESTIONS.md).
+> Name note: "TABOS" is the project's **code name** (working title), not a final
+> brand — it may change. Anything name-derived (the `tb_` kernel prefix, CLI
+> names, domain suggestions) is a placeholder and is hardcoded nowhere. Final
+> name + reservation decision: [OPEN-QUESTIONS §G](docs/OPEN-QUESTIONS.md).
 
-## Ne?
+## Status: the kernel boots and runs
 
-TABOS, agent'ın **zihni** (context, memory, in-flight inference) ile **bilgisayarını** (sandbox, dosya sistemi, tool'lar) tek bir kernel nesnesi olarak yöneten; hafızayı, kendini geliştirmeyi ve çoklu-agent yaşamını framework nezaketi değil **işletim sistemi garantisi** olarak sunan, insan-masaüstü mirası taşımayan bir OS tasarımıdır.
+The v1 kernel-foundation chain **M0 → M4 is complete and green on both
+architectures** (x86_64 + aarch64), verified by booting under QEMU on every
+change. A successful boot prints this cumulative self-test over serial:
 
-- **Sıfırdan kernel/unikernel** — syscall ABI dahil her şey agent'lar için; her alt sistem "agent'a ne kazandırıyor?" sorusuyla yaşar
-- **LLM-agnostik** — `model:anthropic/...` ile `model:local/llama` aynı kontratın iki driver'ı
-- **Memory-first** — her agent kalıcı, katmanlı, recall-edilebilir memory ile doğar
-- **Self-improvement OS servisi** — reflection default-on; skill'ler doğrulanmadan commit olmaz; ölçen, ölçülenden ayrı
-- **Tek = çoklu agent** — tek-agent oturumu, N-agent oturumunun |üye|=1 özel hâlidir
+```
+hello from rust_main          # M0  boot + serial
+M1: traps OK                  # M1  CPU exceptions -> safe-Rust dispatch -> resume
+M2: context-switch OK         # M2  cooperative task switch (1000-round + register canary)
+M3: mmu OK                    # M3  MMU bring-up + own page tables
+syscall from user: arg=0xcafe # M4  trapped back from user mode...
+M4: user/ring OK              # M4  ...privilege separation works
+```
 
-## Döküman Haritası
+The kernel boots, catches hardware traps and runs the policy in
+`#![forbid(unsafe_code)]` safe Rust, switches between tasks, manages its own
+virtual memory, and can drop code to an unprivileged level (ring 3 / EL0) and be
+re-entered safely via a syscall — the hardware foundation for running agents at
+lower privilege. See [docs/MILESTONES.md](docs/MILESTONES.md) for the full
+breakdown, and [BUILD.md](BUILD.md) to build and run it yourself.
 
-| Döküman | İçerik |
+## What is TABOS?
+
+TABOS is an OS design with **zero inherited Linux code or design** (see
+[docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md)) that manages an agent's **mind**
+(context, memory, in-flight inference) and its **computer** (sandbox, file
+system, tools) as a single kernel object, and offers memory, self-improvement,
+and multi-agent life as an **operating-system guarantee** rather than a framework
+courtesy.
+
+- **From-scratch kernel** — everything down to the syscall ABI is designed for
+  agents; every subsystem justifies itself by what it enables an agent to do.
+- **LLM-agnostic** — `model:anthropic/...` and `model:local/llama` are two
+  drivers behind one contract.
+- **Memory-first** — every agent is born with persistent, tiered, recall-capable
+  memory.
+- **Self-improvement as an OS service** — reflection on by default; skills are
+  not committed without verification; the measurer is isolated from the measured.
+- **One = many agents** — a single-agent session is the |members|=1 special case
+  of an N-agent session.
+
+## Engineering
+
+- **Language:** Rust everywhere. *Framekernel* pattern — all `unsafe` and all
+  assembly are confined to one foundation crate (`tb-hal`); every layer above is
+  `#![forbid(unsafe_code)]`. ([docs/LANGUAGE-AND-STANDARDS.md](docs/LANGUAGE-AND-STANDARDS.md))
+- **Targets:** `x86_64` (PVH boot) and `aarch64` (QEMU `virt`), built `no_std`
+  with `-Zbuild-std` against checked-in custom target specs.
+- **Substrate:** boots as a guest on a Firecracker/KVM-class VMM; developed under
+  QEMU. The project's own thin VMM (`tb-vmm`) and sovereign boot contract are the
+  next milestone. ([docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md))
+- **CI:** every push builds both architectures and boots them under QEMU,
+  asserting the milestone marker — [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+## Quickstart
+
+On a Linux host (or WSL2) with Rust nightly (`rust-src` + `llvm-tools`) and
+`qemu-system-x86` / `qemu-system-arm` installed (full setup in [BUILD.md](BUILD.md)):
+
+```sh
+cargo build -p tabos-kernel --target targets/x86_64-tabos-none.json
+bash scripts/run-x86_64.sh      # boots under QEMU, asserts the milestone marker
+
+cargo build -p tabos-kernel --target targets/aarch64-tabos-none.json
+bash scripts/run-aarch64.sh
+```
+
+## Repository layout
+
+```
+kernel/             entry shim + cumulative milestone self-tests (#![forbid(unsafe_code)])
+crates/tb-hal/      the ONLY crate where unsafe + asm live (per-arch under src/arch/)
+targets/            custom no_std target specs
+scripts/            QEMU launch + serial-marker assertion (the executable DoD)
+docs/               design + research documents (see map below)
+research/raw/       raw research and code-generation provenance (JSON)
+.github/workflows/  CI
+```
+
+## Documentation map
+
+| Document | Contents |
 |---|---|
-| [docs/RESEARCH-REPORT.md](docs/RESEARCH-REPORT.md) | Kaynakçalı derin araştırma raporu — 26 arXiv makalesi + 20 sistem belgesi; 25 çekirdek iddia çok-oylu adversarial doğrulamalı, 100 alan bulgusu kaynak-okumalı |
-| [docs/VISION.md](docs/VISION.md) | Varlık nedeni, beş tasarım ilkesi, boşluk analizi, başarı kriterleri, yol haritası |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Kernel kararı (capability çekirdek + unikernel beden + exokernel ruhu), nesne modeli, namespace, syscall yüzeyi, scheduler, context scheduler, güvenlik |
-| [docs/MEMORY-SPEC.md](docs/MEMORY-SPEC.md) | Default memory: T0-T5 tier'ları + blocks, kayıt şeması (bi-temporal), op ABI'si, konsolidasyon, forgetting, çok-agent namespace'leri |
-| [docs/AGENTS-SPEC.md](docs/AGENTS-SPEC.md) | Agent process nesnesi, .taf imaj formatı, spawn protokolü, yaşam döngüsü, IPC, kimlik, oturumlar |
-| [docs/SELF-IMPROVEMENT-SPEC.md](docs/SELF-IMPROVEMENT-SPEC.md) | Üç Yasa (Endure>Excel>Evolve), frozen kernel, skill tier'ı, sleep-time sınıfı, arşiv evrimi, güvenlik mekaniği |
-| [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) | Temiz-sayfa egemenlik: silikon-zorunlu vs Linux-mirası vs TABOS-sahip sınıflandırması; tb-boot/tb-vmm owned VMM kararı; virtio=OASIS; 'eski bug taşımıyoruz' somut defteri (fork/ambient-authority/ioctl/signals/TOCTOU) — adversarial-doğrulamalı |
-| [docs/KERNEL-FOUNDATION-SPEC.md](docs/KERNEL-FOUNDATION-SPEC.md) | Kernel foundation + assembly planı (arch bazında, KARAR-çözümlü): tb-hal crate, boot yolu, 13 asm ünitesi (A1-A13), ABI register setleri, MMU asm-vs-Rust sınırı, asm standartları, test gate'leri, 5-milestone WBS (M0-M4) — ultracode takip omurgası |
-| [docs/LANGUAGE-AND-STANDARDS.md](docs/LANGUAGE-AND-STANDARDS.md) | Dil kararı (Rust, katman bazlı) + endüstriyel standartlar (NSA/CISA/ONCD/EU CRA, Ferrocene, SLSA/SBOM, fuzzing) — adversarial-doğrulamalı |
-| [docs/PROCESS.md](docs/PROCESS.md) | Süreç kaydı + Design Thinking / Success by Design eşlemesi, persona/JTBD, risk register, review gate'leri (G0-G3) |
-| [docs/OPEN-QUESTIONS.md](docs/OPEN-QUESTIONS.md) | 53 açık soru, P0/P1/P2 önceliklendirmeli — P0'lar kapanmadan spec donmaz |
-| [research/raw/](research/raw/) | Araştırma ham verisi: doğrulama kayıtları + 8 alan bulgusu + isim vetlemeleri (JSON) |
+| [docs/MILESTONES.md](docs/MILESTONES.md) | The M0→M4 chain, executable DoDs, the dev pipeline, build/run, what's next |
+| [docs/RESEARCH-REPORT.md](docs/RESEARCH-REPORT.md) | Cited deep-research report — 26 arXiv papers + 20 system docs; 25 core claims adversarially verified, 100 area findings |
+| [docs/VISION.md](docs/VISION.md) | Rationale, five design principles, gap analysis, success criteria, roadmap |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Kernel decision (capability core + unikernel body + exokernel spirit), object model, namespaces, syscall surface, schedulers, security |
+| [docs/MEMORY-SPEC.md](docs/MEMORY-SPEC.md) | Default memory: T0–T5 tiers + blocks, bi-temporal record schema, op ABI, consolidation, forgetting, multi-agent namespaces |
+| [docs/AGENTS-SPEC.md](docs/AGENTS-SPEC.md) | Agent-process object, `.taf` image format, spawn protocol, lifecycle, IPC, identity, sessions |
+| [docs/SELF-IMPROVEMENT-SPEC.md](docs/SELF-IMPROVEMENT-SPEC.md) | Three Laws (Endure>Excel>Evolve), frozen kernel, skill tier, sleep-time class, archive evolution, safety |
+| [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) | Clean-slate sovereignty: silicon-mandated vs Linux-legacy vs TABOS-owned; `tb-boot`/`tb-vmm`; the "no old bugs" ledger |
+| [docs/KERNEL-FOUNDATION-SPEC.md](docs/KERNEL-FOUNDATION-SPEC.md) | Kernel + assembly plan: the `tb-hal` crate, boot path, asm unit inventory, ABI register sets, MMU asm-vs-Rust boundary, test gates, M0–M4 WBS |
+| [docs/LANGUAGE-AND-STANDARDS.md](docs/LANGUAGE-AND-STANDARDS.md) | Language decision (Rust, per layer) + industrial standards (NSA/CISA/ONCD/EU CRA, Ferrocene, SLSA/SBOM, fuzzing) |
+| [docs/PROCESS.md](docs/PROCESS.md) | Process record + Design Thinking / Success by Design mapping, personas/JTBD, risk register, review gates (G0–G3) |
+| [docs/OPEN-QUESTIONS.md](docs/OPEN-QUESTIONS.md) | 53 open questions, prioritized P0/P1/P2 — no spec freeze until the P0s close |
 
-## Durum İşaretleri
+Spec markers: **[DECISION]** a made decision · **[PROPOSAL]** a research-derived
+proposal (to be tested by prototyping) · **[OPEN]** tracked in OPEN-QUESTIONS.
 
-Spec dökümanlarında: **[KARAR]** verilmiş karar · **[ÖNERİ]** araştırmadan türetilmiş güçlü öneri (prototiple test edilecek) · **[AÇIK]** OPEN-QUESTIONS'ta takipli.
+## Provenance
 
-## Metodoloji Notu
-
-Bu döküman seti, 147 subagent'lık üç araştırma dalgasının (deep-research → verify+expand → naming) ürünüdür ve bağımsız 3-denetçili adversarial review'dan geçirilmiştir. Kanıt iki sınıftır: 25 çekirdek iddia birincil kaynak metnine karşı çok-oylu adversarial doğrulamalı (kayıtlar: `research/raw/verified.json` + `verified-wave1.json`); 8 alandan 100 yapılandırılmış bulgu tek-araştırmacı kaynak-okumalı. İsim, 31 adayın (24+7; 23'ü tam vetlenmiş) vetlemesi sonrası seçilmiştir; TABOS'un kendi vetleme kaydı: `research/raw/naming-tabos.json`.
+The design corpus is the product of staged multi-agent research waves
+(deep-research → verify+expand → naming → language/standards → kernel-asm), each
+passed through independent adversarial review; the kernel code was generated and
+adversarially reviewed milestone-by-milestone, then verified by actually booting
+under QEMU. Raw research and code-generation records live in
+[research/raw/](research/raw/).

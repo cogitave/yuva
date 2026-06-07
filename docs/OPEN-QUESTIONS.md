@@ -1,114 +1,114 @@
-# TABOS Açık Sorular
+# TABOS Open Questions
 
-> Durum: v1.0 · Öncelik: **P0** = spec donmadan kapanmalı · **P1** = Faz-1 prototipten önce · **P2** = ilgili faz başlamadan önce
-> Kaynak: üç araştırma dalgasının alan-bazlı openQuestions çıktıları ([`../research/raw/`](../research/raw/)) + döküman yazımında doğan sorular.
+> Status: v1.0 · Priority: **P0** = must close before spec freeze · **P1** = before the Phase-1 prototype · **P2** = before the relevant phase starts
+> Source: domain-based openQuestions outputs from the three research waves ([`../research/raw/`](../research/raw/)) + questions arising during document authoring.
 
 ---
 
-## A. Mimari / Kernel
+## A. Architecture / Kernel
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P0 | **Kernel-vs-userspace sınırı lokal KV yönetiminde nerede?** Kernel PagedAttention-tarzı block table'ları kendisi mi tutar, yoksa vLLM/SGLang'i userspace engine-server olarak schedule mi eder? | Tüm kaynak sistemler userspace; kernel-resident KV pager'ın kazanç/kaybını kimse ölçmemiş |
-| ✅ KARAR | **Substrat: Firecracker/KVM-sınıfı VMM üstünde guest, tek-vCPU (Mirage), x86_64 LinuxBoot / aarch64 PE-Image.** Bare-metal değil; Unikraft C-TCB'si reddedildi (saf-Rust node image). Detay + executable DoD: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) §0,§2 | Çözüldü 2026-06-07 |
-| P1 | seL4 formal verification yaklaşımı handle katmanımız için gerçekçi mi; MCS verification'ının tamamlanma durumu takip edilmeli | seL4 MCS henüz proof-coverage dışı |
-| P1 | 9P-tarzı protokolün yüksek-latency linklerde gevezeliği (walk/open/read): remote memory tier'ları ve model uçları için batched/pipelined uzantı mı, LISAfs-tarzı protokol mü? | gVisor 9P'den taşındı |
-| P1 | Agent manifest şeması: Fuchsia .cml mi, OCI runtime spec mi, WASI component imports mı taban alınır, yoksa yeni şema mı? | Plan 9'un serileştirilemeyen namespace itirafı + Fuchsia emsali |
-| P1 | AIOS'un fiili syscall kataloğu (Table 2) `agiresearch/AIOS` kaynak ağacından doğrulanmalı — `tb_` adlandırması donmadan | HTML'de tablo görüntüye gömülü; ham veride açık soru |
-| 🎯 GATE | <50 ms spawn hedefi **validation-gate** olarak M0/M3 DoD'sine bağlandı (Hermit saf-Rust unikernel Firecracker'da boot ediyor — emsal var); ölçüm düşerse Firecracker+minimal-guest'e geri çekil | [KERNEL-FOUNDATION-SPEC §9](KERNEL-FOUNDATION-SPEC.md) |
-| P2 | Çok-node federasyon: scheme/handle namespace'leri makineler arası nasıl köprülenir — Plan 9 import mu, A2A discovery mi, network channel'dan capability-passing mi; inter-kernel güvende 9P auth/attach'in yerini ne alır? | Swarm senaryosu |
-| ✅ KARAR | **VMM egemenliği = kendi `tb-vmm`'imiz** (rust-vmm tabanlı, `tb-boot v0` kontratı); stock Firecracker yalnız bootstrap loader. virtio=OASIS açık standardı (değiştirilebilir sürücü). Detay: [SOVEREIGNTY](SOVEREIGNTY.md) | Çözüldü 2026-06-07 |
-| P2 | Bare-metal hedefi ne zaman (varsa)? GPU yan-kanalları ayrı izolasyon istiyor mu? (tb-vmm sonrası doğal uzantı) | Bytecode Alliance Spectre itirafı; GPU side-channel literatürü taranmadı |
+| P0 | **Where is the kernel-vs-userspace boundary in local KV management?** Does the kernel itself hold PagedAttention-style block tables, or does it schedule vLLM/SGLang as a userspace engine-server? | All source systems are userspace; nobody has measured the gain/loss of a kernel-resident KV pager |
+| ✅ DECISION | **Substrate: guest on a Firecracker/KVM-class VMM, single-vCPU (Mirage), x86_64 LinuxBoot / aarch64 PE-Image.** Not bare-metal; Unikraft's C-TCB was rejected (pure-Rust node image). Detail + executable DoD: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) §0,§2 | Resolved 2026-06-07 |
+| P1 | Is the seL4 formal verification approach realistic for our handle layer; the completion status of MCS verification must be tracked | seL4 MCS is still outside proof-coverage |
+| P1 | The chattiness of a 9P-style protocol over high-latency links (walk/open/read): a batched/pipelined extension for remote memory tiers and model endpoints, or a LISAfs-style protocol? | gVisor migrated away from 9P |
+| P1 | Agent manifest schema: is Fuchsia .cml, OCI runtime spec, or WASI component imports taken as the base, or a new schema? | Plan 9's non-serializable namespace admission + Fuchsia precedent |
+| P1 | AIOS's actual syscall catalog (Table 2) must be verified from the `agiresearch/AIOS` source tree — before the `tb_` naming freezes | table embedded as an image in the HTML; open question in the raw data |
+| 🎯 GATE | The <50 ms spawn target is bound to the M0/M3 DoD as a **validation-gate** (Hermit pure-Rust unikernel boots on Firecracker — precedent exists); if the measurement falls short, fall back to Firecracker+minimal-guest | [KERNEL-FOUNDATION-SPEC §9](KERNEL-FOUNDATION-SPEC.md) |
+| P2 | Multi-node federation: how are scheme/handle namespaces bridged across machines — Plan 9 import, A2A discovery, or capability-passing over a network channel; what replaces 9P auth/attach in inter-kernel security? | Swarm scenario |
+| ✅ DECISION | **VMM sovereignty = our own `tb-vmm`** (rust-vmm based, `tb-boot v0` contract); stock Firecracker is only the bootstrap loader. virtio = OASIS open standard (replaceable driver). Detail: [SOVEREIGNTY](SOVEREIGNTY.md) | Resolved 2026-06-07 |
+| P2 | When is the bare-metal target (if ever)? Do GPU side-channels require separate isolation? (natural extension after tb-vmm) | Bytecode Alliance Spectre admission; GPU side-channel literature not surveyed |
 
-## B. Capability / Güvenlik
+## B. Capability / Security
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P0 | **LLM'in ürettiği metin ile kernel handle'ı arasındaki bağ**: tool-call metnindeki hangi temsil unforgeable token'a bağlanır; confused-deputy (prompt-injection meşru capability'yi kötüye kullandırır) nasıl sınırlandırılır — rights mask blast-radius'u sınırlar ama *niyeti* kodlamaz | İzolasyon araştırmasının en sivri sorusu |
-| P0 | Capability granülaritesi: MCP feature-level + A2A skill-level + ANP service-level deklarasyonlarını kayıpsız taşıyan tek hiyerarşi tasarlanabilir mi? | Bridge'lerde lossy çeviri riski |
-| P1 | KeyKOS-tarzı universal persistence × revocation × dış (transactional olmayan) kaynaklar: restore edilen agent'ın elindeki remote-API/model-session handle'ları geri sarmadı — sözleşme ne? | [ARCHITECTURE §8](ARCHITECTURE.md) |
-| P1 | WASI 0.2/0.3 resource handle'ları attenuated re-export'u (yetkiyi bağımlılık ağacına zayıflatarak geçirme) artık native veriyor mu? 2019 itirafının güncel durumu | Component Model hızla evrildi |
-| P1 | Factory-deseni (sızdırmazlığı doğrulanabilir agent şablonları) hangi mekanizmayla doğrulanır? | Karşılıklı-şüpheli işbirliği vaadi buna yaslanıyor |
-| P2 | Webhook'lu dış protokoller NAT'lı/edge uçlarda: kernel-managed relay daemon'ı mı, bridge'de stream-aboneliğine çeviri mi? | A2A push-notification varsayımı |
+| P0 | **The binding between LLM-generated text and a kernel handle**: which representation in the tool-call text binds to an unforgeable token; how is confused-deputy (prompt-injection abusing a legitimate capability) constrained — the rights mask bounds the blast-radius but does not encode *intent* | The sharpest question of the isolation research |
+| P0 | Capability granularity: can a single hierarchy be designed that losslessly carries MCP feature-level + A2A skill-level + ANP service-level declarations? | Risk of lossy translation in bridges |
+| P1 | KeyKOS-style universal persistence × revocation × external (non-transactional) resources: the remote-API/model-session handles in a restored agent's possession did not roll back — what is the contract? | [ARCHITECTURE §8](ARCHITECTURE.md) |
+| P1 | Do WASI 0.2/0.3 resource handles now natively provide attenuated re-export (passing authority down the dependency tree while weakening it)? The current status of the 2019 admission | Component Model evolved rapidly |
+| P1 | The factory pattern (agent templates with verifiable leak-tightness): by which mechanism is it verified? | The mutually-suspicious collaboration promise leans on this |
+| P2 | External protocols with webhooks at NATed/edge endpoints: a kernel-managed relay daemon, or translation to a stream-subscription in the bridge? | A2A push-notification assumption |
 
 ## C. Memory
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P0 | **Çok-agent paylaşımlı memory'nin çakışma semantiği**: kayıt-düzeyi CAS mi, CRDT merge mi; Soar i-support otomatik-geri-çekilmesi eşzamanlı yazarlar altında hangi tutarlılık modelini ima eder? | Literatürde standart yok — greenfield |
-| P0 | Graph tier'ın yeri: Zep LongMemEval'de +%18.5 diyor, Mem0 single/multi-hop'ta kaybettiğini ve 2-3× maliyeti ölçüyor, A-MEM graph DB'leri katı buluyor — default'ta var mı, opt-in mi? (Mevcut karar: opt-in; prototipte ölçülecek) | Çelişen birincil kaynaklar |
-| P1 | Eviction/forgetting default'unun benchmark'ı: skor-çürümeli demotion + tombstone bileşimi neyle ölçülür? OS-ömrü memory benchmark'ı tasarlanmalı (mevcutlar: DMR doymuş, DialSim'de herkes F1<4) | [MEMORY-SPEC §8](MEMORY-SPEC.md) |
-| P1 | Write-path'te lokal küçük model: 1B-sınıfı enricher/op-decider frontier'a karşı extraction/dedup/importance/op-seçiminde ne kadar doğruluk kaybeder? (A-MEM 1.1 sn/op'u ölçtü, doğruluk farkını ölçmedi) | Default enricher kararı |
-| P1 | Zaman sabitlerinin yeniden kalibrasyonu: insan-kalibrasyonlu sabitler (d=0.5 saniyeler üstünden, finst 3 sn, decay 0.995/saat) LLM-agent zaman ölçeğinde wall-clock mı, decision-cycle mı, token mu cinsinden tanımlanır? | Bilişsel mimari taşıması |
-| P1 | T0 register seti: kaç register, register başına token bütçesi ne; hard cap (ARCADIA 3-6) mı soft activation eşiği mi? | ACT-R 1-chunk insan kalibrasyonu |
-| P1 | Dosya sistemi: semantic+versioned VFS mi, düz object store mu; T5 archival ile tek storage manager'da birleşme (`fs:` scheme kontratı — Letta/AIOS bulguları) | [ARCHITECTURE §3](ARCHITECTURE.md) |
-| P2 | Erişim metadata'sının (last-k timestamps) okuma yolunda yazılması: relatime-tarzı batch'leme yeterli mi? | Read-path write traffic |
-| P2 | Parametric tier promotion kriterleri: textual→parametric ne zaman taşınır; catastrophic-forgetting bekçileri ne? | Survey: under-researched |
-| P2 | Utility vs activation iki ayrı sıralama düzlemi mi (skill trust / memory salience), tek ledger mı? | ACT-R iki ayrı subsymbolic sistem tutuyor |
+| P0 | **Conflict semantics of multi-agent shared memory**: record-level CAS, or CRDT merge; what consistency model does Soar i-support auto-retraction imply under concurrent writers? | No standard in the literature — greenfield |
+| P0 | The place of the graph tier: Zep claims +18.5% on LongMemEval, Mem0 measures that it loses on single/multi-hop and 2-3× cost, A-MEM finds graph DBs rigid — is it in the default, or opt-in? (Current decision: opt-in; to be measured in the prototype) | Conflicting primary sources |
+| P1 | Benchmark for the eviction/forgetting default: with what is the score-decayed demotion + tombstone combination measured? An OS-lifetime memory benchmark must be designed (existing ones: DMR is saturated, on DialSim everyone scores F1<4) | [MEMORY-SPEC §8](MEMORY-SPEC.md) |
+| P1 | Local small model on the write-path: how much accuracy does a 1B-class enricher/op-decider lose against the frontier on extraction/dedup/importance/op-selection? (A-MEM measured 1.1 s/op, did not measure the accuracy gap) | Default enricher decision |
+| P1 | Recalibration of time constants: are human-calibrated constants (d=0.5 over seconds, finst 3 s, decay 0.995/hour) defined in terms of wall-clock, decision-cycle, or token on the LLM-agent timescale? | Cognitive architecture porting |
+| P1 | T0 register set: how many registers, what is the token budget per register; a hard cap (ARCADIA 3-6) or a soft activation threshold? | ACT-R 1-chunk human calibration |
+| P1 | File system: a semantic+versioned VFS, or a flat object store; merging with T5 archival into a single storage manager (`fs:` scheme contract — Letta/AIOS findings) | [ARCHITECTURE §3](ARCHITECTURE.md) |
+| P2 | Writing access metadata (last-k timestamps) on the read path: is relatime-style batching sufficient? | Read-path write traffic |
+| P2 | Parametric tier promotion criteria: when is textual→parametric migrated; what are the catastrophic-forgetting guards? | Survey: under-researched |
+| P2 | Utility vs activation: two separate ranking planes (skill trust / memory salience), or a single ledger? | ACT-R keeps two separate subsymbolic systems |
 
-## D. Scheduling / Token Ekonomisi
+## D. Scheduling / Token Economy
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P0 | **Cache-locality × fairness**: SGLang starvation'ı future-work bıraktı; hangi aging/virtual-runtime mekanizması default? | Scheduler spec'inin çekirdeği |
-| P1 | OTPM rezervasyonu: çıktı uzunluğu öngörülemezken eşzamanlı agent'lara output bütçesi nasıl ayrılır (Anthropic OTPM yalnız üretileni sayar, max_tokens'ı değil)? | Over/under-commit ikilemi |
-| P1 | Lease-renewal ekonomisi: idle-süre dağılımına göre 5dk-touch vs 1sa-TTL break-even politika fonksiyonu (fiyatlar belli, eğri çıkarılmalı) | Remote driver politikası |
-| P1 | Recompute-vs-fetch crossover: tier bandwidth'ine karşı prefill hızı — deployment başına ölçüm gerektiren default eğri | Mooncake model vermiyor |
-| P1 | Token bütçeleri devredilebilir capability olarak: dolar + token tek capability tipinde nasıl birleşir; iç içe ve geri alınabilir delegasyon (workspace deseninin genelleşmesi) | `tb_budget_split` tasarımı |
-| P2 | Remote DAG kaybı: public API'ler request-level kalırken speculative dispatch/stream-pipelining client-side ne kadarını geri kazanır? | Parrot kazancı self-hosted'da |
-| P2 | Farklı trust-domain'ler arası prefix-cache paylaşımı: timing yan-kanalı ("bu prefix'i başka agent görmüş mü") — intra-host izolasyon politikası | Hiçbir kaynak ele almıyor |
+| P0 | **Cache-locality × fairness**: SGLang left starvation as future-work; which aging/virtual-runtime mechanism is the default? | The core of the scheduler spec |
+| P1 | OTPM reservation: how is the output budget allocated to concurrent agents when output length is unpredictable (Anthropic OTPM counts only what is generated, not max_tokens)? | Over/under-commit dilemma |
+| P1 | Lease-renewal economics: a break-even policy function for 5min-touch vs 1hr-TTL according to the idle-time distribution (prices are known, the curve must be derived) | Remote driver policy |
+| P1 | Recompute-vs-fetch crossover: prefill speed against tier bandwidth — a default curve requiring per-deployment measurement | Mooncake gives no model |
+| P1 | Token budgets as a delegable capability: how do dollars + tokens combine into a single capability type; nested and revocable delegation (generalization of the workspace pattern) | `tb_budget_split` design |
+| P2 | Remote DAG loss: while public APIs stay request-level, how much does speculative dispatch/stream-pipelining recover client-side? | Parrot's gain is in self-hosted |
+| P2 | Prefix-cache sharing across different trust-domains: timing side-channel ("has another agent seen this prefix") — intra-host isolation policy | No source addresses it |
 
 ## E. Self-Improvement
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P0 | **Introspection × hidden-evaluator gerilimi**: agent'ın okuyabildiği kernel durumu ile okuyamayacağı evaluator seti arasındaki sınır tam olarak nereden geçer? | Agent-native OS şeffaflık vaadiyle Goodhart savunması çelişiyor |
-| P1 | Evrim işlerinin bütçe birimi ve ödeyeni: token mu dolar mı wall-clock mu; çok-agent oturumunda fatura kime? (DGM gerçeği: ~22k USD/koşu) | `tb_evolve_request.budget` |
-| P1 | EXCEL yasasının regresyon suite'i: agent'ın görev dağılımı kayarken per-agent yetenek testi nasıl güncel tutulur? | Merge kapısının dişleri |
-| P1 | NL reasoning zincirlerinde skill-compiler provenance granülaritesi: tool-call/memory-read sınırları yeterli mi, token-düzeyi atıf gerekir mi? | Soar backtrace'in LLM çevirisi |
-| P1 | Depolama birleşimi: DGM arşivi + Reflexion buffer'ı + Voyager skill lib + EvolveR ilke deposu tek tiered substrat üstünde farklı retention/index politikalarıyla yaşayabilir mi? (Mevcut tasarım: evet, T2-T4; doğrulanmalı) | [MEMORY-SPEC](MEMORY-SPEC.md)×[SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) |
-| P1 | Sleep-time ekonomisinin ampirik bütçe modeli (Letta sayı vermiyor: "expensive, diminishing returns") | Default-on kararının maliyet tarafı |
-| P2 | Longitudinal güvenlik telemetrisi: nesiller-arası kayma için hangi metrik seti kernel default'u olur (Safety Score/Risk Ratio/Leakage Rate sınıfı)? | Alan snapshot-based |
-| P2 | ANP müzakere-üretimi adapter kodu: skill sandbox+verification hattından geçmesi yeterli mi? | Userspace üretilen kod kernel'a komşu |
+| P0 | **Introspection × hidden-evaluator tension**: where exactly does the boundary run between the kernel state the agent can read and the evaluator set it cannot read? | The agent-native OS transparency promise conflicts with the Goodhart defense |
+| P1 | Budget unit and payer of evolution jobs: token, dollar, or wall-clock; in a multi-agent session who gets the bill? (DGM reality: ~22k USD/run) | `tb_evolve_request.budget` |
+| P1 | Regression suite of the EXCEL law: how is the per-agent capability test kept current while the agent's task distribution shifts? | The teeth of the merge gate |
+| P1 | Skill-compiler provenance granularity in NL reasoning chains: are tool-call/memory-read boundaries sufficient, or is token-level attribution needed? | LLM translation of Soar backtrace |
+| P1 | Storage unification: can the DGM archive + Reflexion buffer + Voyager skill lib + EvolveR policy store live on a single tiered substrate with different retention/index policies? (Current design: yes, T2-T4; to be verified) | [MEMORY-SPEC](MEMORY-SPEC.md)×[SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) |
+| P1 | Empirical budget model of sleep-time economics (Letta gives no number: "expensive, diminishing returns") | The cost side of the default-on decision |
+| P2 | Longitudinal safety telemetry: which metric set becomes the kernel default for cross-generation drift (Safety Score/Risk Ratio/Leakage Rate class)? | The field is snapshot-based |
+| P2 | ANP negotiation-generated adapter code: is passing through the skill sandbox+verification pipeline sufficient? | Userspace-generated code is adjacent to the kernel |
 
-## F. Protokoller / Ekosistem
+## F. Protocols / Ecosystem
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P1 | MCP tasks (SEP-1686, deneysel) A2A 9-durum makinesiyle yakınsayacak mı? Kernel task ABI'sini dondurmadan izle | İki standart tek şekle inerse bridge basitleşir |
-| P1 | ACP'nin A2A'ya konsolidasyonu (orta-2025 duyumları) birincil kaynaktan doğrulanmalı; ACP sunset ise offline-discovery + await/resume doğrudan içselleştirilir | Bridge mi, yerli özellik mi |
-| P1 | A2A discovery well-known URI'sinin normatif son hâli (agent.json → agent-card.json göçü) | Discovery daemon spec'i |
-| P2 | Survey-sonrası protokoller (AGNTCY, Agora arXiv:2410.11905, AP2/payments): kernel-ilgili yeni primitif getiren var mı? | Periyodik tarama |
-| P2 | AIOS Cerebrum agent-hub mekaniği derin okunmalı (paket/dağıtım/keşif) — TABOS paket yöneticisi tasarımına girdi | Faz 4 |
-| P2 | E2B latency iddialarının (80 ms vs <200 ms) bağımsız benchmark'ı — başarı kriteri #1'in çıtası ölçümle sabitlenmeli | self-host repo'suyla |
-| P2 | .af import dönüştürücüsünün kapsamı: hangi alanlar kayıpsız taşınır; archival/secret boşlukları nasıl doldurulur? | [AGENTS-SPEC §3](AGENTS-SPEC.md) |
+| P1 | Will MCP tasks (SEP-1686, experimental) converge with the A2A 9-state machine? Watch before freezing the kernel task ABI | If the two standards collapse into one shape, the bridge simplifies |
+| P1 | ACP's consolidation into A2A (mid-2025 rumors) must be verified from a primary source; if ACP is sunset, offline-discovery + await/resume are internalized directly | Bridge, or native feature |
+| P1 | The normative final form of the A2A discovery well-known URI (agent.json → agent-card.json migration) | Discovery daemon spec |
+| P2 | Post-survey protocols (AGNTCY, Agora arXiv:2410.11905, AP2/payments): does any introduce a kernel-relevant new primitive? | Periodic scan |
+| P2 | AIOS Cerebrum agent-hub mechanics must be read deeply (package/distribution/discovery) — input to the TABOS package manager design | Phase 4 |
+| P2 | Independent benchmark of E2B's latency claims (80 ms vs <200 ms) — the bar of success criterion #1 must be fixed by measurement | with the self-host repo |
+| P2 | Scope of the .af import converter: which fields carry over losslessly; how are the archival/secret gaps filled? | [AGENTS-SPEC §3](AGENTS-SPEC.md) |
 
-## G. İsim / Marka
+## G. Name / Brand
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P1 | **Formal marka taraması (Nice 9/42)** — nihai isim netleşince, o isim için: USPTO/EUIPO/TÜRKPATENT taraması; bot-erişimli olmadığından insan/vekil işi | Tüm vetlemeler registry-düzeyiydi |
-| P2 | **Nihai isim kararı** + (ancak karar sonrası) namespace rezervasyonu — TABOS kod adıdır, rezervasyon bilinçli ertelendi; not: bakir alanların yarı ömrü kısa (agnix 0→267⭐ ~1 yılda), isim netleşince hızlı davranılmalı | Arda (2026-06-06): "kod adı gibi düşün" |
-| P1 | Nihai isim için büyük-motor (Google/Bing) tam web taraması — duyurudan önce zorunlu (2. tur dersi: registry/Mojeek düzeyi yetmez); kayıt: `naming-tabos.json` web sütunu NOT SWEPT | [naming-tabos.json](../research/raw/naming-tabos.json) |
-| P2 | tabos.org'un mevcut sahibi (Alman FOSS grubu, flathub `org.tabos.*`) ile karışıklık riski düşük ama izlenmeli; tabos.com (1996) sahibi RDAP entity lookup'ı yapılmadı | Naming raporu |
+| P1 | **Formal trademark search (Nice 9/42)** — once the final name is settled, for that name: USPTO/EUIPO/TURKPATENT search; a human/attorney job since it is not bot-accessible | All vettings were at the registry-level |
+| P2 | **Final name decision** + (but only after the decision) namespace reservation — TABOS is a code name, reservation deliberately deferred; note: the half-life of virgin spaces is short (agnix 0→267⭐ in ~1 year), once the name is settled one must act fast | Arda (2026-06-06): "think of it as a code name" |
+| P1 | Full web sweep on big engines (Google/Bing) for the final name — mandatory before announcement (lesson from round 2: registry/Mojeek level is not enough); record: `naming-tabos.json` web column NOT SWEPT | [naming-tabos.json](../research/raw/naming-tabos.json) |
+| P2 | The risk of confusion with the current owner of tabos.org (German FOSS group, flathub `org.tabos.*`) is low but must be monitored; the RDAP entity lookup of the tabos.com (1996) owner was not done | Naming report |
 
-## I. Dil ve Verification
+## I. Language and Verification
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| ✅ KARAR | **Kernel verification = saf Rust + tiered-assurance** (Tier0 Miri+coding-guidelines zorunlu, Tier1 Kani her unsafe/parser'da, Tier2 Verus seçici: capability invariant'ları). seL4-üstü yolu v1'de DEĞİL; sertifikasyon pazarına girilirse v3 opsiyonu olarak saklı. asm test-covered (formal değil) | Çözüldü 2026-06-07 · [KERNEL-FOUNDATION-SPEC §8](KERNEL-FOUNDATION-SPEC.md) |
-| P1 | `no_std` çekirdek bağımlılık tabanının denetimi — Rust std/core henüz doğrulanmadı (AWS girişimi sürüyor, ~7.5k unsafe fonksiyon); kernel hangi minimal crate setine güvenecek? | AWS verify-std girişimi |
-| P1 | Native-Rust inference (candle/mistral.rs) tek-node/dense model için C++ engine'i ne zaman tamamen ikame eder — tamamen-Rust node image mümkün mü? | stack-fit bulgusu |
-| P2 | Ferrocene qualification'ı (ASIL D) gerçekten gerekli mi — functional-safety/otomotiv pazarına girilecek mi, yoksa FLS+consortium-guidelines yeterli mi? | EU CRA vs ISO 26262 |
-| P2 | EU CRA zaman çizelgesi (Eyl 2026 raporlama, Ara 2027 CE) TABOS sürüm planına nasıl oturur — SBOM/provenance hattı ne zaman kurulur? | Reg. (EU) 2024/2847 |
+| ✅ DECISION | **Kernel verification = pure Rust + tiered-assurance** (Tier0 Miri+coding-guidelines mandatory, Tier1 Kani on every unsafe/parser, Tier2 Verus selective: capability invariants). The seL4-on-top path is NOT in v1; kept as a v3 option if the certification market is entered. asm test-covered (not formal) | Resolved 2026-06-07 · [KERNEL-FOUNDATION-SPEC §8](KERNEL-FOUNDATION-SPEC.md) |
+| P1 | Audit of the `no_std` core dependency base — Rust std/core is not yet verified (AWS initiative ongoing, ~7.5k unsafe functions); which minimal crate set will the kernel trust? | AWS verify-std initiative |
+| P1 | When does native-Rust inference (candle/mistral.rs) fully replace the C++ engine for single-node/dense models — is a fully-Rust node image possible? | stack-fit finding |
+| P2 | Is Ferrocene qualification (ASIL D) really necessary — will the functional-safety/automotive market be entered, or is FLS+consortium-guidelines sufficient? | EU CRA vs ISO 26262 |
+| P2 | How does the EU CRA timeline (Sep 2026 reporting, Dec 2027 CE) fit into the TABOS release plan — when is the SBOM/provenance pipeline set up? | Reg. (EU) 2024/2847 |
 
-## H. Süreç / Metodoloji
+## H. Process / Methodology
 
-| P | Soru | Bağlam |
+| P | Question | Context |
 |---|---|---|
-| P1 | **Persona doğrulaması**: gerçek agent geliştiricileri ve operatörlerle görüşme — [PROCESS §4](PROCESS.md) taslak personaları/JTBD'leri masa başı üretildi, sahada doğrulanmadı (Design Thinking Empathize boşluğu) | G0 gate kriteri |
-| P2 | Success-measure izleme otomasyonu: VISION §7 ölçülerinin gate-bazlı R/Y/G takibi için araç/dosya düzeni (Faz 1'de SUCCESS-MEASURES.md) | [PROCESS §3.4](PROCESS.md) |
+| P1 | **Persona validation**: interviews with real agent developers and operators — [PROCESS §4](PROCESS.md) draft personas/JTBDs were produced at the desk, not validated in the field (Design Thinking Empathize gap) | G0 gate criterion |
+| P2 | Success-measure tracking automation: tooling/file layout for gate-based R/Y/G tracking of the VISION §7 measures (SUCCESS-MEASURES.md in Phase 1) | [PROCESS §3.4](PROCESS.md) |
 
 ---
 
-**Sayım (2026-06-07):** Açık: P0 ×7 · P1 ×29 · P2 ×19 — toplam 55. **Çözülen kararlar:** substrat (Firecracker/tek-vCPU/LinuxBoot), kernel-verification (saf-Rust tiered), uygulama dili (Rust). 1 madde validation-gate'e dönüştü (<50 ms spawn). P0'lar kapanmadan spec donması ilan edilmez. P0'lar kapanmadan spec donması ilan edilmez ([VISION §8 Faz 0](VISION.md)).
+**Count (2026-06-07):** Open: P0 ×7 · P1 ×29 · P2 ×19 — total 55. **Resolved decisions:** substrate (Firecracker/single-vCPU/LinuxBoot), kernel-verification (pure-Rust tiered), implementation language (Rust). 1 item turned into a validation-gate (<50 ms spawn). Spec freeze is not declared before the P0s are closed. Spec freeze is not declared before the P0s are closed ([VISION §8 Phase 0](VISION.md)).

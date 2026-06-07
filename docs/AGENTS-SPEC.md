@@ -1,83 +1,83 @@
-# TABOS Agent Spesifikasyonu (Tek/Çoklu Agent, Scheduling, IPC)
+# TABOS Agent Specification (Single/Multi-Agent, Scheduling, IPC)
 
-> Durum: v1.0 taslak — **[KARAR] / [ÖNERİ] / [AÇIK]** işaretli.
-> Dayanak: [RESEARCH-REPORT §5-6-8](RESEARCH-REPORT.md) · İlgili: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
+> Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
+> Basis: [RESEARCH-REPORT §5-6-8](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
 
 ---
 
-## 1. Agent Process Nesnesi **[KARAR]**
+## 1. Agent Process Object **[DECISION]**
 
-TABOS'un schedule edilebilir, checkpoint'lenebilir, migrate edilebilir birimi:
+TABOS's schedulable, checkpointable, migratable unit:
 
 ```
 AgentProcess = {
-  manifest,            # imzalı; prefix→handle tablosu; yetenek deklarasyonları
-  context,             # T0 register seti + token-metni kanonik durumu (KV = cache)
-  memory,              # tier handle'ları (MEMORY-SPEC; private ev otomatik)
-  inference,           # açık ModelSession'lar, in-flight DAG future'ları, lease'ler
-  sandbox,             # WASM nanoprocess'ler + (varsa) alt-microVM; FS delta
-  tasks,               # sahip olunan/üstlenilen Task nesneleri (9-durum)
-  budget,              # token/dolar/CPU bütçe handle'ları (hiyerarşik)
-  identity,            # principal + türetilmiş task-scoped alt-kimlikler (ANP çok-DID)
-  handles              # yukarıdakilerin tamamının tek tablosu — yetki = bu tablo
+  manifest,            # signed; prefix→handle table; capability declarations
+  context,             # T0 register set + token-text canonical state (KV = cache)
+  memory,              # tier handles (MEMORY-SPEC; private home automatic)
+  inference,           # open ModelSessions, in-flight DAG futures, leases
+  sandbox,             # WASM nanoprocesses + (if any) sub-microVM; FS delta
+  tasks,               # owned/assumed Task objects (9-state)
+  budget,              # token/dollar/CPU budget handles (hierarchical)
+  identity,            # principal + derived task-scoped sub-identities (ANP multi-DID)
+  handles              # single table of all the above — authority = this table
 }
 ```
 
-**Atomik bütünlük garantisi**: checkpoint/fork/migrate bu yapının *tamamını* tek işlemde alır — beyin/el arasında torn-state olmaz (E2B/Letta/AIOS boşluğunun kapanışı, [VISION §2](VISION.md)).
+**Atomic integrity guarantee**: checkpoint/fork/migrate captures the *entire* structure in a single operation — no torn state between brain/hand (closing the E2B/Letta/AIOS gap, [VISION §2](VISION.md)).
 
-## 2. Yaşam Döngüsü **[ÖNERİ]**
+## 2. Lifecycle **[PROPOSAL]**
 
-A2A 9-durum makinesi scheduler-native alınır, iki TABOS eklentisiyle:
+The A2A 9-state machine is adopted scheduler-native, with two TABOS extensions:
 
 ```
 SUBMITTED → WORKING ⇄ {INPUT_REQUIRED, AUTH_REQUIRED}   # "blocked on human/credential"
-WORKING → {COMPLETED, FAILED, CANCELED, REJECTED}        # REJECTED: agent reddi birinci sınıf
-+ HIBERNATED   # default bekleme hâli: terminate değil (KeyKOS/E2B; 4sn/GiB kaydet, ~1sn dön)
-+ EVOLVING     # self-modification sandbox'ında fork-modify-validate-merge (SELF-IMPROVEMENT-SPEC)
+WORKING → {COMPLETED, FAILED, CANCELED, REJECTED}        # REJECTED: agent refusal is first-class
++ HIBERNATED   # default waiting state: not terminate (KeyKOS/E2B; save 4s/GiB, return ~1s)
++ EVOLVING     # fork-modify-validate-merge in the self-modification sandbox (SELF-IMPROVEMENT-SPEC)
 ```
 
-- Terminal task'a mesaj → typed error (A2A kuralı).
-- `tb_agent_send` blocking (terminal-veya-interrupted'a kadar) ve non-blocking (poll/subscribe/webhook-bridge) modları destekler.
+- Message to a terminal task → typed error (A2A rule).
+- `tb_agent_send` supports blocking (until terminal-or-interrupted) and non-blocking (poll/subscribe/webhook-bridge) modes.
 
-## 3. Agent İmaj Formatı **[ÖNERİ — ".taf", Letta .af envanterinin kernel-tamamlanmışı]**
+## 3. Agent Image Format **[PROPOSAL — ".taf", the kernel-completed version of Letta's .af inventory]**
 
-| .af'tan alınan | TABOS düzeltmesi |
+| Taken from .af | TABOS correction |
 |---|---|
-| model config, mesaj geçmişi + in_context bayrakları, system prompt, memory blocks, tool kuralları + kaynak + JSON şemaları, env | in_context bayrakları kernel context-manager'ın malıdır, serialize edilen uygulama verisi değil |
-| — | **Tüm memory tier'ları dahil** (archival dahil): checkpoint = tam durum |
-| secrets null'lanır | **secret = load-time çözülen capability referansı** |
-| — | FS delta + task durumları + budget + handle tablosu dahil (AgentProcess'in tamamı) |
-| — | İmza: manifest JWS (A2A Agent Card modeli); imaj = kurulum/fork/suspend/migrate/repro-eval birimi (ELF+core-dump rolü) |
+| model config, message history + in_context flags, system prompt, memory blocks, tool rules + source + JSON schemas, env | in_context flags belong to the kernel context-manager, not serialized application data |
+| — | **All memory tiers included** (including archival): checkpoint = full state |
+| secrets nulled | **secret = load-time-resolved capability reference** |
+| — | FS delta + task states + budget + handle table included (the entire AgentProcess) |
+| — | Signature: manifest JWS (A2A Agent Card model); image = unit of install/fork/suspend/migrate/repro-eval (the ELF+core-dump role) |
 
-.af **import uyumluluğu** ucuz ekosistem kazancı olarak hedeflenir [AÇIK: dönüştürücü kapsamı].
+.af **import compatibility** is targeted as a cheap ecosystem win [OPEN: converter scope].
 
-## 4. Spawn Protokolü **[KARAR]**
+## 4. Spawn Protocol **[DECISION]**
 
-1. Çağıran `tb_agent_spawn(manifest)` der; manifest imzası doğrulanır (kernel/trusted loader).
-2. Kernel manifest'in **prefix tablosunu** handle setine çevirir (Fuchsia namespace transfer); tabloda olmayan kaynak agent için *yoktur*.
-3. Agent **tek bootstrap channel** ile doğar (Zircon); kalan her şeyi o kanaldan ister — yetki seti doğum anında numaralandırılabilir.
-4. Bütçe: çağıranın budget handle'ından `tb_budget_split` ile dilim — devredilebilir, iç içe, geri alınabilir [AÇIK: dolar+token kompozisyonu].
-5. Fork çeşidi: `tb_agent_fork` paylaşımlı prefix'i scheduler'a yapısal ipucu olarak geçirir (SGLang fork-hint: ortak system prompt/tool tanımları bedava cache hit).
-6. Spawn maliyet hedefi: **<50 ms** (unikernel hattı ~1 ms boot + imaj yükleme; E2B <200 ms çıtasının altı).
+1. The caller says `tb_agent_spawn(manifest)`; the manifest signature is verified (kernel/trusted loader).
+2. The kernel turns the manifest's **prefix table** into a handle set (Fuchsia namespace transfer); a resource not in the table simply *does not exist* for the agent.
+3. The agent is born with a **single bootstrap channel** (Zircon); it requests everything else over that channel — the authority set is enumerable at birth.
+4. Budget: a slice from the caller's budget handle via `tb_budget_split` — delegatable, nested, revocable [OPEN: dollar+token composition].
+5. Fork variant: `tb_agent_fork` passes the shared prefix to the scheduler as a structural hint (SGLang fork-hint: shared system prompt/tool definitions give free cache hits).
+6. Spawn cost target: **<50 ms** (unikernel path ~1 ms boot + image load; below the E2B <200 ms bar).
 
-## 5. Scheduling **[ÖNERİ — detay ARCHITECTURE §5-6]**
+## 5. Scheduling **[PROPOSAL — detail in ARCHITECTURE §5-6]**
 
-Özet bağlama: quantum = decision cycle (kesinti yalnız cycle sınırında); impasse trap'leri otomatik child-context; QoS `INTERACTIVE/PIPELINE/BULK`; cache-topology-aware dispatch + aging; billing-aware preemption (lokal serbest, metered remote run-to-completion eğilimli); token-pressure'da admission control. Watchdog: tekrarlanan-eylem (>3) ve eylem-sayısı (>30) sezgileri `reflect` sinyali üretir (Reflexion) — sinyal, cycle sınırında teslim edilir.
+For context summary: quantum = decision cycle (interruption only at cycle boundary); impasse traps automatically create a child-context; QoS `INTERACTIVE/PIPELINE/BULK`; cache-topology-aware dispatch + aging; billing-aware preemption (local freely, metered remote tends to run-to-completion); admission control under token-pressure. Watchdog: repeated-action (>3) and action-count (>30) heuristics produce a `reflect` signal (Reflexion) — the signal is delivered at the cycle boundary.
 
-## 6. IPC ve Oturum İçi İletişim **[KARAR — katmanlama; ÖNERİ — mekanizmalar]**
+## 6. IPC and Intra-Session Communication **[DECISION — layering; PROPOSAL — mechanisms]**
 
-- **Kernel lehçesi tek**: correlated request/response + notification + cancellation + capability-passing channel + durable Task + sıralı-replay'li Stream ([ARCHITECTURE §9](ARCHITECTURE.md)).
-- **Dosya yüzeyi**: agent A, `cat /agent/B/status` okur; `/agent/B/inbox`'a yazar — koordinasyon için yeni API icat edilmez (Plan 9). Typed kanallar isteyen `agent:` scheme'inden channel açar.
-- **Blackboard**: `memory:session/<sess>` + paylaşımlı `blocks:` — Letta'nın "update once, visible everywhere" deneyimi, kernel CAS/watch ile yarışsız. Üretici/tüketici: uyanık-agent ile sleep-time-agent aynı blokları paylaşır.
-- **Event fan-out**: bir Task'ın stream'ine N gözlemci; herkes aynı olayları aynı sırada alır; bir stream'in kopması diğerini etkilemez (A2A kuralı) — supervisor/auditor/peer'ların ortak izleme temeli.
-- **Dış protokoller**: MCP (tool/data düzlemi), A2A (peer delegasyon), ACP (REST/multipart; offline package-discovery fikri pakete alınır), ANP (DID kimlik; humanAuthorization kapısı) — hepsi userspace bridge; webhook'lar NAT'lı uçlar için kernel stream aboneliğine çevrilir [AÇIK].
+- **Single kernel dialect**: correlated request/response + notification + cancellation + capability-passing channel + durable Task + ordered-replay Stream ([ARCHITECTURE §9](ARCHITECTURE.md)).
+- **File surface**: agent A reads `cat /agent/B/status`; writes to `/agent/B/inbox` — no new API is invented for coordination (Plan 9). One wanting typed channels opens a channel from the `agent:` scheme.
+- **Blackboard**: `memory:session/<sess>` + shared `blocks:` — Letta's "update once, visible everywhere" experience, race-free via kernel CAS/watch. Producer/consumer: the awake agent and the sleep-time-agent share the same blocks.
+- **Event fan-out**: N observers on a Task's stream; everyone gets the same events in the same order; one stream breaking does not affect another (A2A rule) — the common observation foundation for supervisors/auditors/peers.
+- **External protocols**: MCP (tool/data plane), A2A (peer delegation), ACP (REST/multipart; the offline package-discovery idea is taken into the package), ANP (DID identity; humanAuthorization gate) — all userspace bridges; webhooks are converted to kernel stream subscriptions for NAT'd endpoints [OPEN].
 
-## 7. Kimlik ve Güven **[ÖNERİ]**
+## 7. Identity and Trust **[PROPOSAL]**
 
-- Agent = kernel principal; her task için **türetilmiş, en-az-yetkili, süreli alt-kimlik** (ANP çok-DID stratejisi).
-- Anahtar nezareti: keyring servisi; `EMIT_EXTERNAL` etiketli op'lar (ödeme, mahremiyet, geri-alınamazlar) **insan-onaylı ikinci keyring**den imza ister (humanAuthorization; MCP elicitation accept/decline/cancel — kısıtlı şema kernel'da ucuz doğrulanır).
-- Karşılıklı-şüpheli işbirliği: capability modeli sayesinde "senin verin × benim agent'ım, iki yön de sızdırmaz" — confinement'ı doğrulanabilir agent şablonları (KeyKOS factory deseni) [AÇIK: doğrulama mekanizması].
+- Agent = kernel principal; for each task a **derived, least-privilege, time-bounded sub-identity** (ANP multi-DID strategy).
+- Key custody: keyring service; ops tagged `EMIT_EXTERNAL` (payment, privacy, irreversibles) request a signature from a **human-approved second keyring** (humanAuthorization; MCP elicitation accept/decline/cancel — the constrained schema is cheaply verified in the kernel).
+- Mutually-suspicious cooperation: thanks to the capability model, "your data × my agent, neither direction leaks" — confinement via verifiable agent templates (KeyKOS factory pattern) [OPEN: verification mechanism].
 
-## 8. Çoklu-Agent Oturumu **[ÖNERİ]**
+## 8. Multi-Agent Session **[PROPOSAL]**
 
-`Session` nesnesi = üye agent handle'ları + `memory:session` tier'ı + paylaşımlı block'lar + task fan-out stream'leri + ortak bütçe havuzu (opsiyonel oversubscribe, Anthropic workspace deseni). Topoloji (kim kime mesaj atar) **versiyonlu, evolvable nesnedir** — self-improvement'ın evrim hedeflerinden biri (survey 2508.07407'nin topology-evolution sınıfı). Tek-agent oturumu = |üye|=1 özel hâli; ayrı kod yolu yoktur.
+The `Session` object = member agent handles + `memory:session` tier + shared blocks + task fan-out streams + a common budget pool (optional oversubscribe, Anthropic workspace pattern). Topology (who messages whom) is a **versioned, evolvable object** — one of the evolution targets of self-improvement (the topology-evolution class of survey 2508.07407). A single-agent session = the special case of |members|=1; there is no separate code path.

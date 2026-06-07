@@ -1,110 +1,110 @@
-# TABOS Memory Spesifikasyonu (Default Memory Yapısı)
+# TABOS Memory Specification (Default Memory Structure)
 
-> Durum: v1.0 taslak — **[KARAR] / [ÖNERİ] / [AÇIK]** işaretli.
-> Dayanak: [RESEARCH-REPORT §4](RESEARCH-REPORT.md#4-memory-literatürü--default-memory-yapısının-hammaddesi) · İlgili: [ARCHITECTURE](ARCHITECTURE.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
+> Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
+> Basis: [RESEARCH-REPORT §4](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
 
 ---
 
-## 0. İlke
+## 0. Principle
 
-**Memory, TABOS'ta bir kütüphane değil kernel garantisidir.** Her agent doğduğunda aşağıdaki tier seti otomatik var olur; hiçbir framework kodu gerekmez. Kernel *depoyu, indeksi, kotaları, tutarlılığı ve provenance'ı* garanti eder; *neyin önemli olduğuna karar veren zekâ* (enrichment, op seçimi, damıtma) pluggable userspace servislerindedir (LLM-agnostiklik: exokernel ayrımı — koruma kernel'da, politika dışarıda).
+**In TABOS, memory is not a library but a kernel guarantee.** When each agent is born, the tier set below exists automatically; no framework code is required. The kernel guarantees *the store, the index, the quotas, the consistency and the provenance*; *the intelligence that decides what matters* (enrichment, op selection, distillation) lives in pluggable userspace services (LLM-agnosticism: exokernel separation — protection in the kernel, policy outside).
 
-## 1. Tier Mimarisi **[KARAR — survey'in beşli yakınsamasından türetilmiş T0–T5 + BLOCKS yapısı; gerekçe: 84 mimari, arXiv:1610.08602]**
+## 1. Tier Architecture **[DECISION — T0–T5 + BLOCKS structure derived from the fivefold convergence of the survey; rationale: 84 architectures, arXiv:1610.08602]**
 
 ```
-T0  CONTEXT REGISTERS   ACT-R buffers: adlandırılmış, sınırlı, tipli kayıt yuvaları
-                        (goal, retrieval, percept, tool-result, …). Prompt bunlardan
-                        materialize edilir — sınırsız context blob'u YOK.
-T1  WORKING             Soar WM: state-köklü graf; erişilemeyen otomatik GC;
-                        i-support (gerekçe düşünce otomatik geri çekilir) / o-support ayrımı.
-T2  EPISODIC JOURNAL    Otomatik flight-recorder (agent eylemi gerektirmez — Soar EpMem);
-                        kayıpsız, append-only, bi-temporal; read-your-writes ANLIK.
-T3  SEMANTIC STORE      Damıtılmış fact/not kayıtları; embedded store (SQLite-emsal:
-                        milyonlarca node'da sub-ms, <1KB/fact); activation-ranked retrieval.
-T4  PROCEDURAL / SKILL  Çalıştırılabilir skill'ler + damıtılmış ilkeler; yazma ayrıcalıklı
-                        (CoALA risk asimetrisi: WRITE_PROCEDURAL ayrı hak; verification-
-                        before-commit — bkz. SELF-IMPROVEMENT-SPEC).
-T5  ARCHIVAL / PARAMETRIC  (opsiyonel modüller) Vector-archival (Letta tarzı) ·
-                        graph tier (Zep/Mem0g — temporal sorgular için opt-in) ·
-                        parametric (fine-tune/knowledge-edit; yalnız lokal backend, BULK).
-+   BLOCKS              Letta memory-block tier'ı: adlandırılmış, kotali, N agent'ın
-                        context'ine MAP edilebilen pinned segmentler; CAS/CRDT yazım
-                        semantiği (last-write-wins kütüphane hatası kernel'da çözülür).
+T0  CONTEXT REGISTERS   ACT-R buffers: named, bounded, typed register slots
+                        (goal, retrieval, percept, tool-result, …). The prompt is
+                        materialized from these — NO unbounded context blob.
+T1  WORKING             Soar WM: state-rooted graph; unreachable auto-GC;
+                        i-support (justifying thought auto-retracted) / o-support distinction.
+T2  EPISODIC JOURNAL    Automatic flight-recorder (requires no agent action — Soar EpMem);
+                        lossless, append-only, bi-temporal; read-your-writes INSTANT.
+T3  SEMANTIC STORE      Distilled fact/note records; embedded store (SQLite-class:
+                        sub-ms over millions of nodes, <1KB/fact); activation-ranked retrieval.
+T4  PROCEDURAL / SKILL  Executable skills + distilled principles; write is privileged
+                        (CoALA risk asymmetry: WRITE_PROCEDURAL a separate right; verification-
+                        before-commit — see SELF-IMPROVEMENT-SPEC).
+T5  ARCHIVAL / PARAMETRIC  (optional modules) Vector-archival (Letta-style) ·
+                        graph tier (Zep/Mem0g — opt-in for temporal queries) ·
+                        parametric (fine-tune/knowledge-edit; local backend only, BULK).
++   BLOCKS              Letta memory-block tier: named, quota'd pinned segments that can be
+                        MAPped into N agents' contexts; CAS/CRDT write
+                        semantics (the last-write-wins library bug is resolved in the kernel).
 ```
 
-Sapma gerekçeleri (survey'in kendi kuralı: *deviation needs justification*): survey'in **sensory** tier'ı TABOS'ta ayrı tier değildir — percept/ingest akışı T0 register'larına düşer (ACT-R perceptual buffer modeli); T5 ve BLOCKS, beşli çekirdeğin (T0–T4) üstüne opsiyonel/eklenti katmanlardır.
+Deviation rationales (the survey's own rule: *deviation needs justification*): the survey's **sensory** tier is not a separate tier in TABOS — the percept/ingest flow lands in T0 registers (ACT-R perceptual buffer model); T5 and BLOCKS are optional/add-on layers on top of the fivefold core (T0–T4).
 
-Union-namespace ergonomisi: session-scratch tier, kalıcı tier'ın üstüne bind edilir; `tb_recall` union sırasında düşer ([ARCHITECTURE §3](ARCHITECTURE.md)).
+Union-namespace ergonomics: the session-scratch tier is bound on top of the persistent tier; `tb_recall` lands in union order ([ARCHITECTURE §3](ARCHITECTURE.md)).
 
-## 2. Kayıt Şeması **[ÖNERİ — A-MEM + Zep + GA sentezi]**
+## 2. Record Schema **[PROPOSAL — A-MEM + Zep + GA synthesis]**
 
-`MemRecord` (kernel-sabit alanlar; inode analojisi):
+`MemRecord` (kernel-fixed fields; inode analogy):
 
-| Alan | Tip | Kaynak/desen |
+| Field | Type | Source/pattern |
 |---|---|---|
-| `id`, `content` | — | ham içerik (metin/MIME-parçalı — ACP dersi) |
-| `t_created, t_expired` | transaction timeline | **bi-temporal zorunlu** (Zep) |
-| `t_valid, t_invalid` | event timeline | çelişki = invalidate, silme değil |
-| `importance` | int 1-10 | yazım anında tek LLM çağrısı (GA "poignancy") |
+| `id`, `content` | — | raw content (text/MIME-parts — ACP lesson) |
+| `t_created, t_expired` | transaction timeline | **bi-temporal mandatory** (Zep) |
+| `t_valid, t_invalid` | event timeline | contradiction = invalidate, not delete |
+| `importance` | int 1-10 | single LLM call at write time (GA "poignancy") |
 | `embedding` | vec | provider pluggable |
-| `keywords, tags, context` | derived | enrichment userspace servisi (A-MEM; lokal 1B model ~1.1 sn/op) |
-| `links[]` | typed | `cites` (derived→source: halüsinasyon denetimi — GA reflection), `relates`, `supersedes` |
-| `provenance` | enum+ref | inside-trial / cross-trial / external (survey 2404.13501) + üreten agent/task |
-| `access` | {count, last_k_ts[k=10]} | base-level activation O(1) durumu (ACT-R/Petrov) |
-| `utility` | {c_succ, c_use} | s=(c_succ+1)/(c_use+2) — sonuç telemetrisinden kernel doldurur (EvolveR) |
+| `keywords, tags, context` | derived | enrichment userspace service (A-MEM; local 1B model ~1.1 s/op) |
+| `links[]` | typed | `cites` (derived→source: hallucination audit — GA reflection), `relates`, `supersedes` |
+| `provenance` | enum+ref | inside-trial / cross-trial / external (survey 2404.13501) + producing agent/task |
+| `access` | {count, last_k_ts[k=10]} | base-level activation O(1) state (ACT-R/Petrov) |
+| `utility` | {c_succ, c_use} | s=(c_succ+1)/(c_use+2) — kernel fills from outcome telemetry (EvolveR) |
 | `acl` | namespace ref | §7 |
 
-**Yazma transactional'dır**: bir insert komşu k kaydı evrimleştirebilir (A-MEM memory evolution) → çok-kayıt atomik güncelleme + eski sürümler geri getirilebilir (versioning).
+**The write is transactional**: one insert can evolve neighboring k records (A-MEM memory evolution) → multi-record atomic update + old versions are recoverable (versioning).
 
-## 3. Operasyon ABI'si **[ÖNERİ]**
+## 3. Operation ABI **[PROPOSAL]**
 
-- **Üç syscall ailesi** (survey'in üç OPERATIONS sınıfı): `tb_mem_write` / `tb_mem_read` / `tb_mem_manage`; CoALA üçlüsü `tb_recall`/`tb_reflect`/`tb_learn` bunların üstünde şeker.
-- **Update kararı dört-op sözlüğüyle**: `ADD / UPDATE / DELETE(→tombstone) / NOOP` — politika kararını veren LLM "oracle"ı pluggable (function-calling arabirimi, Mem0); op'u *yürüten* kernel'dır.
-- **Retrieval üç-aşamalı pipeline'dır, monolitik search değil** (Zep): ① aday arama — hibrit default: lexical (BM25) + dense (cosine) + graph/BFS paralel; ② rerank — pluggable: RRF/MMR/cross-encoder/node-distance; ③ context constructor — şablonlu, geçerlilik tarih aralıklı.
-- **Default sıralama (ağırlıklı toplam)**: `score = w_a·BLA(d=0.5) + w_r·relevance + w_i·importance` (bileşenler min-max normalize, default w=1) — toplamsal form, GA'nın doğrulanmış skoruna (α_rec·rec + α_imp·imp + α_rel·rel, tüm α=1) ve ACT-R'ın kendi aktivasyon denklemine (A = B + S + P + ε) sadıktır; BLA(d=0.5) hem Soar hem ACT-R'ın yakınsadığı, 50 yıllık en iyi doğrulanmış sabit; spreading activation (buffer-içeriğinden priming, fan-effect cezalı), partial match ve noise **default KAPALI** (ACT-R muhafazakârlığı).
-- **Finsts** [KARAR]: kernel, agent başına bounded + süreli "az önce döndürüldü" kümesi tutar ve `exclude_recent` / `retrieve_next` iterasyon semantiği sunar — RAG aynı-sonucu-döndürme döngüsünün 40 yıllık kırıcısı (ACT-R 4/3sn; TABOS default'u oturum uzunluğuna ölçekli [AÇIK]).
-- **İndeksleme kapsamı** [ÖNERİ]: default indeks agent *çıktılarını da* kapsar, yalnız kullanıcı girdilerini değil — Zep'in single-session-assistant regresyonu (−%17.7, gpt-4o) türetilmiş tier'ların asistan-tarafı ayrıntıyı kaybettiğini gösterdi.
-- **Copy-on-retrieve** [ÖNERİ]: retrieval, working memory'ye *kopya* enstantiye eder (Soar LTI/STI ayrımı); uzun-vadeli depo yalnız explicit commit'le değişir — kazara in-place mutasyon yok.
-- **Erişim metadata'sı okuma yolunda yazılır** → relatime-tarzı batch'leme [AÇIK].
+- **Three syscall families** (the survey's three OPERATIONS classes): `tb_mem_write` / `tb_mem_read` / `tb_mem_manage`; the CoALA triad `tb_recall`/`tb_reflect`/`tb_learn` is sugar on top of these.
+- **Update decision with a four-op vocabulary**: `ADD / UPDATE / DELETE(→tombstone) / NOOP` — the LLM "oracle" that makes the policy decision is pluggable (function-calling interface, Mem0); the kernel is what *executes* the op.
+- **Retrieval is a three-stage pipeline, not a monolithic search** (Zep): ① candidate search — hybrid default: lexical (BM25) + dense (cosine) + graph/BFS in parallel; ② rerank — pluggable: RRF/MMR/cross-encoder/node-distance; ③ context constructor — templated, with validity date ranges.
+- **Default ranking (weighted sum)**: `score = w_a·BLA(d=0.5) + w_r·relevance + w_i·importance` (components min-max normalized, default w=1) — the additive form is faithful to GA's validated score (α_rec·rec + α_imp·imp + α_rel·rel, all α=1) and to ACT-R's own activation equation (A = B + S + P + ε); BLA(d=0.5) is the best-validated 50-year-old constant on which both Soar and ACT-R converge; spreading activation (priming from buffer content, fan-effect penalized), partial match and noise are **OFF by default** (ACT-R conservatism).
+- **Finsts** [DECISION]: the kernel keeps a bounded + time-limited "just returned" set per agent and offers `exclude_recent` / `retrieve_next` iteration semantics — the 40-year-old breaker of the RAG return-the-same-result loop (ACT-R 4/3 s; TABOS default scaled to session length [OPEN]).
+- **Indexing scope** [PROPOSAL]: the default index covers agent *outputs too*, not just user inputs — Zep's single-session-assistant regression (−17.7%, gpt-4o) showed that derived tiers lose assistant-side detail.
+- **Copy-on-retrieve** [PROPOSAL]: retrieval instantiates a *copy* into working memory (Soar LTI/STI distinction); the long-term store changes only by explicit commit — no accidental in-place mutation.
+- **Access metadata is written on the read path** → relatime-style batching [OPEN].
 
-## 4. Konsolidasyon ve Reflection **[ÖNERİ]**
+## 4. Consolidation and Reflection **[PROPOSAL]**
 
-- **Tetik cron değil importance-akümülatörüdür** (GA: eşik 150, günde 2-3 tetik): kernel agent başına gelen importance toplamını sayar; eşik aşımında `BULK` sınıfı reflection job'ı planlar (dirty-page writeback analojisi).
-- Reflection çıktıları `cites` linkli olarak T3'e döner; reflection-üstüne-reflection ağaçları serbest.
-- **Async consolidation daemon** (kswapd analojisi — Mem0'ın async summary refresher'ı): özetler, dedup (embedding + LLM eşdeğerlik), merge, demotion; agent'ın kritik yolunu asla bloklamaz.
-- **Sleep-time compute** bu daemonun genelleşmiş hâlidir; idle inference kapasitesine `BULK` olarak yerleşir (~5× ölçülmüş geri ödeme — [SELF-IMPROVEMENT-SPEC §4](SELF-IMPROVEMENT-SPEC.md)).
+- **The trigger is not a cron but an importance accumulator** (GA: threshold 150, 2-3 triggers per day): the kernel counts the sum of incoming importance per agent; on threshold overflow it schedules a `BULK`-class reflection job (dirty-page writeback analogy).
+- Reflection outputs return to T3 with `cites` links; reflection-over-reflection trees are allowed.
+- **Async consolidation daemon** (kswapd analogy — Mem0's async summary refresher): summaries, dedup (embedding + LLM equivalence), merge, demotion; it never blocks the agent's critical path.
+- **Sleep-time compute** is the generalized form of this daemon; it lands in idle inference capacity as `BULK` (~5× measured payback — [SELF-IMPROVEMENT-SPEC §4](SELF-IMPROVEMENT-SPEC.md)).
 
-## 5. Tutarlılık ve Kota **[KARAR — ilkeler]**
+## 5. Consistency and Quota **[DECISION — principles]**
 
-- **Read-your-writes, T2 (raw episodic) üzerinde ANLIKTIR.** Türetilmiş tier'lar (T3+, graph, communities) **görünür epoch/freshness işareti** taşır; agent güvenmeden önce sorgulayabilir. (Zep'in saatlerce ingestion lag'i + RYW'sizliği karşı-örnek.)
-- **Write-amplification token-cinsinden kotalıdır** (disk kotası analojisi): sınırsız LLM-türetme 20×'ten fazla şişirebiliyor (Zep ölçümü: 26K→600K+); space-bank tarzı hiyerarşik bütçe (KeyKOS).
-- p95 retrieval bütçesi **<200 ms** (Mem0 kanıtladı); **escape hatch**: yüksek-bahisli sorgu için raw-episode replay her zaman adreslenebilir (10-17 sn'lik bedeliyle — full-context ~5 J-puanı tavan farkı).
+- **Read-your-writes is INSTANT over T2 (raw episodic).** Derived tiers (T3+, graph, communities) carry a **visible epoch/freshness marker**; the agent can query it before trusting. (Zep's hours-long ingestion lag + lack of RYW is the counter-example.)
+- **Write-amplification is quota'd in tokens** (disk quota analogy): unbounded LLM-derivation can inflate by more than 20× (Zep measurement: 26K→600K+); space-bank-style hierarchical budget (KeyKOS).
+- p95 retrieval budget **<200 ms** (Mem0 proved it); **escape hatch**: for a high-stakes query, raw-episode replay is always addressable (at a 10-17 s cost — full-context ~5 J-point ceiling difference).
 
-## 6. Forgetting **[ÖNERİ — alanın çözmediği yer, TABOS tasarımı]**
+## 6. Forgetting **[PROPOSAL — where the field has not solved it, TABOS design]**
 
-Hiçbir birincil sistem test edilmiş gerçek silme uygulamıyor; yakınsanan güvenli kompozisyon:
+No primary system implements tested real deletion; the converged safe composition:
 
-1. **Skor-çürümesiyle demotion** (GA decay × BLA): kayıt tier'lar arasında aşağı iner (T3→T5 archival), kaybolmaz.
-2. **Tombstone, silme değil** (Zep+Mem0g konsensüsü): `t_invalid` set edilir; tarih korunur; temporal sorgular çalışır.
-3. **Hard delete yalnız ayrıcalıklı explicit op** (privacy/compliance; insan-onay kapısına etiketli).
-4. **Soar'ın iki itiraf edilmiş boşluğu kernel'da kapanır**: sınırsız journal için default compaction/özet tier'ı + kanonik journal üstünde pluggable ikincil indeksler (lineer-tarama worst-case'i).
+1. **Demotion via score-decay** (GA decay × BLA): the record moves down across tiers (T3→T5 archival), it does not disappear.
+2. **Tombstone, not delete** (Zep+Mem0g consensus): `t_invalid` is set; history is preserved; temporal queries work.
+3. **Hard delete only as a privileged explicit op** (privacy/compliance; tagged to a human-approval gate).
+4. **Soar's two admitted gaps are closed in the kernel**: default compaction/summary tier for the unbounded journal + pluggable secondary indexes over the canonical journal (the linear-scan worst-case).
 
-## 7. Çok-Agent Memory Namespace'leri **[ÖNERİ — greenfield; literatürde standart yok]**
+## 7. Multi-Agent Memory Namespaces **[PROPOSAL — greenfield; no standard in the literature]**
 
-Survey §8.2 bu alanı açık ilan ediyor; TABOS tasarımı:
+Survey §8.2 declares this area open; the TABOS design:
 
 ```
-memory:private/<agent>/…    yalnız sahibi; default ev
-memory:session/<sess>/…     oturumdaki agent'lar (blackboard deseni: paralel yazarlı
-                            paylaşımlı bilişsel durum — 84-mimari survey'inin kanıtlı yapısı)
-memory:world/…              kurulum-çapı bilgi; READ herkese, WRITE küratörlü
-blocks:<name>               pinned paylaşımlı segmentler; CAS/versiyonlu yazım + watch
+memory:private/<agent>/…    owner only; default home
+memory:session/<sess>/…     the agents in the session (blackboard pattern: shared
+                            cognitive state with parallel writers — the proven structure of the 84-architecture survey)
+memory:world/…              installation-wide knowledge; READ to everyone, WRITE curated
+blocks:<name>               pinned shared segments; CAS/versioned write + watch
 ```
 
-- Erişim capability'yle (handle+rights); `RECALL` hakkı tier başına ayrılabilir.
-- Session tier'ında yazım çakışması: kayıt-düzeyi CAS + çakışmada her iki sürümü bi-temporal tutup `supersedes` linki [AÇIK: CRDT mi CAS mı — prototip ölçümü].
-- Timing yan-kanalı: farklı trust-domain agent'ları arasında prefix/embedding cache paylaşımı kapalı default [AÇIK].
+- Access by capability (handle+rights); the `RECALL` right can be separated per tier.
+- Write conflict in the session tier: record-level CAS + on conflict keep both versions bi-temporally with a `supersedes` link [OPEN: CRDT or CAS — prototype measurement].
+- Timing side-channel: prefix/embedding cache sharing between agents of different trust-domains is off by default [OPEN].
 
-## 8. Benchmark Gerçeği **[AÇIK]**
+## 8. Benchmark Reality **[OPEN]**
 
-Mevcut benchmark'lar (DMR doymuş %98; LOCOMO konuşma-QA; DialSim'de tüm sistemler F1<4) OS-ömrü agent memory'sini ölçmüyor. TABOS kendi değerlendirme koşumunu tanımlamalı: tool-use trace'leri, kod görevleri, cross-task skill transferi, multi-agent oturumları, haftalar süren yaşam döngüleri. ([OPEN-QUESTIONS §Memory](OPEN-QUESTIONS.md))
+Existing benchmarks (DMR saturated at 98%; LOCOMO conversation-QA; all systems F1<4 on DialSim) do not measure OS-lifetime agent memory. TABOS must define its own evaluation harness: tool-use traces, code tasks, cross-task skill transfer, multi-agent sessions, life cycles lasting weeks. ([OPEN-QUESTIONS §Memory](OPEN-QUESTIONS.md))

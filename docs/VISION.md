@@ -1,88 +1,88 @@
-# TABOS Vizyon Dökümanı
+# TABOS Vision Document
 
-**Türkiye's Agent Based Operating System**
+**Turkiye's Agent Based Operating System**
 
-> Durum: v1.0 (planlama fazı) · Dayanak: [RESEARCH-REPORT](RESEARCH-REPORT.md)
-> İlgili: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
+> Status: v1.0 (planning phase) · Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md)
+> Related: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
 
-## 1. Tek Cümlede TABOS
+## 1. TABOS in One Sentence
 
-**TABOS, AI agent'ın ve bilgisayarının tek bir kernel nesnesi olduğu; hafızanın, kendini geliştirmenin ve çoklu-agent yaşamının işletim sistemi garantisi olarak sunulduğu, sıfırdan tasarlanmış bir işletim sistemidir.**
+**TABOS is an operating system designed from scratch, in which the AI agent and its computer are a single kernel object, and in which memory, self-improvement, and multi-agent life are offered as operating-system guarantees.**
 
-Linux'un insan operatör için olduğu neyse, TABOS agent için odur — ama Linux'un 35 yıllık insan-masaüstü mirasını (tty'ler, çok-kullanıcılı uid modeli, X11, insan-okunur olmayan binary ABI'ler, agent'ın hiç çağırmayacağı yüzlerce syscall) hiç taşımadan.
+What Linux is for the human operator, TABOS is for the agent — but without carrying over any of Linux's 35-year human-desktop legacy (ttys, the multi-user uid model, X11, non-human-readable binary ABIs, hundreds of syscalls the agent will never call).
 
-## 2. Neden Var? — Boşluk Analizi
+## 2. Why Does It Exist? — Gap Analysis
 
-Araştırmanın en keskin bulgusu ([RESEARCH-REPORT §5](RESEARCH-REPORT.md#5-mevcut-sistemler-ve-greenfield-gerekçesi)): bugünkü ekosistemde agent'ın "zihni" ile "elleri" ayrı sistemlerde yaşıyor ve hiçbir sistem ikisini birden sahiplenmiyor:
+The sharpest finding of the research ([RESEARCH-REPORT §5](RESEARCH-REPORT.md)): in today's ecosystem the agent's "mind" and its "hands" live in separate systems, and no system owns both at once:
 
-| Sistem | Sahiplendiği parça | Sahiplenemediği |
+| System | Part it owns | What it cannot own |
 |---|---|---|
-| **E2B** | Bilgisayar (microVM, FS+RAM snapshot) | Agent'ın zihni — context, memory, LLM döngüsü host uygulamasında |
-| **Letta** | Zihin (.af: memory blocks, mesaj geçmişi, tool tanımları) | Execution sandbox durumu; eşzamanlılık (last-write-wins) |
-| **AIOS** | Scheduling (LLM syscalls, 2.1× throughput) | İzolasyon (Python daemon, hashmap ACL); kalıcı per-user kernel "ongoing" |
+| **E2B** | The computer (microVM, FS+RAM snapshot) | The agent's mind — context, memory, LLM loop live in the host application |
+| **Letta** | The mind (.af: memory blocks, message history, tool definitions) | Execution sandbox state; concurrency (last-write-wins) |
+| **AIOS** | Scheduling (LLM syscalls, 2.1× throughput) | Isolation (Python daemon, hashmap ACL); persistent per-user kernel "ongoing" |
 
-**Hiçbiri `{context window + memory tier'ları + in-flight inference durumu + sandbox process'leri + dosya sistemi}` bütününü tek atomik birim olarak suspend/resume/migrate/fork edemiyor.** TABOS'un varlık nedeni bu join'i kernel düzeyinde sahiplenmek: *torn-state yok* — beyin ile eller arasında yarım kalmış checkpoint olmaz; capability beyinden ele kernel'dan çıkmadan akar; tek kaynak hesabı (token + CPU + RAM + disk + dolar).
+**None of them can suspend/resume/migrate/fork the whole of `{context window + memory tiers + in-flight inference state + sandbox processes + file system}` as a single atomic unit.** TABOS's reason for being is to own this join at the kernel level: *no torn state* — no half-finished checkpoint between the brain and the hands; capability flows from brain to hand without leaving the kernel; a single resource account (token + CPU + RAM + disk + dollar).
 
-## 3. Tasarım Felsefesi — Beş İlke
+## 3. Design Philosophy — Five Principles
 
-### İlke 1: Her alt sistem "agent'a ne kazandırıyor?" sorusuyla yaşar
-Kullanıcının kurucu kısıtı. Bir alt sistem agent'ın yapabileceklerinin potansiyelini büyütmüyorsa TABOS'ta yeri yoktur. Mimari karşılığı library-OS modülerliğidir (Unikraft: yalnızca gereken bileşenler derlenir, ~1 MB imaj [arXiv:2104.12721]). İnsan-masaüstü mirası sıfır: terminal emülasyonu yok, çok-kullanıcılı oturum yok, GUI altyapısı yok. İnsan, TABOS'a *operatör* olarak değil **consent-verici ve gözlemci** olarak dokunur (elicitation kanalı, audit ağaçları).
+### Principle 1: Every subsystem lives by the question "what does it gain the agent?"
+The user's founding constraint. If a subsystem does not enlarge the potential of what the agent can do, it has no place in TABOS. Its architectural counterpart is library-OS modularity (Unikraft: only the needed components are compiled, ~1 MB image [arXiv:2104.12721]). Zero human-desktop legacy: no terminal emulation, no multi-user session, no GUI infrastructure. The human touches TABOS not as *operator* but as **consent-giver and observer** (elicitation channel, audit trees).
 
-### İlke 2: Memory bir özellik değil, kernel garantisidir
-Bugün memory her framework'ün yeniden icat ettiği bir kütüphane. TABOS'ta **default, kalıcı, katmanlı memory her agent'a doğuştan verilir** — dosya sistemi nasıl "opsiyonel" değilse. KeyKOS'un orthogonal persistence'ı şablon: agent'ın bütün durumu elektrik kesintisini "saatin sıçraması" gibi yaşar; **hibernate default'tur, terminate istisnadır.** Detay: [MEMORY-SPEC](MEMORY-SPEC.md).
+### Principle 2: Memory is not a feature, it is a kernel guarantee
+Today memory is a library every framework reinvents. In TABOS **default, persistent, tiered memory is given to every agent at birth** — just as the file system is not "optional." KeyKOS's orthogonal persistence is the template: the agent's entire state experiences a power outage like "the clock skipping"; **hibernate is the default, terminate is the exception.** Detail: [MEMORY-SPEC](MEMORY-SPEC.md).
 
-### İlke 3: Ambient authority yoktur — yetki her zaman görünür ve devredilirken zayıflar
-Agent'lar Shapiro'nun "programs, not people" eleştirisinin ([EROS essay](RESEARCH-REPORT.md#35-i̇zolasyon-temelleri-plan-9-keykoseros-capsicum-zirconfuchsia-redox-wasm-gvisor)) ta kendisidir: prompt-injection'a açık, üçüncü-parti kodla beslenen, birbirine güvenmeyen aktörler. TABOS'ta POSIX uid modeli hiç var olmaz; her tool çağrısı, her memory erişimi, her model invokasyonu **explicit capability** üzerinden (Zircon handle+rights modeli; attenuation-only duplicate; tek bootstrap handle ile doğum). Bunun bonusu: karşılıklı-şüpheli işbirliği — senin gizli verinde benim tescilli agent'ım, iki taraf da sızdıramadan.
+### Principle 3: There is no ambient authority — authority is always visible and weakens as it is delegated
+Agents are the very thing Shapiro's "programs, not people" critique ([EROS essay](RESEARCH-REPORT.md)) is about: actors open to prompt-injection, fed by third-party code, distrusting one another. In TABOS the POSIX uid model never exists; every tool call, every memory access, every model invocation goes through **explicit capability** (Zircon handle+rights model; attenuation-only duplicate; birth via a single bootstrap handle). The bonus of this: mutually-suspicious cooperation — my proprietary agent on your secret data, with neither side able to leak.
 
-### İlke 4: Token, context ve inference schedule edilebilir kaynaklardır
-CPU-saniyesi ve RAM-byte'ı nasıl kaynaksa, ITPM/OTPM kotası, KV-cache bloğu, context window'u ve dolar da kaynaktır. seL4 MCS'in budget+period scheduling-context capability'leri compute için üretimde kanıtlandı (formal verification'ı hâlâ sürüyor); TABOS aynı modeli token akışlarına uygular. Kernel'da tek nötr **context scheduler**, altında iki driver ailesi: lokal (HBM, GPU-saniye) ve remote (dolar, kota). Asimetrik koz: kalıcı durum token *metni* olduğundan (KV yeniden hesaplanabilir cache'tir [vLLM]), agent migrasyonu GB değil KB taşır.
+### Principle 4: Token, context, and inference are schedulable resources
+Just as CPU-second and RAM-byte are resources, so are the ITPM/OTPM quota, the KV-cache block, the context window, and the dollar. seL4 MCS's budget+period scheduling-context capabilities have been proven in production for compute (its formal verification is still ongoing); TABOS applies the same model to token flows. In the kernel a single neutral **context scheduler**, with two driver families beneath it: local (HBM, GPU-second) and remote (dollar, quota). The asymmetric trump card: because the persistent state is the token *text* (KV is a recomputable cache [vLLM]), agent migration moves KB, not GB.
 
-### İlke 5: Kendini geliştirme OS servisidir — ama ölçen, ölçülenden ayrıdır
-Reflection, skill birikimi, deneyim damıtma her agent'a default-on sunulur (weight-free, dolayısıyla LLM-agnostik [Reflexion]). Ama Darwin Gödel Machine'in dersi kuraldır: **frozen kernel / evolving userspace** — evaluator'lar, güvenlik dedektörleri ve evrim makinesi agent'ın okuyamayacağı/yazamayacağı katmandadır (görünür metrik Goodhart'lanır; DGM'de ajan dedektörü fiilen bypass etti). Öncelik hiyerarşisi kernel'da kodludur: **Endure > Excel > Evolve** [arXiv:2508.07407]. Detay: [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md).
+### Principle 5: Self-improvement is an OS service — but the measurer is separate from the measured
+Reflection, skill accumulation, and experience distillation are offered default-on to every agent (weight-free, hence LLM-agnostic [Reflexion]). But the Darwin Gödel Machine's lesson is the rule: **frozen kernel / evolving userspace** — evaluators, safety detectors, and the evolution engine are in a layer the agent cannot read/write (a visible metric gets Goodharted; in DGM the agent effectively bypassed the detector). The priority hierarchy is coded into the kernel: **Endure > Excel > Evolve** [arXiv:2508.07407]. Detail: [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md).
 
-## 4. TABOS'un Birinci Sınıf Vatandaşları
+## 4. TABOS's First-Class Citizens
 
-1. **Agent process** — `{context + memory + inference + sandbox + FS}` tek nesne; atomik checkpoint/fork/migrate ([AGENTS-SPEC](AGENTS-SPEC.md))
-2. **Memory record / tier** — bi-temporal damgalı, provenance'lı, kotali ([MEMORY-SPEC](MEMORY-SPEC.md))
-3. **Capability/handle** — haklar maskesiyle, yalnızca zayıflayarak çoğalan yetki
-4. **Task** — 9-durumlu, durable, insan/credential-bloklu durumları olan iş birimi (A2A modeli)
-5. **Token budget** — budget+period'lu, hiyerarşik, devredilebilir bütçe
-6. **Skill** — kod + açıklama + embedding + utility skoru; verification-before-commit ile kabul
-7. **Session** — bir veya N agent'ın paylaşımlı blackboard ve event stream'leriyle ortak yaşam alanı
+1. **Agent process** — `{context + memory + inference + sandbox + FS}` as a single object; atomic checkpoint/fork/migrate ([AGENTS-SPEC](AGENTS-SPEC.md))
+2. **Memory record / tier** — bi-temporally stamped, with provenance, quota-bound ([MEMORY-SPEC](MEMORY-SPEC.md))
+3. **Capability/handle** — authority that multiplies only by weakening, with a rights mask
+4. **Task** — a unit of work with 9 states, durable, with human/credential-blocked states (A2A model)
+5. **Token budget** — a budget+period, hierarchical, delegatable budget
+6. **Skill** — code + description + embedding + utility score; accepted with verification-before-commit
+7. **Session** — a shared living space for one or N agents with a shared blackboard and event streams
 
-## 5. Kimlik: İsim ve Dil
+## 5. Identity: Name and Language
 
-- **TABOS** = *Türkiye's Agent Based Operating System* — **kod adı (working title)**, nihai marka değil; değişebilir, rezervasyon bilinçli yapılmadı. 31 adayın (24+7; 23'ü tam vetlendi) iki turlu vetlemesinden sonra kod adı olarak seçildi; npm/PyPI/crates boş, AI/agent/OS alanında aktif çakışma yok ([RESEARCH-REPORT §9](RESEARCH-REPORT.md#9-i̇simlendirme-süreci-ve-tabos-kararı)).
-- Kernel sembol öneki (kod adına bağlı placeholder): **`tb_`** (syscall'lar), **`TB_`** (sabitler). CLI: `tabos` / `tb`. Hiçbir spec isme semantik bağımlılık taşımaz — isim değişirse mekanik find-replace yeter.
-- Alt sistem adlandırması için rezerv kavram havuzu (vetleme sırasında "konsept olarak güzel ama marka olarak dolu" çıkanlar iç isim olarak serbest): `daemon`→agent supervisor, `synapse`→IPC kanalları, `engram`→memory record'un iç adı, `hexis`→skill nesnesinin iç adı.
-- Proje dili: dökümantasyon Türkçe (teknik terimler İngilizce); kod/kimlikler İngilizce (uluslararası katkıya açık).
+- **TABOS** = *Turkiye's Agent Based Operating System* — **code name (working title)**, not the final brand; it may change, the reservation was not made deliberately. After a two-round vetting of 31 candidates (24+7; 23 fully vetted) it was selected as the code name; npm/PyPI/crates empty, no active conflict in the AI/agent/OS space ([RESEARCH-REPORT §9](RESEARCH-REPORT.md)).
+- Kernel symbol prefix (placeholder tied to the code name): **`tb_`** (syscalls), **`TB_`** (constants). CLI: `tabos` / `tb`. No spec carries a semantic dependency on the name — if the name changes, a mechanical find-replace suffices.
+- A reserved concept pool for subsystem naming (those that came out during vetting as "nice as a concept but taken as a brand" are free as internal names): `daemon`→agent supervisor, `synapse`→IPC channels, `engram`→the internal name of the memory record, `hexis`→the internal name of the skill object.
+- Project language: documentation in Turkish (technical terms in English); code/identifiers in English (open to international contribution).
 
-## 6. Kapsam Dışı (bilinçli)
+## 6. Out of Scope (deliberate)
 
-- **Genel amaçlı insan masaüstü/sunucu OS'u olmak** — Linux'la rekabet yok; agent-dışı işyükleri hedef değil.
-- **Kendi LLM'ini eğitmek/barındırmak zorunda olmak** — inference her zaman driver arkasında (remote API veya lokal engine); TABOS model değil, modelin *evi*.
-- **v1'de kendi donanım driver evrenini yazmak** — TABOS bir hypervisor/VMM üstünde (KVM/Firecracker-sınıfı) guest olarak boot eder; çıplak donanım sonraki faz ([OPEN-QUESTIONS](OPEN-QUESTIONS.md)).
-- **Tek protokole evlilik** — MCP/A2A/ACP/ANP userspace bridge'lerdir; kernel ABI'si nötr kalır.
+- **Being a general-purpose human desktop/server OS** — no competition with Linux; non-agent workloads are not a target.
+- **Having to train/host your own LLM** — inference is always behind a driver (remote API or local engine); TABOS is not the model but the model's *home*.
+- **Writing your own hardware driver universe in v1** — TABOS boots as a guest on top of a hypervisor/VMM (KVM/Firecracker-class); bare metal is a later phase ([OPEN-QUESTIONS](OPEN-QUESTIONS.md)).
+- **Marriage to a single protocol** — MCP/A2A/ACP/ANP are userspace bridges; the kernel ABI stays neutral.
 
-## 7. Başarı Kriterleri (planlama fazı çıkış çubukları)
+## 7. Success Criteria (planning-phase exit bars)
 
-| # | Kriter | Ölçü |
+| # | Criterion | Measure |
 |---|---|---|
-| 1 | Agent spawn soğuk başlangıcı | E2B çıtası <200 ms'nin altı; unikernel hattıyla hedef **<50 ms** |
-| 2 | Atomik checkpoint | Zihin+bilgisayar tek imaj; resume sonrası torn-state sıfır |
-| 3 | Memory default'u | Hiçbir framework kodu yazmadan kalıcı recall; p95 retrieval <200 ms (Mem0 çıtası) |
-| 4 | Kota verimliliği | Cache-aware yerleşimle aynı ITPM'de ≥3× efektif iş (Anthropic cache-exempt aritmetiği) |
-| 5 | Self-improvement geri ödemesi | Sleep-time compute sınıfında ≥2× test-time compute düşüşü (Letta ~5× çıtası) |
-| 6 | Güvenlik | Ambient authority sıfır; her yetki spawn anında numaralandırılabilir; evaluator'lar agent'tan okunamaz |
+| 1 | Agent spawn cold start | Below the E2B bar of <200 ms; target **<50 ms** with the unikernel path |
+| 2 | Atomic checkpoint | Mind+computer in a single image; zero torn state after resume |
+| 3 | Memory default | Persistent recall without writing any framework code; p95 retrieval <200 ms (Mem0 bar) |
+| 4 | Quota efficiency | ≥3× effective work at the same ITPM via cache-aware placement (Anthropic cache-exempt arithmetic) |
+| 5 | Self-improvement payback | ≥2× test-time compute reduction in the sleep-time compute class (Letta ~5× bar) |
+| 6 | Security | Zero ambient authority; every authority enumerable at spawn time; evaluators unreadable by the agent |
 
-## 8. Yol Haritası Görünümü (taslak)
+## 8. Roadmap View (draft)
 
-1. **Faz 0 — bu klasör:** Döküman seti + açık soruların kapatılması (spec donması).
-2. **Faz 1 — çekirdek prototip:** Handle/capability katmanı + agent process nesnesi + memory T0-T2 tier'ları; host: Linux üstü user-mode prototip (hızlı iterasyon için), hedef ABI'yi koruyarak.
-3. **Faz 2 — gerçek izolasyon:** Firecracker-sınıfı microVM'de TABOS unikernel guest; WASM nanoprocess tool runtime'ı; context scheduler v1 (remote lease driver'ı önce).
-4. **Faz 3 — çoklu-agent + self-improvement:** Session/blackboard, A2A bridge, sleep-time sınıfı, skill compiler.
-5. **Faz 4 — ekosistem:** Agent imaj formatı + paket/agent hub'ı (Cerebrum dersleri), .af import uyumluluğu.
+1. **Phase 0 — this folder:** Document set + closing the open questions (spec freeze).
+2. **Phase 1 — core prototype:** Handle/capability layer + agent process object + memory T0-T2 tiers; host: user-mode prototype on top of Linux (for fast iteration), preserving the target ABI.
+3. **Phase 2 — real isolation:** TABOS unikernel guest in a Firecracker-class microVM; WASM nanoprocess tool runtime; context scheduler v1 (remote lease driver first).
+4. **Phase 3 — multi-agent + self-improvement:** Session/blackboard, A2A bridge, sleep-time class, skill compiler.
+5. **Phase 4 — ecosystem:** Agent image format + package/agent hub (Cerebrum lessons), .af import compatibility.
 
-> Fazlar [OPEN-QUESTIONS](OPEN-QUESTIONS.md)'taki kernel-vs-userspace kararları kapanmadan taahhüt değildir.
+> The phases are not a commitment until the kernel-vs-userspace decisions in [OPEN-QUESTIONS](OPEN-QUESTIONS.md) are closed.

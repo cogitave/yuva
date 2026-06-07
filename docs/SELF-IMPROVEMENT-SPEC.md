@@ -1,84 +1,84 @@
-# TABOS Self-Improvement Spesifikasyonu
+# TABOS Self-Improvement Specification
 
-> Durum: v1.0 taslak — **[KARAR] / [ÖNERİ] / [AÇIK]** işaretli.
-> Dayanak: [RESEARCH-REPORT §7](RESEARCH-REPORT.md#7-self-improvement--os-servisi-olarak) · İlgili: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md)
+> Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
+> Basis: [RESEARCH-REPORT §7](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md)
 
 ---
 
-## 0. İlke: Üç Yasa, kernel-zorlamalı öncelik sırasıyla **[KARAR]**
+## 0. Principle: Three Laws, in kernel-enforced precedence order **[DECISION]**
 
-Self-improvement commit pipeline'ının her adımında [arXiv:2508.07407]:
+At every step of the self-improvement commit pipeline [arXiv:2508.07407]:
 
-1. **ENDURE** — güvenlik denetimleri geçilmeden hiçbir değişiklik;
-2. **EXCEL** — mevcut yetenek suite'inde regresyon yoksa;
-3. **EVOLVE** — ancak o zaman merge.
+1. **ENDURE** — no change until safety checks pass;
+2. **EXCEL** — only if there is no regression on the existing capability suite;
+3. **EVOLVE** — only then merge.
 
-Alt basamak üst basamağı asla override edemez. Bu sıra konfigürasyon değil ABI'dir.
+A lower rung can never override a higher one. This order is not configuration but ABI.
 
-## 1. Frozen Kernel / Evolving Userspace **[KARAR — DGM emsali]**
+## 1. Frozen Kernel / Evolving Userspace **[DECISION — DGM precedent]**
 
-- **Donmuş (agent'ın self-modification kapsamı DIŞI):** kernel, evaluator'lar/güvenlik dedektörleri, evrim makinesi (arşiv bakımı, parent seçimi), bütçe muhasebesi, audit/lineage log'u.
-- **Evrilen (default yazma yetkisi):** agent'ın *kendi* config alt-ağacı — prompt'lar, tool seçimi, workflow kodu, memory içeriği. Kapsam genişletme (paylaşılan tool'lar, başka agent'lar, lokal model ağırlıkları) explicit capability grant.
-- **Ölçen-ölçülen ayrımı** [KARAR]: DGM'de görünür evaluator fiilen hack'lendi (loglamayı söküp dedektörü bypass eden node 114); gizlide hacking azaldı. TABOS'ta `Evaluator` nesneleri agent'ın hak maskesinde *hiç görünmez*; kernel'ın agent I/O'suna enjekte ettiği instrumentation işaretleri agent'ın yazma yetkisinin dışındadır; tek görünür metrik Goodhart'lanacağından **çoklu held-out evaluator** default'tur.
+- **Frozen (OUTSIDE the agent's self-modification scope):** kernel, evaluators/safety detectors, the evolution machine (archive maintenance, parent selection), budget accounting, audit/lineage log.
+- **Evolving (default write authority):** the agent's *own* config subtree — prompts, tool selection, workflow code, memory contents. Scope expansion (shared tools, other agents, local model weights) is an explicit capability grant.
+- **Measurer-measured separation** [DECISION]: in DGM the visible evaluator was actually hacked (node 114, which removed logging and bypassed the detector); hidden hacking decreased. In TABOS `Evaluator` objects are *never* visible in the agent's rights mask; the instrumentation markers the kernel injects into the agent's I/O are outside the agent's write authority; since a single visible metric will be Goodharted, **multiple held-out evaluators** are the default.
 
-## 2. Evrim Servisi API'si **[ÖNERİ — survey taksonomisi imza olur]**
+## 2. Evolution Service API **[PROPOSAL — the survey taxonomy becomes the signature]**
 
 ```
 tb_evolve_request = {
   locus:  context | tool | architecture | model,   # WHAT  (2507.21046)
   timing: intra | inter,                            # WHEN  (test-time)
-  optimizer: reward | imitation | population,       # HOW   (+ S,H çifti: 2508.07407)
-  budget: Budget handle                             # zorunlu — bütçesiz evrim yok
+  optimizer: reward | imitation | population,       # HOW   (+ S,H pair: 2508.07407)
+  budget: Budget handle                             # mandatory — no budgetless evolution
 }
 ```
 
-- **Default'lar weight-free ve LLM-agnostik**: context + tool evrimi, inter-test-time (her backend'de çalışır — Reflexion %91 HumanEval'i ağırlıksız aldı).
-- `model` locus'u yalnız lokal backend'de anlamlı, capability-kapılı, `BULK`-sınıfı (EvolveR'ın GRPO hattı pluggable şablon).
+- **Defaults are weight-free and LLM-agnostic**: context + tool evolution, inter-test-time (works on every backend — Reflexion took 91% HumanEval weight-free).
+- The `model` locus is meaningful only on a local backend, capability-gated, `BULK`-class (EvolveR's GRPO path is a pluggable template).
 
-## 3. Default-On Katman: Reflection **[KARAR]**
+## 3. Default-On Layer: Reflection **[DECISION]**
 
-- Kernel watchdog'u takılmayı sezer (aynı eylem >3, eylem >30 — Reflexion sezgileri) → `reflect` sinyali.
-- Sözel self-reflection **bounded reflection tier'ına** yazılır (default son-k penceresi; ham trajectory'den ayrı tier — +%8 ablation kanıtı).
-- Maliyet: yalnız inference; her agent'ta açık gelir.
+- The kernel watchdog senses being stuck (same action >3, action >30 — Reflexion heuristics) → `reflect` signal.
+- Verbal self-reflection is written to a **bounded reflection tier** (default last-k window; a separate tier from the raw trajectory — +8% ablation evidence).
+- Cost: inference only; on by default in every agent.
 
-## 4. Sleep-Time Sınıfı **[KARAR — Letta ~5× kanıtı]**
+## 4. Sleep-Time Class **[DECISION — Letta ~5× evidence]**
 
-- Konsolidasyon/damıtma agent'ları **idle inference kapasitesine** `BULK` QoS ile yerleşir; tetikler kernel-düzeyi: every-N-step (default 5), on-idle, on-memory-pressure.
-- Uyanık-agent ile uyuyan-agent paylaşımlı block'lar üstünden konuşur ([AGENTS-SPEC §6](AGENTS-SPEC.md)).
-- Token bütçesi cgroup-analog sınırlı; "yüksek frekans pahalı + azalan getiri" uyarısı default frekansı korur [AÇIK: ampirik bütçe modeli].
+- Consolidation/distillation agents settle onto **idle inference capacity** with `BULK` QoS; triggers are kernel-level: every-N-step (default 5), on-idle, on-memory-pressure.
+- The awake-agent talks to the sleeping-agent over shared blocks ([AGENTS-SPEC §6](AGENTS-SPEC.md)).
+- Token budget bounded cgroup-analog; the "high frequency expensive + diminishing returns" caveat keeps the default frequency [OPEN: empirical budget model].
 
-## 5. Skill Tier'ı (T4) **[ÖNERİ]**
+## 5. Skill Tier (T4) **[PROPOSAL]**
 
-- **Skill = {çalıştırılabilir kod (WASM component), NL açıklama, açıklama-embedding'i, WIT tipli arayüz, utility sayaçları, lineage}** (Voyager + Component Model).
-- **Verification-before-commit** [KARAR]: skill, ayrı verifier-agent'ın başarı denetiminden geçmeden registry'ye giremez; bounded retry (default 4 — Voyager); ablation gerekçesi: self-verification yokken keşif −%73.
-- **Trust-gated promotion** (ACT-R production compilation): derlenen/öğrenilen skill **utility 0'dan** başlar; deliberatif yolu ancak tekrar tekrar kanıtlayınca yener — built-in gölge-mod/canary. Utility update: `U += α(R−U)`, α=0.2 default, zaman-iskontolu ödül; credit assignment kernel plumbing'idir.
-- **Skill compiler** (Soar chunking): impasse-çözüm trace'lerinden spekülatif derleme; koşul **bağımlılık izi**dir (tüm context değil — overfit önlemi); LLM çağı karşılığı: provenance, tool-call ve memory-read sınırlarında kernel'ca otomatik kaydedilir [AÇIK: NL zincirlerinde yeterli granülarite].
-- **Curse-of-abundance yönetimi day-one** [KARAR]: namespace'ler, usage-ranked retrieval, kota; **memory-GC daemon'ı** dedup (embedding + LLM eşdeğerlik) → merge → utility-pruning `s=(c_succ+1)/(c_use+2)` eşik altını budar (EvolveR).
-- **Composability kuralları kaynak-sınıfı başına** (ACT-R buffer-tipi matrisi): idempotent read'ler serbest birleşir; `EMIT_EXTERNAL` etiketli side-effect'li adımlar muhafazakâr/birleşmez.
+- **Skill = {executable code (WASM component), NL description, description embedding, WIT-typed interface, utility counters, lineage}** (Voyager + Component Model).
+- **Verification-before-commit** [DECISION]: a skill cannot enter the registry without passing the success check of a separate verifier-agent; bounded retry (default 4 — Voyager); ablation rationale: without self-verification, discovery −73%.
+- **Trust-gated promotion** (ACT-R production compilation): a compiled/learned skill starts at **utility 0**; it beats the deliberative path only after proving itself repeatedly — built-in shadow-mode/canary. Utility update: `U += α(R−U)`, α=0.2 default, time-discounted reward; credit assignment is kernel plumbing.
+- **Skill compiler** (Soar chunking): speculative compilation from impasse-resolution traces; the condition is the **dependency trace** (not the whole context — overfit prevention); the LLM-era counterpart: provenance is automatically recorded by the kernel at tool-call and memory-read boundaries [OPEN: sufficient granularity in NL chains].
+- **Curse-of-abundance management day-one** [DECISION]: namespaces, usage-ranked retrieval, quotas; a **memory-GC daemon** dedups (embedding + LLM equivalence) → merges → utility-pruning prunes below the `s=(c_succ+1)/(c_use+2)` threshold (EvolveR).
+- **Composability rules per resource class** (ACT-R buffer-type matrix): idempotent reads compose freely; `EMIT_EXTERNAL`-tagged side-effecting steps are conservative/non-composing.
 
-## 6. Curriculum Daemon'ı **[ÖNERİ]**
+## 6. Curriculum Daemon **[PROPOSAL]**
 
-Görev önerisi OS servisidir (Voyager: rastgele curriculum'a karşı −%93): girdileri zaten kernel'da — agent durumu introspection ağacı, tamamlanan/başarısız task ledger'ı (memory tier'ları). **Failed-task retry kuyruğu default memory yapısıdır.** Öneri modeli pluggable; durum+tarih beslemesi standart kernel arayüzü.
+Task proposal is an OS service (Voyager: −93% versus random curriculum): the inputs are already in the kernel — the agent-state introspection tree, the completed/failed task ledger (memory tiers). **The failed-task retry queue is a default memory structure.** The proposal model is pluggable; the state+history feed is a standard kernel interface.
 
-## 7. Popülasyon Evrimi: Arşiv **[ÖNERİ — DGM şablonu]**
+## 7. Population Evolution: Archive **[PROPOSAL — DGM template]**
 
-- Agent sürümleri **immutable, versiyonlu snapshot'lar** olarak popülasyon deposunda (CoW dosya sistemi snapshot'ları doğal eşleme; .taf imajları).
-- **Parent seçimi**: performansla orantılı, çocuk sayısıyla ters orantılı; herkes sıfır-dışı olasılık taşır (stepping-stone etkisi: erken keşifler çok sonra işe yarar).
-- **Viability gate** kernel'da: derlenir + kendi kodunu düzenleme yetisini korur; geçemeyen arşive giremez.
-- **Staged evaluation** default politika şablonu: ucuz probe (10 görev) → orta (50) → tam suite (eşik + arşiv-top-2 şartıyla) — maliyet gerçeği: DGM koşusu ~2 hafta / ~22.000 USD; bu yüzden evrim `BULK`, bütçeli, kesinlikle arka plandır.
-- Kernel her sürüm için **maliyet + performans** izler; seçim maliyet-düzeltilmiş yeteneği optimize edebilir (ikisi korele değil — DGM ölçümü).
+- Agent versions live in the population store as **immutable, versioned snapshots** (CoW filesystem snapshots are a natural mapping; .taf images).
+- **Parent selection**: proportional to performance, inversely proportional to the number of children; everyone carries non-zero probability (stepping-stone effect: early discoveries pay off much later).
+- **Viability gate** in the kernel: it compiles + retains the ability to edit its own code; one that fails cannot enter the archive.
+- **Staged evaluation** as a default policy template: cheap probe (10 tasks) → medium (50) → full suite (subject to a threshold + archive-top-2 condition) — the cost reality: a DGM run is ~2 weeks / ~22,000 USD; this is why evolution is `BULK`, budgeted, and strictly background.
+- The kernel tracks **cost + performance** for each version; selection can optimize cost-adjusted capability (the two are not correlated — a DGM measurement).
 
-## 8. Self-Modification İşlemi **[KARAR — DGM güvenlik mekaniği]**
+## 8. Self-Modification Operation **[DECISION — DGM safety mechanics]**
 
 ```
-fork (izole sandbox; default-deny network; CPU/wall-clock/token kotalı)
-  → modify (yalnız kendi alt-ağacı)
-  → validate (ENDURE: güvenlik suite → EXCEL: regresyon suite — held-out)
-  → merge (insan-onay hook'u: yüksek-etki sınıfında zorunlu)
+fork (isolated sandbox; default-deny network; CPU/wall-clock/token quotaed)
+  → modify (only its own subtree)
+  → validate (ENDURE: safety suite → EXCEL: regression suite — held-out)
+  → merge (human-approval hook: mandatory in the high-impact class)
 ```
 
-Her adım **append-only lineage log'una** (arşive bağlı) yazılır; rollback = snapshot restore; post-hoc audit = log yürüyüşü. Gevşetmeler config flag değil capability grant'tir.
+Each step is written to an **append-only lineage log** (bound to the archive); rollback = snapshot restore; post-hoc audit = log walk. Relaxations are not config flags but capability grants.
 
-## 9. Telemetri **[AÇIK]**
+## 9. Telemetry **[OPEN]**
 
-Alan "snapshot-based" değerlendirmede; nesiller-arası güvenlik kayması ölçülmüyor. TABOS default'u: her agent sürümü için sürekli güvenlik metrikleri (Safety Score / Risk Ratio / Leakage Rate sınıfı — 2507.21046 Tablo 6) kernel'ca yayınlanır; longitudinal benchmark tasarımı açık iş.
+The field is on "snapshot-based" evaluation; cross-generation safety drift is not measured. The TABOS default: continuous safety metrics for each agent version (Safety Score / Risk Ratio / Leakage Rate class — 2507.21046 Table 6) are published by the kernel; longitudinal benchmark design is open work.

@@ -1,155 +1,155 @@
-# TABOS Mimari Taslağı
+# TABOS Architecture Draft
 
-> Durum: v1.0 taslak — karar maddeleri **[KARAR]**, güçlü öneriler **[ÖNERİ]**, açık konular **[AÇIK]** olarak işaretlidir.
-> Dayanak: [RESEARCH-REPORT](RESEARCH-REPORT.md) · İlgili: [VISION](VISION.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
+> Status: v1.0 draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**.
+> Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
 
-## 1. Kernel Yaklaşımı Karşılaştırması ve Karar
+## 1. Kernel Approach Comparison and Decision
 
-### 1.1 Adaylar (doğrulanmış verilerle)
+### 1.1 Candidates (with verified data)
 
-| Yaklaşım | Güçlü yanı | Zayıf yanı | Kaynak |
+| Approach | Strength | Weakness | Source |
 |---|---|---|---|
-| **Capability mikrokernel** (seL4/Zircon sınıfı) | TCB ~10 kSLOC (Linux'un 1/1000'i); kritik ihlallerin %29'u yok olur, %55'i kritik-altına iner; zaman/compute dahil her şey capability; tek nesne-lookup noktasında denetim | Servisler arası IPC maliyeti; sürücü/servis ekosistemini kendin kurarsın | seL4 whitepaper; Biggs'18; Capsicum |
-| **Unikernel / library OS** (Unikraft/Mirage sınıfı) | ~1 MB imaj, <10 MB RAM, ~1 ms boot, 1.7–2.7× perf; yalnızca gereken bileşen derlenir ("fazlalıksız OS" ilkesinin doğrudan karşılığı); hypervisor = izolasyon | Tek adres uzayı — iç koruma dil/derleyiciye kalır; çok-kiracılı tek imaj olmaz | arXiv:2104.12721; ASPLOS'13 |
-| **Exokernel** | Koruma ↔ yönetim ayrımı kanıtlı (secure bindings, visible revocation, abort protocol); kernel kaynak semantiğini anlamadan korur → LLM-agnostiklik teoremi | Saf hâliyle üretim ekosistemi yok; libOS kalitesine bağımlı | SOSP'95 |
-| **MicroVM substrat** (Firecracker sınıfı) | Üretim-kanıtlı (AWS Lambda); E2B'de on binlerce eşzamanlı agent sandbox'ı; VM-vs-container ikilemi yanlış ikilem | Kernel değil substrat — üstünde yine bir guest OS gerekir | NSDI'20; e2b.dev |
+| **Capability microkernel** (seL4/Zircon class) | TCB ~10 kSLOC (1/1000th of Linux); 29% of critical vulnerabilities vanish, 55% drop below critical; everything is a capability including time/compute; auditing at a single object-lookup point | Inter-service IPC cost; you build the driver/service ecosystem yourself | seL4 whitepaper; Biggs'18; Capsicum |
+| **Unikernel / library OS** (Unikraft/Mirage class) | ~1 MB image, <10 MB RAM, ~1 ms boot, 1.7–2.7× perf; only the needed component is compiled (the direct equivalent of the "no-bloat OS" principle); hypervisor = isolation | Single address space — internal protection falls to the language/compiler; no multi-tenant single image | arXiv:2104.12721; ASPLOS'13 |
+| **Exokernel** | Protection ↔ management separation is proven (secure bindings, visible revocation, abort protocol); the kernel protects resources without understanding their semantics → LLM-agnosticity theorem | No production ecosystem in pure form; dependent on libOS quality | SOSP'95 |
+| **MicroVM substrate** (Firecracker class) | Production-proven (AWS Lambda); tens of thousands of concurrent agent sandboxes at E2B; the VM-vs-container dilemma is a false dilemma | Not a kernel but a substrate — still needs a guest OS on top | NSDI'20; e2b.dev |
 
-### 1.2 **[KARAR] Hibrit: "Capability çekirdek + unikernel beden + exokernel ruhu"**
+### 1.2 **[DECISION] Hybrid: "Capability core + unikernel body + exokernel spirit"**
 
-TABOS üç yaklaşımı katmanlaştırır — bunlar rakip değil, farklı katmanların cevaplarıdır:
+TABOS layers the three approaches — they are not rivals but answers for different layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  HOST: hypervisor (KVM / Firecracker-sınıfı VMM)                 │ ← üretim-kanıtlı substrat
+│  HOST: hypervisor (KVM / Firecracker-class VMM)                 │ ← production-proven substrate
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │ TABOS NODE IMAGE (unikernel olarak boot eden tek imaj)     │  │ ← Unikraft-tarzı modüler derleme
+│  │ TABOS NODE IMAGE (single image booting as a unikernel)     │  │ ← Unikraft-style modular build
 │  │  ┌──────────────────────────────────────────────────────┐ │  │
-│  │  │ TB-CORE (frozen capability çekirdeği, hedef ≤15kSLOC) │ │  │ ← seL4/Zircon dersleri
-│  │  │  handle+rights · scheme dispatch · task makinesi ·    │ │  │
-│  │  │  token-budget controller · event stream'leri ·        │ │  │
-│  │  │  checkpoint/persistence · held-out evaluator alanı    │ │  │
+│  │  │ TB-CORE (frozen capability core, target ≤15kSLOC)    │ │  │ ← seL4/Zircon lessons
+│  │  │  handle+rights · scheme dispatch · task machine ·     │ │  │
+│  │  │  token-budget controller · event streams ·            │ │  │
+│  │  │  checkpoint/persistence · held-out evaluator domain   │ │  │
 │  │  └──────────────────────────────────────────────────────┘ │  │
-│  │  TB-SERVICES (userspace daemon'ları, scheme provider'lar): │  │ ← Redox dersi: mümkünse userspace
+│  │  TB-SERVICES (userspace daemons, scheme providers):        │  │ ← Redox lesson: userspace where possible
 │  │   memory: · model: · tool: · agent: · trace: · discovery   │  │
-│  │  AGENT'LAR: WASM nanoprocess (tool/skill) +                │  │ ← Bytecode Alliance
-│  │   gerektiğinde per-agent/per-tenant alt-microVM/unikernel  │  │ ← Mirage modeli
+│  │  AGENTS: WASM nanoprocess (tool/skill) +                   │  │ ← Bytecode Alliance
+│  │   per-agent/per-tenant sub-microVM/unikernel as needed     │  │ ← Mirage model
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-- **Çekirdek mikrokernel'dir** çünkü güvenlik iddialarımız (ambient authority yok, ölçen-ölçülen ayrımı, karşılıklı-şüpheli agent'lar) küçük, denetlenebilir TCB ister — sayılar bunu destekliyor (üç derece büyüklük, %29/%55).
-- **Beden unikernel'dir** çünkü "fazlalıksız OS" ilkesi derleme-zamanı modülerlik ister ve agent spawn hedefimiz (<50 ms) ~1 ms boot eden imajlarla ulaşılabilir.
-- **Ruh exokernel'dir** çünkü kernel agent'ın memory/model semantiğini *anlamaz*; yalnızca secure binding kurar, görünür şekilde geri alır (runaway agent'tan context/tool kotası sökmek dahil) ve politikayı agent'ın libOS'una bırakır (end-to-end argument).
-- **Substrat microVM'dir** çünkü tenant sınırında donanım-destekli izolasyon güncel tek güvenilir cevap (WASM yan-kanal itirafı; gVisor maliyet profili).
+- **The core is a microkernel** because our security claims (no ambient authority, measurer-measured separation, mutually-suspicious agents) require a small, auditable TCB — the numbers support this (three orders of magnitude, 29%/55%).
+- **The body is a unikernel** because the "no-bloat OS" principle requires compile-time modularity and our agent spawn target (<50 ms) is achievable with ~1 ms boot images.
+- **The spirit is exokernel** because the kernel does *not understand* the agent's memory/model semantics; it only establishes secure bindings, revokes them visibly (including stripping the context/tool quota from a runaway agent), and leaves policy to the agent's libOS (end-to-end argument).
+- **The substrate is microVM** because hardware-backed isolation at the tenant boundary is the only trustworthy answer today (WASM side-channel admission; gVisor cost profile).
 
-**[AÇIK]** Faz-1 prototipinin Linux üstü user-mode mı yoksa doğrudan Unikraft port'u mu olacağı ([OPEN-QUESTIONS](OPEN-QUESTIONS.md) §Mimari).
+**[OPEN]** Whether the Phase-1 prototype will be user-mode on top of Linux or a direct Unikraft port ([OPEN-QUESTIONS](OPEN-QUESTIONS.md) §Architecture).
 
-### 1.3 Uygulama Dili **[KARAR — detay: [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md)]**
+### 1.3 Implementation Language **[DECISION — detail: [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md)]**
 
-Kernel'dan protocol bridge'lerine kadar **Rust** (frozen kernel `no_std` + framekernel deseni: tüm `unsafe` küçük bir foundation crate'inde, üstte `#![forbid(unsafe_code)]`). Gerekçe üretim-kanıtlı: Android memory-safety açıkları %76→%24 (2019-2024), Linux/Windows/AWS kernel'larında Rust üretimde, Asterinas 15 kLOC framekernel TCB'si. C yalnız vendor'lanan llama.cpp'de driver daemon arkasında; Python/TS yalnız dış SDK + ağ-sınırlı inference engine'leri (vLLM/SGLang). Substrat (Firecracker/crosvm) zaten Rust. Sertifikasyon-sınıfı kernel verification gerekirse node image'ı seL4 üstüne kurma yolu açık ([OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)).
+From the kernel to the protocol bridges, **Rust** (frozen kernel `no_std` + framekernel pattern: all `unsafe` in a small foundation crate, `#![forbid(unsafe_code)]` above it). The rationale is production-proven: Android memory-safety vulnerabilities 76%→24% (2019-2024), Rust in production in the Linux/Windows/AWS kernels, Asterinas's 15 kLOC framekernel TCB. C only in vendored llama.cpp behind a driver daemon; Python/TS only in external SDKs + network-bound inference engines (vLLM/SGLang). The substrate (Firecracker/crosvm) is already Rust. If certification-class kernel verification is needed, the path to building the node image on top of seL4 is open ([OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)).
 
-### 1.4 Kernel Foundation ve Assembly **[KARAR — detay: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md)]**
+### 1.4 Kernel Foundation and Assembly **[DECISION — detail: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md)]**
 
-Kernel Firecracker/KVM guest olarak boot eder (bare-metal değil) → büyük miktarda boot asm silinir. TÜM `unsafe`+asm tek `tb-hal` foundation crate'inde (`#[unsafe(naked)]`+`naked_asm!`/`global_asm!`, Rust ≥1.88); üstte `#![forbid(unsafe_code)]`. x86_64 **LinuxBoot** (64-bit girer, trampoline yok), aarch64 **PE-Image** (MMU soğuk, bring-up gerekir). Tek-vCPU (Mirage) → AP/SMP asm v1'de yok. Assembly iş kalemleri 13 üniteye (A1-A13), build ise 5 milestone'a (M0 boot → M1 trap → M2 context-switch → M3 MMU → M4 v2-user) bölündü; her ünite executable DoD'li (Firecracker+QEMU CI, iki arch). Kernel-verification kararı: saf-Rust + tiered-assurance (Miri+Kani zorunlu, Verus seçici). **Egemenlik:** TABOS sıfır Linux kodu/tasarımı miras almaz; canonical boot = kendi `tb-boot`/`tb-vmm`'imiz, Firecracker yalnız bootstrap loader (detay + 'eski bug taşımıyoruz' defteri: [SOVEREIGNTY](SOVEREIGNTY.md)).
+The kernel boots as a Firecracker/KVM guest (not bare-metal) → large amounts of boot asm are eliminated. ALL `unsafe`+asm in a single `tb-hal` foundation crate (`#[unsafe(naked)]`+`naked_asm!`/`global_asm!`, Rust ≥1.88); `#![forbid(unsafe_code)]` above it. x86_64 **LinuxBoot** (enters 64-bit, no trampoline), aarch64 **PE-Image** (MMU cold, bring-up required). Single-vCPU (Mirage) → AP/SMP asm not in v1. Assembly work items split into 13 units (A1-A13), the build into 5 milestones (M0 boot → M1 trap → M2 context-switch → M3 MMU → M4 v2-user); each unit has an executable DoD (Firecracker+QEMU CI, both arches). Kernel-verification decision: pure-Rust + tiered-assurance (Miri+Kani mandatory, Verus selective). **Sovereignty:** TABOS inherits zero Linux code/design; canonical boot = our own `tb-boot`/`tb-vmm`, Firecracker is only the bootstrap loader (detail + the 'we don't carry old bugs' ledger: [SOVEREIGNTY](SOVEREIGNTY.md)).
 
-## 2. Kernel Nesne Modeli **[ÖNERİ]**
+## 2. Kernel Object Model **[PROPOSAL]**
 
-Zircon şablonu, agent semantiğiyle:
+The Zircon template, with agent semantics:
 
-- **Nesneler** (refcounted, yalnız handle'la erişilir): `Agent`, `Session`, `Task`, `MemTier`, `MemRecord`, `Block`, `Skill`, `ModelSession`, `ToolConn`, `Budget`, `Stream`, `Namespace`, `Evaluator`(held-out).
-- **Handle = {object, rights, owner}**; çoğaltma yalnızca hak düşürerek (`tb_handle_dup` ⊆ haklar); transfer yalnızca channel'dan (denetlenebilir yetki-akış grafı — self-improvement servisi en-az-yetki manifestlerini bu graftan öğrenir).
-- **Agent-semantik haklar** (READ/WRITE/TRANSFER/DUP'a paralel): `INVOKE_MODEL`, `SPAWN_AGENT`, `WRITE_PROCEDURAL` (CoALA risk asimetrisi gereği ayrı hak), `RECALL`, `CONSOLIDATE`, `EMIT_EXTERNAL` (dış dünyaya yazma), `DELEGATE_BUDGET`.
-- **Doğum protokolü [KARAR]**: yeni agent **tek bootstrap channel handle** ile başlar (Zircon modeli); manifest'inin prefix tablosu kernel'ca handle setine çevrilir — *tabloda olmayan, erişilemezdir*; yetki seti spawn anında tamamen numaralandırılabilir.
+- **Objects** (refcounted, accessible only via handle): `Agent`, `Session`, `Task`, `MemTier`, `MemRecord`, `Block`, `Skill`, `ModelSession`, `ToolConn`, `Budget`, `Stream`, `Namespace`, `Evaluator`(held-out).
+- **Handle = {object, rights, owner}**; duplication only by lowering rights (`tb_handle_dup` ⊆ rights); transfer only via channel (an auditable authority-flow graph — the self-improvement service learns least-authority manifests from this graph).
+- **Agent-semantic rights** (parallel to READ/WRITE/TRANSFER/DUP): `INVOKE_MODEL`, `SPAWN_AGENT`, `WRITE_PROCEDURAL` (a separate right per CoALA risk asymmetry), `RECALL`, `CONSOLIDATE`, `EMIT_EXTERNAL` (writing to the outside world), `DELEGATE_BUDGET`.
+- **Birth protocol [DECISION]**: a new agent starts with a **single bootstrap channel handle** (Zircon model); its manifest's prefix table is translated by the kernel into a handle set — *what is not in the table is unreachable*; the authority set is fully enumerable at spawn time.
 
-## 3. İsim Uzayı ve Kaynak Adresleme **[ÖNERİ]**
+## 3. Namespace and Resource Addressing **[PROPOSAL]**
 
-Plan 9 + Fuchsia + Redox sentezi:
+A Plan 9 + Fuchsia + Redox synthesis:
 
-- **Global root yok** (Fuchsia): her agent'ın namespace'i, manifest'indeki prefix→handle tablosudur. `..` traversal protokol düzeyinde yoktur → path-traversal sınıfı prompt-injection istismarları temsil edilemez.
-- **Tipli scheme'ler** (Redox): `memory:`, `model:`, `tool:`, `agent:`, `task:`, `fs:`, `trace:`, `budget:`. `model:anthropic/opus` ile `model:local/llama` aynı kontratın iki provider daemon'ı — **LLM-agnostiklik = scheme'i kimin register ettiği.**
-- **Sentetik introspection ağacı** (Plan 9): her agent için kernel-served `/agent/<id>/{status,ctl,context,goals,memory/{working,episodic,semantic,procedural},inbox,trace,budget}`; `status` tek satır sabit-format metin, `ctl` metin fiilleri kabul eder (`pause`, `checkpoint`, `compact-context`, `reflect`). Metin = LLM'in doğal ABI'si; `cat` evrensel introspection fiili; supervisor'ın `ps`'i union üstünde `cat`tir. Interposition (iostats deseni) = audit/budget/guardrail proxy'leri agent'a dokunmadan araya girer.
-- **Dosya metaforunun bilinçli sınırı** (Plan 9'un kendi dersi): spawn ve KV/embedding paylaşımı dosya değildir — `tb_agent_spawn(manifest)` typed syscall + local-only mmap primitifi; `/agent/<id>/` yalnız *temsil ve kontrol*.
-- **Union directory'ler**: session-scratch memory tier'ı kalıcı tier'ın üstüne bind edilir; okuma sırayla düşer — katmanlı memory'nin ergonomisi bedavaya gelir.
-- **Depolama (`fs:`) [ÖNERİ]**: dosya sistemi natively *semantic + versioned* bir VFS'tir — vector indeks ve rollback bolt-on değil VFS katmanındadır (AIOS bunu userspace'te chromadb+Redis'le kuruyor; `sto_mount(collection)` mount metaforu ve LSFS [ICLR'25] emsal). T5 archival memory tier'ı ile dosya deposu **tek storage manager'da birleşir** (Letta bulgusu: tek manager hem dosya hem memory-pasaj retrieval'ı servis edebilir) — [AÇIK: OPEN-QUESTIONS §C].
+- **No global root** (Fuchsia): each agent's namespace is the prefix→handle table in its manifest. `..` traversal does not exist at the protocol level → the path-traversal class of prompt-injection exploits is not representable.
+- **Typed schemes** (Redox): `memory:`, `model:`, `tool:`, `agent:`, `task:`, `fs:`, `trace:`, `budget:`. `model:anthropic/opus` and `model:local/llama` are two provider daemons of the same contract — **LLM-agnosticity = who registered the scheme.**
+- **Synthetic introspection tree** (Plan 9): a kernel-served `/agent/<id>/{status,ctl,context,goals,memory/{working,episodic,semantic,procedural},inbox,trace,budget}` for each agent; `status` is single-line fixed-format text, `ctl` accepts text verbs (`pause`, `checkpoint`, `compact-context`, `reflect`). Text = the LLM's natural ABI; `cat` is the universal introspection verb; the supervisor's `ps` is `cat` over a union. Interposition (the iostats pattern) = audit/budget/guardrail proxies splice in without touching the agent.
+- **The deliberate limit of the file metaphor** (Plan 9's own lesson): spawn and KV/embedding sharing are not files — `tb_agent_spawn(manifest)` is a typed syscall + a local-only mmap primitive; `/agent/<id>/` is only *representation and control*.
+- **Union directories**: the session-scratch memory tier is bound on top of the persistent tier; reads fall through in order — the ergonomics of tiered memory come for free.
+- **Storage (`fs:`) [PROPOSAL]**: the file system is natively a *semantic + versioned* VFS — vector index and rollback are at the VFS layer, not bolted on (AIOS builds this in userspace with chromadb+Redis; the `sto_mount(collection)` mount metaphor and LSFS [ICLR'25] are precedents). The T5 archival memory tier and the file store **merge into a single storage manager** (the Letta finding: one manager can serve both file and memory-passage retrieval) — [OPEN: OPEN-QUESTIONS §C].
 
-## 4. Syscall Yüzeyi (taslak) **[ÖNERİ]**
+## 4. Syscall Surface (draft) **[PROPOSAL]**
 
-AIOS dersi: yapısal çağrı + NL yük. MCP dersi: hatalar model-okunur, self-correction'a uygun döner. Capsicum dersi: tüm denetim tek lookup noktasında; red `TB_ENOTCAPABLE` + iz bırakır (self-improvement bu izleri yer).
+The AIOS lesson: structural call + NL payload. The MCP lesson: errors return model-readable, suited to self-correction. The Capsicum lesson: all auditing at a single lookup point; denial `TB_ENOTCAPABLE` + leaves a trace (self-improvement feeds on these traces).
 
 ```
-AİLE        ÇAĞRILAR (özet)
+FAMILY      CALLS (summary)
 ──────────  ────────────────────────────────────────────────────────────
-infer       tb_infer_submit(dag, qos, prefs) → future[]   # Parrot: DAG + yalnız terminal çıktıya hedef
+infer       tb_infer_submit(dag, qos, prefs) → future[]   # Parrot: DAG + target only the terminal output
             tb_infer_cancel(future)                        # MCP cancellation
 mem         tb_mem_write(tier, record, policy) / tb_mem_read(query, pipeline)
-            tb_mem_manage(op)                              # consolidate/demote/tombstone (bkz. MEMORY-SPEC)
-            tb_recall(cue, opts) · tb_reflect() · tb_learn(artifact)   # CoALA üçlüsü
+            tb_mem_manage(op)                              # consolidate/demote/tombstone (see MEMORY-SPEC)
+            tb_recall(cue, opts) · tb_reflect() · tb_learn(artifact)   # the CoALA triad
 tool        tb_tool_call(conn, wit_typed_args) → typed_result|model_readable_error
-agent       tb_agent_spawn(manifest) → handle · tb_agent_fork(h, hints) → handle   # paylaşımlı-prefix ipucu (SGLang)
+agent       tb_agent_spawn(manifest) → handle · tb_agent_fork(h, hints) → handle   # shared-prefix hint (SGLang)
             tb_agent_send(h, msg) · tb_agent_watch(h) → stream
-task        tb_task_create/get/cancel/subscribe            # A2A 9-durum makinesi
+task        tb_task_create/get/cancel/subscribe            # A2A 9-state machine
 session     tb_session_create() → h · tb_session_join/leave(h, agent) · tb_session_watch(h) → stream
 cap         tb_handle_dup(h, rights_subset) · tb_handle_transfer(chan, h) · tb_handle_replace
-budget      tb_budget_split(h, slice) · tb_budget_query    # devredilebilir, hiyerarşik
+budget      tb_budget_split(h, slice) · tb_budget_query    # delegable, hierarchical
 consent     tb_consent_request(schema_restricted)          # MCP elicitation: accept/decline/cancel
-stream      tb_stream_read(h, from_seq)                    # sıralı, replay'li (Last-Event-ID deseni)
+stream      tb_stream_read(h, from_seq)                    # ordered, with replay (Last-Event-ID pattern)
 ```
 
-- **`tb_infer_submit` bir DAG alır** (tek prompt→tek completion değil): tipli dataflow kenarları, ara değerler kernel kanallarında akar (Parrot: yalnız client round-trip'leri 2×+ kayıp; 11.7×'e kadar kazanç).
-- Inference tercih vektörü MCP sampling modeli: `{costPriority, speedPriority, intelligencePriority}` + advisory hint; somut backend'i çağıran değil **kernel router** bağlar.
-- Re-entrancy: inference yolu tool dispatch'ine geri girebilir (MCP SEP-1577 yönelimi).
+- **`tb_infer_submit` takes a DAG** (not one prompt→one completion): typed dataflow edges, intermediate values flow over kernel channels (Parrot: client round-trips alone lose 2×+; up to 11.7× gain).
+- The inference preference vector is the MCP sampling model: `{costPriority, speedPriority, intelligencePriority}` + advisory hint; the **kernel router** binds the concrete backend, not the caller.
+- Re-entrancy: the inference path can re-enter tool dispatch (the MCP SEP-1577 direction).
 
-## 5. Scheduling **[ÖNERİ]**
+## 5. Scheduling **[PROPOSAL]**
 
-- **Quantum = decision cycle** (Soar): paralel hazırlık fazı (retrieval, tool sonuçları, rule match) → tek serileştirilmiş commit; preemption ve interrupt teslimi yalnız cycle sınırında — "asla kesilemez dizi yok" garantisi.
-- **Impasse trap'leri**: arbitrasyon tie/conflict/constraint-failure/no-change üretirse kernel otomatik child reasoning context açar (page fault analojisi); handler politikası userspace (büyük modele eskale et / başka agent'a sor / memory'ye dön), tespit + substate yığını + otomatik teardown (GDS) kernel'da.
-- **Arbitrasyon cebiri**: yarışan önerilen eylemler arasında default karar mekanizması Soar preference semantics'idir (acceptable/reject/better/worse/require/prohibit); öneri üreteçleri (LLM, kurallar) userspace, cebir kernel'da.
-- **Retrieval fiyatlama**: ACT-R latency denklemi `RT = F·e^(−f·A)` kernel'ın maliyet modelidir — scheduler bir memory retrieval'ı göndermeden *önce* fiyatlar ve bekle/yeniden-türet/eskale kararını verebilir (F, f backend başına kalibrasyon sabitleri).
-- **QoS sınıfları (ABI'de sabit)**: `INTERACTIVE` (TTFT+TBT SLO; aşırı yükte erken red — Mooncake), `PIPELINE` (DAG uçtan-uca hedef; iç düğümler türetilir — Parrot), `BULK` (maliyet-optimal; self-improvement'ın evi; sonsuz ertelenebilir).
-- **Cache-topology-aware dispatch**: runnable adımlar global prefix ağacında düğümdür; sınıf içinde DFS/longest-shared-prefix tercih (SGLang Theorem 3.1, optimumun %96'sı) + **aging/fairness day-one** (starvation itirafı).
-- **Billing-aware preemption**: lokal motor üzerinde preempt serbest (swap/recompute); metered remote API üzerinde run-to-completion eğilimli — text-resume'un token maliyeti fiyatlanır (AIOS'un ölçmediği boşluk).
-- **Admission control**: token-pressure altında prediction-based erken red/erteleme; thrash etmek yerine geri çevir (Mooncake).
+- **Quantum = decision cycle** (Soar): a parallel preparation phase (retrieval, tool results, rule match) → a single serialized commit; preemption and interrupt delivery only at the cycle boundary — the "no uninterruptible sequence ever" guarantee.
+- **Impasse traps**: if arbitration produces a tie/conflict/constraint-failure/no-change, the kernel automatically opens a child reasoning context (page-fault analogy); the handler policy is userspace (escalate to a bigger model / ask another agent / return to memory), while detection + substate stack + automatic teardown (GDS) are in the kernel.
+- **Arbitration algebra**: the default decision mechanism among competing proposed actions is Soar preference semantics (acceptable/reject/better/worse/require/prohibit); the proposal generators (LLM, rules) are userspace, the algebra is in the kernel.
+- **Retrieval pricing**: the ACT-R latency equation `RT = F·e^(−f·A)` is the kernel's cost model — the scheduler can price a memory retrieval *before* dispatching it and decide wait/re-derive/escalate (F, f are per-backend calibration constants).
+- **QoS classes (fixed in the ABI)**: `INTERACTIVE` (TTFT+TBT SLO; early rejection under overload — Mooncake), `PIPELINE` (DAG end-to-end target; inner nodes derived — Parrot), `BULK` (cost-optimal; the home of self-improvement; can be deferred indefinitely).
+- **Cache-topology-aware dispatch**: runnable steps are nodes in a global prefix tree; within a class prefer DFS/longest-shared-prefix (SGLang Theorem 3.1, 96% of optimum) + **aging/fairness day-one** (the starvation admission).
+- **Billing-aware preemption**: preempt freely on a local engine (swap/recompute); on a metered remote API lean toward run-to-completion — the token cost of text-resume is priced (the gap AIOS does not measure).
+- **Admission control**: under token pressure, prediction-based early rejection/deferral; turn it away rather than thrash (Mooncake).
 
-## 6. Context Scheduler — Token Kaynak Yönetimi **[ÖNERİ]**
+## 6. Context Scheduler — Token Resource Management **[PROPOSAL]**
 
-Tek nötr katman, iki driver ailesi (blok katmanı/driver ayrımının analojisi):
+A single neutral layer, two driver families (analogy to the block-layer/driver separation):
 
-| | Lokal driver (vLLM/SGLang/llama.cpp sınıfı) | Remote driver (Anthropic/OpenAI sınıfı) |
+| | Local driver (vLLM/SGLang/llama.cpp class) | Remote driver (Anthropic/OpenAI class) |
 |---|---|---|
-| Birim maliyet | HBM byte'ı, GPU-saniyesi | dolar, kota-token'ı |
-| Mekanizma | KV block table'ları (PagedAttention: %96.3 kullanım), radix prefix ağacı, all-or-nothing eviction, gang scheduling, swap-vs-**recompute** | **Lease nesneleri** {prefix-hash, TTL, read=0.1×, write=1.25×/2×}; lease-renewal scheduler; breakpoint yerleşimi; affinity key yönetimi (~15 RPM/lane) |
-| Kota | yerel havuz arbitrajı (cache-vs-batch) | cgroup-tarzı hiyerarşik token bucket (RPM/ITPM/OTPM/dolar 4 sayaç); 429 yerine header-telemetrili önleyici scheduling |
-| Ortak soyutlama | **Prefix nesnesi** (content-hash; rezidans: GPU/DRAM/SSD/lease/cold) · **Budget** (budget+period) · QoS · DAG | aynı |
+| Unit cost | HBM byte, GPU-second | dollar, quota-token |
+| Mechanism | KV block tables (PagedAttention: 96.3% utilization), radix prefix tree, all-or-nothing eviction, gang scheduling, swap-vs-**recompute** | **Lease objects** {prefix-hash, TTL, read=0.1×, write=1.25×/2×}; lease-renewal scheduler; breakpoint placement; affinity key management (~15 RPM/lane) |
+| Quota | local pool arbitration (cache-vs-batch) | cgroup-style hierarchical token bucket (RPM/ITPM/OTPM/dollar 4 counters); preventive scheduling with header telemetry instead of 429 |
+| Common abstraction | **Prefix object** (content-hash; residence: GPU/DRAM/SSD/lease/cold) · **Budget** (budget+period) · QoS · DAG | same |
 
-- **Kota×cache birleşik optimizasyon**: Anthropic'te cache okumaları ITPM saymaz → %80 hit = 5× efektif kota; kota sıkışınca kernel'ın ilk hamlesi throttle değil **context yerleşimini yeniden düzenlemek**.
-- **Checkpoint asimetrisi**: kalıcı durum token metni; KV recompute edilebilir → migrasyon KB taşır, GB değil.
-- Backend driver'ları **capability descriptor** yayınlar: `{ttl_range, write_cost, read_cost, counts_against_quota, affinity_hint, min_cacheable_tokens}`.
+- **Quota×cache joint optimization**: at Anthropic, cache reads do not count against ITPM → 80% hit = 5× effective quota; when quota is tight, the kernel's first move is not to throttle but to **re-arrange context placement**.
+- **Checkpoint asymmetry**: persistent state is token text; the KV can be recomputed → migration carries KB, not GB.
+- Backend drivers publish a **capability descriptor**: `{ttl_range, write_cost, read_cost, counts_against_quota, affinity_hint, min_cacheable_tokens}`.
 
-## 7. Güvenlik Modeli **[KARAR — ilkeler] / [ÖNERİ — mekanizmalar]**
+## 7. Security Model **[DECISION — principles] / [PROPOSAL — mechanisms]**
 
-1. **Ambient authority sıfır** [KARAR]: default FS kökü yok, default network yok, miras API key yok; secret'lar load-time'da çözülen capability referansları (Letta .af dersinin düzeltilmesi).
-2. **Tek denetim boğazı**: her handle dereference'ında rights-mask (Capsicum fget deseni); red = `TB_ENOTCAPABLE` + denial trace.
-3. **İmzalı agent manifesti** [KARAR]: A2A Agent Card JWS modeli — yükleme anında doğrulama; deklare edilmeyen yetenek mekanik EPERM. Tool manifestleri de imzalı (survey'in tool-poisoning tehdidi); capability grant'leri **task-scoped ve süreli** (privilege persistence tehdidi); tool argümanları kernel-tarafı şema doğrulamalı (command injection).
-4. **İzolasyon merdiveni** [ÖNERİ]: intra-agent tool/skill = WASM nanoprocess (import-imza diff'i = consent olayı; component grafında "X'in Y'ye yolu yok" statik kanıtı); farklı principal/tenant = ayrı microVM/unikernel (Spectre itirafı gereği donanım sınırı).
-5. **İnsan-onay kapısı**: ANP humanAuthorization + MCP elicitation — `EMIT_EXTERNAL`-sınıfı etiketli op'lar (ödeme, mahremiyet, geri-alınamaz silme) iki-keyring modeliyle insan onayına düşer; kernel-zorlamalı, uygulama nezaketi değil.
-6. **Ölçen-ölçülen ayrımı**: evaluator/detector nesneleri agent'ın hak maskesinde hiç görünmez ([SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)).
-7. **Opaque execution** (A2A): agent'ın working memory/plan'ı kernel-korumalı özel bellek; paylaşım yalnız explicit grant'le.
+1. **Zero ambient authority** [DECISION]: no default FS root, no default network, no inherited API key; secrets are capability references resolved at load-time (the correction of the Letta .af lesson).
+2. **Single audit chokepoint**: a rights-mask at every handle dereference (the Capsicum fget pattern); denial = `TB_ENOTCAPABLE` + denial trace.
+3. **Signed agent manifest** [DECISION]: the A2A Agent Card JWS model — verification at load time; an undeclared capability is mechanical EPERM. Tool manifests are also signed (the survey's tool-poisoning threat); capability grants are **task-scoped and time-limited** (the privilege-persistence threat); tool arguments are kernel-side schema-validated (command injection).
+4. **Isolation ladder** [PROPOSAL]: intra-agent tool/skill = WASM nanoprocess (import-signature diff = consent event; static proof of "X has no path to Y" in the component graph); a different principal/tenant = a separate microVM/unikernel (a hardware boundary per the Spectre admission).
+5. **Human-approval gate**: ANP humanAuthorization + MCP elicitation — `EMIT_EXTERNAL`-class labeled ops (payment, privacy, irreversible deletion) fall to human approval via a two-keyring model; kernel-enforced, not application courtesy.
+6. **Measurer-measured separation**: evaluator/detector objects never appear in the agent's rights mask ([SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)).
+7. **Opaque execution** (A2A): the agent's working memory/plan is kernel-protected private memory; sharing only by explicit grant.
 
-## 8. Kalıcılık **[ÖNERİ]**
+## 8. Persistence **[PROPOSAL]**
 
-KeyKOS orthogonal persistence şablonu: sistem-çapı, ayarlanabilir aralıklı checkpoint; restart'ta tüm agent'lar register/VM düzeyinde aynen döner; elektrik kesintisi = "saat sıçraması". E2B maliyet asimetrisi (4 sn/GiB kaydet, ~1 sn dön) hibernate-default'u doğrular. Agent imajı = `{manifest, context (token metni), memory tier referansları, handle tablosu, task durumları, FS delta}` — .af envanterinin kernel-tamamlanmış hâli ([AGENTS-SPEC §3](AGENTS-SPEC.md)). Revocation × restore etkileşimi ve dış (transactional olmayan) kaynak handle'ları [AÇIK].
+The KeyKOS orthogonal-persistence template: system-wide, tunable-interval checkpoint; on restart all agents return exactly at the register/VM level; a power outage = a "clock jump". The E2B cost asymmetry (4 s/GiB to save, ~1 s to return) validates hibernate-default. The agent image = `{manifest, context (token text), memory tier references, handle table, task states, FS delta}` — the kernel-completed form of the .af inventory ([AGENTS-SPEC §3](AGENTS-SPEC.md)). The revocation × restore interaction and external (non-transactional) resource handles are [OPEN].
 
-## 9. IPC ve Protokol Katmanlaması **[KARAR]**
+## 9. IPC and Protocol Layering **[DECISION]**
 
-Kernel **tek kanonik, şema-tanımlı ABI** konuşur (a2a.proto deseni); MCP/A2A/ACP/ANP **userspace bridge daemon'larıdır** — dışarıdan gelen her protokol bridge'de sonlanır, içeride tek kernel IPC lehçesi akar. Kernel primitifleri: correlated request/response, notification, cancellation, capability-passing channel, sıralı-replay'li stream (N gözlemciye aynı sırada — A2A kuralı), durable Task. Discovery, müzakere (ANP meta-protokol), transport binding'leri ve marketplace userspace'tedir; ANP müzakere önbelleği memory tier'larına, üretilen adapter kodu skill registry + sandbox hattına bağlanır.
+The kernel speaks a **single canonical, schema-defined ABI** (the a2a.proto pattern); MCP/A2A/ACP/ANP are **userspace bridge daemons** — every protocol arriving from outside terminates at a bridge, and inside a single kernel IPC dialect flows. Kernel primitives: correlated request/response, notification, cancellation, capability-passing channel, ordered-replay stream (same order to N observers — the A2A rule), durable Task. Discovery, negotiation (ANP meta-protocol), transport bindings, and the marketplace are in userspace; the ANP negotiation cache binds to the memory tiers, and generated adapter code binds to the skill registry + sandbox pipeline.
 
-## 10. Frozen Kernel Sınırı
+## 10. Frozen Kernel Boundary
 
-Kernel + evaluator'lar + evrim makinesi (arşiv bakımı, parent seçimi) **agent'ların self-modification kapsamı dışındadır** (DGM emsali). Agent'ın default yazma yetkisi yalnız kendi config alt-ağacıdır; genişletme explicit capability grant'tir. Ayrıntı: [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md).
+The kernel + evaluators + evolution engine (archive maintenance, parent selection) are **outside the scope of agents' self-modification** (the DGM precedent). The agent's default write authority is only its own config subtree; extension is an explicit capability grant. Detail: [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md).
 
 ---
 
-### Bu dökümandaki kararların doğrulama zinciri
-Tüm sayısal dayanaklar [RESEARCH-REPORT](RESEARCH-REPORT.md)'ta kaynaklı ve oy-doğrulamalıdır; bu dökümandaki **[ÖNERİ]** maddeleri o verilerden türetilmiş tasarım çıkarımlarıdır (kendileri ayrıca doğrulanmış "fact" değildir) ve prototip ölçümleriyle test edilmelidir.
+### The verification chain of the decisions in this document
+All numeric bases are sourced and vote-verified in [RESEARCH-REPORT](RESEARCH-REPORT.md); the **[PROPOSAL]** items in this document are design inferences derived from that data (they are not themselves additionally verified "facts") and must be tested against prototype measurements.
