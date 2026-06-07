@@ -182,3 +182,110 @@ _start:
     jmp     .Lhalt
 "#
 );
+
+// ===========================================================================
+// MV / tb-boot v0: the SECOND x86_64 entry (the L1 sovereignty rung).
+// ===========================================================================
+// The project's OWN KVM VMM, `tb-vmm`, boots THIS SAME kernel ELF directly in
+// 64-bit long mode via our boot contract — it does NOT use the PVH note and
+// does NOT run the A0 32->64 trampoline above. tb-vmm finds the kernel's
+// 64-bit entry through the TABOS ELF note (below) and jumps to `_tb_start`
+// with paging already on (tb-vmm's identity tables) and `rdi` already holding
+// the guest-physical `TbBootInfo*` (SysV arg0). The PVH path (QEMU/Firecracker)
+// is untouched: both notes coexist in the PT_NOTE phdr, both entries coexist in
+// `.text`, and exactly one of them runs per boot.
+//
+// Verified sources (the PRE-state tb-vmm establishes before the first KVM_RUN,
+// which `_tb_start` relies on — do NOT re-derive these from memory):
+//  * Long-mode sregs mirror Firecracker `src/vmm/src/arch/x86_64/regs.rs`
+//    (`configure_segments_and_sregs` / `setup_page_tables`, the LinuxBoot arm):
+//    CODE = gdt_entry(0xa09b,0,0xfffff) -> L=1 64-bit code; DATA =
+//    gdt_entry(0xc093,...); `cr0 |= PE(0x1)|PG(0x8000_0000)`,
+//    `cr4 |= PAE(0x20)`, `efer |= LME(0x100)|LMA(0x400)`, `cr3 = PML4`, and
+//    PD = 512 * `(i<<21)|0x83` identity-mapping [0,1 GiB) with 2 MiB pages.
+//  * Entry register state mirrors `regs.rs::setup_regs`: `rflags = 0x2`,
+//    `rip = entry`. Firecracker's *Linux* ABI puts its boot pointer in `rsi`
+//    (zero page); OUR tb-boot v0 contract instead puts the `TbBootInfo*` in
+//    `rdi` = the first SysV INTEGER argument (System V AMD64 psABI §3.2.3:
+//    "the next available register of the sequence %rdi, %rsi, ..."), so the
+//    `extern "C" fn rust_main(boot_info)` receives the pointer directly.
+//  * tb-boot v0 ABI (crates/tb-boot): TB_NOTE_NAME = "TABOS",
+//    TB_NOTE_TYPE_ENTRY64 = 0x5442_0001, desc = u64 = the 64-bit entry addr.
+//    Mirrors XEN_ELFNOTE_PHYS32_ENTRY (type 18) but carries a 64-bit entry.
+global_asm!(
+r#"
+// ---------------------------------------------------------------------------
+// TABOS ELF note: PT_NOTE name "TABOS", type 0x54420001, desc = u64 _tb_start.
+// (a) PRE: KEEP'd into the PT_NOTE phdr (kernel/linker/x86_64.ld). POST: tb-vmm
+//     reads `desc` (the kernel's 64-bit entry) and jumps there in long mode.
+//     Coexists with the Xen note in the same PT_NOTE segment: QEMU/Firecracker
+//     match the Xen note (type 18), tb-vmm matches TABOS (type 0x54420001).
+// (b) ABI: System V ELF note, 4-byte aligned (mirrors the Xen note; loaders
+//     mis-pad notes at other alignments). Byte layout (consumer view):
+//       [ 0.. 4)  n_namesz = 6            (.long)   sizeof("TABOS\0")
+//       [ 4.. 8)  n_descsz = 8            (.long)   sizeof(u64 entry)
+//       [ 8..12)  n_type   = 0x54420001   (.long)   == TB_NOTE_TYPE_ENTRY64
+//       [12..20)  "TABOS\0" + 2 pad bytes (name field, padded to 4)
+//       [20..28)  _tb_start as 8-byte LE  (desc field = the 64-bit entry)
+// (c) Tested by: the vmm-boot CI job (tb-vmm boots this ELF and reaches
+//     "M4: user/ring OK"); offsets cross-checked vs tb-boot's #[cfg(test)].
+// ---------------------------------------------------------------------------
+.section .note.TABOS, "a", @note
+.align 4
+.long   6                       // n_namesz = sizeof("TABOS\0")
+.long   8                       // n_descsz = sizeof(u64 entry)
+.long   0x54420001              // n_type   = TB_NOTE_TYPE_ENTRY64
+.asciz  "TABOS"                 // n_name   ("TABOS\0", 6 bytes)
+.align  4                       // pad the name field to a 4-byte boundary
+.quad   _tb_start               // n_desc   = 64-bit entry address (LE u64)
+
+// ---------------------------------------------------------------------------
+// Reserved 64-bit boot stack for the tb-boot path. NOBITS, placed in
+// `.boot.stack` so the linker puts it BEFORE __bss_start (no .bss-clear ever
+// touches it). Distinct from the PVH __boot_stack: only one entry runs per
+// boot, so the duplicate reservation costs nothing in the file (NOBITS).
+// ---------------------------------------------------------------------------
+.section .boot.stack, "aw", @nobits
+.align 16
+__tb_boot_stack_bottom: .skip 0x10000      // 64 KiB tb-boot boot stack
+__tb_boot_stack_top:
+
+// ===========================================================================
+// `_tb_start` (tb-boot v0 64-bit entry). tb-vmm jumps here.
+// (a) PRE (tb-boot v0 contract; tb-vmm sets this up before the first KVM_RUN):
+//     64-bit long mode, paging ON via tb-vmm's identity tables (CR3 loaded;
+//     CR0.PG|PE, CR4.PAE, EFER.LME|LMA set), flat 64-bit CS (L=1) + flat data
+//     segments, rdi = guest-physical TbBootInfo* (SysV arg0), rsi = 0,
+//     rflags = 0x2 (IF=0, DF=0). POST: rsp on the reserved tb-boot stack
+//     (16-aligned), rdi unchanged, then `call rust_main` (rust_main is `-> !`).
+//     Deliberately does NOT touch PVH/A0: no GDT/CR3/EFER/CR0 programming and
+//     no .bss clear — tb-vmm already established paging, and KVM-mapped guest
+//     RAM is zero-filled (so .bss is already zero; clearing it here would risk
+//     wiping a boot struct that a loader placed in the image's NOBITS range).
+// (b) ABI: System V AMD64. The incoming rdi (INTEGER arg0) is preserved
+//     verbatim into rust_main. `cld` honours the psABI "DF clear on entry"
+//     rule; rsp is 16-byte aligned before `call` (callee sees rsp%16==8).
+// (c) Tested by: the vmm-boot CI job — `_tb_start` must reach the SAME M0-M4
+//     markers the PVH path prints, proving identical kernel state.
+// ===========================================================================
+.section .text._tb_start, "ax", @progbits
+.code64
+.global _tb_start
+_tb_start:
+    cli                                 // tb-vmm has no IDT; keep IF masked
+    cld                                 // psABI: DF=0 on entry to rust_main
+
+    // Reserved 64-bit boot stack (RIP-relative; small code model, < 4 GiB).
+    lea     rsp, [rip + __tb_boot_stack_top]
+    and     rsp, -16                    // SysV: 16-byte aligned before `call`
+
+    // rdi already = guest-physical TbBootInfo* (SysV arg0); pass it untouched.
+    call    rust_main                   // extern "C" fn rust_main(usize) -> !
+
+    // rust_main is `-> !`; belt-and-suspenders halt if it ever returns.
+.Ltb_halt:
+    cli
+    hlt
+    jmp     .Ltb_halt
+"#
+);

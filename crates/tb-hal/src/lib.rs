@@ -402,3 +402,65 @@ pub fn mmu_selftest() -> bool {
 pub fn user_demo() -> bool {
     arch::user_demo()
 }
+
+// ===========================================================================
+// MV: tb-boot v0 — recognise a `tb-vmm` boot (the L1 sovereignty rung)
+// ===========================================================================
+//
+// On the tb-boot path the kernel's `rust_main(boot_info: usize)` is entered
+// (via `arch::x86_64::boot::_tb_start`) with `boot_info` = the guest-physical
+// address of an identity-mapped `tb_boot::TbBootInfo`. On the PVH path the same
+// argument is an `hvm_start_info` pointer instead. The kernel crate is
+// `#![forbid(unsafe_code)]`, so it cannot dereference the raw address itself;
+// THIS is the single, guarded raw read that lets it tell the two boot paths
+// apart by magic — the one place the boundary is crossed, confined to tb-hal.
+
+/// Read the 8-byte `tb-boot` magic at the boot-info pointer, if that pointer is
+/// safe to dereference; `None` otherwise (so the caller fail-closed-ignores it).
+///
+/// `boot_info` is the raw `usize` `rust_main` was entered with. The magic is the
+/// first field (offset 0) of `#[repr(C)] tb_boot::TbBootInfo`, so this reads it
+/// WITHOUT importing the struct layout. The caller — the `forbid(unsafe_code)`
+/// kernel — compares the result against `tb_boot::TB_BOOT_MAGIC`: a match means
+/// `tb-vmm` booted us via tb-boot v0; a mismatch (e.g. a PVH `hvm_start_info`
+/// pointer, whose magic is `0x336e_c578`) is simply ignored, never misread.
+///
+/// The read is guarded to the architecture's identity-mapped low window
+/// (`[0x1000, 1 GiB)` on x86_64 — the PVH `_start` / tb-vmm 2 MiB-page identity
+/// region, which is present and readable) and to 8-byte alignment, so a stray
+/// or out-of-window pointer can never fault the boot path; it just yields
+/// `None`. aarch64 is an MV follow-up: there the FDT pointer (QEMU `virt` places
+/// it at `0x4000_0000`) falls outside this window and is correctly ignored.
+pub fn read_boot_magic(boot_info: usize) -> Option<u64> {
+    // Lowest address we will touch (reject the null page) and the first address
+    // past the identity-mapped window. Both x86_64 boot paths map [0, 1 GiB)
+    // with 2 MiB pages: PVH `_start` builds __boot_pd; tb-vmm builds the same
+    // shape (Firecracker `regs.rs::setup_page_tables`). Anything in range is
+    // present, so an 8-byte read there cannot page-fault.
+    const WINDOW_LO: usize = 0x1000;
+    const WINDOW_HI: usize = 0x4000_0000; // 1 GiB, exclusive upper bound
+
+    if boot_info < WINDOW_LO {
+        return None;
+    }
+    // Ensure the whole 8-byte read stays inside the window.
+    if boot_info > WINDOW_HI - core::mem::size_of::<u64>() {
+        return None;
+    }
+    // A `u64` read must be 8-byte aligned (TbBootInfo is `#[repr(C)]` with
+    // `magic: u64` first, so the struct — and thus its magic — is 8-aligned).
+    if boot_info % core::mem::align_of::<u64>() != 0 {
+        return None;
+    }
+
+    // SAFETY: `boot_info` is in [0x1000, 1 GiB - 8] and 8-byte aligned (checked
+    // above), so it lies inside the present, identity-mapped 2 MiB-page region
+    // the active boot path established (PVH `_start` or tb-vmm), making this
+    // 8-byte read both mapped and aligned. `u64` has no invalid bit patterns,
+    // so whatever bytes are there form a valid value (we never act on it unless
+    // it equals `TB_BOOT_MAGIC`). `read_volatile` stops the optimiser from
+    // making assumptions about this foreign, single-producer boot word. The
+    // pointee is boot RAM that outlives this call.
+    let magic = unsafe { (boot_info as *const u64).read_volatile() };
+    Some(magic)
+}

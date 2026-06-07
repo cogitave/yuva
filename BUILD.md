@@ -59,23 +59,26 @@ Source: <https://www.qemu.org/docs/master/system/i386/microvm.html>.
 
 ## 2. Build both targets
 
-`-Zbuild-std`, `compiler-builtins-mem`, and `json-target-spec` are all wired in
-`.cargo/config.toml`, so a plain `cargo build --target <spec>` is enough.
+The three nightly flags the kernel needs (`-Zbuild-std`, `compiler-builtins-mem`,
+`-Zjson-target-spec`) are bundled into the `cargo kbuild` alias in
+`.cargo/config.toml` (the single source of truth for how the kernel is built).
+They are deliberately NOT global, so the host VMM crate `tb-vmm` still builds
+with a plain `cargo build`.
 
 ```bash
 # From the repo root:
 
 # x86_64 PVH image (loads at 1 MiB):
-cargo build --release --target targets/x86_64-tabos-none.json
-#   -> target/x86_64-tabos-none/release/tabos-kernel  (ELF with PVH note)
+cargo kbuild --release --target targets/x86_64-tabos-none.json
+#   -> target/x86_64-tabos-none/release/tabos-kernel  (ELF, PVH + TABOS notes)
 
 # aarch64 QEMU-virt image:
-cargo build --release --target targets/aarch64-tabos-none.json
+cargo kbuild --release --target targets/aarch64-tabos-none.json
 #   -> target/aarch64-tabos-none/release/tabos-kernel  (ELF)
 ```
 
-`--release` is recommended for the DoD (smaller, deterministic); `cargo build`
-(debug) also works.
+`--release` is recommended for the DoD (smaller, deterministic); `cargo kbuild`
+without it (debug) also works.
 
 `cargo run --target <spec>` invokes the matching `scripts/run-<arch>.sh` runner
 (configured under `[target.<stem>].runner` in `.cargo/config.toml`), passing the
@@ -135,13 +138,13 @@ Reproduced here for traceability; cite the source in each asm file's header note
 
 ---
 
-## 4. Why these `.cargo/config.toml` flags
+## 4. Why these build flags (the `kbuild` alias + `.cargo/config.toml`)
 
 | Flag | Purpose | Source |
 |---|---|---|
-| `[unstable] json-target-spec = true` | Recent nightlies error `.json target specs require -Zjson-target-spec` without it | phil-opp Minimal Rust Kernel |
-| `build-std = ["core", "compiler_builtins"]` | No precompiled std for none-class targets; rebuild from `rust-src` | phil-opp; embedonomicon; cargo unstable docs |
-| `build-std-features = ["compiler-builtins-mem"]` | Provides `memcpy/memset/memcmp/memmove` (needed the moment we copy/zero memory) | phil-opp Minimal Rust Kernel |
+| `kbuild` alias `-Zjson-target-spec` | Recent nightlies error `.json target specs require -Zjson-target-spec` without it | phil-opp Minimal Rust Kernel |
+| `kbuild` alias `-Zbuild-std=core,compiler_builtins` | No precompiled std for none-class targets; rebuild from `rust-src` | phil-opp; embedonomicon; cargo unstable docs |
+| `kbuild` alias `-Zbuild-std-features=compiler-builtins-mem` | Provides `memcpy/memset/memcmp/memmove` (needed the moment we copy/zero memory) | phil-opp Minimal Rust Kernel |
 | `link-arg=-Tkernel/linker/<arch>.ld` | rust-lld (`ld.lld`) uses our script: keep the PVH note, place `.text` at 1 MiB (x86) | embedonomicon custom-target |
 | `runner = ["bash", "scripts/run-<arch>.sh"]` | `cargo run` boots the built ELF in QEMU | cargo config `target.*.runner` |
 
@@ -151,7 +154,9 @@ Reproduced here for traceability; cite the source in each asm file's header note
 
 ```bash
 llvm-readobj --notes target/x86_64-tabos-none/release/tabos-kernel
-# Expect a note: Owner "Xen", Type 0x12 (18 = XEN_ELFNOTE_PHYS32_ENTRY).
+# Expect TWO notes: Owner "Xen" Type 0x12 (XEN_ELFNOTE_PHYS32_ENTRY -- the
+#   PVH/QEMU entry) and Owner "TABOS" Type 0x54420001 (the tb-boot 64-bit entry
+#   that tb-vmm jumps to; see docs/SOVEREIGNTY-ROADMAP.md).
 
 llvm-objdump -t target/x86_64-tabos-none/release/tabos-kernel | grep -E '_start|rust_main'
 # Expect _start near 0x100000 and rust_main present (un-mangled).
@@ -242,8 +247,8 @@ grep -q 'hello from rust_main' serial-arm.log \
 ### Both at once
 
 ```bash
-cargo build --release --target targets/x86_64-tabos-none.json
-cargo build --release --target targets/aarch64-tabos-none.json
+cargo kbuild --release --target targets/x86_64-tabos-none.json
+cargo kbuild --release --target targets/aarch64-tabos-none.json
 # then run the two assert blocks above. CI requires BOTH to print PASS.
 ```
 

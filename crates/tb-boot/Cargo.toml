@@ -1,0 +1,30 @@
+# tb-boot: the TABOS boot-handoff ABI (contract v0).
+#
+# The SINGLE shared definition of how a TABOS VMM hands a freshly-loaded kernel
+# its boot environment. Depended on by BOTH sides of the contract:
+#   - tb-vmm : a std Linux /dev/kvm binary (OUTSIDE the framekernel
+#              forbid(unsafe) boundary) that PRODUCES a TbBootInfo into guest
+#              RAM and enters the guest in 64-bit long mode with rdi = its
+#              guest-physical address (MV / L1-sovereignty path).
+#   - kernel / tb-hal : no_std, CONSUMES that pointer; tb-hal does the one
+#              unsafe deref, then calls this crate's safe reader/validator.
+#
+# This crate is itself `#![forbid(unsafe_code)]`: the ABI types are plain
+# `#[repr(C)]` PODs and every reader operates on a borrowed &[u8] parsed with
+# from_le_bytes, so the contract DEFINITION needs no unsafe. It is no_std for
+# the kernel/-Zbuild-std build (`#![cfg_attr(not(test), no_std)]`), yet its
+# size/offset/round-trip unit tests run on the std host harness via `cargo test`.
+
+[package]
+name = "tb-boot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# Default rlib at src/lib.rs. Pulled in by the kernel binary (built no_std for
+# the none-class custom targets) AND by tb-vmm (built std for the host).
+# no_std vs std is selected inside src/lib.rs via cfg_attr(not(test), no_std).
+
+[dependencies]
+# Intentionally empty: the ABI is self-contained core/std-free Rust.

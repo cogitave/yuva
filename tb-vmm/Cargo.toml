@@ -1,0 +1,57 @@
+# tb-vmm — TABOS sovereign userspace VMM (the L1 sovereignty rung).
+#
+# tb-vmm is a STD, Linux-hosted x86_64 binary that drives /dev/kvm via the
+# rust-vmm crates. It boots the SAME TABOS kernel ELF the QEMU/PVH path boots,
+# but through OUR own boot contract (tb-boot v0), entering the guest DIRECTLY in
+# 64-bit long mode — no PVH note, no A0 32->64 trampoline.
+#
+# Trust boundary (docs/SOVEREIGNTY-ROADMAP.md §3): tb-vmm is DELIBERATELY
+# UNTRUSTED, per-guest userspace, and is EXPLICITLY OUTSIDE the framekernel
+# `#![forbid(unsafe_code)]` boundary. Its only real `unsafe` is the
+# KVM_SET_USER_MEMORY_REGION FFI handoff (isolated + commented in memory.rs).
+# Do not conflate it with the sovereign kernel.
+#
+# Dependency pins mirror Firecracker's baseline (SOVEREIGNTY-ROADMAP §7):
+# Firecracker pins kvm-ioctls 0.24.0 + kvm-bindings 0.14.0.
+
+[package]
+name = "tb-vmm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TABOS sovereign userspace VMM (L1): boots the TABOS kernel via the tb-boot v0 contract on /dev/kvm."
+license = "Apache-2.0"
+
+# Declaring an (empty) [workspace] makes tb-vmm an INDEPENDENT nested workspace.
+# Cargo auto-excludes nested workspaces from the parent no_std workspace, so
+# `cargo build -p tabos-kernel` never pulls in this host crate, and tb-vmm gets
+# its own Cargo.lock. See tb-vmm/.cargo/config.toml + README.md for the
+# build-std interaction with the parent .cargo/config.toml.
+[workspace]
+
+[[bin]]
+name = "tb-vmm"
+path = "src/main.rs"
+
+[dependencies]
+# Safe /dev/kvm ioctl wrappers (Kvm/VmFd/VcpuFd, VcpuExit). Firecracker baseline.
+kvm-ioctls = "0.24"
+# FFI structs (kvm_sregs, kvm_regs, kvm_segment, kvm_userspace_memory_region...).
+kvm-bindings = "0.14"
+# Guest RAM: GuestMemoryMmap (anonymous mmap) + the Bytes/GuestMemory traits.
+vm-memory = { version = "0.16", features = ["backend-mmap"] }
+
+# tb-boot v0 ABI: the shared no_std + forbid(unsafe_code) contract crate. It is
+# the SINGLE source of truth for the TbBootInfo/TbMemRegion struct sizes and the
+# magic/version/ELF-note constants. tb-vmm uses ONLY:
+#   tb_boot::{TB_BOOT_MAGIC, TB_BOOT_VERSION, TB_NOTE_NAME, TB_NOTE_TYPE_ENTRY64,
+#             TbBootInfo (size only), TbMemRegion (size only)}
+# so the coupling is intentionally minimal (see boot.rs static asserts).
+tb-boot = { path = "../crates/tb-boot" }
+
+[profile.release]
+panic = "abort"
+lto = true
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,236 @@
+//! The VM lifecycle and the `KVM_RUN` exit loop.
+//!
+//! [`Vmm::new`] wires KVM -> guest RAM -> kernel image -> vCPU -> devices ->
+//! arch boot setup; [`Vmm::run`] drives `KVM_RUN`, dispatching serial PIO,
+//! MMIO, and terminal exits (HLT/shutdown), with a wall-clock guard and an
+//! exit budget so a hung guest cannot run forever.
+//!
+//! KVM exit-reason handling follows kvm-ioctls `VcpuExit` (docs.rs/kvm-ioctls):
+//! `IoOut(port,&[u8])`, `IoIn(port,&mut[u8])`, `MmioRead`, `MmioWrite`, `Hlt`,
+//! `Shutdown`, `SystemEvent`, `FailEntry(reason,cpu)`, `InternalError`.
+
+use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use kvm_bindings::KVM_API_VERSION;
+use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
+
+use crate::arch::{self, BootParams};
+use crate::cli::Config;
+use crate::device::Bus;
+use crate::error::VmmError;
+use crate::loader;
+use crate::memory::GuestRam;
+use crate::serial::Serial;
+
+/// COM1 base port + register span (16550 has 8 registers).
+const COM1_BASE: u64 = 0x3f8;
+const COM1_LEN: u64 = 8;
+
+/// Upper bound on VM exits before we declare the guest hung. The M0-M4 boot
+/// produces only a few thousand exits (serial bytes), so this is vast headroom.
+const MAX_EXITS: u64 = 5_000_000;
+
+/// Why the run loop stopped *cleanly*. There is exactly one clean stop: the
+/// kernel executing `HLT` after printing the final milestone marker. Every other
+/// terminal exit (`KVM_EXIT_SHUTDOWN`, `KVM_EXIT_SYSTEM_EVENT`, fail-entry,
+/// internal error, guard timeout) is a [`VmmError`], not a `StopReason` — so a
+/// boot that crashes can never be mistaken for success.
+#[derive(Debug, Clone, Copy)]
+pub enum StopReason {
+    /// Guest executed `HLT` (the kernel halts after M4 — the only clean stop).
+    Halted,
+}
+
+/// A configured, ready-to-run virtual machine.
+///
+/// Field order is the drop order: the vCPU drops first, then the VM, then guest
+/// RAM (whose mmap must stay valid while the VM fd is open), then the Kvm handle.
+pub struct Vmm {
+    config: Config,
+    pio_bus: Bus,
+    mmio_bus: Bus,
+    vcpu: VcpuFd,
+    vm: VmFd,
+    // Held only to keep the guest mmap alive for the VM's lifetime and to drop
+    // it in the correct order (after the VM fd). Never read after construction —
+    // the KVM memslots point straight at its mmap — so the field is a deliberate
+    // RAII drop-guard, not dead state.
+    #[allow(dead_code)]
+    ram: GuestRam,
+    _kvm: Kvm,
+}
+
+impl Vmm {
+    /// Build the VM: open KVM, allocate + register guest RAM, load the kernel,
+    /// create the vCPU, attach devices, and run the arch boot configuration.
+    pub fn new(config: Config) -> Result<Self, VmmError> {
+        let kvm = Kvm::new().map_err(VmmError::KvmInit)?;
+        let api = kvm.get_api_version();
+        if api != KVM_API_VERSION as i32 {
+            return Err(VmmError::ApiVersion(api));
+        }
+
+        let vm = kvm.create_vm()?;
+
+        // Guest RAM + KVM memslots.
+        let ram = GuestRam::new(config.mem_bytes)?;
+        ram.register_with_kvm(&vm)?;
+
+        // Load the kernel ELF into guest RAM and resolve the 64-bit entry.
+        let image = std::fs::read(&config.kernel_path)
+            .map_err(|e| VmmError::KernelRead(config.kernel_path.clone(), e))?;
+        let loaded = loader::load_kernel(&image, ram.inner())?;
+        if config.print_exit {
+            eprintln!(
+                "tb-vmm: loaded kernel entry={:#x} (TABOS note), image_end={:#x}",
+                loaded.entry, loaded.image_end
+            );
+        }
+
+        let vcpu = vm.create_vcpu(0)?;
+
+        // Devices: a 16550A UART on COM1 carrying guest output to stdout.
+        let mut pio_bus = Bus::new();
+        let mmio_bus = Bus::new();
+        let serial = Arc::new(Mutex::new(Serial::new(Box::new(io::stdout()))));
+        pio_bus.register(COM1_BASE, COM1_LEN, serial)?;
+
+        // Arch boot configuration (boot structures + sregs/regs).
+        let params = BootParams {
+            entry_point: loaded.entry,
+            mem_regions: ram.regions(),
+            cmdline: &config.cmdline,
+        };
+        arch::setup(&kvm, &vm, &vcpu, ram.inner(), &params)?;
+
+        Ok(Self {
+            config,
+            pio_bus,
+            mmio_bus,
+            vcpu,
+            vm,
+            ram,
+            _kvm: kvm,
+        })
+    }
+
+    /// Drive `KVM_RUN` until the guest halts/shuts down, or a guard fires.
+    pub fn run(&mut self) -> Result<StopReason, VmmError> {
+        let _ = &self.vm; // VM fd kept alive for the duration of the run
+        let deadline = Instant::now() + Duration::from_secs(self.config.timeout_secs);
+        let mut exits: u64 = 0;
+
+        // The loop breaks with either a clean StopReason or an error sentinel.
+        enum Outcome {
+            Stop(StopReason),
+            Shutdown,
+            SystemEvent(u32),
+            Timeout,
+            ExitBudget,
+            Fail { reason: u64, cpu: u32 },
+            Internal,
+            RunErr(kvm_ioctls::Error),
+        }
+
+        let outcome = loop {
+            if Instant::now() >= deadline {
+                break Outcome::Timeout;
+            }
+            exits += 1;
+            if exits > MAX_EXITS {
+                break Outcome::ExitBudget;
+            }
+
+            match self.vcpu.run() {
+                Ok(exit) => match exit {
+                    VcpuExit::IoIn(port, data) => self.pio_bus.read(port as u64, data),
+                    VcpuExit::IoOut(port, data) => self.pio_bus.write(port as u64, data),
+                    VcpuExit::MmioRead(addr, data) => self.mmio_bus.read(addr, data),
+                    VcpuExit::MmioWrite(addr, data) => self.mmio_bus.write(addr, data),
+                    VcpuExit::Hlt => break Outcome::Stop(StopReason::Halted),
+                    // A TABOS kernel reaches the end of its boot self-test and
+                    // halts (HLT). KVM_EXIT_SHUTDOWN means a triple fault / reset
+                    // instead — i.e. the guest crashed — so it is a failure.
+                    VcpuExit::Shutdown => break Outcome::Shutdown,
+                    VcpuExit::SystemEvent(ev, _) => break Outcome::SystemEvent(ev),
+                    VcpuExit::FailEntry(reason, cpu) => break Outcome::Fail { reason, cpu },
+                    VcpuExit::InternalError => break Outcome::Internal,
+                    other => {
+                        if self.config.print_exit {
+                            eprintln!("tb-vmm: ignoring unhandled VM exit: {other:?}");
+                        }
+                    }
+                },
+                Err(e) => {
+                    // EINTR is benign (a delivered signal); retry. Anything else
+                    // is fatal for our single-shot boot.
+                    if e.errno() == libc_eintr() {
+                        continue;
+                    }
+                    break Outcome::RunErr(e);
+                }
+            }
+        };
+
+        // Post-loop: the vCPU borrow from the run() exit has ended, so we may
+        // now read regs/sregs for diagnostics.
+        match outcome {
+            Outcome::Stop(reason) => Ok(reason),
+            Outcome::Shutdown => {
+                self.dump_diagnostics("KVM_EXIT_SHUTDOWN (triple fault / reset)");
+                Err(VmmError::GuestShutdown)
+            }
+            Outcome::SystemEvent(ev) => {
+                self.dump_diagnostics("KVM_EXIT_SYSTEM_EVENT");
+                Err(VmmError::SystemEvent(ev))
+            }
+            Outcome::Timeout => {
+                self.dump_diagnostics("run guard (timeout)");
+                Err(VmmError::Timeout { secs: self.config.timeout_secs })
+            }
+            Outcome::ExitBudget => {
+                self.dump_diagnostics("exit budget exhausted");
+                Err(VmmError::ExitBudget(MAX_EXITS))
+            }
+            Outcome::Fail { reason, cpu } => {
+                self.dump_diagnostics("KVM_EXIT_FAIL_ENTRY");
+                Err(VmmError::GuestFault { reason, cpu })
+            }
+            Outcome::Internal => {
+                self.dump_diagnostics("KVM_EXIT_INTERNAL_ERROR");
+                Err(VmmError::InternalError)
+            }
+            Outcome::RunErr(e) => {
+                self.dump_diagnostics("KVM_RUN error");
+                Err(VmmError::Kvm(e))
+            }
+        }
+    }
+
+    /// Best-effort dump of vCPU state to stderr for boot-failure triage.
+    fn dump_diagnostics(&self, context: &str) {
+        eprintln!("tb-vmm: vCPU diagnostics ({context}):");
+        match self.vcpu.get_regs() {
+            Ok(r) => eprintln!(
+                "  rip={:#018x} rflags={:#x} rsp={:#018x} rdi={:#018x} rsi={:#018x}",
+                r.rip, r.rflags, r.rsp, r.rdi, r.rsi
+            ),
+            Err(e) => eprintln!("  <get_regs failed: {e}>"),
+        }
+        match self.vcpu.get_sregs() {
+            Ok(s) => eprintln!(
+                "  cr0={:#x} cr3={:#018x} cr4={:#x} efer={:#x} cs.base={:#x} cs.l={} cs.sel={:#x}",
+                s.cr0, s.cr3, s.cr4, s.efer, s.cs.base, s.cs.l, s.cs.selector
+            ),
+            Err(e) => eprintln!("  <get_sregs failed: {e}>"),
+        }
+    }
+}
+
+/// `EINTR` without pulling in the `libc` crate (kvm-ioctls already depends on
+/// it transitively, but we keep our direct deps minimal).
+fn libc_eintr() -> i32 {
+    4
+}

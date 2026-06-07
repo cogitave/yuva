@@ -68,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (${{ matrix.arch }})
-        run: cargo build -p tabos-kernel --target ${{ matrix.target }}
+        run: cargo kbuild --target ${{ matrix.target }}
 
       # The run script boots the freshly built ELF under QEMU (TCG), greps the
       # serial log for the milestone DoD marker, and exits 0 only on a hit.

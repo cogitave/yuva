@@ -12,9 +12,16 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/tb-boot",
     "crates/tb-hal",
     "kernel",
 ]
+# tb-vmm is a host (std) VMM and is its OWN nested workspace (see tb-vmm/Cargo.toml
+# [workspace]). It is intentionally NOT a member here so the no_std kernel
+# workspace and the std host crate keep separate Cargo.lock files and never
+# cross-contaminate build-std / target settings. tb-vmm depends on crates/tb-boot
+# by path, which is allowed across workspaces.
+exclude = ["tb-vmm"]
 
 # panic = abort everywhere. The custom target specs in /targets already set
 # "panic-strategy": "abort" (so -Zbuild-std rebuilds core without unwinding and

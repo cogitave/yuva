@@ -6,8 +6,13 @@ version = 4
 name = "tabos-kernel"
 version = "0.1.0"
 dependencies = [
+ "tb-boot",
  "tb-hal",
 ]
+
+[[package]]
+name = "tb-boot"
+version = "0.1.0"
 
 [[package]]
 name = "tb-hal"

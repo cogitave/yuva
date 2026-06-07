@@ -10,15 +10,24 @@
 # All commands below assume cargo is invoked from the repo root (so the relative
 # linker-script and target-spec paths resolve). See BUILD.md.
 
-[unstable]
-json-target-spec = true
-# Recent nightlies gate `.json` target specs behind this flag (the older
-# Recompile core + its dependency compiler_builtins for our custom targets
-# (no precompiled std exists for none-class triples).
-build-std = ["core", "compiler_builtins"]
-# Enable compiler_builtins' memcpy/memset/memcmp/memmove (mem feature). Without
-# this the linker fails as soon as the kernel copies a struct or zeroes memory.
-build-std-features = ["compiler-builtins-mem"]
+# NOTE: build-std/json-target-spec are NOT set globally here, so that the std
+# host crate `tb-vmm` builds normally (a global [unstable] build-std would force
+# build-std onto every `cargo build`, including the host VMM, and break it).
+# Instead the three kernel-only nightly flags are bundled into the `kbuild`
+# alias below — the single source of truth for "how to build the kernel". CI,
+# scripts, and the docs all call `cargo kbuild`, so the flags live in exactly
+# one place.
+[alias]
+# Build the no_std kernel for a custom none-class target spec. Append the
+# target (and optionally --release):
+#   cargo kbuild --target targets/x86_64-tabos-none.json
+#   cargo kbuild --release --target targets/aarch64-tabos-none.json
+# Flags: -Zbuild-std recompiles core + compiler_builtins from rust-src (no
+# precompiled std exists for none-class triples); -Zbuild-std-features enables
+# compiler_builtins' mem* intrinsics (needed the moment the kernel copies/zeroes
+# memory); -Zjson-target-spec lets cargo accept a `.json` target file on recent
+# nightlies. Requires the nightly toolchain pinned in rust-toolchain.toml.
+kbuild = "build -p tabos-kernel -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec"
 
 # ---- x86_64: PVH ELF, loads at 1 MiB, links with kernel/linker/x86_64.ld ----
 # `[target.<stem>]` matches `--target targets/x86_64-tabos-none.json` by the

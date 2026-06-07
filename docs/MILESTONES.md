@@ -71,6 +71,38 @@ that traps cleanly back into the kernel — observed by a safe-Rust handler with
 the user-supplied argument intact. This is the hardware foundation for running
 agents and daemons at lower privilege than the kernel.
 
+### MV — owned boot via `tb-vmm` (the L1 sovereignty rung)
+
+M0–M4 above boot under QEMU using the bootstrap **PVH** ELF note (and, on x86_64,
+the 32→64 `A0` trampoline). **MV** removes that external dependency from the boot
+path: the project ships its own thin **userspace** VMM, [`tb-vmm`](../tb-vmm/),
+built on the rust-vmm crates (`kvm-ioctls`, `kvm-bindings`, `vm-memory`), which
+boots the *same* kernel through the project's own **`tb-boot v0`** contract —
+entering the guest **directly in 64-bit long mode** with page tables, GDT, and a
+`TbBootInfo` block that `tb-vmm` itself programs via `KVM_SET_SREGS`/`KVM_SET_REGS`.
+
+To support both paths, the kernel now carries **two** ELF entry notes (see
+`crates/tb-hal/src/arch/x86_64/boot.rs` and the [`tb-boot`](../crates/tb-boot/)
+ABI crate):
+
+| Note | Owner / type | Entry | Used by |
+|---|---|---|---|
+| Xen PVH | `Xen` / `0x12` (`XEN_ELFNOTE_PHYS32_ENTRY`) | `_start` (32-bit) | QEMU `-kernel`, Firecracker |
+| TABOS tb-boot | `TABOS` / `0x54420001` (`TB_NOTE_TYPE_ENTRY64`) | `_tb_start` (64-bit) | `tb-vmm` |
+
+`tb-vmm` resolves the **TABOS note only** — it refuses to fall back to `e_entry`
+(which is the 32-bit PVH `_start`, and would triple-fault if entered in long
+mode). The DoD is unchanged and shared: a `tb-vmm` boot must print the same
+`M4: user/ring OK` marker, proving the entire M0–M4 stack runs **identically**
+under the project's own VMM + boot contract. Because the host VMM needs
+`/dev/kvm`, its CI job (`.github/workflows/vmm-boot.yml`) runs on the GitHub
+Actions Linux runners; the WSL2 dev box has no nested virt, so locally `tb-vmm`
+is exercised by its unit tests (ELF loader, boot-info serialisation, device bus)
+plus the `tb-boot` ABI tests. Status: **implemented and green** (kernel boots
+M0–M4 under both PVH/QEMU and tb-boot/tb-vmm). The next rung, **L2**, replaces
+the host kernel's KVM with the project's own Type-1 microhypervisor —
+see [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
+
 ## 3. Development pipeline
 
 Each milestone was built with the same loop, and the same loop applies going
@@ -100,8 +132,8 @@ short, on a Linux host (or WSL2) with a Rust nightly that has `rust-src` +
 
 ```sh
 # Build (per arch)
-cargo build -p tabos-kernel --target targets/x86_64-tabos-none.json
-cargo build -p tabos-kernel --target targets/aarch64-tabos-none.json
+cargo kbuild --target targets/x86_64-tabos-none.json
+cargo kbuild --target targets/aarch64-tabos-none.json
 
 # Boot under QEMU and assert the milestone marker (exit 0 = PASS)
 bash scripts/run-x86_64.sh
@@ -125,13 +157,12 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
 
 ## 5. What's next
 
-- **MV — `tb-vmm`** (the **L1** sovereignty rung): the project's own thin
-  **userspace** VMM on the rust-vmm crates, producing the sovereign `tb-boot v0`
-  contract that enters the guest directly in 64-bit long mode (deleting the
-  bootstrap PVH note + the `A0` trampoline). Build-ready: verified `KVM_SET_SREGS`
-  long-mode constants + the aarch64 `KVM_ARM_VCPU_INIT` path, one console device.
-  Needs a Linux host with `/dev/kvm` (the GitHub Actions Linux runners qualify).
-  See [SOVEREIGNTY-ROADMAP §7](SOVEREIGNTY-ROADMAP.md).
+- **MV — `tb-vmm`** (the **L1** sovereignty rung) — **done.** The project's own
+  thin **userspace** VMM on the rust-vmm crates now boots the kernel through the
+  sovereign `tb-boot v0` contract (64-bit long-mode entry; no PVH note, no `A0`
+  trampoline on that path). Implemented and green; see **§2 → "MV — owned boot
+  via `tb-vmm`"** above. Remaining follow-up: an aarch64 `tb-vmm` arch backend
+  (`KVM_ARM_VCPU_INIT`) — today `tb-vmm` configures the x86_64 vCPU only.
 - **L2 — `tb-core`** (the **north-star**): TABOS as its own minimal Type-1
   microhypervisor (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + scheduling, <10K-LOC
   TCB), with the proprietary GPU/CUDA stack quarantined in a confined Linux driver

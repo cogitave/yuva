@@ -72,10 +72,10 @@ On a Linux host (or WSL2) with Rust nightly (`rust-src` + `llvm-tools`) and
 `qemu-system-x86` / `qemu-system-arm` installed (full setup in [BUILD.md](BUILD.md)):
 
 ```sh
-cargo build -p tabos-kernel --target targets/x86_64-tabos-none.json
+cargo kbuild --target targets/x86_64-tabos-none.json
 bash scripts/run-x86_64.sh      # boots under QEMU, asserts the milestone marker
 
-cargo build -p tabos-kernel --target targets/aarch64-tabos-none.json
+cargo kbuild --target targets/aarch64-tabos-none.json
 bash scripts/run-aarch64.sh
 ```
 

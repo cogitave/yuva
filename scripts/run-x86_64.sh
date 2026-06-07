@@ -34,7 +34,7 @@ fi
 if [[ ! -f "${KERNEL}" ]]; then
   echo "error: kernel image not found: ${KERNEL}" >&2
   echo "build it first, e.g.:" >&2
-  echo "  cargo build -p tabos-kernel --target ${REPO_ROOT}/targets/${TARGET}.json" >&2
+  echo "  cargo kbuild --target ${REPO_ROOT}/targets/${TARGET}.json" >&2
   exit 2
 fi
 

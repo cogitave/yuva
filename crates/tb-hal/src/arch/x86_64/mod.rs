@@ -8,6 +8,12 @@
 //!
 //! M0 boot path is PVH: `boot` emits the `XEN_ELFNOTE_PHYS32_ENTRY` note and
 //! the (bootstrap-only) 32->64 trampoline; `serial` is the 16550 COM1 driver.
+//! MV (the L1 sovereignty rung) adds a SECOND x86_64 entry in `boot`: a TABOS
+//! ELF note (PT_NOTE name "TABOS", type 0x54420001, desc = u64 `_tb_start`
+//! address) plus the 64-bit `_tb_start` that the project's own `tb-vmm` jumps
+//! to directly in long mode — NO PVH note, NO A0 trampoline on that path. Both
+//! notes coexist in the PT_NOTE phdr and both entries coexist in `.text`:
+//! QEMU/Firecracker use the Xen note, tb-vmm uses TABOS, one runs per boot.
 //! M1 adds CPU trap handling: `gdt` installs a permanent flat 64-bit GDT + TSS
 //! (IST stacks), `idt` installs the 256-gate IDT, and `trap` holds the entry
 //! thunks + the extern "C" handler that dispatches into safe Rust policy.

@@ -1,0 +1,69 @@
+# vmm-boot CI — the L1 (tb-vmm) Definition-of-Done.
+#
+# Proves: tb-vmm boots the from-scratch kernel via tb-boot v0 (direct 64-bit
+# long mode, NO PVH note, NO A0 trampoline) and reaches "M4: user/ring OK".
+# Requires hardware /dev/kvm. GitHub-hosted ubuntu runners expose /dev/kvm but
+# typically need a udev rule / chmod to grant access to the non-root runner user
+# (the same pattern android-emulator-runner uses):
+#   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+# If /dev/kvm is absent the job SKIPS the boot step rather than failing.
+
+name: vmm-boot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vmm-boot:
+    name: tb-vmm boot (x86_64, /dev/kvm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Enable /dev/kvm for the runner user
+        run: |
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::warning::/dev/kvm absent on this runner; the boot step will skip"
+            echo "KVM_OK=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm
+          echo "KVM_OK=1" >> "$GITHUB_ENV"
+
+      - name: Cache cargo + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            tb-vmm/target
+          key: ${{ runner.os }}-cargo-vmm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (custom target)
+        run: cargo kbuild --target targets/x86_64-tabos-none.json
+
+      - name: Boot via tb-vmm and assert marker
+        if: env.KVM_OK == '1'
+        run: bash scripts/run-vmm-x86_64.sh
+
+      - name: Note when KVM was unavailable
+        if: env.KVM_OK != '1'
+        run: echo "::notice::Skipped tb-vmm boot — /dev/kvm not available on this runner."

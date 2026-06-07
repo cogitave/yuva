@@ -36,6 +36,17 @@ SECTIONS
         KEEP(*(.note.Xen))
     } :text :note
 
+    /* MV / tb-boot v0: the TABOS note (PT_NOTE name "TABOS", type 0x54420001,
+     * desc = u64 _tb_start) sits in the SAME PT_NOTE segment, right after the
+     * Xen note. tb-vmm iterates PT_NOTE and matches type 0x54420001 to find the
+     * kernel's 64-bit entry; QEMU/Firecracker match the Xen note (type 18) and
+     * ignore this one. KEEP() also anchors `_tb_start` against --gc-sections:
+     * the note's `.quad _tb_start` desc is the ONLY reference to that entry.
+     * Source: tb-boot v0 ABI (crates/tb-boot); mirrors XEN_ELFNOTE_PHYS32_ENTRY. */
+    .note.TABOS : ALIGN(4) {
+        KEEP(*(.note.TABOS))
+    } :text :note
+
     .text : ALIGN(16) {
         *(.text._start)
         *(.text .text.*)

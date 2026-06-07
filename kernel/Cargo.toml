@@ -16,3 +16,9 @@ publish = false
 
 [dependencies]
 tb-hal = { path = "../crates/tb-hal" }
+# MV / tb-boot v0: the shared boot-ABI crate (no_std, forbid(unsafe_code)).
+# The kernel uses its `TB_BOOT_MAGIC` constant to recognise when the project's
+# own `tb-vmm` booted it through the tb-boot contract (see src/main.rs). tb-hal
+# performs the single guarded raw read of the boot-info pointer; this
+# forbid(unsafe_code)-class crate only compares the returned magic.
+tb-boot = { path = "../crates/tb-boot" }

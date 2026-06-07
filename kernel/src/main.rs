@@ -30,6 +30,14 @@
 //! user mode with arg == 0xCAFE. DoD marker: \"M4: user/ring OK\". ALL the new
 //! unsafe/asm lives in tb-hal; this crate calls one safe fn and branches on a
 //! bool.
+//!
+//! MV (the L1 sovereignty rung) adds a SECOND boot path WITHOUT touching this
+//! self-test: the project's own `tb-vmm` boots this SAME kernel ELF directly in
+//! 64-bit long mode via tb-boot v0 (tb-hal's `_tb_start` + the TABOS ELF note),
+//! with `boot_info` = the guest-physical `tb_boot::TbBootInfo` pointer instead
+//! of a PVH `hvm_start_info`. `rust_main` prints "tb-boot: contract v0 OK"
+//! first IFF the magic validates (a PVH pointer is silently ignored), then runs
+//! M0-M4 identically. The PVH/QEMU regression path is unchanged.
 
 #![no_std]
 #![no_main]
@@ -83,16 +91,31 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Set by task B after it audited its own canaries on its final round.
 static B_VERIFIED: AtomicBool = AtomicBool::new(false);
 
-/// Boot entry. tb-hal's per-arch `_start` jumps here after setting up a stack,
-/// zeroing `.bss`, and placing the boot-info pointer in arg0 (SysV `rdi` on
-/// x86_64 = `hvm_start_info` phys addr; AAPCS64 `x0` on aarch64 = FDT blob).
+/// Boot entry. Reached by EITHER of tb-hal's two x86_64 entries (or the
+/// aarch64 `_start`); each sets up a stack and places the boot-info pointer in
+/// SysV arg0 before calling here:
+///   * PVH (`_start`, QEMU/Firecracker): `rdi` = `hvm_start_info` phys addr.
+///   * tb-boot v0 (`_tb_start`, the project's `tb-vmm`): `rdi` = guest-physical
+///     `tb_boot::TbBootInfo` addr (identity-mapped; magic-validated below).
+///   * aarch64 (`_start`): `x0` = FDT blob (MV is an x86_64-first follow-up).
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main(boot_info: usize) -> ! {
-    // M0..M4 ignore boot_info; a later milestone parses hvm_start_info / FDT.
-    let _ = boot_info;
-
     // --- M0 proof (kept verbatim): serial first-light ----------------------
     tb_hal::serial_init();
+
+    // --- MV / tb-boot v0: announce the contract IFF tb-vmm booted us -------
+    // On the tb-boot path `boot_info` is the guest-physical address of an
+    // identity-mapped `tb_boot::TbBootInfo` whose magic validates; on the PVH
+    // path it is an `hvm_start_info` pointer whose magic does NOT match, so we
+    // silently skip (fail-closed; never misread). tb-hal performs the single
+    // guarded raw read of the pointer — this `#![forbid(unsafe_code)]`-class
+    // crate only compares the returned magic against `tb_boot::TB_BOOT_MAGIC`.
+    // Printing this is OPTIONAL and does NOT gate M0-M4: the PVH regression path
+    // skips it and emits the same markers below.
+    if tb_hal::read_boot_magic(boot_info) == Some(tb_boot::TB_BOOT_MAGIC) {
+        tb_hal::serial_write_str("tb-boot: contract v0 OK\n");
+    }
+
     tb_hal::serial_write_str("hello from rust_main\n");
 
     // --- M1 proof (kept): install traps, take a breakpoint, resume ---------
