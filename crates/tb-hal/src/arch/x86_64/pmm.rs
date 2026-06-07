@@ -53,9 +53,14 @@ use tb_boot::{TbBootInfo, TbMemRegion, TB_BOOT_MAGIC};
 /// Bytes per frame.
 const FRAME: u64 = 4096;
 
-/// Lowest physical address the guarded readers will touch (rejects the null
-/// page). Mirrors `crate::read_boot_magic`'s `WINDOW_LO`.
-const ID_LO: u64 = 0x1000;
+/// Lowest physical address the guarded readers will touch: just above null so a
+/// null/garbage boot-info pointer is still rejected, while the sub-4 KiB region
+/// stays READABLE. Newer QEMU `microvm`/PVH stages `hvm_start_info` AND its
+/// memmap in low memory (observed `memmap_paddr = 0x5a8` on a CI runner), so the
+/// previous `0x1000` floor wrongly hid the map and the allocator fail-closed to
+/// "no usable frames". The whole `[0, 2 MiB)` first 2 MiB page is identity-mapped
+/// present on both x86_64 boot paths, so these low reads cannot fault.
+const ID_LO: u64 = 0x8;
 
 /// First address PAST the identity-mapped low window: 1 GiB. Both x86_64 boot
 /// paths identity-map `[0, 1 GiB)` with 2 MiB pages, so any read below this is
@@ -117,22 +122,6 @@ fn read_u64(pa: u64) -> Option<u64> {
     }
 }
 
-/// M6 boot diagnostic: print `label=0x<value>\n` over the early serial console.
-/// TEMPORARY — surfaces what the active QEMU/Firecracker actually puts in the
-/// PVH/tb-boot block so a CI-only "no usable frames" can be diagnosed from the
-/// serial log without a local repro. (Removed once M6 is CI-green.)
-fn dbg(label: &str, value: u64) {
-    crate::serial_write_str(label);
-    crate::serial_write_str("=0x");
-    let mut shift: i32 = 60;
-    while shift >= 0 {
-        let nib = ((value >> shift) & 0xf) as u8;
-        let c = if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) };
-        crate::serial_write_byte(c);
-        shift -= 4;
-    }
-    crate::serial_write_byte(b'\n');
-}
 
 // ---------------------------------------------------------------------------
 // Range helpers (clamp everything to the identity window).
@@ -222,7 +211,6 @@ fn collect_pvh(bi: u64, sink: &mut RegionSink) {
     // Gate the memmap walk on the version below (QEMU microvm + Firecracker
     // both emit version 1). The reservations just below use only v0 fields.
     let version = read_u32(bi + 4).unwrap_or(0);
-    dbg("pmm-dbg pvh-ver", version as u64);
 
     // Reserve the start_info block (v1 is 56 bytes) and the cmdline
     // (NUL-terminated; reserve one conservative page).
@@ -270,8 +258,6 @@ fn collect_pvh(bi: u64, sink: &mut RegionSink) {
         Some(e) => e,
         None => return,
     };
-    dbg("pmm-dbg memmap", memmap);
-    dbg("pmm-dbg entries", entries as u64);
     if memmap == 0 || entries == 0 {
         return;
     }
@@ -322,8 +308,6 @@ pub fn pmm_collect_regions(boot_info: usize, sink: &mut RegionSink) {
     sink.push_reserved(0, 0x10_0000);
 
     let bi = boot_info as u64;
-    dbg("pmm-dbg bootinfo", bi);
-    dbg("pmm-dbg magic", read_u64(bi).unwrap_or(0xffff_ffff_ffff_ffff));
     if let Some(magic) = read_u64(bi) {
         if magic == TB_BOOT_MAGIC {
             collect_tb_boot(bi, sink);
