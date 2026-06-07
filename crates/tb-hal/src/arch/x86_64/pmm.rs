@@ -117,6 +117,23 @@ fn read_u64(pa: u64) -> Option<u64> {
     }
 }
 
+/// M6 boot diagnostic: print `label=0x<value>\n` over the early serial console.
+/// TEMPORARY — surfaces what the active QEMU/Firecracker actually puts in the
+/// PVH/tb-boot block so a CI-only "no usable frames" can be diagnosed from the
+/// serial log without a local repro. (Removed once M6 is CI-green.)
+fn dbg(label: &str, value: u64) {
+    crate::serial_write_str(label);
+    crate::serial_write_str("=0x");
+    let mut shift: i32 = 60;
+    while shift >= 0 {
+        let nib = ((value >> shift) & 0xf) as u8;
+        let c = if nib < 10 { b'0' + nib } else { b'a' + (nib - 10) };
+        crate::serial_write_byte(c);
+        shift -= 4;
+    }
+    crate::serial_write_byte(b'\n');
+}
+
 // ---------------------------------------------------------------------------
 // Range helpers (clamp everything to the identity window).
 // ---------------------------------------------------------------------------
@@ -205,6 +222,7 @@ fn collect_pvh(bi: u64, sink: &mut RegionSink) {
     // Gate the memmap walk on the version below (QEMU microvm + Firecracker
     // both emit version 1). The reservations just below use only v0 fields.
     let version = read_u32(bi + 4).unwrap_or(0);
+    dbg("pmm-dbg pvh-ver", version as u64);
 
     // Reserve the start_info block (v1 is 56 bytes) and the cmdline
     // (NUL-terminated; reserve one conservative page).
@@ -252,6 +270,8 @@ fn collect_pvh(bi: u64, sink: &mut RegionSink) {
         Some(e) => e,
         None => return,
     };
+    dbg("pmm-dbg memmap", memmap);
+    dbg("pmm-dbg entries", entries as u64);
     if memmap == 0 || entries == 0 {
         return;
     }
@@ -302,6 +322,8 @@ pub fn pmm_collect_regions(boot_info: usize, sink: &mut RegionSink) {
     sink.push_reserved(0, 0x10_0000);
 
     let bi = boot_info as u64;
+    dbg("pmm-dbg bootinfo", bi);
+    dbg("pmm-dbg magic", read_u64(bi).unwrap_or(0xffff_ffff_ffff_ffff));
     if let Some(magic) = read_u64(bi) {
         if magic == TB_BOOT_MAGIC {
             collect_tb_boot(bi, sink);
