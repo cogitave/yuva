@@ -17,4 +17,8 @@ publish = false
 # global_asm!/_start. No_std is declared in src/lib.rs.
 
 [dependencies]
-# Intentionally empty at M0.
+# M6: the shared boot-handoff ABI (no_std, forbid(unsafe_code)). tb-hal's
+# x86_64 frame-allocator boot-map reader parses a tb-vmm `TbBootInfo` using the
+# crate's typed `#[repr(C)]` readers + constants instead of hand-coded offsets.
+# No cycle: tb-boot depends on nothing; the kernel already depends on both.
+tb-boot = { path = "../tb-boot" }

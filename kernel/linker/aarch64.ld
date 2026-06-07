@@ -17,6 +17,11 @@
  *   __bss_start, __bss_end        -- .bss bounds, zeroed at boot
  *   __boot_stack_top              -- initial SP (16 KiB stack, grows down)
  *   __exception_vectors           -- 2 KiB-aligned VBAR_EL1 table (in .text)
+ * Symbols exported for crates/tb-hal/src/pmm.rs (M6 frame allocator):
+ *   __image_start, __image_end    -- whole-image bounds; the frame allocator
+ *                                    reserves [__image_start, __image_end) so it
+ *                                    never hands out the image, its .bss (which
+ *                                    holds M5's 2 MiB heap arena), or stacks.
  */
 
 ENTRY(_start)
@@ -26,6 +31,7 @@ KERNEL_LMA = 0x40080000;
 SECTIONS
 {
     . = KERNEL_LMA;
+    __image_start = .;
 
     .text : ALIGN(0x800) {
         KEEP(*(.text._start))      /* boot entry -- must be e_entry           */
@@ -55,6 +61,9 @@ SECTIONS
     }
     . = ALIGN(16);
     __bss_end = .;
+
+    . = ALIGN(4096);
+    __image_end = .;
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)

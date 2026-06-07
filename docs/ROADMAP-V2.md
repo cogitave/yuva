@@ -338,8 +338,9 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 | M0–M4 (v1 kernel foundation) | ✅ complete, CI-green both arches |
 | L0→L1 sovereignty (tb-vmm + tb-boot v0) | ✅ complete, CI-green on `/dev/kvm` |
 | **M5** (bootstrap heap / `alloc`) | ✅ **complete**, CI-green (x86_64 + aarch64 QEMU + tb-vmm/`/dev/kvm`) |
-| **M6** (frame allocator from boot map) | ⏳ **in progress** (next increment) |
-| M7 – M18 | ⬜ planned (this document) |
+| **M6** (frame allocator from boot map) | ✅ **complete**, CI-green (PVH + tb-vmm/TbBootInfo + aarch64 QEMU-`virt` map) |
+| **M7** (frame-backed growable heap) | ⏳ **in progress** (next increment) |
+| M8 – M18 | ⬜ planned (this document) |
 | L2 (own Type-1 microhypervisor) | ⬜ parallel north-star track ([SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)) |
 
 Every milestone increment is shipped by the same pipeline — codified as the

@@ -29,6 +29,7 @@
 
 mod boot; // _start; arms VBAR_EL1; pure side-effect (`global_asm!`) module.
 mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
+mod pmm; // M6: QEMU `virt` boot memory-map source (hard-coded map + DTB reserve).
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
 mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
@@ -36,6 +37,7 @@ mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
 pub use mmu::{mmu_init, mmu_selftest};
+pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init};
 pub use serial::{serial_init, serial_write_byte};
 pub use trap::breakpoint;

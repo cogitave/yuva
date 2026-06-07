@@ -33,6 +33,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 mod arch;
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
+mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
 
 /// Initialise the early serial console for the current architecture.
 ///
@@ -513,4 +514,89 @@ pub fn heap_high_water() -> usize {
 /// (proving coalescing). It leaks nothing — used-bytes ends at the entry value.
 pub fn heap_selftest() -> bool {
     heap::selftest()
+}
+
+// ===========================================================================
+// M6: physical frame allocator over the active boot memory map (this milestone)
+// ===========================================================================
+//
+// A from-scratch INTRUSIVE FREE-FRAME STACK that hands out / reclaims 4 KiB
+// PHYSICAL frames from usable RAM only — never the kernel image (which now
+// INCLUDES M5's 2 MiB .bss heap arena), the boot structures, sub-1 MiB on
+// x86_64, or device MMIO. The per-arch boot-map READERS (PVH `hvm_start_info` /
+// tb-boot `TbBootInfo` / aarch64 QEMU-`virt` map) and ALL the raw memory access
+// — the guarded boot-map reads, the kernel-image linker-symbol read, and the
+// next-free-PA links written THROUGH each free frame's identity address — live
+// in `pmm.rs` + `arch::pmm`. The kernel crate stays `#![forbid(unsafe_code)]`:
+// `frame_alloc` returns a PHYSICAL address it cannot dereference, so the
+// "write a magic through the frame then verify" check lives in `pmm_selftest`
+// (mirroring M5's `heap_selftest`). DoD marker: "M6: frame alloc OK".
+
+/// Parse the ACTIVE boot path's memory map and seed the physical frame
+/// allocator. Idempotent; call once early (after [`heap_init`], i.e. after M5),
+/// passing the same `boot_info` `rust_main` was entered with.
+///
+/// tb-hal reads the boot map for the live path — x86_64 PVH
+/// `hvm_start_info.memmap`, x86_64 tb-boot `tb_boot::TbBootInfo` regions, or the
+/// aarch64 QEMU `virt` map — clamps usable RAM to the M3 identity region, carves
+/// out the kernel image (incl. the M5 heap arena), the boot structures, sub-1
+/// MiB (x86_64) and the DTB (aarch64), and pushes every remaining 4 KiB frame
+/// onto an intrusive free stack. All raw work is in `pmm.rs`/`arch::pmm`.
+pub fn pmm_init(boot_info: usize) {
+    pmm::init(boot_info);
+}
+
+/// Allocate one 4 KiB physical frame, returning its PHYSICAL address, or `None`
+/// when usable RAM is exhausted (fail-closed). O(1) pop of the free stack.
+///
+/// The returned address is 4 KiB-aligned, inside a parsed usable-RAM range, and
+/// disjoint from every reservation. The `#![forbid(unsafe_code)]` kernel may
+/// compare it but cannot dereference it (see [`pmm_selftest`]).
+pub fn frame_alloc() -> Option<u64> {
+    pmm::frame_alloc()
+}
+
+/// Return a frame previously obtained from [`frame_alloc`] to the free stack;
+/// `true` = accepted, `false` = rejected (fail-closed) for a misaligned/null
+/// address, an address outside usable RAM, an address inside a reservation, a
+/// free when nothing is allocated, or a double-free of the current stack top.
+/// O(1) push.
+pub fn frame_free(pa: u64) -> bool {
+    pmm::frame_free(pa)
+}
+
+/// Total frames the allocator seeded at [`pmm_init`]:
+/// `sum(usable RAM ranges) − reservations`. Constant after init; the invariant
+/// the M6 self-test checks the free count against.
+pub fn pmm_total_frames() -> usize {
+    pmm::total_frames()
+}
+
+/// Frames currently available on the free stack (`pmm_total_frames` minus the
+/// number of live allocations).
+pub fn pmm_free_frames() -> usize {
+    pmm::free_frames()
+}
+
+/// `true` iff `pa` lies inside a parsed usable-RAM range. Lets the
+/// `#![forbid(unsafe_code)]` kernel assert an allocated frame is real RAM.
+pub fn pmm_addr_in_usable_ram(pa: u64) -> bool {
+    pmm::addr_in_usable_ram(pa)
+}
+
+/// `true` iff `pa` lies inside any reservation (kernel image incl. the heap
+/// arena, boot structures, sub-1 MiB, DTB, or a device/non-RAM hole). Lets the
+/// kernel assert an allocated frame never overlaps a reservation.
+pub fn pmm_addr_reserved(pa: u64) -> bool {
+    pmm::addr_reserved(pa)
+}
+
+/// Run tb-hal's low-level frame self-test; `true` = pass.
+///
+/// Performs the raw-memory check the `forbid(unsafe_code)`-class kernel cannot:
+/// allocate a frame, write a magic THROUGH its identity-mapped address (first
+/// word and a word deep in the page), read both back, free it, and end at the
+/// entry free-count (no leak). Mirrors M5's [`heap_selftest`].
+pub fn pmm_selftest() -> bool {
+    pmm::selftest()
 }

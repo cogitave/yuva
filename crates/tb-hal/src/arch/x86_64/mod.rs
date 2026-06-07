@@ -58,6 +58,12 @@ pub mod mmu;
 // maps a U/S=1 code+stack page and drops to ring3.
 pub mod user;
 
+// M6 physical frame allocator: the x86_64 boot memory-map reader (PVH
+// `hvm_start_info.memmap` + tb-boot `TbBootInfo` regions) that feeds the shared
+// intrusive free-frame stack in `crate::pmm`. The only x86_64 place the
+// boot-info pointer is dereferenced for M6.
+pub mod pmm;
+
 pub use serial::{serial_init, serial_write_byte};
 
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
@@ -91,6 +97,11 @@ pub use mmu::{mmu_init, mmu_selftest};
 // handles it in ring0 and returns whether the syscall was observed from user
 // mode with the expected arg. (Same name + signature as the aarch64 arm.)
 pub use user::user_demo;
+
+// M6: the x86_64 boot memory-map reader, re-exported through `arch/mod.rs` so
+// `crate::pmm` can call `crate::arch::pmm_collect_regions`. Same name +
+// signature as the aarch64 arm, one uniform contract.
+pub use pmm::pmm_collect_regions;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

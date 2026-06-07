@@ -323,6 +323,162 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M5: alloc OK\n"); // <-- the M5 DoD marker
+
+    // --- M6: physical frame allocator from the active boot memory map -------
+    // tb-hal parses the LIVE boot path's memory map (x86_64 PVH
+    // `hvm_start_info.memmap` or tb-boot `TbBootInfo` regions; aarch64 the QEMU
+    // `virt` map) into an INTRUSIVE FREE-FRAME STACK that hands out / reclaims
+    // 4 KiB PHYSICAL frames from usable RAM only — never the kernel image (incl.
+    // M5's 2 MiB .bss heap arena), the boot structures, sub-1 MiB, or device
+    // MMIO. ALL the raw memmap reads, the linker-symbol image span, and the
+    // next-free-PA links written THROUGH each free frame's identity address live
+    // in tb-hal; this forbid(unsafe_code)-class crate only calls the safe facade
+    // (frame_alloc -> Option<u64 PA>, frame_free, the pmm stats, pmm_selftest)
+    // and COMPARES the returned physical addresses — it can never deref a frame.
+    // DoD marker: "M6: frame alloc OK".
+    tb_hal::serial_write_str("frame-test: parsing boot memory map\n");
+    tb_hal::pmm_init(boot_info);
+
+    // Local fail helper: emit the M6 failure verdict and park the core. Matches
+    // the M5 `m5_fail` style; uses only safe serial calls.
+    let m6_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M6: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    // The boot map must yield usable RAM, and a freshly seeded allocator has
+    // every usable frame on the free stack: free_count == total_frames ==
+    // sum(usable ranges) - reservations (the tb-hal stat).
+    let total = tb_hal::pmm_total_frames();
+    if total == 0 {
+        m6_fail("no usable frames parsed from the boot map");
+    }
+    if tb_hal::pmm_free_frames() != total {
+        m6_fail("post-init free count != total usable frames");
+    }
+
+    // (1) Allocate K frames; each PA must be 4 KiB-aligned, inside a usable RAM
+    //     range, outside EVERY reservation, and pairwise-disjoint.
+    const K: usize = 64;
+    let mut frames: Vec<u64> = Vec::with_capacity(K);
+    {
+        let mut i = 0;
+        while i < K {
+            match tb_hal::frame_alloc() {
+                Some(pa) => {
+                    if pa % 4096 != 0 {
+                        m6_fail("allocated frame is not 4 KiB-aligned");
+                    }
+                    if !tb_hal::pmm_addr_in_usable_ram(pa) {
+                        m6_fail("allocated frame is outside usable RAM");
+                    }
+                    if tb_hal::pmm_addr_reserved(pa) {
+                        m6_fail("allocated frame overlaps a reservation");
+                    }
+                    frames.push(pa);
+                }
+                None => m6_fail("ran out of frames before K allocations"),
+            }
+            i += 1;
+        }
+        // Pairwise-disjoint: distinct 4 KiB-aligned PAs cannot overlap.
+        let mut a = 0;
+        while a < K {
+            let mut b = a + 1;
+            while b < K {
+                if frames[a] == frames[b] {
+                    m6_fail("two allocations returned the same frame");
+                }
+                b += 1;
+            }
+            a += 1;
+        }
+    }
+    if tb_hal::pmm_free_frames() != total - K {
+        m6_fail("free count wrong after K allocations");
+    }
+
+    // (2) LIFO reuse: free the most-recently-allocated frame; the next alloc
+    //     must hand the SAME physical frame straight back (free-stack pop).
+    let last = frames[K - 1];
+    if !tb_hal::frame_free(last) {
+        m6_fail("free of a valid frame was rejected");
+    }
+    match tb_hal::frame_alloc() {
+        Some(pa) if pa == last => {} // LIFO reuse proven
+        Some(_) => m6_fail("free stack did not reuse the just-freed frame (LIFO)"),
+        None => m6_fail("alloc after a free returned None"),
+    }
+
+    // (3) Fail-closed: reject a double-free, a misaligned free, and a null free.
+    if !tb_hal::frame_free(last) {
+        m6_fail("free of the re-allocated frame was rejected");
+    }
+    if tb_hal::frame_free(last) {
+        m6_fail("double-free was accepted");
+    }
+    if tb_hal::frame_free(last + 1) {
+        m6_fail("misaligned free was accepted");
+    }
+    if tb_hal::frame_free(0) {
+        m6_fail("null free was accepted");
+    }
+
+    // Return the remaining K-1 held frames; the free count must climb back to
+    // `total`, proving full reclaim (the seed-count invariant round-trips).
+    {
+        let mut i = 0;
+        while i < K - 1 {
+            if !tb_hal::frame_free(frames[i]) {
+                m6_fail("reclaim of a held frame was rejected");
+            }
+            i += 1;
+        }
+    }
+    if tb_hal::pmm_free_frames() != total {
+        m6_fail("free count did not return to total after reclaim");
+    }
+
+    // (4) tb-hal's own through-the-frame self-test (alloc -> write a magic via
+    //     the frame's identity address -> read it back -> free): the raw-memory
+    //     check this forbid(unsafe_code)-class crate cannot perform itself.
+    if !tb_hal::pmm_selftest() {
+        m6_fail("tb_hal::pmm_selftest failed");
+    }
+    if tb_hal::pmm_free_frames() != total {
+        m6_fail("pmm_selftest leaked a frame");
+    }
+
+    // (5) Drive the allocator to exhaustion: exactly `total` frames come out,
+    //     then frame_alloc fail-closes to None. M6 is the last milestone before
+    //     halt, so these frames are intentionally not reclaimed (no Vec needed).
+    drop(frames);
+    let free_before = tb_hal::pmm_free_frames();
+    let mut got: usize = 0;
+    loop {
+        match tb_hal::frame_alloc() {
+            Some(pa) => {
+                if pa % 4096 != 0 {
+                    m6_fail("frame from the exhaustion drain is misaligned");
+                }
+                got += 1;
+            }
+            None => break,
+        }
+    }
+    if got != free_before {
+        m6_fail("exhaustion drained a different count than the free total");
+    }
+    if tb_hal::frame_alloc().is_some() {
+        m6_fail("frame_alloc handed out a frame past exhaustion");
+    }
+    if tb_hal::pmm_free_frames() != 0 {
+        m6_fail("free count nonzero at full exhaustion");
+    }
+
+    tb_hal::serial_write_str("M6: frame alloc OK\n"); // <-- the M6 DoD marker
     tb_hal::halt()
 }
 
