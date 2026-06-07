@@ -11,6 +11,11 @@
 //! M1 adds CPU trap handling: `gdt` installs a permanent flat 64-bit GDT + TSS
 //! (IST stacks), `idt` installs the 256-gate IDT, and `trap` holds the entry
 //! thunks + the extern "C" handler that dispatches into safe Rust policy.
+//! M2 adds the cooperative context switch: `sched` holds the naked
+//! `ctx_switch` (saves/restores ONLY the psABI Fig. 3.4 callee-saved set
+//! {rbx, rbp, r12-r15} + rsp, callee-saved-on-stack model) and the
+//! initial-frame fabricator that tb-hal's shared `Task`/`task_create`/
+//! `yield_to` layer builds on.
 
 // `_start`, the PVH note and the 32->64 trampoline live here. The module is
 // pulled into the final link because the linker script's `ENTRY(_start)`
@@ -23,12 +28,29 @@ pub mod gdt;
 pub mod idt;
 pub mod trap;
 
+// M2 cooperative switch: naked ctx_switch + new-task stack fabrication.
+pub mod sched;
+
 pub use serial::{serial_init, serial_write_byte};
 
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
 // `int3` lives in `trap.rs`. `set_trap_hook`/`TrapInfo`/`TrapKind`/`TrapAction`
 // and the `dispatch_trap` glue live at the crate root (`lib.rs`).
 pub use trap::breakpoint;
+
+// M2: the arch-internal primitives consumed by the shared task layer in
+// `lib.rs` (`Task`, `task_create`, `yield_to`). Per-arch contract:
+//   * `unsafe extern "C" fn ctx_switch(prev_sp_save: *mut usize, next_sp: usize)`
+//     — save the CURRENT task's callee-saved context on its own stack, store
+//     the resulting SP to `*prev_sp_save`, adopt `next_sp` and resume the
+//     next task (callee-saved-on-stack model, xv6 swtch.S shape).
+//   * `fn task_stack_init(stack: &mut [usize], entry: fn()) -> usize`
+//     — fabricate a brand-new task's initial frame on `stack` so the FIRST
+//     switch into it `ret`s into `entry`; returns the initial saved-SP handle
+//     that `task_create` records for the first `yield_to`.
+// (Same names + signatures as the aarch64 arm, so `arch/mod.rs` re-exports
+// one uniform contract to `lib.rs`.)
+pub use sched::{ctx_switch, task_stack_init};
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

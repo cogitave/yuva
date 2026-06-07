@@ -1,4 +1,4 @@
-//! `tb-hal` — TABOS Hardware Abstraction Layer (M0 surface + M1 traps).
+//! `tb-hal` — TABOS Hardware Abstraction Layer (M0 serial + M1 traps + M2 tasks).
 //!
 //! This crate is the single place where `unsafe` and assembly are allowed in
 //! TABOS (framekernel rule, KERNEL-FOUNDATION-SPEC.md §1). The raw pokes live in
@@ -8,12 +8,25 @@
 //! M0 serial + park:
 //!   * [`serial_init`], [`serial_write_byte`], [`serial_write_str`], [`halt`]
 //!
-//! M1 traps (this milestone):
+//! M1 traps:
 //!   * [`install_traps`]  — load the permanent GDT+TSS+IDT (x86_64) / set
 //!     `VBAR_EL1` (aarch64). Idempotent, called once from `rust_main`.
 //!   * [`breakpoint`]     — execute a software breakpoint (`int3` / `brk #0`).
 //!   * [`set_trap_hook`]  — register the safe dispatch policy hook.
 //!   * [`TrapInfo`] / [`TrapKind`] / [`TrapAction`] — the safe trap-dispatch ABI.
+//!
+//! M2 cooperative tasks (this milestone):
+//!   * [`Task`], [`task_create`], [`yield_to`] — voluntary (cooperative)
+//!     context switch between kernel tasks. Only the ABI callee-saved
+//!     registers plus the stack pointer are switched; the saved SP is the
+//!     ENTIRE per-task context handle (verified ABI facts in the M2 section
+//!     below).
+//!   * [`TaskStack`] — one-shot-takeable static stack cell, so the
+//!     `#![forbid(unsafe_code)]` kernel crate can OWN its static stack arrays
+//!     (tb-hal allocates nothing) and still mint the unique `&'static mut`
+//!     that [`task_create`] requires.
+//!   * [`current_task`] — handle of the task executing right now (slot 0 is
+//!     the bootstrap context that entered `rust_main`).
 //!
 //! POLICY lives in safe Rust: tb-hal's per-arch assembly marshals a raw
 //! `TrapFrame`, an `extern "C"` handler in tb-hal (the ONLY place that derefs
@@ -23,7 +36,8 @@
 #![no_std]
 #![deny(missing_docs)]
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod arch;
 
@@ -176,4 +190,222 @@ pub(crate) fn dispatch_trap(info: &TrapInfo) -> TrapAction {
     let hook: fn(&TrapInfo) -> TrapAction =
         unsafe { core::mem::transmute::<usize, fn(&TrapInfo) -> TrapAction>(raw) };
     hook(info)
+}
+
+// ===========================================================================
+// M2: cooperative tasks + context switch
+// ===========================================================================
+//
+// Saved-context model (callee-saved-on-stack, the classic cooperative switch):
+// `yield_to` saves ONLY the callee-saved registers of the outgoing task onto
+// the outgoing task's own stack and records the resulting stack pointer in
+// that task's slot; resuming a task is "load its saved SP, pop the
+// callee-saved set, return". A single `usize` (the saved SP) is therefore the
+// whole per-task context. Caller-saved registers need no saving: `yield_to`
+// is an ordinary function call, so the compiler already treats them as dead
+// across it.
+//
+// Verified ABI facts (sources re-checked for M2 — do NOT change the register
+// sets or frame layouts without re-reading them):
+//  * x86-64 System V psABI (AMD64 ABI 1.0 draft, 2025-03-12, §3.2.1 + Fig 3.4
+//    "Register Usage"): "Registers %rbp, %rbx and %r12 through %r15 'belong'
+//    to the calling function and the called function is required to preserve
+//    their values" → callee-saved GPRs = {rbx, rbp, r12, r13, r14, r15}
+//    (+ rsp itself). §3.2.2 "The Stack Frame": at function entry "the value of
+//    (%rsp + 8) is a multiple of 16", i.e. RSP % 16 == 8 right after `call`.
+//  * AAPCS64 (ARM-software/abi-aa, aapcs64.rst, 2025Q4, §6.1.1 "General-purpose
+//    registers"): "r19…r28 | Callee-saved registers" and "Registers r19-r29
+//    and SP are Callee-saved"; r29 = FP, r30 = LR (the resume address rides in
+//    LR; `ret` branches to it). §6.4.5.1 "Universal stack constraints":
+//    "SP mod 16 = 0. The stack must be quad-word aligned."
+//  * Initial-frame fabrication technique: OSDev wiki, "Brendan's Multi-tasking
+//    Tutorial" (Step 1/2): "put values on the new kernel stack to match the
+//    values that your switch_to_task(task) function expects to pop off the
+//    stack after switching to the task" — i.e. a fake callee-saved frame whose
+//    return address / LR is the task's entry, so the FIRST switch into the
+//    task "returns" into `entry`.
+//
+// No FP/SIMD state is switched: both TABOS targets are soft-float target
+// specs, so v8-v15 (AAPCS64) and the SSE/x87 state (psABI) cannot hold live
+// values across the switch.
+
+/// Number of task slots tb-hal tracks, INCLUDING slot 0, which is permanently
+/// reserved for the bootstrap context (the stack `_start` set up and
+/// `rust_main` runs on). M2 needs three (bootstrap + the two ping-pong tasks);
+/// eight leaves headroom without needing a heap.
+const MAX_TASKS: usize = 8;
+
+/// Per-slot saved stack pointer — the WHOLE saved context of a suspended task
+/// under the callee-saved-on-stack model. `0` means "no saved context" (slot
+/// never created, or its task is currently running so its slot is stale).
+/// `AtomicUsize` because tb-hal is `no_std` with no locks; M2 is single-core
+/// cooperative, so the atomics are for safe interior mutability, not racing.
+static TASK_SP: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
+
+/// Slot index of the task currently executing on this (single) core.
+/// `yield_to` updates it right before the raw switch, so a task that is
+/// resumed always observes itself as current.
+static CURRENT_TASK: AtomicUsize = AtomicUsize::new(0);
+
+/// Next free slot in [`TASK_SP`]; slot 0 is the bootstrap context.
+static NEXT_TASK_SLOT: AtomicUsize = AtomicUsize::new(1);
+
+/// Smallest stack [`task_create`] accepts, in `usize` words. The fabricated
+/// initial frame needs at most 13 words (aarch64: 12-register stp/ldp frame +
+/// 16-byte re-alignment of the top); 64 words also gives the entry a little
+/// room before it overflows. Real guard pages arrive with the MMU milestone.
+const MIN_STACK_WORDS: usize = 64;
+
+/// An opaque handle to a cooperative kernel task: the slot index into
+/// tb-hal's internal saved-SP table. `Copy` so it can be passed around freely;
+/// convertible to/from a raw `usize` (see [`Task::raw`]) so the
+/// `forbid(unsafe_code)` kernel can stash handles in `AtomicUsize` statics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Task(usize);
+
+impl Task {
+    /// The raw slot index of this handle, for stashing in an `AtomicUsize`
+    /// (cross-task handle passing in safe kernel code goes through statics).
+    pub fn raw(self) -> usize {
+        self.0
+    }
+
+    /// Rebuild a handle from a value previously obtained via [`Task::raw`].
+    ///
+    /// Safe: a fabricated/invalid index cannot cause memory unsafety — it is
+    /// rejected fail-closed by [`yield_to`] (bounds check + "has this slot a
+    /// saved context" check), which reports over serial and halts.
+    pub fn from_raw(raw: usize) -> Self {
+        Task(raw)
+    }
+}
+
+/// Handle of the task currently executing (slot 0 — the bootstrap context —
+/// until the first [`yield_to`] after [`task_create`]).
+pub fn current_task() -> Task {
+    Task(CURRENT_TASK.load(Ordering::Relaxed))
+}
+
+/// Fail-closed termination for misuse of the M2 task API: report the reason
+/// over serial (best-effort) and park the core. Never returns.
+fn task_api_fatal(msg: &str) -> ! {
+    serial_write_str("tb-hal: task: ");
+    serial_write_str(msg);
+    serial_write_byte(b'\n');
+    halt()
+}
+
+/// Create a cooperative task that will start executing `entry` the first time
+/// somebody [`yield_to`]s it.
+///
+/// `stack` is caller-provided `'static` memory (the kernel owns its static
+/// stack arrays — see [`TaskStack`]; tb-hal does NOT allocate). The arch
+/// backend fabricates the INITIAL context frame at the 16-byte-aligned-down
+/// top of `stack` — a fake callee-saved frame whose return address (x86_64) /
+/// LR slot (aarch64) is `entry` and whose other slots are zero — so the first
+/// switch into the task "returns" into `entry` with an ABI-conformant stack
+/// (x86_64: RSP % 16 == 8 as after `call`, psABI §3.2.2; aarch64:
+/// SP % 16 == 0, AAPCS64 §6.4.5.1).
+///
+/// `entry` must never return: there is no caller frame beneath it. End it in
+/// `halt()` or park it by never yielding back. Fatal (reports + halts) if the
+/// stack is too small or all task slots are used.
+pub fn task_create(stack: &'static mut [usize], entry: fn()) -> Task {
+    if stack.len() < MIN_STACK_WORDS {
+        task_api_fatal("task_create: stack too small");
+    }
+    let slot = NEXT_TASK_SLOT.fetch_add(1, Ordering::Relaxed);
+    if slot >= MAX_TASKS {
+        task_api_fatal("task_create: too many tasks");
+    }
+    let sp = arch::task_stack_init(stack, entry);
+    TASK_SP[slot].store(sp, Ordering::Release);
+    Task(slot)
+}
+
+/// Cooperatively switch from the current context to `next`.
+///
+/// Saves the callee-saved registers + SP of the CURRENT task (on its own
+/// stack), records the resulting SP in the current task's slot, then loads
+/// `next`'s saved SP, restores its callee-saved registers and returns into it.
+/// When somebody later yields back, this function simply returns to its
+/// caller, all callee-saved state intact (psABI §3.2.1 / AAPCS64 §6.1.1).
+///
+/// M2 keeps scheduling explicit/manual: there is no run queue; the caller says
+/// exactly which task runs next. Yielding to the current task is a no-op.
+/// An invalid handle (out of range, or a slot with no saved context) is fatal:
+/// reported over serial, then halt — never a wild jump.
+pub fn yield_to(next: Task) {
+    if next.0 >= MAX_TASKS {
+        task_api_fatal("yield_to: invalid task handle");
+    }
+    let prev = CURRENT_TASK.load(Ordering::Relaxed);
+    if prev == next.0 {
+        return; // self-yield: nothing to switch
+    }
+    let next_sp = TASK_SP[next.0].load(Ordering::Acquire);
+    if next_sp == 0 {
+        task_api_fatal("yield_to: target has no saved context");
+    }
+    CURRENT_TASK.store(next.0, Ordering::Relaxed);
+    // SAFETY: `next_sp` was produced either by `arch::task_stack_init` over a
+    // caller-provided exclusive `&'static mut` stack (fabricated initial
+    // frame) or by a previous `ctx_switch` save of a then-live task; both
+    // leave a well-formed callee-saved frame at that SP. `TASK_SP[prev]
+    // .as_ptr()` points into a `'static` atomic, valid for the single word
+    // `ctx_switch` stores. Single core + cooperative switching: no other
+    // context can touch either slot while the switch runs.
+    unsafe { arch::ctx_switch(TASK_SP[prev].as_ptr(), next_sp) }
+}
+
+/// A statically-allocatable, 16-byte-aligned kernel task stack of `WORDS`
+/// `usize` words, takeable exactly once as `&'static mut [usize]`.
+///
+/// Exists so the `#![forbid(unsafe_code)]` kernel crate can OWN its static
+/// stack arrays (tb-hal allocates nothing) and still produce the unique
+/// `&'static mut` that [`task_create`] requires — safe code cannot otherwise
+/// mint a mutable reference into a `static`. The atomic one-shot gate makes
+/// aliased handouts impossible; a second [`TaskStack::take`] is fatal
+/// (reported over serial, then halt).
+#[repr(C, align(16))]
+pub struct TaskStack<const WORDS: usize> {
+    // First field at offset 0 inherits the struct's 16-byte alignment — both
+    // ABIs demand a 16-aligned stack (psABI §3.2.2; AAPCS64 §6.4.5.1
+    // "SP mod 16 = 0"), and the arch frame builders keep it that way.
+    mem: UnsafeCell<[usize; WORDS]>,
+    // One-shot gate, flipped by the first `take()`.
+    taken: AtomicBool,
+}
+
+// SAFETY: the ONLY route to the inner array is `take()`, whose atomic
+// swap-once gate hands out at most one `&'static mut` ever (a racing second
+// caller loses the swap and halts), so shared references to the cell are never
+// used to alias the interior data.
+unsafe impl<const WORDS: usize> Sync for TaskStack<WORDS> {}
+
+impl<const WORDS: usize> TaskStack<WORDS> {
+    /// A new zeroed stack; `const`, so it can initialise a kernel `static`.
+    pub const fn new() -> Self {
+        TaskStack {
+            mem: UnsafeCell::new([0; WORDS]),
+            taken: AtomicBool::new(false),
+        }
+    }
+
+    /// Hand out the stack as `&'static mut [usize]` — exactly once.
+    ///
+    /// A second call on the same static is a fatal API misuse: it reports over
+    /// serial and halts (fail-closed; it can never mint a second aliasing
+    /// `&mut`).
+    pub fn take(&'static self) -> &'static mut [usize] {
+        if self.taken.swap(true, Ordering::AcqRel) {
+            task_api_fatal("TaskStack::take: taken twice");
+        }
+        // SAFETY: the swap above guarantees this body runs at most once per
+        // static instance, so the `&mut` minted here is unique for `'static`;
+        // `UnsafeCell` makes mutating the interior of an immutable `static`
+        // well-defined.
+        let array: &'static mut [usize; WORDS] = unsafe { &mut *self.mem.get() };
+        &mut array[..]
+    }
 }

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M0 (x86_64).
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M2 (x86_64).
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M1: traps OK" appears on serial. Fail-closed: a wall-clock timeout
-# always bounds the run (the kernel halts rather than exiting), and a missing
-# marker is a non-zero exit.
+# "M2: context-switch OK" appears on serial (the cooperative ping-pong proof;
+# M0's hello and M1's trap round-trip still print earlier in the same boot).
+# Fail-closed: a wall-clock timeout always bounds the run (the kernel halts
+# rather than exiting), and a missing marker is a non-zero exit.
 #
 # PVH is selected automatically by QEMU from the XEN_ELFNOTE_PHYS32_ENTRY note
 # in the ELF (see crates/tb-hal/src/arch/x86_64/boot.rs + kernel/linker/x86_64.ld).
@@ -20,7 +21,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M1: traps OK'
+MARKER='M2: context-switch OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
