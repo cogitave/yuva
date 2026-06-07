@@ -13,6 +13,32 @@ it in order and do not skip the documentation/benchmark steps.
 Repo: `/mnt/c/Users/Arda/workspaces/@cogitave/tabos` (build/run/git via WSL bash;
 edits via Windows paths). Build: `cargo kbuild --target targets/<arch>-tabos-none.json`.
 
+## Operating mode (standing directives — do not ask)
+- **Always ultracode.** Every substantive step (design, generate, review,
+  synthesize, research) runs as a multi-agent `Workflow`, never solo. The user
+  has made this standing for the whole project — do **not** ask whether to use a
+  workflow; use one. Solo is only for trivial mechanical edits and conversation.
+- **Design Thinking × Success by Design.** Each milestone passes the same
+  principled loop, mapped onto the concrete pipeline so it stays trackable:
+  - *Empathize / Define* — who is this milestone for, and what EXACTLY must it
+    do? Read its ROADMAP-V2 section; state the one capability + the exact DoD
+    marker before any code (Step 1). Every subsystem answers "what does this give
+    an agent?" (the four pillars).
+  - *Ideate* — diverse options before committing: the multi-agent generate +
+    3-lens adversarial review panel (Step 2). Never a single attempt; surface and
+    resolve the contested decisions explicitly (no open decisions left dangling).
+  - *Prototype* — the generated code applied to a clean tree (Step 3).
+  - *Test* — the build + both-arch boot-assert + benchmark + your own audit are
+    the empirical test. "The build is the arbiter" (Steps 4–6).
+  - *Success-by-Design gates* — "done" only when it clears the well-architected
+    pillars, each already a pipeline step: **reliability** (cumulative regression
+    stays green), **security** (framekernel / forbid-unsafe intact), **performance**
+    (boot benchmark current — `docs/BENCHMARKS.md`), **operational excellence**
+    (CI green on both arches + `/dev/kvm`; docs/roadmap/trackers updated). A
+    skipped gate = not done.
+  - *Learn forward* — carry each milestone's lessons (the "actual build catches
+    what review missed" findings) into the next iteration and into this skill.
+
 ## Non-negotiable invariants
 - **Framekernel**: ALL `unsafe` + ALL assembly live ONLY in `crates/tb-hal`.
   `kernel/` and any future service crate stay free of `unsafe {}` (the kernel's
