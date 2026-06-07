@@ -1,0 +1,1117 @@
+[
+ {
+  "area": "sovereignty-ladder",
+  "decisions": [
+   {
+    "decision": "Define the ladder formally and resolve the north-star: L0(guest)->L1(own userspace VMM on /dev/kvm)->L2(own Type-1/bare-metal hypervisor on VT-x/AMD-V/EL2)->L3(own real device drivers). 'Full sovereignty' (north-star) lands at L2, NOT L3. Silicon sovereignty = owning the CPU-virtualization layer + guest memory (EPT/stage-2) + the isolation boundary + scheduling directly on the hardware extensions with NO host kernel underneath; that is fully achieved at L2. L3 (owning all real drivers) is descoped because it is neither necessary for the sovereignty/security goal nor feasible.",
+    "level": "cross",
+    "rationale": "The Type-1 vs Type-2 split is the dividing line: Xen is 'an open-source type-1 or baremetal hypervisor... the first program running after the bootloader exits', whereas KVM (and thus any /dev/kvm VMM) is the hosted model that 'unlike conventional Type-1 hypervisors (such as Xen), makes the explicit design decision to delegate workload scheduling to the host kernel'. Crucially, even the canonical open Type-1 refuses to own drivers ('A special domain, called domain 0 contains the drivers for all the devices in the system'), and the smallest production EL2 monitor (pKVM, ~10k LOC) delegates scheduling, interrupts and device emulation to the host. So removing the host kernel from the TCB (the real sovereignty win) is an L2 property; owning drivers (L3) is a separate, optional, mostly-infeasible burden.",
+    "sources": [
+     "https://wiki.xenproject.org/wiki/Xen_Project_Software_Overview",
+     "https://source.android.com/docs/core/virtualization/security"
+    ]
+   },
+   {
+    "decision": "Acknowledge L0 (today) as the baseline to escape: TABOS-as-guest on stock Firecracker/QEMU owns NOTHING below the guest boundary — the third-party VMM owns the boot contract, machine model and device model, and the entire host Linux + KVM + VMM + firmware sit in the TCB. The MV milestone exists specifically to exit L0.",
+    "level": "L0-guest",
+    "rationale": "Firecracker design: 'Each Firecracker process encapsulates one and only one microVM'; the VMM thread 'exposes the machine model, minimal legacy device model... VirtIO device emulated Net, Block and Vsock devices'; vCPU threads are 'created via KVM and run the KVM_RUN main loop'; and 'the first layer of isolation is provided by the Linux KVM'. At L0 every one of those is owned by code TABOS did not write, so sovereignty below the guest boundary is effectively nil.",
+    "sources": [
+     "https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md"
+    ]
+   },
+   {
+    "decision": "Realistic near-term target is L1: ship tb-vmm as a userspace rust-vmm VMM on the host's /dev/kvm. This is the proven path and the right MV milestone. At L1 TABOS owns the boot contract + machine model + device model (all in #![forbid(unsafe_code)] Rust over thin FFI), while the host Linux still owns the hardware and KVM (still in the TCB).",
+    "level": "L1-own-vmm",
+    "rationale": "Firecracker, cloud-hypervisor and crosvm are ALL rust-vmm Type-2 VMMs on KVM ('Cloud Hypervisor... runs on top of the KVM hypervisor', 'based on the Rust VMM crates'). The rust-vmm building blocks are exactly the ones named: kvm-bindings = 'Rust FFI bindings to KVM', kvm-ioctls = 'Safe wrappers over the KVM API'. The control flow is open('/dev/kvm') -> KVM_CREATE_VM -> KVM_CREATE_VCPU -> KVM_RUN loop. Low cost, high payoff: TABOS owns its boot ABI immediately without owning silicon.",
+    "sources": [
+     "https://github.com/cloud-hypervisor/cloud-hypervisor",
+     "https://github.com/rust-vmm/kvm",
+     "https://docs.kernel.org/virt/kvm/api.html",
+     "https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md"
+    ]
+   },
+   {
+    "decision": "tb-boot v0 enters the guest DIRECTLY in 64-bit long mode: tb-vmm maps guest RAM with KVM_SET_USER_MEMORY_REGION, builds an initial page table, and programs the vCPU via KVM_SET_SREGS (CR0.PE+PG, CR4.PAE, EFER.LME/LMA, a 64-bit/L=1 code segment) before the first KVM_RUN — deleting the bootstrap PVH path and the A0 32->64 trampoline.",
+    "level": "L1-own-vmm",
+    "rationale": "KVM api: KVM_SET_SREGS 'Writes special registers into the vcpu' (struct kvm_sregs carries CR0/CR3/CR4/EFER/segments on x86); guest RAM is established with KVM_SET_USER_MEMORY_REGION; KVM_RUN then runs the vCPU. Because a sovereign VMM sets the entire architectural CPU state itself, it can define its own boot ABI and skip third-party firmware/real-mode bring-up entirely. (Verify exact kvm_sregs field semantics for a clean long-mode entry.)",
+    "sources": [
+     "https://docs.kernel.org/virt/kvm/api.html"
+    ]
+   },
+   {
+    "decision": "The L2 north-star is a SMALL Type-1 core (pKVM/Hedron-NOVA shape), not a fat hypervisor. TABOS owns only the silicon-mandated virtualization layer + memory + scheduling + IOMMU, and delegates OS services and device emulation to confined guests. Keep the trusted virtualization core minimal to preserve the framekernel's small-TCB thesis at the hypervisor level too.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "pKVM shows a ~10k-LOC EL2 monitor yields 'three orders of magnitude less attack surface compared to the entire Linux kernel (roughly 10 thousand versus 20 million lines of code)' while delegating scheduling, physical interrupt handling and the VMM/device model to the host. Hedron is 'a microhypervisor [that] combines microkernel and hypervisor functionality and provides an extremely small trusted computing base', capability-based, with guests run by 'a virtual machine monitor running in user space'. Both prove the win is a tiny sovereign core, not a monolith.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/security",
+     "https://github.com/cyberus-technology/hedron"
+    ]
+   },
+   {
+    "decision": "L2 is per-silicon-ABI and triples the unsafe surface: on ARM, run in EL2 using stage-2 translation (optionally VHE/E2H); on x86, own VMX (VMXON, a VMCS per vCPU, VM-entry/VM-exit, EPT) and/or AMD SVM (EFER.SVME, VMCB, VMRUN, NPT). Sequence the architectures (likely ARM-EL2 or one x86 vendor first) rather than assume parity, and budget a large new unsafe+asm block in tb-hal.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "kernel.org arm64 booting (authoritative): 'EL2 is the hypervisor level'... the CPU must enter 'either in EL2 (RECOMMENDED in order to have access to the virtualisation extensions), or in EL1'. The three vendor virtualization ABIs (Intel VMX/VMCS/EPT, AMD SVM/VMCB/NPT, ARM EL2/stage-2) are disjoint and each is its own silicon-mandated unsafe surface; Hedron even dropped AMD support 'due to lack of testing', evidence that multi-vendor hypervisor parity is costly. (Verify VMXON/VMCS/EPT against Intel SDM Vol 3C and VMCB/VMRUN/NPT against AMD APM Vol 2.)",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html",
+     "https://github.com/cyberus-technology/hedron"
+    ]
+   },
+   {
+    "decision": "TABOS will NOT write native device drivers. The driver burden is quarantined in confined driver domains (Xen dom0-disaggregation / driver-domain model; Hedron-style userspace multiserver), each handed ONLY its device through the IOMMU. Consequently L2 MUST own IOMMU programming (Intel VT-d, AMD-Vi, ARM SMMU) — it is a hard security prerequisite, not optional.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Xen driver-domain doc: 'Without IOMMU support, there's nothing to stop the driver domain from using the network card's DMA engine to read and write any system memory.' VFIO confirms the IOMMU group is the unit of secure assignment — a device is unbound from its host driver and bound to vfio-pci, and DMA is confined by VT-d/AMD-Vi. Even Xen, a <300KSLOC-x86 Type-1, keeps all native drivers in a Linux dom0 rather than in the hypervisor; TABOS copies that and owns the IOMMU, not the drivers.",
+    "sources": [
+     "https://wiki.xenproject.org/wiki/Driver_Domain",
+     "https://www.kernel.org/doc/html/latest/driver-api/vfio.html"
+    ]
+   },
+   {
+    "decision": "The GPU/CUDA dependency is silicon + proprietary-driver-mandated and is QUARANTINED, not eliminated: at every rung above L1, local LLM inference runs by passing the physical GPU through (VFIO/IOMMU) to a Linux 'GPU driver domain' running the closed NVIDIA stack. TABOS will not reimplement the NVIDIA kernel driver. Accept explicitly that a Linux+CUDA blob is a PERMANENT resident of the AI-data confidentiality TCB whenever a GPU is in use.",
+    "level": "cross",
+    "rationale": "CUDA install guide: 'To use NVIDIA CUDA on your system, you will need... a CUDA-capable GPU, a supported version of Linux with a gcc compiler and toolchain, [and the] CUDA Toolkit', supported only on qualified Linux distros (RHEL/Ubuntu/SUSE/Debian/Fedora...). The only sovereign escape is passthrough: VFIO 'turns the VM into a userspace driver, with... direct use of bare-metal device drivers', requiring VT-d/AMD-Vi. So the GPU stack stays Linux+proprietary inside a confined VM; full sovereignty stops at the IOMMU boundary around the GPU.",
+    "sources": [
+     "https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html",
+     "https://www.kernel.org/doc/html/latest/driver-api/vfio.html"
+    ]
+   },
+   {
+    "decision": "Descope L3 to a bounded, selective driver set for a headless control plane (UART/serial, timers/APIC-GIC, one NIC, NVMe, optionally a simple framebuffer) and NEVER pursue it wholesale; in particular TABOS never owns a native GPU driver. L3 is a per-device opportunistic optimization on top of L2, not a milestone to 'complete'.",
+    "level": "L3-baremetal",
+    "rationale": "The central tension is monotone: the higher the rung, the more device-driver + GPU burden TABOS must own, and that burden is effectively unbounded ('the amount of space... is effectively unbound' echoes the driver problem). The two strongest open precedents both refuse it: Xen keeps every native driver in Linux dom0, and Hedron 'has to be used with a multi-server environment that implements operating-system services in user mode, such as device drivers, protocol stacks'. The marginal sovereignty of owning native modern-hardware drivers (esp. a closed GPU) does not justify the cost; L2 already delivers the security/sovereignty payoff.",
+    "sources": [
+     "https://wiki.xenproject.org/wiki/Xen_Project_Software_Overview",
+     "https://github.com/cyberus-technology/hedron",
+     "https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "SOVEREIGNTY.md resolved 'own VMM (tb-vmm on rust-vmm using host /dev/kvm) + eventual bare metal' but never split L2 (own the Type-1 CPU-virtualization core) from L3 (own real device drivers), and never named L2 as the north-star. 'Bare metal' is ambiguous between 'own the hypervisor' and 'own all drivers'.",
+    "impact": "Without the split the roadmap risks chasing infeasible L3 driver/GPU ownership; this analysis resolves that ambiguity by fixing the north-star at L2 and bounding L3."
+   },
+   {
+    "gap": "IOMMU ownership (Intel VT-d, AMD-Vi, ARM SMMU) is absent from prior research / KERNEL-FOUNDATION-SPEC. It is a hard prerequisite for any L2 driver-domain or GPU-passthrough design.",
+    "impact": "Without TABOS-owned IOMMU programming, DMA-capable driver domains and GPU passthrough are insecure (a passed-through device can DMA over all of memory). It is also a brand-new unsafe surface in tb-hal that nobody has scoped."
+   },
+   {
+    "gap": "The #![forbid(unsafe_code)] framekernel invariant collides with L2: VMX/SVM/EL2 entry, VMCS/VMCB management, EPT/stage-2 page tables, and IOMMU programming all require substantial new unsafe + asm concentrated in tb-hal.",
+    "impact": "The unsafe/asm TCB grows by roughly an order of magnitude versus the current MMU/trap/context-switch code. Prior milestones (M0-M4) did not budget for this, and the 'one unsafe crate' design needs to absorb a much larger, security-critical block."
+   },
+   {
+    "gap": "The GPU/CUDA dependency was flagged as a 'Linux-userspace + proprietary-driver dependency' but never architected, and prior docs did not state that the GPU domain's Linux+CUDA is itself inside the confidentiality TCB for model weights and inference data on the device.",
+    "impact": "Blocks any honest 'sovereign + local inference' claim. Forces an explicit, permanent VFIO GPU-driver-domain design and a stated TCB compromise; pKVM's own model notes DMA-capable devices and more-privileged services must be constrained to preserve confidentiality, which TABOS would have to replicate around the GPU."
+   },
+   {
+    "gap": "Bare-metal platform bring-up is uncovered by the guest-only M0-M4 work: x86 UEFI/ACPI (uefi-rs path), APIC; ARM PSCI/Device Tree, GIC, architected timers (CNTFRQ/CNTVOFF), and SMP AP/secondary-CPU startup (spin-table vs PSCI CPU_ON).",
+    "impact": "L2/L3 cannot boot on real hardware/firmware without this. The kernel.org arm64 boot contract (DTB in x0, MMU off, EL2 entry, per-CPU enable-method) is exactly the surface TABOS must now own as the bootee, then as the hypervisor providing it to guests."
+   },
+   {
+    "gap": "The device-I/O delegation model is unchosen: dom0-equivalent single control domain vs per-device driver domains (Xen disaggregation) vs microhypervisor userspace multiserver (Hedron/seL4). It dictates how much Linux remains and where.",
+    "impact": "This single choice defines TABOS's whole I/O architecture, its residual Linux footprint, and its failure-isolation story (Xen driver domains let a crashed/compromised driver be rebooted 'without affecting the rest of the system')."
+   },
+   {
+    "gap": "Per-architecture hypervisor scope was treated as parity in prior MMU/trap work, but L2 spans three disjoint silicon ABIs (Intel VMX vs AMD SVM vs ARM EL2). Sequencing and possibly dropping a vendor was not considered.",
+    "impact": "L2 effort is ~3x and likely sequential, not parallel; Hedron's removal of AMD support 'due to lack of testing' is a concrete warning that multi-vendor hypervisor parity is expensive to sustain."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "x86 Type-1 (Intel) requires: VMX entered via VMXON; per-vCPU architectural state lives in a VMCS; guest<->host transitions are VM-entry/VM-exit; second-level (guest-physical) address translation is EPT. These are the mandatory primitives tb-hal must own at L2 on Intel. VERIFY exact instruction/structure names and EPT format.",
+    "source": "Intel SDM Vol 3C (VMX: VMXON/VMCS/VM-entry/EPT) — to fetch and quote"
+   },
+   {
+    "fact": "x86 Type-1 (AMD) requires: SVM enabled via EFER.SVME; per-vCPU state in a VMCB; world switch via the VMRUN instruction; nested paging = NPT. Distinct ABI from Intel VMX. VERIFY against AMD docs.",
+    "source": "AMD APM Vol 2 (SVM/VMCB/VMRUN/NPT) — to fetch and quote"
+   },
+   {
+    "fact": "ARM Type-1: 'EL2 is the hypervisor level, EL3 is the highest priority level and exists only in secure mode. Both are architecturally optional.' A bootee must enter 'in non-secure state, either in EL2 (RECOMMENDED in order to have access to the virtualisation extensions), or in EL1.' Guest memory is virtualized via stage-2 translation; VHE (FEAT_VHE / HCR_EL2.E2H) lets a host OS run in EL2. VERIFY VHE/E2H specifics against the ARM ARM.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html (EL2 + virtualisation extensions, verified); ARM ARM AArch64 EL2/stage-2/VHE — to verify"
+   },
+   {
+    "fact": "L1 KVM mechanism: open('/dev/kvm') -> KVM_CREATE_VM (VM fd) -> KVM_CREATE_VCPU (vCPU fd) -> KVM_RUN loop; guest RAM mapped via KVM_SET_USER_MEMORY_REGION; vCPU special registers (CR0/CR4/EFER/segments) set via KVM_SET_SREGS which 'Writes special registers into the vcpu'. This is the exact contract tb-vmm uses to enter long mode directly.",
+    "source": "https://docs.kernel.org/virt/kvm/api.html (verified)"
+   },
+   {
+    "fact": "rust-vmm building blocks: kvm-bindings = 'Rust FFI bindings to KVM'; kvm-ioctls = 'Safe wrappers over the KVM API'. These are the crates tb-vmm builds on at L1.",
+    "source": "https://github.com/rust-vmm/kvm (verified)"
+   },
+   {
+    "fact": "Taxonomy: Xen is 'an open-source type-1 or baremetal hypervisor... the first program running after the bootloader exits' (<65KSLOC on Arm, <300KSLOC on x86); KVM 'unlike conventional Type-1 hypervisors (such as Xen), makes the explicit design decision to delegate workload scheduling to the host kernel.' Therefore any /dev/kvm VMM (L1) is fundamentally the hosted/Type-2 arrangement; L2 is the move to Type-1. (Origin of the Type I/II split is Goldberg 1973 — verify if cited.)",
+    "source": "https://wiki.xenproject.org/wiki/Xen_Project_Software_Overview (verified); https://source.android.com/docs/core/virtualization/security (verified)"
+   },
+   {
+    "fact": "Even a canonical Type-1 does not own drivers: in Xen 'a special domain, called domain 0 contains the drivers for all the devices in the system'; Dom0 holds the native device drivers, toolstack and QEMU device emulation. This is the precedent for TABOS delegating drivers at L2.",
+    "source": "https://wiki.xenproject.org/wiki/Xen_Project_Software_Overview (verified)"
+   },
+   {
+    "fact": "pKVM EL2 monitor: 'the EL2 portion of pKVM... has three orders of magnitude less attack surface compared to the entire Linux kernel (roughly 10 thousand versus 20 million lines of code)'; it delegates vCPU scheduling AND physical interrupt handling to the host kernel to keep the hypervisor small. Justifies the small-Type-1-core decision.",
+    "source": "https://source.android.com/docs/core/virtualization/security (verified)"
+   },
+   {
+    "fact": "Hedron/NOVA: 'combines microkernel and hypervisor functionality and provides an extremely small trusted computing base', capability-based, runs guests via 'a virtual machine monitor running in user space', and 'has to be used with a multi-server environment that implements operating-system services in user mode, such as device drivers, protocol stacks'. Requires Intel VMX + nested paging (EPT); AMD support currently absent.",
+    "source": "https://github.com/cyberus-technology/hedron (verified)"
+   },
+   {
+    "fact": "VFIO GPU/device passthrough: VFIO is an 'IOMMU/device agnostic framework for exposing direct device access to userspace', requiring DMA/interrupt remapping (Intel VT-d / AMD-Vi); the device is unbound from its host driver and bound to vfio-pci; the IOMMU group is 'the unit of ownership used by VFIO'; passthrough 'turns the VM into a userspace driver, with... direct use of bare-metal device drivers'. This is the mechanism for the GPU driver domain.",
+    "source": "https://www.kernel.org/doc/html/latest/driver-api/vfio.html (verified)"
+   },
+   {
+    "fact": "CUDA is a Linux + proprietary-driver dependency: 'To use NVIDIA CUDA on your system, you will need... a CUDA-capable GPU, a supported version of Linux with a gcc compiler and toolchain, [and the] CUDA Toolkit', supported only on qualified Linux distributions (RHEL, AlmaLinux, SUSE/SLES, Ubuntu, Debian, Fedora, Amazon/Azure Linux). TABOS cannot natively run CUDA; it must passthrough to a Linux GPU domain.",
+    "source": "https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html (verified)"
+   },
+   {
+    "fact": "IOMMU is mandatory for DMA-safe driver domains: 'Without IOMMU support, there's nothing to stop the driver domain from using the network card's DMA engine to read and write any system memory.' Hence L2 must own VT-d/AMD-Vi/SMMU before any passthrough or driver-domain is secure.",
+    "source": "https://wiki.xenproject.org/wiki/Driver_Domain (verified)"
+   }
+  ]
+ },
+ {
+  "area": "tb-vmm-rustvmm",
+  "decisions": [
+   {
+    "decision": "Build tb-vmm on a fixed rust-vmm crate matrix: MANDATORY = kvm-ioctls (safe /dev/kvm wrappers) + kvm-bindings (FFI structs) + vm-memory (backend-mmap GuestMemoryMmap) + vmm-sys-util (EventFd/ioctl/FamStructWrapper, transitively required and re-exported by kvm-ioctls as errno::Error) + event-manager (epoll loop) + vm-allocator (IdAllocator for KVM memslot IDs/GSIs, AddressAllocator for MMIO ranges). USE-AS-PARSER = linux-loader's loader::elf::Elf to parse our own tb-kernel ELF, but DELIBERATELY skip its LinuxBootConfigurator/PvhBootConfigurator. DEVICE = vm-superio. AARCH64-ONLY = vm-fdt. DEFER for MV = virtio-bindings/virtio-queue/virtio-device. Pin to Firecracker's exact versions.",
+    "level": "L1-own-vmm",
+    "rationale": "linux-loader README states plainly: 'much of the boot process remains the VMM's responsibility... The VMM sets up initial register values in this phase, without using linux-loader' - so the loader/configurator split lets us reuse only the ELF parser and set vCPU state ourselves, which is exactly the tb-boot goal. vm-allocator README: IdAllocator is 'for legacy GSI numbers or KVM memory slot IDs'. kvm-ioctls lib.rs re-exports vmm_sys_util::errno::Error, proving the transitive dependency. Versions from Firecracker src/vmm/Cargo.toml: kvm-ioctls 0.24.0, kvm-bindings 0.14.0, vm-memory 0.17.1, linux-loader 0.13.2, vm-superio 0.8.1, event-manager 0.4.2, vm-allocator 0.1.3, vmm-sys-util 0.15.0, vm-fdt 0.3.0.",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/vm-allocator/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/kvm-ioctls/src/lib.rs",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/Cargo.toml"
+    ]
+   },
+   {
+    "decision": "Pin the tb-boot v0 x86_64 contract concretely. Before the first KVM_RUN, tb-vmm writes a flat long-mode GDT and identity page tables into guest RAM, then KVM_SET_SREGS with cr0|=PE(0x1), cr0|=PG(0x8000_0000), cr4|=PAE(0x20), efer|=LME(0x100)|LMA(0x400), cr3=PML4 base; cs=code/ds=es=fs=gs=ss=data/tr=tss segments loaded; and KVM_SET_REGS with rflags=0x2, rip=entry, rsp=rbp=BOOT_STACK_POINTER, and RSI -> tb-boot info struct (our convention, replacing Linux's zero-page pointer). Memory map pinned: GDT@0x500, IDT@0x520, PML4@0x9000, PDPTE@0xa000, PDE@0xb000 (512x 2MB identity map of [0,1GB): PDE[i]=(i<<21)|0x83, PML4/PDPTE entries=child|0x03). FPU: fcw=0x37f, mxcsr=0x1f80 via KVM_SET_FPU.",
+    "level": "L1-own-vmm",
+    "rationale": "This is Firecracker's exact BootProtocol::LinuxBoot path in src/vmm/src/arch/x86_64/regs.rs minus the Linux ABI: configure_segments_and_sregs sets cr0|=PE, efer|=LME|LMA with GDT [NULL, 0xa09b CODE, 0xc093 DATA, 0x808b TSS]; setup_page_tables sets cr3=PML4(0x9000), cr4|=PAE, cr0|=PG and writes PDE[i]=(i<<21)+0x83. Because PG/PAE/LME/LMA and CR3 are live before instruction 0, the guest's first fetch already runs in 64-bit long mode with [0,1GB) mapped - this is precisely what deletes the PVH note and the A0 32->64 trampoline. Firecracker's PvhBoot path (cr0=PE|ET, cr4=0, no LME) is the 32-bit-protected mode TABOS is rejecting. RSI is a pure software ABI (KVM does not constrain it), so swapping ZERO_PAGE_START for a tb-boot info pointer is free.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+    ]
+   },
+   {
+    "decision": "Pin the tb-boot v0 aarch64 contract. tb-vmm calls VmFd::get_preferred_target() then VcpuFd::vcpu_init(&kvi) (KVM_ARM_VCPU_INIT) with KVM_ARM_VCPU_PSCI_0_2 set; then via KVM_SET_ONE_REG sets PSTATE=PSTATE_FAULT_BITS_64 (EL1h, DAIF masked), PC=entry, and X0 -> tb-boot info struct (core_reg_base 0x6030_0000_0010_0000; PC at base+2*32, X0 at base+2*0). The guest enters at EL1. Secondary vCPUs are created KVM_ARM_VCPU_POWER_OFF and woken by guest PSCI. tb-vmm must also create an in-kernel GIC (KVM irqchip) and, for MV, build a minimal DTB with vm-fdt that X0 points to.",
+    "level": "L1-own-vmm",
+    "rationale": "Firecracker src/vmm/src/arch/aarch64/vcpu.rs setup_boot_regs sets PSTATE=PSTATE_FAULT_BITS_64, PC=boot_ip, and regs[0]=get_fdt_addr(mem) (i.e. X0=DTB); default_kvi() does get_preferred_target + KVM_ARM_VCPU_PSCI_0_2; secondary vcpus get '1 << KVM_ARM_VCPU_POWER_OFF'. The kvm-ioctls lib.rs aarch64 example confirms the register IDs: core_reg_base=0x6030_0000_0010_0000, set PC at base+2*32, set X0 at base+2*0, after vm.get_preferred_target+vcpu.vcpu_init. CRITICAL silicon/KVM fact: KVM hands the guest EL1 (KVM itself occupies EL2), so the tb-kernel CANNOT run at EL2 under L1 - that is an L2/L3 capability, not an L1 one.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs",
+     "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/kvm-ioctls/src/lib.rs"
+    ]
+   },
+   {
+    "decision": "Ship MV with exactly ONE console device for M0-M4 parity: a vm-superio 16550A on x86_64 (PIO base 0x3f8, registered on the bus, fed by an event-manager EventSubscriber that pumps stdin via an EventFd Trigger), and a PL011 (or the same 16550 over MMIO) on aarch64. Add the vm-superio i8042 (CPU-reset only) on x86 to detect guest shutdown. No virtio, no block, no net in MV.",
+    "level": "L1-own-vmm",
+    "rationale": "vm-superio README: it emulates a 16550A UART (DLL/IER/IIR/LCR/LSR/MCR/MSR/SR) with a 64-byte FIFO, a PL031 RTC, and an i8042 that emulates 'only the CPU reset command which is needed for announcing the VMM about the guest's shutdown'; the VMM must 'add the serial port to the Bus (either PIO or MMIO), define the serial backend, event handling'. The event-manager README's CounterSubscriber example is the exact pattern for wiring stdin via EventFd+EventSet::IN. A single UART gives serial round-trip + the syscall console TABOS already exercises in M0-M4, so virtio (more queues, feature negotiation, MMIO transport) is unjustified complexity for MV.",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/vm-superio/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/event-manager/main/README.md"
+    ]
+   },
+   {
+    "decision": "Treat tb-vmm as a Linux-userspace binary in its OWN audited-unsafe domain, explicitly OUTSIDE the framekernel's #![forbid(unsafe_code)] boundary, and do NOT conflate it with the sovereign kernel. The rust-vmm crates are std, Linux-only, and unsafe-bearing (mmap, ioctl, raw guest-memory pointers); event-manager is epoll/Linux-only. tb-vmm gets a tb-hal-style rule (unsafe confined, reviewed, wrapped) but is documented as a host tenant, not part of TABOS's verified core.",
+    "level": "cross",
+    "rationale": "event-manager README: 'this crate only works on Linux and uses the epoll API'. vm-memory backend-mmap and kvm-ioctls wrap mmap/ioctl in unsafe (lib.rs example uses libc::mmap and `unsafe { vm.set_user_memory_region(...) }`). vmm-sys-util README: 'safe wrappers around common utilities for working with files, event file descriptors, ioctls'. None are no_std or forbid(unsafe). TABOS's discipline (all unsafe+asm in tb-hal, rest forbid-unsafe) applies to the KERNEL; tb-vmm is a separate host program, so the orchestrator must record it as a distinct trust/unsafe domain rather than letting it silently violate the kernel invariant.",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/event-manager/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/vmm-sys-util/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/kvm-ioctls/src/lib.rs"
+    ]
+   },
+   {
+    "decision": "Document the L1 ceiling honestly: tb-vmm on host /dev/kvm wins a sovereign BOOT CONTRACT and DEVICE MODEL, not independence from Linux. The world switch (VMX/SVM), EPT/NPT second-stage paging, vCPU scheduling, and physical interrupt routing all remain in the host KVM module. Independence from the host kernel is L2 (own type-1 hypervisor in VMX-root / EL2) or L3 (bare metal), and rust-vmm provides NONE of that machinery - it assumes KVM already exists.",
+    "level": "cross",
+    "rationale": "kvm-ioctls README/lib.rs describe ONLY userspace wrappers over the kernel's KVM interface ('A safe wrapper around the kernel's KVM interface'); KVM_RUN returns to userspace on VcpuExit but the VM-entry/VM-exit and EPT are done by the host. Firecracker (the reference) is a KVM client, not a hypervisor. Therefore the SOVEREIGNTY.md plan 'own VMM on rust-vmm using host /dev/kvm' must be tagged as L1=orchestrator-of-Linux. To reach L2, TABOS must itself implement VMXON/VMCS/EPT (Intel) or VMCB/NPT (AMD) or EL2 stage-2 translation, which is a wholly different, non-rust-vmm codebase (precedents: NOVA/Hedron, Bareflank, seL4-virt, pKVM nVHE).",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/kvm-ioctls/src/lib.rs",
+     "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/README.md"
+    ]
+   },
+   {
+    "decision": "Resolve the GPU/CUDA tax now: local LLM inference (vLLM/llama.cpp + CUDA) NEVER runs inside the sovereign tb-kernel guest. At L1 it stays on the host; at L2/L3 the only path is VFIO GPU passthrough into a Linux DRIVER DOMAIN (Qubes/Xen-style) that TABOS orchestrates, with the NVIDIA proprietary kernel driver + CUDA userspace living entirely in that Linux domain and TABOS talking to it over a virtio/vsock channel. The from-scratch tb-kernel gets no native GPU driver - permanently.",
+    "level": "cross",
+    "rationale": "CUDA requires NVIDIA's proprietary kernel-mode driver + userspace runtime, neither of which exists for a from-scratch Rust kernel, and writing one is out of scope for any TABOS milestone. The realistic precedent is Qubes/Xen driver domains and VFIO passthrough (IOMMU-backed device assignment), which keep the messy proprietary stack in a disposable Linux VM. This bounds the LLM-agnostic constraint: TABOS can be sovereign for compute and orchestration while delegating GPU inference to a quarantined Linux domain reachable over a paravirtual channel - the sovereignty is architectural (isolation + our own transport), not driver-level.",
+    "sources": [
+     "https://raw.githubusercontent.com/rust-vmm/vm-virtio/main/README.md",
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/Cargo.toml"
+    ]
+   },
+   {
+    "decision": "Copy Firecracker's vCPU-setup and boot patterns as the tb-boot reference, but do NOT adopt rust-vmm's virtio stack for MV - and expect to write our own MMIO transport glue when virtio eventually lands. Firecracker is the canonical source for register/page-table/GDT setup; clone those modules' logic. For virtio later, pull virtio-queue + virtio-device + virtio-bindings from rust-vmm but plan to implement the MMIO transport wiring ourselves, as the reference VMMs do.",
+    "level": "L1-own-vmm",
+    "rationale": "Firecracker's src/vmm/Cargo.toml lists kvm-ioctls/kvm-bindings/vm-memory/linux-loader/vm-superio/event-manager/vm-allocator/vm-fdt but NO rust-vmm virtio-queue/virtio-device dependency - Firecracker ships its own in-tree virtio (src/vmm/src/devices/virtio); crosvm and cloud-hypervisor similarly maintain their own device layers. The vm-virtio README confirms the division of labor: virtio-device gives 'a default implementation for the MMIO transport operations (read, write)' and the VirtioDevice trait, but 'the VMM has to also define the device backend and the event handling mechanism'. So crate reuse is real but partial; the transport+backend glue is always bespoke.",
+    "sources": [
+     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/Cargo.toml",
+     "https://raw.githubusercontent.com/rust-vmm/vm-virtio/main/README.md",
+     "https://raw.githubusercontent.com/rust-vmm/vm-virtio/main/virtio-queue/README.md"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "Prior TABOS docs (SOVEREIGNTY.md) classified 'own VMM on rust-vmm using host /dev/kvm' as a sovereignty win, but never pinned the L1 CEILING: tb-vmm is a host-Linux userspace tenant - the VMX/SVM world switch, EPT/NPT, vCPU scheduling, and physical IRQ routing all stay in the host KVM module. rust-vmm provides zero hypervisor (VMXON/VMCS/EPT, EL2 stage-2) machinery.",
+    "impact": "If MV is mis-sold as 'sovereign hypervisor', the roadmap skips the actually-hard L2 work (own type-1 in VMX-root/EL2). The orchestrator must label MV as L1-orchestrator-of-Linux and budget L2 as a separate non-rust-vmm codebase (NOVA/Hedron/Bareflank/pKVM-class)."
+   },
+   {
+    "gap": "The tb-boot v0 contract was described only abstractly ('CR0.PG|PE, CR4.PAE, EFER.LME|LMA, flat GDT, CR3, RIP, RSI/arg'); prior research never pinned the GUEST-RAM ADDRESSES of the boot artifacts (GDT, IDT, PML4/PDPTE/PDE, info struct, stack) that both the VMM (producer) and the tb-kernel's M3 MMU code (consumer) must agree on.",
+    "impact": "Without a pinned memory map (Firecracker uses GDT@0x500, IDT@0x520, PML4@0x9000, PDPTE@0xa000, PDE@0xb000), the kernel's own page-table takeover in M3 can collide with the VMM's bootstrap tables. tb-boot v0 must specify these as a frozen ABI, including where the tb-boot info struct lives and how the kernel reclaims the bootstrap pages."
+   },
+   {
+    "gap": "The aarch64 path is materially heavier than x86 and prior notes ('set PC/x0=our-info, EL1') understated it: KVM mandates KVM_ARM_VCPU_INIT against a kernel-preferred target, an in-kernel GIC (irqchip), PSCI for secondary-CPU bring-up (KVM_ARM_VCPU_POWER_OFF), and (for a Linux-shaped boot) a vm-fdt-built DTB that X0 points at. And the guest is locked to EL1.",
+    "impact": "tb-vmm needs an aarch64-only GIC + DTB + PSCI bring-up subsystem that has no x86 analog, plus the tb-kernel must accept EL1 (never EL2) under L1. This is extra MV scope and forecloses any 'tb-kernel at EL2' ambition until L2/L3."
+   },
+   {
+    "gap": "Prior research implied building 'on the rust-vmm crates' broadly, but did not note that the reference VMMs (Firecracker, cloud-hypervisor, crosvm) do NOT consume rust-vmm's virtio-queue/virtio-device - they fork their own device + MMIO-transport layers - and that rust-vmm crates are std/Linux-only/unsafe-bearing.",
+    "impact": "Reuse is partial: tb-vmm will still hand-write MMIO transport + device backends even with virtio-queue, and the whole tb-vmm binary is a new unsafe, std, Linux-coupled surface that lives outside the kernel's forbid(unsafe_code) discipline. The roadmap must treat tb-vmm as its own audited-unsafe crate, not as 'free' glue."
+   },
+   {
+    "gap": "No prior decision on the GPU inference boundary across rungs. The LLM-agnostic constraint (vLLM/llama.cpp+CUDA needs proprietary NVIDIA driver) was flagged but not resolved into an architecture.",
+    "impact": "Leaving it open risks an impossible expectation that the sovereign tb-kernel hosts CUDA. Resolved here as a permanent Linux driver-domain + VFIO passthrough + virtio/vsock channel pattern; the roadmap must allocate that quarantined-Linux domain as a first-class component at L2/L3."
+   },
+   {
+    "gap": "Snapshot/restore, dirty-logging, and live-migration surfaces (vm-superio-ser, virtio-queue-ser, KVM_GET_DIRTY_LOG, VcpuState save/restore) exist in the crates but were not scoped by prior TABOS milestones.",
+    "impact": "If TABOS later wants pause/resume or migration of tb-kernel guests, the device and vCPU state-serialization design must be planned now (the *-ser crates require version-locked mirroring of every device state struct); retrofitting serialization is expensive."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "Firecracker's 64-bit boot GDT (src/vmm/src/arch/x86_64/regs.rs, BootProtocol::LinuxBoot) is [gdt_entry(0,0,0) NULL, gdt_entry(0xa09b,0,0xfffff) CODE, gdt_entry(0xc093,0,0xfffff) DATA, gdt_entry(0x808b,0,0xfffff) TSS], verified in tests to produce descriptors 0x00af9b000000ffff (CODE), 0x00cf93000000ffff (DATA), 0x008f8b000000ffff (TSS). Verify each flag field against Intel SDM Vol 3A segment-descriptor encoding before freezing tb-boot's GDT.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "Firecracker constants: EFER_LME=0x100, EFER_LMA=0x400, X86_CR0_PE=0x1, X86_CR0_ET=0x10, X86_CR0_PG=0x8000_0000, X86_CR4_PAE=0x20; page-table entries PML4=PDPTE|0x03, PDPTE=PDE|0x03, PDE[i]=(i<<21)+0x83 for i in 0..512 (2MB huge pages, identity map [0,1GB)); cr3=PML4@0x9000. Verify bit values (esp. PS=bit7 huge-page in 0x83, and that 0x03=Present|RW) against Intel SDM Vol 3A paging tables.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "x86_64 base regs (LinuxBoot): rflags=0x0000_0000_0000_0002 (bit1 reserved-must-be-1), rip=entry, rsp=rbp=BOOT_STACK_POINTER, rsi=ZERO_PAGE_START (Linux ABI boot_params pointer). For tb-boot we replace rsi target with our info-struct pointer. FPU: fcw=0x37f, mxcsr=0x1f80. Verify rflags bit1 requirement against Intel SDM and confirm KVM imposes no constraint on RSI (it is pure guest software ABI).",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/x86_64/regs.rs"
+   },
+   {
+    "fact": "aarch64 boot: KVM core_reg_base=0x6030_0000_0010_0000; set PC at base+2*32, X0 at base+2*0, PSTATE via offset_of!(user_pt_regs,pstate) set to PSTATE_FAULT_BITS_64 (EL1h, DAIF masked). vcpu_init uses VmFd::get_preferred_target + KVM_ARM_VCPU_PSCI_0_2; secondary vcpus get 1<<KVM_ARM_VCPU_POWER_OFF. Verify the arm64_core_reg_id macro math and PSTATE_FAULT_BITS_64 value, and confirm KVM_ARM_VCPU_INIT default entry exception level is EL1 (not EL2) from the ARM ARM / KVM arm64 ABI.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/src/arch/aarch64/vcpu.rs"
+   },
+   {
+    "fact": "kvm-ioctls API surface used by tb-vmm: Kvm::new(); kvm.create_vm() (KVM_CREATE_VM); vm.set_user_memory_region(kvm_userspace_memory_region{slot,guest_phys_addr,memory_size,userspace_addr,flags}) (KVM_SET_USER_MEMORY_REGION, unsafe); vm.create_vcpu(0) (KVM_CREATE_VCPU); vcpu.get_sregs/set_sregs, get_regs/set_regs, set_fpu; vcpu.run()->VcpuExit (KVM_RUN); aarch64 vm.get_preferred_target + vcpu.vcpu_init + vcpu.set_one_reg. Platform support stated as x86_64 (stable), arm64 (experimental), riscv64 (experimental).",
+    "source": "https://raw.githubusercontent.com/rust-vmm/kvm-ioctls/main/kvm-ioctls/src/lib.rs"
+   },
+   {
+    "fact": "Firecracker src/vmm/Cargo.toml pins: kvm-ioctls 0.24.0, kvm-bindings 0.14.0 (fam-wrappers,serde), vm-memory 0.17.1 (backend-mmap,backend-bitmap), linux-loader 0.13.2, vm-superio 0.8.1, event-manager 0.4.2, vm-allocator 0.1.3, vmm-sys-util 0.15.0, vm-fdt 0.3.0 (aarch64 target only) - and depends on NO rust-vmm virtio-queue/virtio-device crate (it ships its own in-tree virtio). Verify these are still current at tb-vmm build time and re-confirm the absence of a rust-vmm virtio dependency.",
+    "source": "https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/src/vmm/Cargo.toml"
+   },
+   {
+    "fact": "linux-loader is loader-only: it loads vmlinux ELF/bzImage on x86_64 and PE Image on aarch64, supports Linux + PVH protocols, but its README states 'much of the boot process remains the VMM's responsibility... The VMM sets up initial register values in this phase, without using linux-loader.' This confirms tb-vmm can use loader::elf::Elf purely as an ELF parser and ignore the boot configurators. Verify the elf loader returns an entry address usable directly as tb-boot RIP.",
+    "source": "https://raw.githubusercontent.com/rust-vmm/linux-loader/main/README.md"
+   },
+   {
+    "fact": "vm-superio emulates a UART 16550A (regs DLL/IER/DLH/IIR/LCR/LSR/MCR/MSR/SR) with a 64-byte RX FIFO (FIFO_SIZE=64, CVE-2020-27173 mitigation), an i8042 emulating only the CPU-reset command for guest shutdown signaling, and a PL031 RTC; the VMM must add it to a PIO or MMIO Bus, define the backend, and do event handling. event-manager is epoll-based and Linux-only. Verify the exact bus-registration and Trigger/EventFd wiring API against the crate docs at the pinned version.",
+    "source": "https://raw.githubusercontent.com/rust-vmm/vm-superio/main/README.md"
+   }
+  ]
+ },
+ {
+  "area": "type1-x86-vmx",
+  "decisions": [
+   {
+    "decision": "Adopt Intel VMX as the PRIMARY L2 substrate (AMD-V second). The canonical bring-up is small and fully specified: CPUID.1:ECX.VMX[5] check, set CR4.VMXE=1, satisfy IA32_FEATURE_CONTROL (bit0 lock + bit2 enable-VMX-outside-SMX), allocate a 4KB-aligned VMXON region seeded with the VMCS revision ID from IA32_VMX_BASIC and execute VMXON; then per-vCPU VMCS via VMCLEAR->VMPTRLD, populate guest-state/host-state/control fields via VMWRITE, enter with VMLAUNCH/VMRESUME, decode exits from the VMCS exit-reason field.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "The instruction surface is ~10 opcodes and each precondition is exact in the SDM: VMXON #UD if CR4.VMXE=0 and #GP if IA32_FEATURE_CONTROL lock bit clear / VMX-enable bit clear; the VMXON region must carry rev[30:0]=VMCS revision id with rev[31]=0. VMLAUNCH flips launch state clear->launched, VMRESUME requires launched. This is the well-trodden, low-risk part of a type-1 — the cost is NOT here.",
+    "sources": [
+     "Intel SDM Vol 3C VMXON (felixcloutier.com/x86/vmxon, Dec 2023)",
+     "Intel SDM Vol 3C VMPTRLD/VMWRITE/VMLAUNCH (felixcloutier.com)",
+     "SDM Vol 3C Ch.24 VMCS, Ch.27 VM Entries (cross-refs in those pages)"
+    ]
+   },
+   {
+    "decision": "Reuse the x86_vcpu crate (arceos-hypervisor, Apache-2.0) as the unsafe VMX/SVM core under tb-hal instead of re-deriving VMCS/EPT plumbing from scratch; TABOS owns only the policy layer above it.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "x86_vcpu already ships vmx/vcpu.rs (VmxArchVCpu), vmx/vmcs.rs (VMCS mgmt), ept.rs (EPT), msr.rs, definitions.rs (VmxExitReason enum + exit reasons), instructions.rs (VMX instr wrappers), percpu.rs (per-CPU VMXON/VMCS state), and an `svm` feature for AMD. This is precisely the asm/unsafe surface TABOS would otherwise hand-write and is the same core ArceOS/axvisor build on. Apache-2.0 is reuse-compatible. Writing VMXON/VMLAUNCH is easy; getting the dozens of consistency-check fields right is not — reuse it.",
+    "sources": [
+     "github.com/arceos-hypervisor/x86_vcpu (README: vmx/vmcs.rs, ept.rs, definitions.rs VmxExitReason, svm feature, Apache-2.0)"
+    ]
+   },
+   {
+    "decision": "Model the architecture on the hvisor/axvisor 'separation-kernel, static-partitioning' Type-1 — one sovereign guest, pCPUs statically partitioned, guest memory pre-allocated, devices passed through — NOT a general multi-VM hypervisor.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "hvisor is a Rust Type-1 bare-metal VMM (x86_64 QEMU-Q35 + real boards, plus arm/riscv/loongarch) using static pCPU partitioning, config-file pre-allocated memory, and device passthrough + virtio; it explicitly references RVM1.5 and jailhouse. axvisor is a modular Type-1 on ArceOS spanning x86_64/aarch64/riscv (Apache-2.0). This matches TABOS's need (single sovereign guest, no dynamic scheduler, no device-model zoo) and is the realistic minimal scope versus KVM-scale generality.",
+    "sources": [
+     "github.com/syswonder/hvisor (README: 'Type-1 bare-metal VMM in Rust', static partitioning, x86_64 Q35, references RVM1.5/jailhouse)",
+     "github.com/arceos-hypervisor/axvisor (README: unified modular Type I, x86_64/arm/riscv, Apache-2.0)"
+    ]
+   },
+   {
+    "decision": "First L2 milestone = a UEFI-loaded thin hypervisor that enters VMX root and demotes the already-booted TABOS into a guest (the Bareflank / rustyvisor / SimpleVisor 'late-launch' pattern). Full pre-OS bare-metal Type-1 (own firmware/ACPI/PCIe) is L3 and is deferred.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Late-launch needs no firmware/ACPI/PCIe re-implementation to bootstrap: Bareflank loads a microkernel+extension into VMX root ('ring -1') from Windows/Linux/UEFI loaders, and rustyvisor runs as a UEFI runtime service virtualizing the running UEFI environment. Be honest: this is L2, not L3 — the hypervisor still TRUSTS the boot chain that launched it and sits below firmware SMM. It buys real CPU/memory isolation of the guest without first solving platform bring-up.",
+    "sources": [
+     "github.com/Bareflank/hypervisor (README: loader places microkernel+extension into VMX root / 'ring -1', UEFI/Windows/Linux)",
+     "github.com/iankronquist/rustyvisor (README: UEFI runtime service that virtualizes the running UEFI env; also a Linux kmod variant)"
+    ]
+   },
+   {
+    "decision": "Provide AMD-V/SVM as the second backend and exploit that it is STRUCTURALLY SIMPLER to bring up than Intel VMX. Enable via EFER.SVME (bit 12) + a VM_HSAVE_PA host-save MSR (no separate VMXON region); a single 4KB VMCB holds control + guest-state edited with plain memory writes (no VMREAD/VMWRITE); VMRUN is one world-switch instruction; NPT via NP_ENABLE + N_CR3 reuses the normal x86 page-table format.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "APM Vol 2 confirms: EFER.SVME bit 12 gates VMRUN/VMLOAD/VMSAVE/VMMCALL (#UD otherwise); VMRUN runs at CPL0 in protected mode with implicit [rAX]=4KB-aligned VMCB phys addr, saves host state to VM_HSAVE_PA (C001_0117h), loads guest from the VMCB state-save area, runs until an intercept -> #VMEXIT resumes after VMRUN. NPT enabled by NP_ENABLE with N_CR3, requires hCR0.PG=1, detected via CPUID 8000_000A.EDX[0]. The VMCB-as-plain-struct + single VMRUN avoids Intel's opaque VMREAD/VMWRITE field encoding and the launch/resume state machine — a genuinely lower-friction path that the x86_vcpu `svm` feature already abstracts.",
+    "sources": [
+     "AMD64 APM Vol 2 (24593 Rev 3.14) sec 2902 EFER.SVME bit12, sec 15.5 VMRUN / VM_HSAVE_PA, sec 15.25.3 Enabling Nested Paging NP_ENABLE/N_CR3, App B VMCB layout",
+     "github.com/arceos-hypervisor/x86_vcpu (svm feature flag)"
+    ]
+   },
+   {
+    "decision": "Mandate second-level address translation (EPT on Intel / NPT on AMD) from day one as THE memory-isolation primitive, with explicit INVEPT/TLB invalidation discipline.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "EPT confines guest-physical->host-physical: enabled by the secondary proc-based exec control 'enable EPT' (IA32_VMX_PROCBASED_CTLS2 bit 33), capabilities in IA32_VMX_EPT_VPID_CAP, an EPTP pointing at a 4-level PML4/PDPT/PD/PT tree, invalidated by INVEPT single-context(type1)/global(type2). Without SLAT the guest's physical addresses ARE host physical addresses — no isolation at all. TABOS already wrote its own normal page tables in M3, so EPT/NPT table-building is adjacent skillset.",
+    "sources": [
+     "Intel SDM Vol 3C INVEPT (felixcloutier.com/x86/invept): IA32_VMX_PROCBASED_CTLS2[33], IA32_VMX_EPT_VPID_CAP, EPTP, Ch.29 'VMX Support for Address Translation'",
+     "AMD APM Vol 2 sec 15.25 Nested Paging"
+    ]
+   },
+   {
+    "decision": "HARD GATE on any sovereignty claim: a real Type-1 MUST program the IOMMU (Intel VT-d / AMD-Vi) for DMA remapping — EPT/NPT alone do NOT isolate device DMA. Treat VT-d/AMD-Vi as a mandatory, separately-scoped sub-project, not an afterthought.",
+    "level": "L3-baremetal",
+    "rationale": "EPT/NPT only constrain CPU memory accesses; a passed-through or buggy device performs DMA that bypasses EPT entirely unless an IOMMU translates/blocks it. hvisor itself lists 'IOMMU virtualization' only as PLANNED, i.e. even the leading Rust Type-1 has not closed this. Claiming guest isolation while a device can DMA over the whole host is the single most dangerous gap in a naive type-1.",
+    "sources": [
+     "github.com/syswonder/hvisor (Roadmap: 'Support for IOMMU virtualization' = Planned)",
+     "AMD APM Vol 2 (device protection / DEV) sec 15.24; Intel VT-d is the EPT-orthogonal DMA-remap unit"
+    ]
+   },
+   {
+    "decision": "Do NOT use rust-vmm (kvm-ioctls/kvm-bindings) or Microsoft Hyperlight for L2/L3 — they are L1-rung technologies that require a host hypervisor. rust-vmm wraps a Linux /dev/kvm; Hyperlight is a micro-VMM whose backends are KVM/MSHV/WHP. Keep them strictly to the L1 'own-VMM-on-host-KVM' rung.",
+    "level": "cross",
+    "rationale": "kvm-ioctls is 'safe wrappers over the KVM API' and its tests literally need --device=/dev/kvm; on bare metal there is no KVM to call. Hyperlight's own README states 'Supports KVM, MSHV, and Windows Hypervisor Platform' and that it is a VMM 'embedded within applications' for sandboxing untrusted code — it is NOT bare-metal and is explicitly 'not designed for general-purpose virtualization.' Useful as a sandbox-VMM/design reference for L1, misleading if cited as an L2 substrate.",
+    "sources": [
+     "github.com/rust-vmm/kvm (README: kvm-ioctls = safe wrappers over KVM; CI runs with /dev/kvm)",
+     "github.com/hyperlight-dev/hyperlight (README: backends KVM/MSHV/WHP; 'lightweight VMM embedded within applications'; 'not for general-purpose virtualization')"
+    ]
+   },
+   {
+    "decision": "Scope the L2 MVP explicitly to 'launch-and-isolate': one guest, EPT/NPT, passthrough LAPIC/timer + a minimal exit-reason handler set. Defer virtual-APIC/interrupt-virtualization, multi-VM scheduling, and device emulation. A from-scratch FULL type-1 is realistic for the team only as 'minimal viable hypervisor', not as a KVM replacement.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "The hard, multi-person-year cost of VMX is NOT VMXON/VMLAUNCH; it is (a) the VM-entry/exit consistency-check matrix (SDM Ch.27) that fails silently, (b) the ~70 exit reasons each needing a handler, (c) MSR/IO/exception bitmaps, and above all (d) interrupt virtualization — virtual-APIC page, posted interrupts, and event injection via the VM-entry interruption-information field. Tanda's 'Hypervisor 101 in Rust' (a UEFI fuzzing hypervisor on Intel+AMD) and hvisor demonstrate a small team CAN reach launch-and-isolate; none of them reach KVM-grade device/APIC virtualization. Bound the milestone accordingly.",
+    "sources": [
+     "Intel SDM Vol 3C VMLAUNCH (consistency checks, Ch.27 VM Entries)",
+     "github.com/tandasat/Hypervisor-101-in-Rust (UEFI fuzzing hypervisor, Intel/AMD, small-team educational scope)",
+     "github.com/syswonder/hvisor (no virtual-APIC; passthrough + static partition)"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "IOMMU (VT-d / AMD-Vi) DMA isolation is absent from prior TABOS sovereignty docs. SOVEREIGNTY.md resolved 'own VMM on host /dev/kvm + eventual bare metal' but on the host-KVM path the host owns VT-d; on a real type-1 TABOS must program VT-d/AMD-Vi itself or device DMA bypasses EPT.",
+    "impact": "Without it, any passthrough/buggy device can DMA over all of host memory — the type-1's isolation guarantee is void. Mandatory, large sub-project; gates the whole sovereignty claim at L3."
+   },
+   {
+    "gap": "No 'can we even reach VMX root here?' probe. IA32_FEATURE_CONTROL may be BIOS-locked with VMX disabled, or TABOS may already be a nested guest whose host does not expose nested VMX/SVM. Prior research assumed TABOS can become its own VMM/hypervisor.",
+    "impact": "On many cloud hosts and locked consumer firmware, VMXON #GPs outright. The roadmap needs an early capability gate (CPUID + IA32_FEATURE_CONTROL/VM_CR check) and a fallback rung, or L2 is unreachable on that machine."
+   },
+   {
+    "gap": "SMP / multi-core hypervisor bring-up is not in kernel M0-M4. A type-1 needs per-pCPU VMXON + per-vCPU VMCS, AP startup via INIT-SIPI-SIPI, and x2APIC handling.",
+    "impact": "Current kernel is effectively uniprocessor; a single-core hypervisor is a demo, not sovereign. AP bring-up and per-CPU VMX state are prerequisites for any real deployment."
+   },
+   {
+    "gap": "ACPI (MADT/DMAR/MCFG) parsing and PCIe ECAM enumeration are not implemented (current boot is PVH/PE guest). A true pre-OS L3 type-1 must discover CPUs, the IOMMU (DMAR), and devices from firmware tables.",
+    "impact": "Blocks the L3 bare-metal rung entirely; also blocks VT-d (needs DMAR) and SMP (needs MADT). The late-launch L2 path sidesteps this but cannot reach L3 without it."
+   },
+   {
+    "gap": "The VM-entry consistency-check matrix and the full VM-exit-reason handler set (~70 reasons) are unspecified in prior docs.",
+    "impact": "Silent VM-entry failures and unhandled exits are the dominant bring-up time-sink; reusing x86_vcpu mitigates but the policy/handler layer still must be designed and tested exhaustively."
+   },
+   {
+    "gap": "Interrupt virtualization (virtual-APIC page, posted interrupts, event injection via VM-entry interruption-information field) is unscoped — it is the single hardest VMX subsystem.",
+    "impact": "Determines whether TABOS can ever run interrupt-driven workloads (e.g. a GPU/inference guest) under its own type-1 versus only CPU-bound guests. Likely the milestone that separates 'demo' from 'usable'."
+   },
+   {
+    "gap": "The SMM/firmware privilege ceiling is not acknowledged. Even a correct type-1 (ring -1) sits BELOW firmware SMM ('ring -2') and the management engine; VMX root does not own SMM.",
+    "impact": "Honest sovereignty bound: L2/L3 as defined do NOT make TABOS the most-privileged code on the machine unless it also owns firmware (coreboot-class effort). Must be stated so the roadmap does not over-claim."
+   },
+   {
+    "gap": "License lineage of the chosen Rust cores is only partially verified. x86_vcpu and axvisor are Apache-2.0 (confirmed), but hvisor descends from jailhouse (GPLv2) and its license was not fetched.",
+    "impact": "If TABOS wants permissive licensing, hvisor code may be unusable for copy/derive while still valuable as architecture reference; must be confirmed before reuse."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "VMXON requires CR4.VMXE=1 (else #UD) and, when outside VMX operation, fails with #GP if IA32_FEATURE_CONTROL bit0 (lock) is clear, or if the relevant VMX-enable bit (bit2 outside SMX / bit1 in SMX) is clear; the VMXON region operand is a 4KB-aligned physical address whose first dword must equal the processor's VMCS revision id (rev[30:0]) with rev[31]=0, discoverable via IA32_VMX_BASIC.",
+    "source": "Intel SDM Vol 3C, VMXON (felixcloutier.com/x86/vmxon, Dec 2023 edition); revision id via IA32_VMX_BASIC Appendix A.1"
+   },
+   {
+    "fact": "VMCS fields are OPAQUE: software must read/write them via VMREAD/VMWRITE using a VMCS-field encoding passed in a secondary register operand (not by direct memory access); VMPTRLD marks the current-VMCS pointer valid and fails if the operand equals the VMXON pointer or carries the wrong revision id.",
+    "source": "Intel SDM Vol 3C, VMWRITE and VMPTRLD (felixcloutier.com/x86/vmwrite, /vmptrld)"
+   },
+   {
+    "fact": "VMLAUNCH requires VMCS launch state 'clear' and sets it to 'launched'; VMRESUME requires 'launched'. On VM entry the CPU runs consistency checks (SDM Ch.27 'VM Entries'); failure of control/host-state checks returns control to the instruction AFTER VMLAUNCH/VMRESUME, while guest-state-check failure loads host state from the VMCS host-state area and jumps to the host RIP field.",
+    "source": "Intel SDM Vol 3C, VMLAUNCH/VMRESUME (felixcloutier.com/x86/vmlaunch:vmresume), Ch.27/Section 27.8"
+   },
+   {
+    "fact": "EPT is enabled via the secondary processor-based exec control 'enable EPT' (gated by IA32_VMX_PROCBASED_CTLS2 bit 33); INVEPT supports single-context(type 1) and global(type 2) invalidation, takes a 128-bit descriptor whose low 64 bits are the EPTP, and is gated by IA32_VMX_EPT_VPID_CAP; described in the SDM chapter 'VMX Support for Address Translation'.",
+    "source": "Intel SDM Vol 3C, INVEPT (felixcloutier.com/x86/invept)"
+   },
+   {
+    "fact": "AMD SVM is enabled by EFER.SVME (bit 12) — VMRUN/VMLOAD/VMSAVE/VMMCALL/CLGI/INVLPGA #UD if it is 0. VMRUN runs only at CPL0 in protected mode, takes an implicit [rAX]=4KB-aligned VMCB physical address, saves host state to the VM_HSAVE_PA MSR (C001_0117h), loads guest state from the VMCB state-save area, and on intercept performs #VMEXIT resuming at the instruction after VMRUN. The single 4KB VMCB contains a control area + state-save area (App B), edited as plain memory.",
+    "source": "AMD64 APM Vol 2 (24593 Rev 3.14, Sep 2007): EFER.SVME (p.~2902 of text), sec 15.5 VMRUN (lines 17419-17461), App B VMCB layout"
+   },
+   {
+    "fact": "AMD Nested Paging (NPT) is enabled by the VMCB NP_ENABLE bit with N_CR3 holding the nested page-table base; it reuses the standard x86 page-table format (not a separate EPT format), requires hCR0.PG=1 (else #VMEXIT(VMEXIT_INVALID)), and is detected via CPUID 8000_000A.EDX[0].",
+    "source": "AMD64 APM Vol 2, sec 15.25.3 'Enabling Nested Paging' (lines 18893-18901, NP_ENABLE p.22389, N_CR3 p.22420)"
+   },
+   {
+    "fact": "The x86_vcpu crate (github.com/arceos-hypervisor, Apache-2.0) implements the VMX core in Rust: vmx/vcpu.rs (VmxArchVCpu), vmx/vmcs.rs, ept.rs, msr.rs, definitions.rs (VmxExitReason enum), instructions.rs, percpu.rs (VmxArchPerCpuState), plus an `svm` feature for AMD — it is the reusable unsafe substrate used by axvisor/ArceOS.",
+    "source": "github.com/arceos-hypervisor/x86_vcpu (README)"
+   },
+   {
+    "fact": "hvisor is a Rust Type-1 bare-metal hypervisor supporting x86_64 (QEMU Q35, ASUS NUC14, ECX-2300F) using static pCPU partitioning + config-preallocated memory + passthrough/virtio, references RVM1.5 and jailhouse, and still lists IOMMU virtualization as only planned.",
+    "source": "github.com/syswonder/hvisor (README + Roadmap)"
+   },
+   {
+    "fact": "Microsoft Hyperlight is a Rust micro-VMM whose hypervisor backends are KVM, MSHV, and Windows Hypervisor Platform (i.e. it runs ON a host hypervisor, not bare-metal); it is positioned for sandboxing untrusted code and is explicitly 'not designed for general-purpose virtualization'. Bareflank is a C++ (with Rust example) hypervisor SDK that loads a microkernel+extension into VMX root from Windows/Linux/UEFI.",
+    "source": "github.com/hyperlight-dev/hyperlight (README); github.com/Bareflank/hypervisor (README)"
+   },
+   {
+    "fact": "SDM chapter numbering for VMX drifts between editions; the Dec-2023 edition referenced here uses Ch.24 (VMCS), Ch.27 (VM Entries), Ch.29 (VMX Support for Address Translation / EPT), Ch.31 (VMM Programming, Section 31.2 VM-instruction error). Any spec must pin the exact edition before citing chapter numbers.",
+    "source": "Cross-references inside Intel SDM Vol 3C instruction pages (felixcloutier.com, Dec 2023): VMXON->Sec 24.8, VMLAUNCH->Ch.27, INVEPT->Ch.29"
+   }
+  ]
+ },
+ {
+  "area": "type1-arm-el2-pkvm",
+  "decisions": [
+   {
+    "decision": "Build TABOS's aarch64 Type-1 layer as a SEPARATE, minimal nVHE-style EL2 hypervisor crate (call it tb-hyp-arm), with the TABOS framekernel running as an EL1 guest underneath it. Do NOT adopt the VHE 'host-kernel-runs-at-EL2' design as the sovereignty path.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "pKVM deliberately keeps the hypervisor at EL2 nVHE and runs the host kernel at EL1 specifically so the EL2 TCB stays tiny and guest memory is protected even from a compromised host; the Android AVF doc states 'reducing the amount of SoC-specific code at EL2 is a key strategy to reduce the overall trusted computing base (TCB) of pKVM.' LWN (Deacon, KVM Forum) is explicit that VHE 'moves the host kernel and VMM into the TCB and the host kernel has access to all of the memory of the guests... effectively turns the trusted model on its head' — the opposite of sovereignty. nVHE/separate-EL2 also matches the framekernel structure: all EL2 asm + register pokes concentrate in tb-hal/tb-hyp while the rest stays #![forbid(unsafe_code)]. hvisor proves a no_std Rust type-1 EL2 hypervisor of exactly this shape exists and runs.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/architecture",
+     "https://lwn.net/Articles/836693/",
+     "https://github.com/syswonder/hvisor"
+    ]
+   },
+   {
+    "decision": "Treat aarch64 L2 as a DISTINCT codebase from the planned x86 tb-vmm, not an extension of it: rust-vmm/KVM crates (kvm-ioctls, kvm-bindings, etc.) are host-userspace-only and contribute ZERO at EL2. Specify a new boot contract 'tb-boot-arm v0' whose core requirement is: the CPU hands control to tb-hyp at non-secure EL2; tb-hyp installs its EL2 vector (VBAR_EL2 via the HVC_SET_VECTORS stub model), sets up its own EL2 stage-1 (TTBR0_EL2/TCR_EL2/MAIR_EL2), then ERETs guests down to EL1.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "The Linux HYP-ABI doc shows the canonical pattern: a kernel booted at EL2 installs stubs (HVC_SET_VECTORS sets VBAR_EL2) then drops to EL1, and the EL2 object becomes unmapped from EL1 (a one-way deprivilege). hvisor's entry.rs runs at EL2 from reset (it writes sctlr_el2, sets up ttbr0_el2/tcr_el2/mair_el2, and ERETs into the guest), confirming there is no rust-vmm reuse at this level. This is a different sovereignty rung than the L1 'own VMM on host /dev/kvm' decision in SOVEREIGNTY.md.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/virt/kvm/arm/hyp-abi.html",
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/entry.rs",
+     "https://source.android.com/docs/core/virtualization/architecture"
+    ]
+   },
+   {
+    "decision": "Make stage-2 translation the isolation primitive: program VTTBR_EL2 (stage-2 table base), configure VTCR_EL2 (4KB granule, PS from id_aa64mmfr0_el1 PARange, SL0/T0SZ for start level, inner-shareable WBWA), enable via HCR_EL2.VM=1, and invalidate with `tlbi vmalls12e1is`. For the privileged TABOS guest use the pKVM 'identity-mapped stage-2 as access-control' model (contiguous IPA==PA, large mappings, ownership tracked in reserved PTE bits); for sandboxed guests use full IPA->PA remap.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Android AVF: 'The stage 2 MMU is controlled by EL2 and enables a second address translation on the output of stage 1, resulting in a physical address'; pKVM 'enables stage 2 protection even in host context' and the host stage-2 is identity-mapped so it can be indexed by PA and used to track page ownership in reserved PTE bits. hvisor's s2pt.rs/cpu.rs give the exact Rust register recipe (VTTBR_EL2.set_baddr + tlbi vmalls12e1is; VTCR_EL2 with TG0::Granule4KB, PS, SL0, T0SZ derived from PARange). This is a NEW page-table format vs the EL1/stage-1 user tables built in milestone M3.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/architecture",
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/s2pt.rs",
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs"
+    ]
+   },
+   {
+    "decision": "Drive all guest trapping/routing through HCR_EL2: set VM (stage-2 on), IMO+FMO (route virtual IRQ/FIQ to EL2 so the hypervisor owns interrupt injection), TSC (trap guest EL1 SMC to EL2), and RW (EL1 is AArch64). Use the SMC trap to proxy PSCI and FF-A at EL2 rather than letting guests call the secure monitor directly.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "hvisor's activate_vmm() writes exactly HCR_EL2::{VM, IMO, FMO, TSC, RW}, giving a verified minimal trap configuration. Android AVF requires pKVM to 'trap all host SMC calls to EL2 and act as a proxy between the host and the secure monitor at EL3' to prevent confused-deputy/DMA-style attacks, and to proxy FF-A memory-sharing messages — establishing SMC trapping as mandatory, not optional, for a sovereign EL2 layer.",
+    "sources": [
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs",
+     "https://source.android.com/docs/core/virtualization/architecture"
+    ]
+   },
+   {
+    "decision": "Implement a virtual GIC: emulate the GICv3 distributor/redistributor MMIO and inject virtual interrupts via the hardware GIC virtualization extension (list registers / ICH_* EL2 system registers + virtual CPU interface), accepting that SGIR/DIR accesses are architecturally mandated to trap to EL2 while the rest is handled in hardware. Develop and CI this under QEMU `-M virt,virtualization=on,gic-version=3`.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Android AVF describes pKVM offering 'full GICv3 emulation', notes 'the architecture mandates that [SGIR and DIR] registers always trap to EL2' while 'everything else is being handled in hardware', and relays WFI/timer to EL1. QEMU virt documents gic-version 2/3/4 and that GICv4 'requires virtualization to be on', so EL2 + vGIC are fully developable in emulation before touching silicon. hvisor independently ships vGICv2 with vGICv3 support, and seL4's ARM VMM also centers on a virtual GIC — three precedents converge on this being the required interrupt model.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/architecture",
+     "https://www.qemu.org/docs/master/system/arm/virt.html",
+     "https://docs.sel4.systems/projects/camkes-vm/"
+    ]
+   },
+   {
+    "decision": "Accept that true guest isolation requires an SMMUv3 (Arm System MMU) stage-2 driver inside/under the EL2 TCB — CPU stage-2 alone does NOT stop DMA-capable devices. Make SMMU support a first-class part of tb-hyp-arm (develop against QEMU `iommu=smmuv3`), and treat it as the single gating mechanism for both real DMA protection and GPU passthrough to an inference guest.",
+    "level": "L3-baremetal",
+    "rationale": "Android AVF is unambiguous: 'unmapping guest pages from the Linux host in the CPU page tables is a necessary but insufficient step'; pKVM 'requires input-output memory management unit (IOMMU) hardware for every DMA-capable device' and names the Arm SMMU as 'the recommended reference solution' for isolation + direct assignment. QEMU virt exposes a machine-wide or per-root-complex SMMUv3 (iommu=smmuv3 / -device arm-smmuv3), so it is testable in emulation. Honest cost: this enlarges the sovereign TCB and is the precondition for ever passing an NVIDIA GPU through to a guest.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/architecture",
+     "https://www.qemu.org/docs/master/system/arm/virt.html"
+    ]
+   },
+   {
+    "decision": "Resolve the entry-to-EL2 dependency honestly: develop on QEMU virt (which enters guest code at EL2 when virtualization=on) and, on real SoCs, require TF-A at EL3 to hand off at non-secure EL2 with SCR_EL3.HCE=1 and to provide PSCI for SMP bring-up (psci cpu_on). HARD LIMIT to record: if a vendor's firmware, or a Secure-EL2 SPMC (Hafnium), already owns non-secure EL2, TABOS CANNOT install itself as the Type-1 hypervisor there — aarch64 L2 sovereignty is firmware-gated, not purely a software choice.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "kernel booting.rst: the CPU must be 'in non-secure state, either in EL2 (RECOMMENDED ... to have access to the virtualisation extensions), or in EL1', and 'If EL3 is present and the kernel is entered at EL2: SCR_EL3.HCE (bit 8) must be initialised to 0b1.' Xen-on-ARM states the same prerequisite: 'the hypervisor must be launched in Non-Secure Hypervisor mode only' and needs PSCI for secondary CPUs. hvisor brings up secondaries via psci::cpu_on. Android AVF relies on TF-A at EL3 and PSCI/FF-A — so whoever controls EL3 firmware controls whether TABOS can reach EL2.",
+    "sources": [
+     "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html",
+     "https://wiki.xenproject.org/wiki/Xen_ARM_with_Virtualization_Extensions",
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs"
+    ]
+   },
+   {
+    "decision": "Concentrate every EL2 register access behind the typed `aarch64_cpu` register crate (hvisor's approach) so the unsafe surface is auditable and the rest of TABOS stays #![forbid(unsafe_code)]; adopt TWO reference designs as the L2 blueprint — hvisor/Jailhouse static partitioning (simple, pre-allocated, no scheduler) for the first milestone, and the pKVM memory-donation/ownership model (host donates pages, hypervisor revokes host stage-2 access, guest shares back via hypercall) as the target isolation model.",
+    "level": "cross",
+    "rationale": "hvisor demonstrates a complete no_std Rust EL2 hypervisor using aarch64_cpu typed registers (VTTBR_EL2, VTCR_EL2, HCR_EL2, SPSR_EL2, ELR_EL2) and explicitly 'references RVM1.5 and jailhouse' — proving the static-partitioning path is the lowest-risk first cut. pKVM's donation model (Android AVF: 'the host donates memory pages... the hypervisor transitions ownership... puts access-control restrictions in the host's stage 2 page table') is the stronger end-state where the guest is protected even from the privileged TABOS-host guest. Sequencing static-partition first, donation-model second de-risks the EL2 buildout.",
+    "sources": [
+     "https://github.com/syswonder/hvisor",
+     "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs",
+     "https://source.android.com/docs/core/virtualization/architecture"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "Prior TABOS sovereignty research equated 'own VMM on rust-vmm using host /dev/kvm' (an L1 rung that still needs a host kernel exposing KVM) with being a hypervisor. The aarch64 L2 Type-1 path shares NOTHING with that: it is bare EL2 code (stage-2 tables, vGIC, world-switch, SMMU) with zero rust-vmm reuse.",
+    "impact": "L2 is a fresh codebase, not an evolution of tb-vmm. Roadmap must budget a separate tb-hyp-arm workstream; assuming rust-vmm carries over will mis-scope the effort."
+   },
+   {
+    "gap": "The planned boot contract 'tb-boot v0' is x86-specific (64-bit long-mode entry, deleting the A0 32->64 trampoline). There is no aarch64 boot contract specifying entry at non-secure EL2, SCR_EL3.HCE=1, PSCI-based SMP bring-up, and DTB pointer in x0.",
+    "impact": "Without a tb-boot-arm contract the L2 layer cannot even start; the EL3/TF-A handoff and PSCI dependencies are unspecified and are the gate to reaching EL2 at all."
+   },
+   {
+    "gap": "Milestone M3 built EL1/stage-1 user page tables. Stage-2 (IPA->PA, VTTBR_EL2/VTCR_EL2, different descriptor format with S2AP_R/S2AP_W) AND the hypervisor's OWN EL2 stage-1 (TTBR0_EL2/TCR_EL2/MAIR_EL2) are distinct and unimplemented.",
+    "impact": "The core isolation primitive of a Type-1 hypervisor is missing; M3's MMU work does not transfer directly."
+   },
+   {
+    "gap": "No interrupt-virtualization design exists. M0-M4 covered traps and cooperative context switch but not a virtual GIC, hardware GIC list-register injection (ICH_* EL2 regs), virtual timer (CNTVOFF_EL2), or the HCR_EL2.IMO/FMO routing.",
+    "impact": "Guests cannot receive virtual interrupts or timer ticks; without it no real guest OS runs under tb-hyp."
+   },
+   {
+    "gap": "SMMU/IOMMU (DMA isolation) was absent from prior research, which focused on the CPU MMU / own page tables. CPU stage-2 does not constrain DMA-capable devices.",
+    "impact": "Stage-2 isolation is only a paper guarantee until an SMMUv3 stage-2 driver exists; it is also the unaddressed precondition for GPU passthrough."
+   },
+   {
+    "gap": "The GPU/CUDA tax is not removed by reaching L2 — it is relocated. As the Type-1 hypervisor, TABOS itself must own the SMMU + device-passthrough plumbing, and the proprietary NVIDIA kernel driver still has to run inside whichever guest performs local inference (vLLM/llama.cpp).",
+    "impact": "Full local-inference sovereignty stays blocked by a closed driver even at L2; L2 adds SMMU/passthrough burden to the EL2 TCB rather than eliminating the dependency."
+   },
+   {
+    "gap": "Per-vCPU EL2 world-switch state (save/restore of EL1 sysregs, GIC list registers, timer context) and the non-preemptible, tiny-address-space EL2 execution model are not covered. LWN notes nVHE EL2 'is not preemptible or interruptible, so you cannot block or schedule' and has a limited VA space.",
+    "impact": "The cooperative-switch design from M2 does not map onto EL2 world-switch; scheduling, timer offsetting (CNTVOFF_EL2), and register save/restore need a new design."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "Stage-2 is enabled/configured by: VTTBR_EL2 = stage-2 translation-table base (hvisor calls VTTBR_EL2.set_baddr); HCR_EL2.VM=1 turns stage-2 on; VTCR_EL2 fields TG0/PS/SL0/T0SZ/SH0/ORGN0/IRGN0 set granule, physical-address size, start level and region size. PS is derived from id_aa64mmfr0_el1[3:0] (PARange).",
+    "source": "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/s2pt.rs + cpu.rs"
+   },
+   {
+    "fact": "HCR_EL2.IMO and HCR_EL2.FMO route virtual IRQ/FIQ to EL2; HCR_EL2.TSC traps EL1 SMC to EL2; HCR_EL2.RW selects whether EL1 is AArch64. (hvisor activate_vmm writes VM+IMO+FMO+TSC+RW.)",
+    "source": "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs"
+   },
+   {
+    "fact": "Combined stage-1+stage-2 TLB invalidation for EL1 uses the instruction `tlbi vmalls12e1is`.",
+    "source": "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/s2pt.rs"
+   },
+   {
+    "fact": "Guest entry from EL2: set ELR_EL2=guest entry, SPSR_EL2.M=EL1h (mask D/A/I/F), put DTB IPA in x0, then `eret`. SMP secondaries brought up via PSCI cpu_on.",
+    "source": "https://raw.githubusercontent.com/syswonder/hvisor/main/src/arch/aarch64/cpu.rs"
+   },
+   {
+    "fact": "To run a Type-1 hypervisor the CPU must enter your code in non-secure EL2 (RECOMMENDED for virtualization) or EL1; if EL3 is present and entry is at EL2, SCR_EL3.HCE (bit 8) must be initialised to 0b1 to allow HVC. MMU must be off at entry.",
+    "source": "https://www.kernel.org/doc/html/latest/arch/arm64/booting.html"
+   },
+   {
+    "fact": "The HYP stub ABI: HVC_SET_VECTORS sets VBAR_EL2 to a physical address to enable a hypervisor; HVC_FINALISE_EL2 'attempts to upgrade the kernel's exception level from EL1 to EL2 by enabling the VHE mode', conditioned on the CPU supporting VHE and the EL2 MMU being off.",
+    "source": "https://www.kernel.org/doc/html/latest/virt/kvm/arm/hyp-abi.html"
+   },
+   {
+    "fact": "VHE (Virtualization Host Extensions) was added in ARMv8.1 and lets a host-style kernel run at EL2 (KVM-VHE mode); nVHE splits a tiny EL2 component out and runs the kernel at EL1. EXACT E2H/TGE bit semantics (HCR_EL2.E2H, HCR_EL2.TGE, FEAT_VHE) are described here only indirectly via Linux/Android/LWN and MUST be verified against ARM ARM (D-section, AArch64 virtualization).",
+    "source": "https://lwn.net/Articles/836693/ + https://source.android.com/docs/core/virtualization/architecture"
+   },
+   {
+    "fact": "pKVM nVHE: the EL2 hypervisor is compiled into a separate dedicated section of vmlinux; the generic kernel boots at EL2, detects this, and DEPRIVILEGES itself to EL1 while pKVM stays at EL2; stage-2 is enabled even for the host; the host stage-2 is identity-mapped and used for access control + page-ownership tracking in reserved PTE bits; an illegal host access to a donated page injects a synchronous exception.",
+    "source": "https://source.android.com/docs/core/virtualization/architecture"
+   },
+   {
+    "fact": "pKVM requires IOMMU hardware for every DMA-capable device, names the Arm SMMU as the recommended reference, and traps all host SMC calls to EL2 to proxy PSCI and FF-A (preventing confused-deputy/DMA attacks).",
+    "source": "https://source.android.com/docs/core/virtualization/architecture"
+   },
+   {
+    "fact": "pKVM's productized interrupt model is full GICv3 emulation (SGIR and DIR mandated to trap to EL2, rest handled in hardware; WFI and virtual-timer comparator relayed to EL1). NOTE the 2020 KVM Forum talk instead proposed an RVIC paravirtual interrupt controller — which one ships in current AOSP must be verified.",
+    "source": "https://source.android.com/docs/core/virtualization/architecture + https://lwn.net/Articles/836693/"
+   },
+   {
+    "fact": "QEMU virt: `-machine virt,virtualization=on` emulates a guest CPU implementing the Arm Virtualization Extensions (i.e. EL2); gic-version supports 2/3/4 (GICv4 requires virtualization=on); `iommu=smmuv3` or `-device arm-smmuv3` models the SMMU; RAM starts at 0x4000_0000 and the DTB pointer is passed in x0 for Linux-protocol boot.",
+    "source": "https://www.qemu.org/docs/master/system/arm/virt.html"
+   },
+   {
+    "fact": "hvisor is a no_std Rust Type-1 EL2 hypervisor using the typed `aarch64_cpu` register crate; it runs on QEMU virt aarch64 plus real boards (RK3588/RK3568, ZCU102, i.MX8MP, Phytium Pi), does static CPU partitioning, supports vGICv2 (vGICv3 in progress) and PSCI cpu_on, and acknowledges referencing Jailhouse and RVM1.5.",
+    "source": "https://github.com/syswonder/hvisor"
+   },
+   {
+    "fact": "seL4 as an ARM hypervisor requires the kernel built with KernelArmHypervisorSupport and currently provides a virtual GICv2 (virtual GICv3 under development); the CAmkES ARM VMM runs on QEMU arm virt (AArch64) and real boards (TX2, ZCU102). seL4 is the formally-verified microkernel precedent for a small verified hypervisor.",
+    "source": "https://docs.sel4.systems/projects/camkes-vm/"
+   },
+   {
+    "fact": "The exact EL2 TCB line count of pKVM and the precise scope of its formal-verification effort are NOT established by the fetched sources (Android AVF only asserts the qualitative goal of minimizing EL2 TCB; LWN says EL2 code is 'drastically simpler than Linux' and that formal verification is intended). The LoC figure and verification coverage must be independently verified before entering a spec.",
+    "source": "FLAG-unverified (not in fetched Android AVF / LWN 836693)"
+   }
+  ]
+ },
+ {
+  "area": "firmware-baremetal-boot",
+  "decisions": [
+   {
+    "decision": "Ship a TABOS-owned UEFI application built on uefi-rs as the SOLE sovereign bare-metal entry path on both x86_64 and aarch64. Reject a from-scratch BIOS/16-bit raw bootloader, and reject any runtime dependence on GRUB/Limine for the sovereign boot path (Limine/the rust-osdev bootloader crate are permitted only as dev/test conveniences, not as the shipped artifact).",
+    "level": "L3-baremetal",
+    "rationale": "UEFI is the industry-mandated firmware interface on every modern x86-64 PC/server and on aarch64 servers (ARM Base Boot Requirements / SBBR require UEFI to even pass ACPI). A raw bootloader would re-implement work the firmware already did (RAM init, mode switch, basic device bring-up) for firmware TABOS does not own anyway - that is reinventing firmware, not gaining sovereignty. uefi-rs gives a safe, all-Rust EFI app: a `#[entry] fn main() -> Status` no_std/no_main binary using `cargo add uefi --features panic_handler,logger`, with `uefi-raw` for ABI-exact types and `--target {x86_64,ia32,aarch64}` build support. It is a thin, auditable shim TABOS controls end-to-end.",
+    "sources": [
+     "https://rust-osdev.github.io/uefi-rs/tutorial/app.html",
+     "https://github.com/rust-osdev/uefi-rs"
+    ]
+   },
+   {
+    "decision": "Make tb-boot v0 a DUAL-producer internal ABI: both tb-vmm (milestone MV) AND the bare-metal UEFI loader must emit the exact same boot-info struct (memory map + RSDP/DT pointer + framebuffer descriptor + command line), so the kernel entry point is byte-identical whether booted in a VM or on metal. Bare metal then becomes 'a new loader,' never 'a new kernel.'",
+    "level": "cross",
+    "rationale": "On x86_64, UEFI already executes the loaded image in 64-bit long mode with paging+identity map on - the same state tb-boot v0 targets - so the bare-metal path needs NO 32->64 trampoline either (the A0 trampoline being deleted at MV stays deleted). The only thing that differs between L0/L1 (VM) and L3 (metal) is who fills the boot-info struct. If tb-boot v0 is scoped for tb-vmm ONLY, bare metal silently forks the kernel entry; designing it dual-producer from MV prevents that fork at near-zero cost.",
+    "sources": [
+     "https://rust-osdev.github.io/uefi-rs/tutorial/app.html",
+     "https://github.com/rust-osdev/uefi-rs"
+    ]
+   },
+   {
+    "decision": "In the UEFI loader, execute the canonical hand-off sequence in order: open the Graphics Output Protocol and capture the framebuffer (base/size/stride/pixel format) while boot services are still alive; load the kernel image + initial data; then call exit_boot_services, letting uefi-rs's wrapper fetch the memory map, pass the correct map key, and retry once on a stale key; only then jump to the kernel. After ExitBootServices the loader owns the hardware - only UEFI runtime services and configuration tables remain valid.",
+    "level": "L3-baremetal",
+    "rationale": "uefi-rs documents `unsafe fn exit_boot_services(custom_memory_type: Option<MemoryType>) -> MemoryMapOwned` as the spec-compliant wrapper that 'retrieves the system memory map and invokes ExitBootServices() with the correct memory map key, retrying if necessary'; after it returns, boot-services protocols (including stdout) and the pool allocator are invalid and BOOT_SERVICES_CODE/DATA regions become free. GOP's FrameBuffer is documented as 'Direct access to a memory-mapped frame buffer,' so the framebuffer physical range captured pre-exit stays writable post-exit provided the OS treats that range as reserved MMIO from the final memory map. This is THE handoff - getting the map-key dance wrong is the classic bare-metal boot bug uefi-rs already solves.",
+    "sources": [
+     "https://docs.rs/uefi/latest/uefi/boot/fn.exit_boot_services.html",
+     "https://docs.rs/uefi/latest/uefi/proto/console/gop/index.html"
+    ]
+   },
+   {
+    "decision": "Adopt the rust-osdev `acpi` crate's no-alloc API as the x86_64 and ARM-server hardware-discovery substrate. Get the RSDP from the UEFI configuration table (ACPI_20_TABLE_GUID), build `AcpiTables::from_rsdp`, and parse XSDT -> MADT (LAPIC/x2APIC/IOAPIC topology, or GIC on ARM), MCFG (PCIe ECAM base), FADT, and HPET/GTDT. Prefer XSDT and ignore RSDT.",
+    "level": "L3-baremetal",
+    "rationale": "The acpi crate explicitly 'provides a limited API that can be used without an allocator, for example for use from a bootloader' that can 'search for the RSDP, enumerate over the available tables, and interact with the tables using their raw structures,' exposing AcpiTables::from_rsdp/from_rsdt, PlatformInfo, and PciConfigRegions. The kernel.org arm-acpi contract confirms RSDT is 'deprecated and ignored on arm64 since they only allow for 32-bit addresses' and that the core uses the XSDT. This is the single biggest thing the VM gave for free: in L0/L1 the VMM handed a deterministic machine; on metal, MADT is the ONLY way to find the other CPUs and the IOAPIC, and MCFG is the ONLY way to find PCIe config space.",
+    "sources": [
+     "https://github.com/rust-osdev/acpi",
+     "https://docs.rs/acpi/latest/acpi/index.html",
+     "https://docs.kernel.org/arch/arm64/arm-acpi.html"
+    ]
+   },
+   {
+    "decision": "Phase ACPI: ship 'static tables only' (MADT/MCFG/FADT/HPET/GTDT) first and DEFER the AML bytecode interpreter (DSDT/SSDT) to a later, clearly-separated phase. Treat the AML interpreter as an explicit, optional, large subsystem - not part of minimum bring-up.",
+    "level": "L3-baremetal",
+    "rationale": "The acpi crate gates 'a dynamic interpreter for AML - the bytecode format encoded in the DSDT and SSDT tables' behind the `alloc` feature and an implemented Handler trait; AML is a second full language runtime inside the kernel. The static tables (MADT/MCFG/FADT/HPET/GTDT) are plain C structs that give SMP topology, interrupt routing, PCIe ECAM, and timers with zero AML. AML is only required for dynamic power management (S-states/shutdown/sleep), thermal, GPIO, and embedded controllers. Pulling an interpreter into a #![forbid(unsafe_code)] kernel on day one is a large, avoidable risk; defer it.",
+    "sources": [
+     "https://github.com/rust-osdev/acpi",
+     "https://docs.rs/acpi/latest/acpi/index.html"
+    ]
+   },
+   {
+    "decision": "Build a net-new PCIe enumeration subsystem that walks ECAM config space from the MCFG base: bus/device/function scan, BAR sizing/mapping, capability-list parse, and MSI/MSI-X interrupt setup. Scope it as its own large module, distinct from the VM's virtio handling.",
+    "level": "L3-baremetal",
+    "rationale": "In L0/L1 TABOS saw a fixed handful of paravirtual devices (virtio-mmio/virtio-pci) at addresses the VMM advertised on the command line or in a tiny table. On metal there is no such gift: real device discovery means memory-mapped ECAM enumeration over potentially hundreds of functions, then BAR allocation and MSI-X programming. The acpi crate's PciConfigRegions parses MCFG to give the ECAM segment base(s), but the bus walk, BAR, and interrupt plumbing are TABOS-owned code that did not exist in the VM case.",
+    "sources": [
+     "https://docs.rs/acpi/latest/acpi/index.html",
+     "https://docs.kernel.org/arch/arm64/arm-acpi.html"
+    ]
+   },
+   {
+    "decision": "On aarch64, support BOTH discovery models and select per target: devicetree (the no_std `fdt` crate) for embedded/SoC boards, and ACPI-via-UEFI (hardware-reduced mode, ACPI 5.1+) for SBSA/SBBR servers. Honor the ARM64 entry contract directly: enter with MMU OFF, dtb pointer in x0 (or RSDP via UEFI config table), all interrupts masked in PSTATE.DAIF, ideally at EL2; bring up secondary CPUs via PSCI CPU_ON (ARM DEN 0022A) or the spin-table cpu-release-addr; and set up the GIC and the generic timer (CNTFRQ/CNTVOFF).",
+    "level": "L3-baremetal",
+    "rationale": "Unlike x86, aarch64 has no single architected discovery mechanism. The kernel.org booting doc mandates: MMU off, dtb on an 8-byte boundary <=2MB, x0=dtb physical address, 'CPU must be in non-secure state, either in EL2 (RECOMMENDED ... to have access to the virtualisation extensions), or in EL1,' interrupts masked, and SMP either via spin-table (poll cpu-release-addr) or 'psci' enable-method where 'the kernel will issue CPU_ON calls as described in ARM document number ARM DEN 0022A.' The arm-acpi doc fixes that 'the only defined method for passing ACPI tables ... is via the UEFI system configuration table,' i.e. ACPI on ARM implies UEFI boot, hardware-reduced mode, XSDT, and required MADT/MCFG/FADT/GTDT. The fdt crate gives `Fdt::new(bytes)` -> cpus()/memory()/chosen()/find_node() for the DT path. EL2 entry is also what a future type-1 hypervisor needs, so target EL2 where present.",
+    "sources": [
+     "https://docs.kernel.org/arch/arm64/booting.html",
+     "https://docs.kernel.org/arch/arm64/arm-acpi.html",
+     "https://docs.rs/fdt/latest/fdt/"
+    ]
+   },
+   {
+    "decision": "Treat the entire bare-metal bring-up stack (UEFI loader + ACPI/DT parse + PCIe ECAM + real LAPIC/x2APIC/IOAPIC or GICv3 + SMP AP startup + timer calibration) as SHARED infrastructure required by BOTH L3 (bare-metal OS) and L2 (type-1 hypervisor), and sequence it as its own milestone track ('MB') that lands AFTER tb-vmm (MV). A type-1 hypervisor is itself a UEFI-launched bare-metal program, so this work is its prerequisite, not a parallel effort.",
+    "level": "cross",
+    "rationale": "There is no L2 type-1 hypervisor without first solving 'how does my code take over a real machine from UEFI and discover its hardware' - which is exactly the L3 bring-up problem. Folding both under one MB track avoids doing this twice and makes the L2-vs-L3 fork a late decision (what runs on top of the bring-up) rather than an early one. Honest sizing: MB is a large, multi-quarter body comparable to M0-M4 combined - it adds an AP trampoline, two interrupt-controller drivers, a PCIe stack, and ACPI/DT parsing that the VM made unnecessary.",
+    "sources": [
+     "https://github.com/rust-osdev/uefi-rs",
+     "https://docs.kernel.org/arch/arm64/booting.html"
+    ]
+   },
+   {
+    "decision": "Preserve the framekernel invariant on metal: the UEFI loader is a SEPARATE binary owning the uefi-rs FFI unsafe; and the ACPI Handler (physical-memory mapping), PCIe ECAM MMIO, APIC/GIC MMIO, and the SMP startup trampoline concentrate ALL their unsafe inside tb-hal. The rest of the kernel stays #![forbid(unsafe_code)]; bare metal does NOT widen the unsafe exception beyond {tb-hal, the loader crate}.",
+    "level": "L3-baremetal",
+    "rationale": "The acpi crate requires the caller to implement its Handler trait to 'make requests such as mapping a particular region of physical memory into the virtual address space' - inherently raw-pointer/unsafe work; the same is true of ECAM reads, APIC/GIC register writes, and the x86 AP INIT-SIPI-SIPI trampoline (a 16-bit real-mode blob). Keeping these in tb-hal + the loader crate maintains the established 'all unsafe+asm in one HAL crate' contract from M0-M4 rather than letting bare metal metastasize unsafe across the tree.",
+    "sources": [
+     "https://docs.rs/acpi/latest/acpi/index.html",
+     "https://github.com/rust-osdev/uefi-rs"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "The firmware floor below 'bare metal' was never stated honestly. Even at L3, TABOS runs on top of closed, un-deletable firmware: UEFI/EDK2, the platform's SMM (System Management Mode, ring -2 on x86), Intel ME / AMD PSP, and CPU microcode. 'L3 bare metal' means 'TABOS is the first general-purpose OS,' NOT 'TABOS is the lowest software on the machine.'",
+    "impact": "Sovereignty has a hard silicon/firmware ceiling that no rung removes. The roadmap must say this out loud or it over-promises; it also means the threat model still includes SMM/ME/PSP, which TABOS cannot audit or replace."
+   },
+   {
+    "gap": "No ACPI/AML dependency was scoped. Full bare-metal power management (shutdown, sleep states, thermal, lid/button, embedded controllers) requires an AML bytecode interpreter - effectively a second language runtime - which prior SOVEREIGNTY.md / KERNEL-FOUNDATION-SPEC never accounted for.",
+    "impact": "Either accept 'no clean shutdown / no power management' for an extended period, or budget a major interpreter subsystem. Both are big roadmap facts currently missing."
+   },
+   {
+    "gap": "No SMP / application-processor bring-up design. M0-M4 are effectively single-core (cooperative context switch). Real bare metal multi-core needs an x86 INIT-SIPI-SIPI trampoline (a 16-bit real-mode startup blob, new asm/unsafe in tb-hal) or ARM PSCI CPU_ON / spin-table.",
+    "impact": "Multi-core is a from-scratch subsystem with new low-level asm; the VM/tb-vmm path could have hidden how much AP startup actually costs."
+   },
+   {
+    "gap": "No real interrupt-controller plan beyond what a VMM emulates. Bare metal needs LAPIC/x2APIC + IOAPIC routing decoded from MADT (x86), or a GICv3 distributor+redistributor driver (ARM), plus MSI/MSI-X for PCIe.",
+    "impact": "Interrupt delivery on metal is materially harder than the simple emulated controller in the VM; it is a prerequisite for every real driver and was not in scope."
+   },
+   {
+    "gap": "No timer/clock-source calibration story. The VM handed a known/paravirtual clock; bare metal must calibrate TSC against HPET or the ACPI PM timer (x86), or program/read the ARM generic timer (the ARM64 doc requires firmware to set CNTFRQ/CNTVOFF, which TABOS must trust and validate).",
+    "impact": "Scheduling, timeouts, and delays all depend on a calibrated timebase that did not have to be derived in the VM."
+   },
+   {
+    "gap": "PCIe enumeration was entirely free in the VM (virtio at advertised addresses) and is absent from prior research. Bare metal requires an ECAM bus walk + BAR allocation + capability/MSI-X programming.",
+    "impact": "A whole device-discovery subsystem must be built before any real (non-virtio) hardware driver, including the GPU needed for local inference."
+   },
+   {
+    "gap": "tb-boot v0 was scoped for tb-vmm only. Prior research did not designate it a dual-producer contract that the bare-metal UEFI loader must also emit.",
+    "impact": "Risk of a silent kernel-entry fork between VM and metal; cheap to prevent now, expensive to retrofit after MV ships."
+   },
+   {
+    "gap": "The aarch64 ACPI-vs-devicetree choice was never made, and prior docs did not note that ACPI on ARM is only reachable via UEFI (so a DT-only embedded target and an ACPI server target need different loader/discovery paths).",
+    "impact": "Without a per-target rule, ARM bring-up either picks the wrong discovery stack or has to support both unplanned, doubling driver-probe complexity."
+   },
+   {
+    "gap": "Secure Boot / firmware key custody was not addressed. Shipping a UEFI application forces a choice: enroll TABOS's own keys (db/KEK/PK), get the loader signed, or require users to disable Secure Boot.",
+    "impact": "A sovereignty-relevant trust decision (who signs the first byte of TABOS) with UX and security consequences that no prior doc covers."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "uefi-rs exposes the EFI entry as `#[entry] fn main() -> Status` in a `#![no_main] #![no_std]` crate, added via `cargo add uefi --features panic_handler,logger`; `uefi` is the high-level wrapper and `uefi-raw` holds ABI-exact spec types; build targets are x86_64, ia32, aarch64. VERIFY the current entry-macro signature (older uefi-rs used `fn main(handle, system_table) -> Status`) and the exact feature flags against the pinned crate version.",
+    "source": "https://rust-osdev.github.io/uefi-rs/tutorial/app.html ; https://github.com/rust-osdev/uefi-rs"
+   },
+   {
+    "fact": "uefi-rs `boot::exit_boot_services` is `unsafe fn exit_boot_services(custom_memory_type: Option<MemoryType>) -> MemoryMapOwned`; it internally retrieves the memory map, passes the correct map key, and retries (up to one retry) on a stale key; after it returns, all boot-services protocols and the pool allocator are invalid and BOOT_SERVICES_CODE/DATA become free memory; only runtime services + config tables remain. VERIFY against the UEFI spec ExitBootServices()/GetMemoryMap() section (uefi.org was Cloudflare-blocked this session).",
+    "source": "https://docs.rs/uefi/latest/uefi/boot/fn.exit_boot_services.html"
+   },
+   {
+    "fact": "The GOP (uefi::proto::console::gop) provides FrameBuffer as 'Direct access to a memory-mapped frame buffer,' with ModeInfo giving pixel format and stride; UEFI does no double-buffering. VERIFY that the captured framebuffer physical range remains valid after ExitBootServices and appears correctly typed in the final UEFI memory map (treat as reserved MMIO).",
+    "source": "https://docs.rs/uefi/latest/uefi/proto/console/gop/index.html"
+   },
+   {
+    "fact": "The rust-osdev `acpi` crate has a no-alloc API for bootloader use (find RSDP, enumerate tables, raw structs) and an alloc-gated higher level incl. PlatformInfo, PciConfigRegions, and an AML interpreter for DSDT/SSDT; the caller implements the Handler trait to map physical memory; entry points are AcpiTables::from_rsdp / from_rsdt. VERIFY exact module paths/struct names against the pinned version (sub-paths like acpi::madt::Madt 404'd this session; the top-level index is authoritative).",
+    "source": "https://github.com/rust-osdev/acpi ; https://docs.rs/acpi/latest/acpi/index.html"
+   },
+   {
+    "fact": "On arm64, ACPI is reachable ONLY via the UEFI system configuration table (ACPI_20_TABLE_GUID -> RSDP); the core enforces hardware-reduced mode (ACPI 5.1+), uses the XSDT and IGNORES the RSDT (32-bit-only, deprecated), uses only 64-bit FADT fields, and expects RSDP/XSDT/FADT/DSDT/MADT/GTDT plus MCFG (if PCI). Standards: Arm BSA (DEN 0094), BBR (DEN 0044), SBSA (DEN 0029).",
+    "source": "https://docs.kernel.org/arch/arm64/arm-acpi.html"
+   },
+   {
+    "fact": "ARM64 bare-metal entry contract: MMU OFF; dtb on 8-byte boundary, <=2MB, physical address in x0 (x1-x3=0); interrupts masked in PSTATE.DAIF; non-secure EL2 (RECOMMENDED for virtualization) or EL1; firmware must program CNTFRQ/CNTVOFF; SMP via spin-table (poll cpu-release-addr) or 'psci' enable-method where the kernel issues CPU_ON per ARM DEN 0022A; GICv2/v3/v5 setup required per mode.",
+    "source": "https://docs.kernel.org/arch/arm64/booting.html"
+   },
+   {
+    "fact": "Limine is a multiprotocol bootloader / reference impl of the Limine boot protocol, supporting IA-32/x86-64/aarch64/riscv64/loongarch64 and the Linux + Multiboot 1/2 protocols, handing the kernel a memory map, framebuffer, and RSDP. The rust-osdev `bootloader` crate is an EXPERIMENTAL x86_64-ONLY loader for both BIOS and UEFI (BiosBoot/UefiBoot/DiskImageBuilder). These bound the 'use an existing loader' option: Limine is multi-arch but external; the Rust bootloader crate is Rust but x86_64-only and experimental.",
+    "source": "https://github.com/limine-bootloader/limine ; https://docs.rs/bootloader/latest/bootloader/"
+   },
+   {
+    "fact": "On x86_64, UEFI launches the boot image already in 64-bit long mode (paging + identity map on), so the bare-metal UEFI path needs no 32->64 trampoline - matching the long-mode entry tb-boot v0 targets. VERIFY against the UEFI spec 'Calling Conventions / boot environment' section for x86_64 (could not fetch uefi.org spec or OSDev UEFI page this session due to Cloudflare 403).",
+    "source": "https://github.com/rust-osdev/uefi-rs (x86_64 EFI target) ; cross-check pending: UEFI Spec sec. 2 + wiki.osdev.org/UEFI"
+   }
+  ]
+ },
+ {
+  "area": "driver-gpu-tax",
+  "decisions": [
+   {
+    "decision": "Define full sovereignty as OWN + CONFINE, not reimplement: TABOS owns the machine, the hypervisor, scheduling, memory, agents, and policy; the unavoidable proprietary GPU/CUDA stack and the complex/unstable device drivers are confined to a least-privileged, disposable Linux 'driver/inference VM' behind the IOMMU. Adopt the Xen dom0/driver-domain + Qubes + pKVM-host pattern as TABOS's canonical L2 architecture. The sovereign boundary is ownership and confinement of the proprietary code, not its replacement.",
+    "level": "cross",
+    "rationale": "Every serious sovereign/security OS does exactly this rather than rewrite drivers: Qubes is 'based on a secure bare-metal hypervisor (Xen)' with 'networking code sand-boxed in an unprivileged VM (using IOMMU/VT-d)', 'USB stacks and drivers sand-boxed in an unprivileged VM', and 'no networking code in the privileged domain (dom0)'. Xen driver domains give 'an unprivileged Xen domain ... responsibility for a particular piece of hardware [running] a minimal kernel with only that hardware driver and the backend driver'. pKVM 'isolates pVMs and Android into mutually distrusted execution environments' where the host (which holds the drivers) can be compromised without breaking guest confidentiality/integrity. This is the only architecture that squares 'full sovereignty' with a 20M-line driver/GPU reality.",
+    "sources": [
+     "https://doc.qubes-os.org/en/latest/developer/system/architecture.html",
+     "https://wiki.xenproject.org/wiki/Driver_Domain",
+     "https://source.android.com/docs/core/virtualization/security"
+    ]
+   },
+   {
+    "decision": "Do NOT attempt a native TABOS GPU/CUDA driver. NVIDIA's stack is unportable to a non-Linux kernel; instead pass the whole GPU through VFIO/IOMMU to a confined Linux inference VM that hosts the NVIDIA kernel modules + GSP firmware + CUDA/vLLM/llama.cpp, and treat that VM as untrusted-for-confidentiality.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "NVIDIA's 'open' kernel modules v610.43.02 are still Linux .ko modules (nvidia.ko, nvidia-uvm.ko, nvidia-drm.ko, nvidia-modeset.ko), 'support ... Linux kernel 4.15 or newer', ship a closed OS-agnostic binary core (nv-kernel.o_binary), and 'must be used with GSP firmware and user-space NVIDIA GPU driver components from a corresponding ... driver release'; the kernel-interface layer is 'specific to the Linux kernel version and configuration' and 'must be built with the toolchain that was used to build the kernel'. There is no public porting interface to a non-Linux OS, and the CUDA userspace is wholly closed. Reimplementation is therefore infeasible; passthrough into a Linux VM is the documented path (cloud-hypervisor assigns NVIDIA GPUs via vfio-pci for compute). AMD ROCm has the same shape (Linux amdkfd kernel driver), so switching vendors does not remove the Linux tax.",
+    "sources": [
+     "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/main/README.md",
+     "https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/main/docs/vfio.md"
+    ]
+   },
+   {
+    "decision": "Make a hardware IOMMU (Intel VT-d with interrupt remapping / AMD-Vi / ARM SMMU) a HARD, non-negotiable requirement for TABOS L2/L3. Without it, any passed-through GPU/NIC DMA engine can read and write all TABOS and agent memory, collapsing the confinement boundary. Mirror Qubes: require both CPU virtualization (VT-x+EPT / AMD-V+RVI / ARM EL2) AND the IOMMU.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "VFIO is explicitly 'an IOMMU/device agnostic framework for exposing direct device access to userspace, in a secure, IOMMU protected environment'; 'DMA is by far the most critical aspect ... allowing a device read-write access to system memory imposes the greatest risk'. The Xen driver-domain page is blunt: 'without IOMMU support, there's nothing to stop the driver domain from using the network card's DMA engine to read and write any system memory' and without it 'you cannot pass through a device to an HVM guest, only PV guests'. Qubes minimum spec mandates BOTH 'Intel VT-x with EPT or AMD-V with RVI' AND 'Intel VT-d or AMD-Vi (also known as AMD IOMMU)'. On ARM, seL4's VMM needs SMMU entries 'for any DMA-capable devices'. This is silicon-mandated: the IOMMU is the only thing that makes a confined proprietary driver safe.",
+    "sources": [
+     "https://docs.kernel.org/driver-api/vfio.html",
+     "https://wiki.xenproject.org/wiki/Driver_Domain",
+     "https://doc.qubes-os.org/en/latest/user/hardware/system-requirements.html",
+     "https://docs.sel4.systems/projects/camkes-vm/"
+    ]
+   },
+   {
+    "decision": "Make the IOMMU GROUP (not the individual device) the unit of TABOS device assignment, and require ACS-clean platforms on a TABOS 'certified hardware' list. The device-assignment policy and tb-hal PCIe code must enumerate IOMMU groups and refuse to split them.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "VFIO states 'the group is the minimum granularity that must be used to ensure secure user access'; granularity is reduced by 'multi-function PCI device with backdoors between functions', non-ACS bridges 'allowing redirection without reaching the IOMMU', and PCIe-to-PCI bridges that mask devices. Concretely, cloud-hypervisor documents that an NVIDIA GPU and its HDMI-audio function commonly share one IOMMU group and 'it is important to bind both devices to VFIO and pass them both through the VM, otherwise this could cause some functional and security issues'. Therefore TABOS must reason about groups, and (like Qubes 'certified hardware') gate on platforms with clean ACS isolation so a single passed-through GPU does not drag a sovereignty-critical device into the untrusted VM.",
+    "sources": [
+     "https://docs.kernel.org/driver-api/vfio.html",
+     "https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/main/docs/vfio.md",
+     "https://doc.qubes-os.org/en/latest/user/hardware/system-requirements.html"
+    ]
+   },
+   {
+    "decision": "Build the L2 hypervisor as a minimal Rust type-1 microhypervisor that keeps the pKVM-style tiny privileged root (EL2 / VMX-root) but, unlike KVM/pKVM, retains TABOS-sovereign scheduling and memory ownership (Xen-like). The Linux driver/inference VM is a mutually-distrusted guest; the hypervisor's stage-2 page tables (EPT/NPT/stage-2) + IOMMU page tables must guarantee the driver-VM cannot CPU- or DMA-access TABOS or agent memory unless explicitly shared.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "pKVM proves a privileged hypervisor can be three orders of magnitude smaller than the OS it confines: 'the EL2 portion of pKVM ... has three orders of magnitude less attack surface compared to the entire Linux kernel (roughly 10 thousand versus 20 million lines of code)' and it 'tracks the memory ownership of individual physical memory pages ... ensures that only entitled pVMs have the given page mapped in their stage 2 page tables'. But pKVM/KVM deliberately 'delegate workload scheduling to the host kernel' so 'a malicious host can choose to never schedule a guest' (no availability guarantee). TABOS wants the opposite ownership: it must own the scheduler and memory like Xen Type-1 (which schedules itself), while keeping pKVM's tiny-root + page-ownership discipline. Hedron/NOVA and seL4 show the same capability-based, user-mode-driver, mutually-distrusted decomposition is viable in a small TCB.",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/security",
+     "https://raw.githubusercontent.com/cyberus-technology/hedron/master/README.md",
+     "https://docs.sel4.systems/projects/camkes-vm/"
+    ]
+   },
+   {
+    "decision": "Triage native drivers: TABOS writes native Rust (#![forbid(unsafe_code)] outside tb-hal) drivers ONLY for the small set of stable, well-specified, sovereignty-critical devices — virtio (already), NVMe (storage), one NIC family, xHCI/USB, and a simple framebuffer. It writes NO native driver for GPUs, Wi-Fi, or exotic NICs; those permanently live in the driver-VM. This bounds the bare-metal (L3) effort.",
+    "level": "L3-baremetal",
+    "rationale": "Drivers are 'the most failure-prone part of an operating system' (Xen wiki), which is exactly why every precedent isolates rather than trusts them. NVMe, xHCI, and virtio are open, versioned specifications a small team can implement and audit; GPUs and Wi-Fi are not (closed firmware, no spec, constant churn). seL4's CAmkES-VM only achieves passthrough for SATA/USB/Ethernet via per-device MMIO/IRQ/ioport config and notes the SMMU must be hand-populated — illustrating how much per-device plumbing native support costs. Confining the long tail keeps L3 finite and keeps the #![forbid(unsafe_code)] invariant defensible.",
+    "sources": [
+     "https://wiki.xenproject.org/wiki/Driver_Domain",
+     "https://docs.sel4.systems/projects/camkes-vm/"
+    ]
+   },
+   {
+    "decision": "Keep the TRUSTED display/console owned by TABOS itself on a simple, spec'd framebuffer (UEFI GOP / simple-framebuffer), and use the passed-through GPU HEADLESS for compute only — no display output path runs on the proprietary GPU stack. Agent UI and any sensitive rendering stay on the TABOS-owned framebuffer.",
+    "level": "cross",
+    "rationale": "Qubes treats the GUI domain as security-sensitive ('Qubes GUI provides isolation between apps sharing the same desktop'; the GUI domain currently equals dom0) and recommends Intel integrated graphics, warning 'Nvidia GPUs may require significant troubleshooting' for the host display. Decoupling display from compute means the proprietary GPU never drives the trusted pixels. Cloud-hypervisor demonstrates that headless multi-GPU compute via passthrough is fully functional (GPUDirect P2P over PCIe on Turing/Ampere/Hopper/Lovelace), so inference needs no display path at all — the GPU can be a pure compute endpoint inside the driver-VM.",
+    "sources": [
+     "https://doc.qubes-os.org/en/latest/developer/system/architecture.html",
+     "https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/main/docs/vfio.md"
+    ]
+   },
+   {
+    "decision": "Expose inference to TABOS-native agents only through a NARROW control/data channel (vsock or virtio over the hypervisor, qrexec-style), with the driver-VM serving a high-level inference API (e.g. OpenAI-compatible / gRPC over vsock) — never raw GPU/CUDA surface. This is the seam where the LLM-agnostic boundary lives: swap NVIDIA/AMD/CPU backends behind a stable API without TABOS ever touching a driver.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Qubes mediates all cross-domain interaction through the qrexec/Core-Stack RPC layer rather than shared device access, and pKVM warns that even with isolation 'the host's VMM ... is responsible for ... providing virtual devices' — so the interface must be minimal and policed. seL4's CAmkES-VM exposes exactly this pattern as 'cross VM connectors' (shared dataports + events between a guest and a native seL4 component). A narrow inference-API vsock channel keeps the proprietary stack from ever being a TABOS dependency surface and lets TABOS keep its LLM-agnostic contract: agents call an API, the driver-VM owns the GPU.",
+    "sources": [
+     "https://doc.qubes-os.org/en/latest/developer/system/architecture.html",
+     "https://docs.sel4.systems/projects/camkes-vm/",
+     "https://source.android.com/docs/core/virtualization/security"
+    ]
+   },
+   {
+    "decision": "Be brutally honest in the roadmap: the driver/inference VM IS a Linux, and the proprietary GPU tax is PERMANENT for local NVIDIA/AMD inference — there is no L3 'bare-metal, zero-Linux, full-speed local LLM' endpoint. Sequence sovereignty as: L1 = tb-vmm on a host /dev/kvm (TABOS still a guest of Linux); L2 = TABOS's own type-1 microhypervisor owning the machine with a disposable Linux driver/inference VM; L3 = native TABOS drivers for the simple devices only, GPU/CUDA forever inside the confined VM. 'Full sovereignty' = TABOS owns and confines the tax, not that the tax disappears.",
+    "level": "L1-own-vmm",
+    "rationale": "The NVIDIA README forecloses a non-Linux GPU driver, so at every rung the GPU implies a Linux kernel somewhere in the box. The only escape valves are non-sovereignty-preserving in other ways: CPU-only inference (llama.cpp without CUDA — no proprietary driver, but far slower) or betting on a future open accelerator. The sovereignty win is structural: like Qubes/Xen, the proprietary code runs deprivileged behind the IOMMU with no access to TABOS memory, scheduling, or agent state — the host-compromise threat model pKVM formalizes ('properties hold in the event of a compromise within any pVM, including the host'). Stating this plainly prevents the roadmap from promising a bare-metal GPU outcome that silicon and NVIDIA's licensing make impossible.",
+    "sources": [
+     "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/main/README.md",
+     "https://source.android.com/docs/core/virtualization/security",
+     "https://wiki.xenproject.org/wiki/Driver_Domain"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "Prior TABOS docs (SOVEREIGNTY.md decided 'own VMM (tb-vmm on rust-vmm/KVM) + eventual bare metal') skip the middle rung entirely: there is no L2 'TABOS-owned type-1 microhypervisor + disposable Linux driver/inference VM' stage. The ladder jumps from L1 (guest-of-Linux VMM) straight to L3 (bare metal), but the GPU tax means the real terminal architecture is L2, never pure L3.",
+    "impact": "The whole sovereignty endgame for GPU inference is undefined. Without the L2 rung, the roadmap implicitly (and falsely) promises bare-metal local LLM, and there is no design for the most important component: the confined driver/inference VM and the hypervisor that owns it."
+   },
+   {
+    "gap": "No IOMMU/SMMU + stage-2 translation (EPT/NPT/ARM stage-2) requirement appears in M0-M4 or tb-boot v0. The kernel has its own stage-1 page tables (MMU milestone) but the tb-hal has no second-stage paging, no VT-d/AMD-Vi/SMMU programming, and no interrupt remapping — all mandatory to be a safe type-1 host.",
+    "impact": "This is an entire new privileged HAL surface (VMX/SVM or EL2 entry, VMCS/VMCB or stage-2 tables, IOMMU page tables, IRQ remapping). It is the long pole for L2 and is currently unscoped and unbudgeted; without it, passthrough is unsafe and confinement is fiction."
+   },
+   {
+    "gap": "No PCIe subsystem in the HAL: no PCI/PCIe enumeration, BAR/MMIO mapping, MSI/MSI-X routing, IOMMU-group discovery, ACS verification, or FLR/device-reset handling. VFIO and cloud-hypervisor both show device assignment is fundamentally a PCIe-group operation.",
+    "impact": "TABOS cannot assign a GPU/NIC to a driver-VM, cannot certify ACS-clean hardware, and cannot recover a wedged device (GPU reset quirks) without this. It blocks every passthrough decision above."
+   },
+   {
+    "gap": "No device-driver scope/triage policy or native-driver budget. Prior research treats 'bare metal' as monolithic instead of splitting devices into native (NVMe/NIC/xHCI/simple-fb) vs forever-delegated (GPU/Wi-Fi/exotic).",
+    "impact": "Without an explicit triage, L3 looks infinite and the #![forbid(unsafe_code)] / one-tb-hal-crate invariant is at risk; effort estimates for bare metal are meaningless."
+   },
+   {
+    "gap": "No agent<->driver-VM IPC / inference-API contract. The LLM-agnostic layer is asserted but the actual seam (vsock/virtio control plane, qrexec-equivalent, OpenAI-compatible API surface) is unspecified.",
+    "impact": "This seam IS the LLM-agnostic boundary and the security perimeter around the proprietary stack. Undefined, it risks leaking raw GPU/CUDA surface into TABOS or coupling agents to a specific backend."
+   },
+   {
+    "gap": "No trusted-display story distinct from the GPU, and no measured-boot/attestation (DICE-style) for the disposable driver/inference VM image. pKVM/Microdroid show a confined VM still needs verified boot and per-instance secrets to be trustworthy.",
+    "impact": "Without a TABOS-owned framebuffer, sensitive UI rides the proprietary GPU; without attestation, a tampered driver-VM image is undetectable, undermining the 'least-privileged, disposable' claim."
+   },
+   {
+    "gap": "No stance on the firmware/silicon layer BELOW the hypervisor: UEFI/coreboot, SMM, Intel ME / AMD PSP, and GPU GSP signed firmware. Qubes-certified hardware explicitly wants open boot firmware (coreboot) and treats these as part of the trust base.",
+    "impact": "True 'own the machine' sovereignty is capped by closed firmware that is more privileged than TABOS's hypervisor (SMM/ME/PSP/GSP). The roadmap must acknowledge this ceiling or it overstates sovereignty."
+   },
+   {
+    "gap": "No evaluation of the consumer-GPU sharing limitation: consumer NVIDIA/AMD GPUs do not expose SR-IOV/MIG, so one GPU = one driver-VM (no multi-tenant partition without datacenter parts + licensing).",
+    "impact": "Affects the multi-agent/multi-tenant model: TABOS cannot subdivide one consumer GPU across mutually-distrusted inference VMs, forcing time-sharing through a single (trusted-ish) inference VM, which weakens isolation between agent workloads."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "pKVM's privileged EL2 component is roughly 10,000 lines vs the Linux kernel's ~20,000,000 — 'three orders of magnitude less attack surface' — and it enforces memory ownership via guest stage-2 page tables it controls.",
+    "source": "https://source.android.com/docs/core/virtualization/security"
+   },
+   {
+    "fact": "KVM/pKVM deliberately delegate workload scheduling AND physical interrupt handling to the host kernel (unlike conventional Type-1 hypervisors such as Xen), shrinking the TCB but giving up availability guarantees ('a malicious host can choose to never schedule a guest').",
+    "source": "https://source.android.com/docs/core/virtualization/security"
+   },
+   {
+    "fact": "NVIDIA open GPU kernel modules v610.43.02 are Linux .ko modules (nvidia/nvidia-uvm/nvidia-drm/nvidia-modeset), support 'Linux kernel 4.15 or newer', ship a closed OS-agnostic core (nv-kernel.o_binary), require corresponding GSP firmware + closed user-space components, and have a kernel-interface layer 'specific to the Linux kernel version' that 'must be built with the toolchain that was used to build the kernel'.",
+    "source": "https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/main/README.md"
+   },
+   {
+    "fact": "VFIO requires an IOMMU for safe operation; without it a device's DMA engine can read/write any system memory. The IOMMU GROUP (not the device) is 'the unit of ownership used by VFIO'; ACS-less bridges, PCIe-to-PCI bridges, and multifunction backdoors reduce isolation granularity.",
+    "source": "https://docs.kernel.org/driver-api/vfio.html"
+   },
+   {
+    "fact": "Xen driver domain: 'an unprivileged Xen domain ... given responsibility for a particular piece of hardware [running] a minimal kernel with only that hardware driver and the backend driver'; 'without IOMMU support, there's nothing to stop the driver domain from using the network card's DMA engine to read and write any system memory'; without IOMMU only PV (not HVM) passthrough is possible.",
+    "source": "https://wiki.xenproject.org/wiki/Driver_Domain"
+   },
+   {
+    "fact": "Qubes requires BOTH CPU virtualization (Intel VT-x+EPT or AMD-V+RVI) AND an IOMMU (Intel VT-d or AMD-Vi); confines the network stack in unprivileged sys-net and USB in unprivileged sys-usb via IOMMU/VT-d with 'no networking code in the privileged domain (dom0)'; recommends Intel integrated graphics and warns 'Nvidia GPUs may require significant troubleshooting'.",
+    "source": "https://doc.qubes-os.org/en/latest/user/hardware/system-requirements.html"
+   },
+   {
+    "fact": "A discrete GPU and its companion HDMI-audio function commonly land in the SAME IOMMU group, so both must be bound to vfio-pci and passed through together; multi-GPU compute passthrough with GPUDirect P2P over PCIe is supported on NVIDIA Turing/Ampere/Hopper/Lovelace under cloud-hypervisor.",
+    "source": "https://raw.githubusercontent.com/cloud-hypervisor/cloud-hypervisor/main/docs/vfio.md"
+   },
+   {
+    "fact": "Hedron is a microhypervisor derived from NOVA (last common commit 2015) with capability-based authorization, user-mode device drivers/protocol stacks and a user-space VMM; it is x86-only (Intel VMX + EPT/nested paging), with AMD support currently removed.",
+    "source": "https://raw.githubusercontent.com/cyberus-technology/hedron/master/README.md"
+   },
+   {
+    "fact": "seL4's CAmkES-VM performs device passthrough to Linux guests via explicit per-device untyped_mmios/ioports/irqs/pci_devices config; the SMMU must be hand-populated 'for any DMA-capable devices'; ARM guests require ARMv7 virt-extensions or ARMv8 with seL4 KernelArmHypervisorSupport and a virtual GICv2 (GICv3 under development).",
+    "source": "https://docs.sel4.systems/projects/camkes-vm/"
+   }
+  ]
+ },
+ {
+  "area": "sovereign-precedents",
+  "decisions": [
+   {
+    "decision": "Architect tb-vmm as a deliberately UNTRUSTED, per-guest userspace VMM from day one, not a single trusted monolith — push all device emulation/VM-exit handling into it and keep nothing security-critical there.",
+    "level": "L1-own-vmm",
+    "rationale": "Every minimal-TCB precedent splits the privileged mechanism from a per-VM usermode VMM. seL4 whitepaper: 'Each VM has its private copy of the VMM, isolated from the guest OS as well as from other VMs... the VMM cannot break isolation, and is therefore not more trusted than the guest OS itself.' NOVA does the same: the 9 KLOC microhypervisor only provides 'a simple message-passing interface that transfers guest state from the virtual machine to the VMM and back,' while 'the VMM emulates the complex x86 interface.' Designing tb-vmm as untrusted now means the L2 climb only inserts a tiny privileged core beneath an UNCHANGED VMM, instead of re-architecting a trusted blob.",
+    "sources": [
+     "https://sel4.systems/About/seL4-whitepaper.pdf (sec 2.3, 'seL4 is also a hypervisor')",
+     "http://hypervisor.org/eurosys2010.pdf (NOVA EuroSys 2010, sec 4)"
+    ]
+   },
+   {
+    "decision": "At L1, own only the device model + the tb-boot v0 contract; reuse the commodity VM mechanism (host /dev/kvm via rust-vmm) rather than writing a hypervisor kernel.",
+    "level": "L1-own-vmm",
+    "rationale": "Oxide Computer — a funded, Rust-first, sovereignty-obsessed hardware company — did NOT write a hypervisor kernel. Propolis is literally 'VMM userspace for illumos bhyve,' reusing the in-kernel bhyve VMM through 'bhyve-api: API (ioctls & structs) for the illumos bhyve kernel VMM'; what they own is propolis-server + the omicron control plane. Google's crosvm (Rust, type-2, 'similar to QEMU-KVM') and Microsoft Hyperlight (Rust, embeds over KVM/MSHV/WHP) likewise own only the userspace VMM. The convergent criterion across all of them: own what defines your identity (device model, boot contract), reuse the silicon-adjacent commodity (KVM/bhyve). This validates SOVEREIGNTY.md's 'tb-vmm on rust-vmm using host /dev/kvm.'",
+    "sources": [
+     "https://github.com/oxidecomputer/propolis (README)",
+     "https://rfd.shared.oxide.computer/rfd/0026",
+     "https://crosvm.dev/book/",
+     "https://github.com/hyperlight-dev/hyperlight (README)"
+    ]
+   },
+   {
+    "decision": "Anchor TABOS's sovereign identity ABOVE the hypervisor (tb-boot v0 contract + memory-centric agent model + forbid(unsafe) framekernel) so identity survives every rung swap L0->L1->L2->L3 and the substrate stays replaceable.",
+    "level": "cross",
+    "rationale": "Genode is deliberately kernel-agnostic: the same component/security framework 'runs on most members of the L4 family (NOVA, seL4, Fiasco.OC...), Linux, and a custom kernel,' and Sculpt OS — built on that framework — 'is used as day-to-day OS by the Genode developers' regardless of base kernel. Qubes locates its identity in compartmentalization + driver domains, not Xen, and explicitly reserves the right to swap 'the Xen hypervisor... or - in the future - some other virtualising or containerizing software.' TABOS must likewise treat the VMM/hypervisor as a swappable floor, not its identity, or each rung becomes a rewrite.",
+    "sources": [
+     "https://genode.org/about/index",
+     "https://genode.org/download/sculpt",
+     "https://doc.qubes-os.org/en/latest/developer/system/architecture.html"
+    ]
+   },
+   {
+    "decision": "When climbing to L2, own ONLY a minimal EL2/VMX-root core and deliberately delegate vCPU scheduling and physical interrupt handling to the layer below — mirror pKVM, do not insource them.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "pKVM's EL2 is ~10,000 LOC vs Linux's ~20,000,000 ('three orders of magnitude less attack surface') precisely because, per source.android.com, 'KVM... makes the explicit design decision to delegate workload scheduling to the host kernel. Given the size and complexity of today's schedulers, this design decision significantly reduces the size of the trusted computing base,' and 'pKVM also delegates physical interrupt handling to the host kernel to reduce complexity of the hypervisor.' The honest cost: this means pKVM 'doesn't provide availability to guests' (a malicious host can refuse to schedule). For TABOS, owning a tiny privileged core while delegating scheduling/IRQ is what keeps L2 tractable; insourcing them is the real expense hidden inside 'bare metal.'",
+    "sources": [
+     "https://source.android.com/docs/core/virtualization/security",
+     "https://source.android.com/docs/core/virtualization"
+    ]
+   },
+   {
+    "decision": "Set an explicit, falsifiable TCB budget for the L2 privileged core: target under ~10K LOC of privileged code (all of TABOS's unsafe+asm surface), with every emulation byte outside it. Treat exceeding the budget as proof the split is wrong.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "Every minimal type-1 lands in the same band: NOVA's Figure 1 caption states 'NOVA consists of the microhypervisor (9 KLOC), a thin user-level environment (7 KLOC), and the VMM (20 KLOC)' — only the 9 KLOC runs in 'the most privileged processor mode (host mode, ring 0)'; seL4 is 'of the order of ten thousand lines of source code'; pKVM's EL2 is ~10K LOC. NOVA's was built by a small team and Cyberus productized its derivative (Hedron) as a 'Secure Virtual Platform.' TABOS's framekernel discipline (all unsafe in tb-hal, rest forbid(unsafe)) already creates the right boundary to measure against this budget.",
+    "sources": [
+     "http://hypervisor.org/eurosys2010.pdf (Fig 1 caption; sec 4.1 '9000 lines of source code')",
+     "https://sel4.systems/About/seL4-whitepaper.pdf",
+     "https://source.android.com/docs/core/virtualization/security"
+    ]
+   },
+   {
+    "decision": "Do NOT pursue formal verification of tb-vmm; treat forbid(unsafe) Rust memory-safety as the realistic assurance ceiling, and reserve any future verification effort exclusively for the L2 core.",
+    "level": "L2-type1-hypervisor",
+    "rationale": "seL4 is explicit: 'there is no need to verify the VMM, as that would not add real assurance as long as the guest OS, typically Linux, is not verified.' And the cost of real verification is brutal: seL4's functional-correctness proof was '200,000 lines of proof script' for a ~10K LOC kernel (~20:1), maintained for over a decade by a dedicated group, and even then the proof ASSUMES correctness of assembly, boot code, hardware, and DMA. forbid(unsafe) buys absence of memory-safety bugs but NOT functional correctness — be honest that TABOS gets seL4-flavored architecture without seL4-grade proof.",
+    "sources": [
+     "https://sel4.systems/About/seL4-whitepaper.pdf (sec 2.3; 'Verification Story')",
+     "https://sel4.systems/Verification/"
+    ]
+   },
+   {
+    "decision": "Gate L3-baremetal behind a concrete security-identity test, not sovereignty maximalism: stay at L2-on-host (or even reuse a commodity type-1) unless owning the silicon directly is itself the product.",
+    "level": "L3-baremetal",
+    "rationale": "The whole field converges on 'own what defines your security/identity, reuse the commodity mechanism,' and the most sovereignty-driven projects still STOP short of owning the machine: Qubes runs on stock Xen yet is fully sovereign where it matters (network/USB stacks sandboxed in unprivileged IOMMU/VT-d VMs, 'no networking code in the privileged domain (dom0)'); Oxide owns the host OS and control plane but reuses the bhyve in-kernel VMM. L3 only pays for itself when silicon ownership is the differentiator (e.g. a confidential-compute root of trust / measured launch like NOVA's), which is not yet a stated TABOS requirement. Resolve: L3 is an opt-in capability gated on such a requirement, not the default endpoint.",
+    "sources": [
+     "https://doc.qubes-os.org/en/latest/developer/system/architecture.html",
+     "https://github.com/oxidecomputer/propolis (README)",
+     "http://hypervisor.org/ (NOVA Measured Launch / Trusted Computing)"
+    ]
+   },
+   {
+    "decision": "Offer a 'no guest kernel' micro-VM mode for agent workloads, where the framekernel IS the guest library — this is the natural shape for the memory-centric agent model and the cleanest way to delete the L0 bootstrap-OS dependency.",
+    "level": "L1-own-vmm",
+    "rationale": "Hyperlight 'lets you safely run untrusted code inside hypervisor-isolated micro VMs that spin up in milliseconds... To minimize startup time and memory footprint, there's no guest kernel or OS. Guests are regular ELF binaries written in no_std Rust.' It explicitly is 'not designed for running full-blown Linux guest workloads.' For TABOS, where the workload is the agent runtime rather than a general OS, a kernel-free micro-VM removes the PVH/A0 32->64 trampoline dependency that L0 imposed and matches the MV milestone's goal of entering the guest directly in 64-bit long mode.",
+    "sources": [
+     "https://github.com/hyperlight-dev/hyperlight (README)"
+    ]
+   }
+  ],
+  "gaps": [
+   {
+    "gap": "The split-VMM pattern is missing. SOVEREIGNTY.md/MV frame tb-vmm as one thing; every minimal-TCB precedent (seL4, NOVA, pKVM) instead splits a tiny privileged mechanism from a per-guest UNTRUSTED usermode VMM. Prior TABOS docs do not declare tb-vmm untrusted-by-construction.",
+    "impact": "If tb-vmm is built as a trusted monolith, the L2 climb becomes a re-architecture instead of 'slide a small privileged core underneath.' Declaring it untrusted now is nearly free and makes L1->L2 incremental."
+   },
+   {
+    "gap": "No TCB/LOC budget for the eventual L2 hypervisor. Prior docs say 'eventual bare metal' with no size target, while precedents are tightly clustered (NOVA 9K, seL4 ~10K C, pKVM EL2 ~10K).",
+    "impact": "Without a falsifiable budget, 'eventual bare metal' is unscoped and unbounded; a budget (<10K privileged LOC) turns it into a gate the framekernel boundary can be measured against."
+   },
+   {
+    "gap": "Scheduling + physical-IRQ ownership is not separated from 'bare metal' in prior research. pKVM's small TCB depends entirely on DELEGATING scheduling and IRQ handling to the host; a pure L3 must insource a scheduler, IRQ controller logic, and drivers.",
+    "impact": "Treating L3 as a single milestone hides that it pulls in scheduler+IRQ+driver ownership (and forfeits guest availability guarantees) that L2-on-host avoids. This is the dominant hidden cost of the last rung."
+   },
+   {
+    "gap": "The 'don't verify the VMM' criterion and the real cost of assurance are absent. seL4 says verifying a VMM over an unverified guest adds nothing, and its proof cost was ~200K lines for ~10K LOC over a decade.",
+    "impact": "Prior docs lean on forbid(unsafe) as the assurance story but don't state its ceiling (memory-safety, not functional-correctness) or where verification effort should go if ever wanted (the L2 core, never tb-vmm)."
+   },
+   {
+    "gap": "No explicit 'is L3 worth it' economic gate. The most sovereignty-driven funded teams (Oxide) and the strongest compartmentalization OS (Qubes) both deliberately REUSE the type-1/in-kernel VMM and stop at owning the layer above.",
+    "impact": "The standing 'maximize sovereignty -> eventual bare metal' directive needs a counterweight: own-the-machine only when silicon ownership is the product (measured launch / confidential compute), else L1/L2 is the rational stopping point even for maximalists."
+   },
+   {
+    "gap": "Identity-above-the-substrate is not formalized. Genode's kernel-agnosticism and Qubes' Xen-replaceability show the winning move is to pin identity above the hypervisor; TABOS hasn't declared which artifacts (tb-boot v0 contract, agent/memory model, forbid(unsafe) discipline) ARE the invariant identity vs the swappable floor.",
+    "impact": "Without that declaration, each rung risks being treated as a new identity rather than a substrate swap under a stable identity, multiplying rewrite cost across L0->L3."
+   }
+  ],
+  "hardFacts": [
+   {
+    "fact": "NOVA microhypervisor is 'approximately 9000 lines of source code' running in the most privileged mode (host mode, ring 0); full TCB split is 9 KLOC microhypervisor + 7 KLOC thin user-level environment + 20 KLOC per-VM VMM; each VM has its own usermode VMM that emulates the x86 interface over a simple message-passing interface.",
+    "source": "http://hypervisor.org/eurosys2010.pdf (NOVA, EuroSys 2010, sec 4.1 and Figure 1 caption)"
+   },
+   {
+    "fact": "Hedron is Cyberus Technology's NOVA derivative (last common commit with NOVA dates from 2015), combines microkernel+hypervisor with a capability-based authorization model, runs unmodified guests via a userspace VMM, is the core of Cyberus's 'Secure Virtual Platform,' x86-only (AMD support removed), requires ACPI/XSAVE/FSGSBASE + VMX/EPT.",
+    "source": "https://github.com/cyberus-technology/hedron (README)"
+   },
+   {
+    "fact": "pKVM's EL2 portion is roughly 10 thousand lines of code vs the entire Linux kernel's ~20 million (three orders of magnitude less attack surface); pKVM delegates BOTH vCPU scheduling and physical interrupt handling to the host kernel to shrink the TCB, and consequently 'doesn't provide availability to guests' (a malicious host can refuse to schedule a guest).",
+    "source": "https://source.android.com/docs/core/virtualization/security"
+   },
+   {
+    "fact": "In Android's AVF, the VMM is crosvm (a Rust type-2 VMM, each virtual device sandboxed in a minijail with a seccomp syscall policy) and the hypervisor is pKVM; the host Android, guest pVMs, and hypervisor are mutually distrusted, with per-pVM pvmfw + DICE-derived secrets.",
+    "source": "https://source.android.com/docs/core/virtualization ; https://crosvm.dev/book/"
+   },
+   {
+    "fact": "seL4's functional-correctness proof was ~200,000 lines of proof script for a kernel 'of the order of ten thousand lines of source code'; it runs as a hypervisor in EL2 (Arm) / Root Ring-0 (x86) / HS (RISC-V); its per-VM usermode VMM is deliberately NOT verified ('no need to verify the VMM... as long as the guest OS, typically Linux, is not verified').",
+    "source": "https://sel4.systems/About/seL4-whitepaper.pdf (secs 2.3 and 'Verification Story')"
+   },
+   {
+    "fact": "seL4's proofs explicitly ASSUME the correctness of assembly code, boot code, the machine interface, hardware, and DMA — these are outside the verified scope.",
+    "source": "https://sel4.systems/Verification/"
+   },
+   {
+    "fact": "Oxide's Propolis is a Rust userspace VMM ('VMM userspace for illumos bhyve') that reuses the illumos in-kernel bhyve VMM via the bhyve-api ioctl crate; Oxide owns propolis-server (REST-operated) + the omicron control plane, runs best on AMD hosts, MPL-2.0 licensed.",
+    "source": "https://github.com/oxidecomputer/propolis (README)"
+   },
+   {
+    "fact": "Genode is base-kernel-agnostic, running on NOVA, seL4, Fiasco.OC, OKL4, L4ka::Pistachio, L4/Fiasco, Linux, and its own custom kernel, with a custom ARM VMM and VirtualBox-on-NOVA; Sculpt OS (built on Genode) 'is used as day-to-day OS by the Genode developers'; NOVA is the default kernel for Sculpt.",
+    "source": "https://genode.org/about/index ; https://genode.org/download/sculpt ; http://hypervisor.org/"
+   },
+   {
+    "fact": "Qubes reuses Xen as a bare-metal type-1 hypervisor and owns the compartmentalization layer: networking and USB stacks are sandboxed in unprivileged VMs via IOMMU/VT-d, dom0 has no networking code, plus a GUI-virtualization protocol; Qubes explicitly reserves the option to replace Xen 'in the future' with other virtualizing/containerizing technology.",
+    "source": "https://doc.qubes-os.org/en/latest/developer/system/architecture.html"
+   },
+   {
+    "fact": "Hyperlight is an embeddable Rust micro-VMM with NO guest kernel/OS (guest = no_std Rust/C ELF + guest library, ms startup, microsecond calls) over KVM/MSHV/Windows Hypervisor Platform; explicitly NOT for full Linux guests. Bareflank is a Rust/C++ hypervisor SDK (by AIS) providing only enough to start/stop a hypervisor — a 'ring -1'/VMX-root microkernel plus your extension; the full product is MicroV.",
+    "source": "https://github.com/hyperlight-dev/hyperlight ; https://github.com/Bareflank/hypervisor"
+   }
+  ]
+ }
+]

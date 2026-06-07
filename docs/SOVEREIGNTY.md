@@ -13,6 +13,8 @@
 
 Honesty clause: no OS can escape silicon. The table below draws precisely what is **truly unavoidable** (the CPU itself), what is an **OS-independent open standard**, what is **rejected Linux heritage**, and what is **owned/invented by TABOS**. Conclusion: TABOS owes **nothing** to Linux; it owes a debt to the CPU (Intel/ARM) and to a few neutral standards (virtio=OASIS, devicetree=devicetree.org) — which every OS shares.
 
+> **Sovereignty roadmap (2026-06-07):** "Full sovereignty" is now resolved to land at **L2 — TABOS as its own minimal Type-1 hypervisor** (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + scheduling, with **no host kernel in the TCB**), **not** L3 (owning every driver). The unavoidable proprietary GPU/CUDA stack is *quarantined* in a confined Linux driver VM, not eliminated. The full L0→L3 ladder, the split-VMM architecture, the IOMMU requirement, the <10K-LOC TCB budget, and the build-ready `tb-vmm` / `tb-boot v0` spec are in [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
+
 ## 1. Sovereignty Boundary — Precise Classification [verified]
 
 | Layer | Category | Authority | What TABOS does |

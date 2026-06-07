@@ -109,6 +109,18 @@
 | P1 | **Persona validation**: interviews with real agent developers and operators — [PROCESS §4](PROCESS.md) draft personas/JTBDs were produced at the desk, not validated in the field (Design Thinking Empathize gap) | G0 gate criterion |
 | P2 | Success-measure tracking automation: tooling/file layout for gate-based R/Y/G tracking of the VISION §7 measures (SUCCESS-MEASURES.md in Phase 1) | [PROCESS §3.4](PROCESS.md) |
 
+## J. Sovereignty (L1 -> L2 -> bare metal)
+
+| P | Question | Context |
+|---|---|---|
+| GR | **Full sovereignty = L2 (own minimal Type-1 microhypervisor), not L3.** Split-VMM: a tiny <10K-LOC privileged `tb-core` + an untrusted userspace `tb-vmm`. A hardware IOMMU (VT-d/AMD-Vi/SMMU) is a hard L2 requirement. The GPU/CUDA stack is permanent and quarantined in a confined Linux driver VM (VFIO passthrough), reached via a vsock inference API. RESOLVED — detail: [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md) | Resolved 2026-06-07 |
+| GR | **`tb-boot v0` is build-ready**: verified `KVM_SET_SREGS` long-mode constants (EFER_LME=0x100/LMA=0x400, CR0_PE=0x1/PG=0x8000_0000, CR4_PAE=0x20) + aarch64 `KVM_ARM_VCPU_INIT`; rust-vmm crate matrix fixed; one console device for MV. RESOLVED | [SOVEREIGNTY-ROADMAP §7](SOVEREIGNTY-ROADMAP.md) |
+| P1 | Which silicon ABI first for L2 — Intel VMX vs AMD SVM vs ARM EL2? Surfaces are disjoint; sequence one (ARM EL2 / pKVM-shape is the lightest study). Decided at the first L2 milestone gate | per-arch hypervisor scope |
+| P1 | SMP / AP bring-up: M0-M4 are single-core; a Type-1 needs per-pCPU VMXON + per-vCPU VMCS. Not yet designed | type1-x86-vmx gap |
+| P1 | VMX-reachability probe: IA32_FEATURE_CONTROL may be BIOS-locked / VMX disabled — need a "can we reach VMX root here?" check before committing to L2 on a box | type1-x86-vmx gap |
+| P2 | Bare-metal platform bring-up body: UEFI (uefi-rs) + ACPI (MADT/DMAR/MCFG) + PCIe ECAM + APIC/GIC + SMMU + timer calibration — a large separate work stream | firmware-baremetal gap |
+| P2 | TABOS "certified hardware" list: ACS-clean IOMMU groups required for safe device passthrough | driver-gpu gap |
+
 ---
 
-**Count (2026-06-07):** Open: P0 ×7 · P1 ×29 · P2 ×19 — total 55. **Resolved decisions:** substrate (Firecracker/single-vCPU/LinuxBoot), kernel-verification (pure-Rust tiered), implementation language (Rust). 1 item turned into a validation-gate (<50 ms spawn). Spec freeze is not declared before the P0s are closed. Spec freeze is not declared before the P0s are closed ([VISION §8 Phase 0](VISION.md)).
+**Count (2026-06-07):** Open: P0 ×7 · P1 ×32 · P2 ×21 — total 60. **Resolved decisions:** substrate (Firecracker/single-vCPU/LinuxBoot), kernel-verification (pure-Rust tiered), implementation language (Rust). 1 item turned into a validation-gate (<50 ms spawn). Spec freeze is not declared before the P0s are closed ([VISION §8 Phase 0](VISION.md)).

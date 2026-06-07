@@ -125,11 +125,18 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
 
 ## 5. What's next
 
-- **MV — `tb-vmm`**: the project's own thin VMM (built on the rust-vmm crates)
-  producing the sovereign `tb-boot v0` contract, which removes the bootstrap
-  PVH path and the `A0` trampoline. Building it needs a Linux host with
-  `/dev/kvm` (the GitHub Actions Linux runners qualify). See
-  [SOVEREIGNTY §2](SOVEREIGNTY.md).
+- **MV — `tb-vmm`** (the **L1** sovereignty rung): the project's own thin
+  **userspace** VMM on the rust-vmm crates, producing the sovereign `tb-boot v0`
+  contract that enters the guest directly in 64-bit long mode (deleting the
+  bootstrap PVH note + the `A0` trampoline). Build-ready: verified `KVM_SET_SREGS`
+  long-mode constants + the aarch64 `KVM_ARM_VCPU_INIT` path, one console device.
+  Needs a Linux host with `/dev/kvm` (the GitHub Actions Linux runners qualify).
+  See [SOVEREIGNTY-ROADMAP §7](SOVEREIGNTY-ROADMAP.md).
+- **L2 — `tb-core`** (the **north-star**): TABOS as its own minimal Type-1
+  microhypervisor (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + scheduling, <10K-LOC
+  TCB), with the proprietary GPU/CUDA stack quarantined in a confined Linux driver
+  VM. This is where "full sovereignty" lands. See
+  [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
 - **v2 layers**: the agent-native subsystems proper — the default memory tiers
   ([MEMORY-SPEC](MEMORY-SPEC.md)), the agent runtime and scheduler
   ([AGENTS-SPEC](AGENTS-SPEC.md)), the self-improvement service

@@ -103,6 +103,7 @@ research/raw/       raw research and code-generation provenance (JSON)
 | [docs/AGENTS-SPEC.md](docs/AGENTS-SPEC.md) | Agent-process object, `.taf` image format, spawn protocol, lifecycle, IPC, identity, sessions |
 | [docs/SELF-IMPROVEMENT-SPEC.md](docs/SELF-IMPROVEMENT-SPEC.md) | Three Laws (Endure>Excel>Evolve), frozen kernel, skill tier, sleep-time class, archive evolution, safety |
 | [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) | Clean-slate sovereignty: silicon-mandated vs Linux-legacy vs TABOS-owned; `tb-boot`/`tb-vmm`; the "no old bugs" ledger |
+| [docs/SOVEREIGNTY-ROADMAP.md](docs/SOVEREIGNTY-ROADMAP.md) | The full-sovereignty ladder L0→L3: why "full sovereignty" = L2 (own Type-1 microhypervisor) not L3; split-VMM architecture, the IOMMU requirement, the permanent GPU tax quarantined in a driver VM, and the build-ready `tb-vmm`/`tb-boot v0` spec |
 | [docs/KERNEL-FOUNDATION-SPEC.md](docs/KERNEL-FOUNDATION-SPEC.md) | Kernel + assembly plan: the `tb-hal` crate, boot path, asm unit inventory, ABI register sets, MMU asm-vs-Rust boundary, test gates, M0–M4 WBS |
 | [docs/LANGUAGE-AND-STANDARDS.md](docs/LANGUAGE-AND-STANDARDS.md) | Language decision (Rust, per layer) + industrial standards (NSA/CISA/ONCD/EU CRA, Ferrocene, SLSA/SBOM, fuzzing) |
 | [docs/PROCESS.md](docs/PROCESS.md) | Process record + Design Thinking / Success by Design mapping, personas/JTBD, risk register, review gates (G0–G3) |
