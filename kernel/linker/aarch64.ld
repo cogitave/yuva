@@ -28,27 +28,49 @@ ENTRY(_start)
 
 KERNEL_LMA = 0x40080000;
 
+/* tb-boot v0: the TABOS note carrying `_tb_start` must live in a PT_NOTE phdr
+ * so a (future) tb-vmm aarch64 KVM_ARM backend's PT_NOTE walk can discover the
+ * kernel's EL1 entry (the consumer NEVER uses e_entry, which stays `_start`).
+ * The note is file-backed in the `text` PT_LOAD AND exposed via PT_NOTE, the
+ * same shape as kernel/linker/x86_64.ld. Under QEMU `virt` `-kernel` loads the
+ * PT_LOADs and jumps to e_entry (= `_start`), ignoring notes -- so adding these
+ * phdrs leaves the x0=FDT QEMU-virt boot byte-for-byte unchanged. */
+PHDRS
+{
+    note PT_NOTE FLAGS(4);          /* R   : the TABOS _tb_start note          */
+    text PT_LOAD FLAGS(5);          /* R E : .note.TABOS, .text, .rodata       */
+    data PT_LOAD FLAGS(6);          /* R W : .data, .bss (stacks)              */
+}
+
 SECTIONS
 {
     . = KERNEL_LMA;
     __image_start = .;
+
+    /* tb-boot v0 TABOS note (name "TABOS", type 0x54420001, desc = u64
+     * _tb_start). Emitted by crates/tb-hal/src/arch/aarch64/boot.rs; KEEP()
+     * protects it (and, transitively, `_tb_start`) from --gc-sections. 4-byte
+     * aligned per the ELF note framing. */
+    .note.TABOS : ALIGN(4) {
+        KEEP(*(.note.TABOS))
+    } :text :note
 
     .text : ALIGN(0x800) {
         KEEP(*(.text._start))      /* boot entry -- must be e_entry           */
         KEEP(*(.text._vectors))    /* VBAR_EL1 table, self-aligned to 2 KiB   */
         KEEP(*(.text._el2_vectors))/* L2.0 VBAR_EL2 table, self-aligned 2 KiB */
         *(.text .text.*)
-    }
+    } :text
 
     .rodata : ALIGN(8) {
         *(.rodata .rodata.*)
         *(.data.rel.ro .data.rel.ro.*)
         *(.got .got.plt)           /* empty under relocation-model=static     */
-    }
+    } :text
 
     .data : ALIGN(8) {
         *(.data .data.*)
-    }
+    } :data
 
     . = ALIGN(16);
     __bss_start = .;
@@ -63,7 +85,7 @@ SECTIONS
         __el2_stack_bottom = .;
         . = . + 0x4000;            /* L2.0: 16 KiB resident EL2-monitor stack */
         __el2_stack_top = .;       /* SP_EL2; single-accessor, EL1 never used */
-    }
+    } :data
     . = ALIGN(16);
     __bss_end = .;
 
@@ -72,7 +94,8 @@ SECTIONS
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)
-        *(.note .note.*)
+        *(.note.gnu.*)             /* drop GNU property/build-id notes, but    */
+                                   /* KEEP .note.TABOS (the _tb_start entry)   */
         *(.comment)
         *(.ARM.attributes)
         *(.ARM.exidx .ARM.exidx.*)

@@ -67,6 +67,38 @@ use core::arch::global_asm;
 global_asm!(
     r#"
     .section .text._start, "ax"
+
+    // -- _tb_start (tb-boot v0 / tb-vmm aarch64 entry) ----------------------
+    // A SEPARATE entry symbol, ADDED ALONGSIDE _start (NOT replacing it): a
+    // (future) tb-vmm aarch64 KVM_ARM backend resolves this address from the
+    // .note.TABOS ELF note (emitted below) and lands the vCPU here via
+    // KVM_SET_ONE_REG (PC=_tb_start, X0=TbBootInfo*). Under QEMU `virt` the
+    // kernel still enters at _start (= e_entry) with x0=FDT and runs the #48
+    // EL2->EL1 drop -- THIS path is not reached there, so the existing
+    // M0..M18.2 + L2.0 `el2 OK` FDT chain is byte-for-byte unaffected.
+    //
+    // (a) PRE (frozen tb-boot v0 aarch64 contract; the host-side producer's
+    //     KVM_SET_ONE_REG establishes it before the first KVM_RUN -- see
+    //     tb_boot::aarch64): EL1h, MMU OFF, caches OFF, DAIF masked
+    //     (PSTATE = 0x3c5), x0 = guest-physical TbBootInfo*, x1=x2=x3=0. A
+    //     single, non-nested KVM_ARM vCPU boots directly at EL1, so -- UNLIKE
+    //     _start -- this path runs NO EL2 monitor setup and never reads
+    //     CurrentEL.
+    // (b) POST: identical to the shared EL1 continuation's post-state, except
+    //     rust_main's arg0 (x0) carries the TbBootInfo* (vs the FDT pointer);
+    //     the kernel disambiguates the two paths at runtime via read_boot_magic.
+    // (c) ABI: x0 is stashed in callee-saved x19 (restored as arg0 at `1:`);
+    //     x20 = 0 records "no resident EL2 monitor" (-> BOOTED_AT_EL2 = 0, so
+    //     el2_selftest() gracefully skips -- no bootstrap HVC, no fault). Ends
+    //     in `b 1f` (a branch -- it never falls through into _start's EL2-aware
+    //     bring-up below). The shared `1:` continuation sets SP, zeroes .bss,
+    //     records w20, arms VBAR_EL1, restores x0 from x19, and enters rust_main.
+    .globl _tb_start
+_tb_start:
+    mov  x19, x0                  // TbBootInfo* -> x19 (restored as arg0 at 1:)
+    mov  x20, #0                  // tb-vmm path: no resident EL2 monitor
+    b    1f                       // join the shared EL1 continuation (label 1:)
+
     .globl _start
 _start:
     // Stash the FDT pointer (x0) in callee-saved x19 so it survives the
@@ -163,8 +195,52 @@ _start:
     msr  vbar_el1, x1
     isb
 
-    // (5) Restore the FDT pointer as AAPCS64 arg0 and enter safe Rust.
+    // (5) Restore the boot pointer as AAPCS64 arg0 and enter safe Rust. On the
+    //     _start path x19 = FDT/DTB; on the _tb_start path x19 = TbBootInfo*.
+    //     rust_main disambiguates the two via tb_hal::read_boot_magic.
     mov  x0, x19
     b    rust_main
+"#
+);
+
+// ===========================================================================
+// tb-boot v0: the `.note.TABOS` ELF note carrying the `_tb_start` entry.
+// ===========================================================================
+// Mirrors the x86_64 TABOS note (crates/tb-hal/src/arch/x86_64/boot.rs): a
+// (future) tb-vmm aarch64 KVM_ARM backend walks the kernel ELF's PT_NOTE
+// segments, matches type 0x54420001 ("TABOS"), and jumps to the 8-byte LE entry
+// in the descriptor (= `_tb_start`) -- it NEVER uses `e_entry` (which stays
+// `_start`, the QEMU `virt` x0=FDT entry). Under QEMU the note is inert: QEMU
+// `-kernel` enters at `e_entry`, ignoring notes entirely.
+//
+// kernel/linker/aarch64.ld places this note in a PT_NOTE phdr (and KEEP()s it,
+// which also anchors `_tb_start` against --gc-sections -- the note's
+// `.quad _tb_start` is the only reference to that entry from outside `.text`).
+//
+// AArch64 assembler idioms that DIFFER from the x86 note (do not "fix" to the
+// x86 spelling):
+//   * `%note` section type, not `@note`: on Arm `@` begins a comment, so the
+//     ELFOSABI-safe section-type prefix is `%` (accepted by LLVM MC + GAS).
+//   * `.balign 4`, not `.align 4`: on AArch64 `.align N` means 2^N bytes, so
+//     `.align 4` would (wrongly) demand 16-byte alignment; `.balign 4` is the
+//     literal 4-byte boundary the ELF note framing requires.
+//
+// Byte layout (consumer view, matches tb_boot::parse_entry64_note):
+//   [ 0.. 4)  n_namesz = 6            (.long)   sizeof("TABOS\0")
+//   [ 4.. 8)  n_descsz = 8            (.long)   sizeof(u64 entry)
+//   [ 8..12)  n_type   = 0x54420001   (.long)   == TB_NOTE_TYPE_ENTRY64
+//   [12..18)  "TABOS\0"               (.asciz)  name field
+//   [18..20)  2 pad bytes             (.balign 4) name padded to 4
+//   [20..28)  _tb_start as 8-byte LE  (.quad)   desc = the EL1 entry address
+global_asm!(
+    r#"
+    .section .note.TABOS, "a", %note
+    .balign 4
+    .long   6                       // n_namesz = sizeof("TABOS\0")
+    .long   8                       // n_descsz = sizeof(u64 entry)
+    .long   0x54420001              // n_type   = TB_NOTE_TYPE_ENTRY64
+    .asciz  "TABOS"                 // n_name   ("TABOS\0", 6 bytes)
+    .balign 4                       // pad the name field to a 4-byte boundary
+    .quad   _tb_start               // n_desc   = 64-bit EL1 entry (LE u64)
 "#
 );

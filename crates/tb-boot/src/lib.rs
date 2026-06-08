@@ -70,6 +70,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Host-side **aarch64** `tb-boot v0` producer + register-file handoff (the
+/// aarch64 mirror of the x86 `tb-vmm` producer; pure, `cargo test`-able on every
+/// host with no `/dev/kvm`).
+pub mod aarch64;
+
 // ===========================================================================
 // Contract constants
 // ===========================================================================
