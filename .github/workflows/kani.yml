@@ -51,3 +51,38 @@ jobs:
       # SUCCESSFUL count matches the pinned constant, then emits the DoD marker.
       - name: Assert proof marker (fail-closed harness count)
         run: bash scripts/verify-caps.sh
+
+  # Task #49 encoder proof gate. Machine-proves the PURE silicon-adjacent
+  # encoders/validators -- the VMX control-MSR adjust legality gate (the #1 cause
+  # of silent VM-entry failure), the CR0/CR4 fixed-bit clamp, the TSS-base decode,
+  # the page-table/EPT entry encoders, and the 16-byte IPC frame codec + bounded
+  # ring -- over the host-verifiable `tb-encode` crate (the SAME pure code tb-hal
+  # CALLS to feed its VMX/EPT/MMU asm, byte-identically). A SECOND, INDEPENDENT
+  # job so it neither shares state with nor can break the M11 `prove-caps` lane
+  # above. Runs `cargo kani -p tb-encode` (NEVER --workspace -- that would drag
+  # tb-hal's inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO
+  # failures AND that SUCCESSFUL == the pinned EXPECTED_HARNESSES before emitting
+  # the DoD marker `V1: kani-encoders OK` (fail-closed).
+  prove-encode:
+    name: "prove #49 encoders (Kani)"
+    runs-on: ubuntu-latest
+    # Fail fast + clearly if a harness ever regresses into a state explosion.
+    # The fixed-size POD encoders + the single bounded ring harness verify in
+    # seconds.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
+      - name: Run Kani over tb-encode
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: '-p tb-encode --output-format=terse'
+
+      # Re-runs the proofs and FAILS CLOSED unless every harness verifies AND the
+      # SUCCESSFUL count matches the pinned constant, then emits the DoD marker.
+      - name: Assert encoder proof marker (fail-closed harness count)
+        run: bash scripts/verify-encode.sh

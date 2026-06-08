@@ -365,7 +365,10 @@ unsafe fn host_tr_base(gdt_base: u64, tr_sel: u16) -> u64 {
     let desc = (gdt_base + off) as *const u64;
     let lo = unsafe { read_volatile(desc) };
     let hi = unsafe { read_volatile(desc.add(1)) };
-    ((lo >> 16) & 0x00FF_FFFF) | (((lo >> 56) & 0xFF) << 24) | ((hi & 0xFFFF_FFFF) << 32)
+    // Task #49: the pure base reassembly lives in the Kani-proven `tb-encode`
+    // crate; only the two `read_volatile`s of the GDT descriptor stay here. The
+    // returned base is byte-identical to the former inline shuffle.
+    tb_encode::vmx::decode_tss_base(lo, hi)
 }
 
 /// Step 4: write the full minimal VMCS — controls, host-state (from the LIVE
@@ -426,12 +429,21 @@ unsafe fn program_vmcs(
         // HOST_RSP / HOST_RIP are written by the world-switch asm.
 
         // ---- Guest control registers (clamped to the VMX fixed MSRs) -------
+        // Task #49: the `(fixed0 | desired) & fixed1` clamp is the Kani-proven
+        // `tb_encode::vmx::clamp_fixed`; only the `rdmsr`s of the fixed MSRs (the
+        // silicon-unsafe reads) stay here. The clamped CRs are byte-identical.
         let pe_ne_pg: u64 = (1 << 0) | (1 << 5) | (1 << 31);
-        let guest_cr0 = (vmxon::rdmsr(IA32_VMX_CR0_FIXED0) | pe_ne_pg)
-            & vmxon::rdmsr(IA32_VMX_CR0_FIXED1);
+        let guest_cr0 = tb_encode::vmx::clamp_fixed(
+            pe_ne_pg,
+            vmxon::rdmsr(IA32_VMX_CR0_FIXED0),
+            vmxon::rdmsr(IA32_VMX_CR0_FIXED1),
+        );
         let pae: u64 = 1 << 5;
-        let guest_cr4 =
-            (vmxon::rdmsr(IA32_VMX_CR4_FIXED0) | pae) & vmxon::rdmsr(IA32_VMX_CR4_FIXED1);
+        let guest_cr4 = tb_encode::vmx::clamp_fixed(
+            pae,
+            vmxon::rdmsr(IA32_VMX_CR4_FIXED0),
+            vmxon::rdmsr(IA32_VMX_CR4_FIXED1),
+        );
         w(GUEST_CR0, guest_cr0);
         w(GUEST_CR3, gp.cr3);
         w(GUEST_CR4, guest_cr4);

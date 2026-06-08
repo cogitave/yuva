@@ -1,0 +1,34 @@
+# tb-encode: the host-verifiable PURE bit-level encoder/validator leaf for TABOS.
+#
+# Single source of truth for the SILICON-UNSAFE-ADJACENT *value computation* that
+# feeds the VMX/EPT/MMU assembly and the IPC wire format -- but WITHOUT any of the
+# unsafe MMIO/asm itself. The pure `(desired|allowed0)&allowed1` control-MSR
+# adjust, the CR0/CR4 fixed-bit clamp, the TSS-base decode, the page-table /
+# EPT entry encoders, and the 16-byte IPC `MessageFrame` codec all live here as
+# `const fn` / pure safe Rust; `tb-hal` CALLS them and keeps the actual
+# `vmwrite`/`write_volatile` next to the value it just computed (byte-identical).
+#
+# Exactly like `tb-boot` and `tb-caps-core`: `#![no_std]` + `#![forbid(unsafe_code)]`
+# + ZERO deps + ZERO asm, so it builds for the HOST triple under plain `cargo`
+# (the repo keeps `-Zbuild-std` OUT of the global `.cargo/config.toml`, bundling
+# it only in the `kbuild` alias), which is what lets `cargo kani -p tb-encode`
+# model-check the EXACT SAME encoders the kernel runs -- zero model drift, and
+# CBMC never sees `tb-hal`'s inline asm.
+
+[package]
+name = "tb-encode"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+
+[dependencies]
+# Intentionally empty: the encoders are self-contained core-only Rust.
+
+# Kani sets `cfg(kani)` on the target crate; the `#[cfg(kani)]` proof harnesses in
+# src/proofs.rs are inert under a normal build. Declaring the cfg keeps Rust >=
+# 1.80 from emitting an `unexpected_cfgs` warning under the kernel's pinned
+# nightly (Kani usage.html "Configuration in Cargo.toml").
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

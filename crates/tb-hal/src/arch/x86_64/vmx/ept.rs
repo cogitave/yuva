@@ -24,16 +24,13 @@ use core::ptr::write_volatile;
 
 use super::vmxon::rdmsr;
 use super::IA32_VMX_EPT_VPID_CAP;
-
-/// EPT read|write|execute (non-leaf and leaf permission bits).
-const EPT_RWX: u64 = 0b111;
-/// EPT 2 MiB leaf: R|W|X | memory-type WB(6)<<3 | "maps page"(bit7).
-const EPT_LEAF_2MB: u64 = EPT_RWX | (6 << 3) | (1 << 7);
-
-/// Standard paging entry: Present|R/W.
-const PTE_P_RW: u64 = 0b11;
-/// Standard paging 2 MiB leaf: Present|R/W|PS(bit7).
-const PDE_LEAF_2MB: u64 = PTE_P_RW | (1 << 7);
+// Task #49: the pure EPT / standard-paging entry encoders now live in the
+// host-verifiable, Kani-proven `tb-encode` crate. tb-hal CALLS them and keeps
+// the `write_volatile` store of the returned value (byte-identical to the
+// former inline `| EPT_LEAF_2MB` / `pml4 | 6 | (3 << 3)` constants).
+use tb_encode::paging::{
+    ept_leaf_2mib, ept_nonleaf, eptp as encode_eptp, std_leaf_2mib, std_table, EPT_MEMTYPE_WB,
+};
 
 /// A built EPT identity map: the EPTP to VMWRITE plus the three table frames
 /// (kept so the caller can free them on teardown).
@@ -94,16 +91,16 @@ pub(super) unsafe fn build_ept_identity_1gib() -> Option<EptMap> {
         zero_frame(pml4);
         zero_frame(pdpt);
         zero_frame(pd);
-        put(pml4, 0, pdpt | EPT_RWX);
-        put(pdpt, 0, pd | EPT_RWX);
+        put(pml4, 0, ept_nonleaf(pdpt));
+        put(pdpt, 0, ept_nonleaf(pd));
         let mut i = 0u64;
         while i < 512 {
-            put(pd, i as usize, (i << 21) | EPT_LEAF_2MB);
+            put(pd, i as usize, ept_leaf_2mib(i << 21, EPT_MEMTYPE_WB));
             i += 1;
         }
     }
     // EPTP: PML4 base | memory-type WB(6) | (page-walk-length - 1 = 3) << 3.
-    let eptp = pml4 | 6 | (3 << 3);
+    let eptp = encode_eptp(pml4);
     Some(EptMap { eptp, pml4, pdpt, pd })
 }
 
@@ -120,11 +117,11 @@ pub(super) unsafe fn build_guest_pml4_identity_1gib() -> Option<GuestPaging> {
         zero_frame(pml4);
         zero_frame(pdpt);
         zero_frame(pd);
-        put(pml4, 0, pdpt | PTE_P_RW);
-        put(pdpt, 0, pd | PTE_P_RW);
+        put(pml4, 0, std_table(pdpt));
+        put(pdpt, 0, std_table(pd));
         let mut i = 0u64;
         while i < 512 {
-            put(pd, i as usize, (i << 21) | PDE_LEAF_2MB);
+            put(pd, i as usize, std_leaf_2mib(i << 21));
             i += 1;
         }
     }

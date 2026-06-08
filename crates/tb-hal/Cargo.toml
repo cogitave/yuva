@@ -28,3 +28,11 @@ tb-boot = { path = "../tb-boot" }
 # `CapTable<Rc<Object>>`, so the kernel and the Kani harnesses verify the EXACT
 # SAME rights/slot/generation logic (zero model drift).
 tb-caps-core = { path = "../tb-caps-core" }
+
+# Task #49: the host-verifiable PURE encoder/validator leaf (no_std,
+# forbid(unsafe_code), zero deps). tb-hal CALLS its VMX control-MSR adjust,
+# CR0/CR4 clamp, TSS-base decode, and page-table/EPT entry encoders, keeping the
+# silicon-unsafe `vmwrite`/`write_volatile` store next to the just-computed
+# value (byte-identical). src/mmu.rs re-exports its page-table algebra so every
+# existing `crate::mmu::{make_entry, level_index, ...}` caller is untouched.
+tb-encode = { path = "../tb-encode" }

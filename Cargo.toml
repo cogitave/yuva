@@ -18,6 +18,13 @@ members = [
     # CapTable<Rc<Object>>. Builds for the HOST triple under plain cargo (no
     # build-std), so `cargo kani -p tb-caps-core` works cleanly.
     "crates/tb-caps-core",
+    # Task #49 proof: the host-verifiable PURE encoder/validator leaf (no_std +
+    # forbid(unsafe_code) + zero deps). Holds the VMX control-MSR adjust, the
+    # CR0/CR4 clamp, the TSS-base decode, the page-table/EPT entry encoders, and
+    # the IPC frame codec as pure safe Rust; tb-hal CALLS them and keeps the
+    # silicon-unsafe store byte-identical. Builds for the HOST triple under plain
+    # cargo, so `cargo kani -p tb-encode` model-checks the EXACT SAME encoders.
+    "crates/tb-encode",
     "crates/tb-hal",
     "kernel",
 ]

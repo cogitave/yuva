@@ -40,65 +40,30 @@
 // walk never uses SHIFT_512G; x86_64 never reads entries back); the unused
 // remainder must not turn the other arch's build warning-noisy.
 #![allow(dead_code)]
+// The re-export below brings in the WHOLE shared geometry, but each arch backend
+// consumes only a SUBSET (aarch64's 39-bit/3-level walk never references
+// SHIFT_512G; x86_64 does), so a `pub use` of the superset is intentionally
+// allowed to carry items unused on one target -- mirroring the `dead_code`
+// allowance the local `pub const`s carried before task #49 re-homed them.
+#![allow(unused_imports)]
 
-/// Bytes per page, per frame and per translation table (4 KiB granule, both
-/// architectures).
-pub const PAGE_SIZE: usize = 4096;
-
-/// Entries per translation table: `4096 / 8 = 512` on both architectures.
-pub const ENTRIES: usize = 512;
-
-/// VA shift of the level whose entries each cover 512 GiB — x86_64 PML4.
-/// (Unused by aarch64's 39-bit/3-level layout, which starts at 1 GiB.)
-pub const SHIFT_512G: u32 = 39;
-
-/// VA shift of the level whose entries each cover 1 GiB — x86_64 PDPT;
-/// aarch64 L1 (the `TTBR0_EL1` root table under `T0SZ=25`).
-pub const SHIFT_1G: u32 = 30;
-
-/// VA shift of the level whose entries each cover 2 MiB — x86_64 PD
-/// (`PS`-bit 2 MiB pages live here); aarch64 L2.
-pub const SHIFT_2M: u32 = 21;
-
-/// VA shift of the 4 KiB leaf level — x86_64 PT; aarch64 L3.
-pub const SHIFT_4K: u32 = 12;
-
-/// Output-address bits common to both architectures' 4 KiB-granule entries:
-/// bits [47:12]. See the module docs for why [51:48] are deliberately NOT
-/// included (x86 address bits up to MAXPHYADDR vs. VMSAv8 upper attributes).
-pub const ENTRY_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
-
-/// The 9-bit table index a translation level consumes from `va`.
-///
-/// Both architectures slice the VA identically over 512-entry tables:
-/// `index = (va >> shift) & 0x1FF` (Intel SDM Vol 3A §4.5.4; Arm ARM
-/// VMSAv8-64 translation-walk, 4 KiB granule). Pass one of [`SHIFT_512G`],
-/// [`SHIFT_1G`], [`SHIFT_2M`], [`SHIFT_4K`].
-pub const fn level_index(va: u64, shift: u32) -> usize {
-    ((va >> shift) & (ENTRIES as u64 - 1)) as usize
-}
-
-/// Compose a table entry / descriptor: 4 KiB-aligned output address plus the
-/// caller's attribute bits.
-///
-/// `attrs` carries ALL low/high attribute bits — x86_64: `P`/`RW`/`PS`/`NX`…
-/// (SDM Table 4-15); aarch64: valid/type, `AF`, `SH[1:0]`, `AP[2:1]`,
-/// `AttrIndx[2:0]`… (Arm ARM VMSAv8-64 descriptor formats). This helper only
-/// guarantees the address lands in the address field and nowhere else.
-pub const fn make_entry(pa: u64, attrs: u64) -> u64 {
-    (pa & ENTRY_ADDR_MASK) | attrs
-}
-
-/// The output address packed in an entry (the inverse of [`make_entry`]).
-pub const fn entry_addr(entry: u64) -> u64 {
-    entry & ENTRY_ADDR_MASK
-}
-
-/// Whether an entry is live: bit 0 is x86 `P`resent and VMSAv8 `Valid` on
-/// both architectures (see the verified facts in the module docs).
-pub const fn entry_is_valid(entry: u64) -> bool {
-    entry & 1 != 0
-}
+// ---------------------------------------------------------------------------
+// Shared page-table entry algebra -- re-exported from the host-verifiable
+// `tb-encode` crate (task #49).
+//
+// The table geometry constants (PAGE_SIZE/ENTRIES/SHIFT_*/ENTRY_ADDR_MASK) and
+// the pure entry math (level_index/make_entry/entry_addr/entry_is_valid) now
+// live in `tb_encode::paging` (no_std + forbid(unsafe_code), Kani-proven over
+// ALL inputs: `level_index < 512`, `make_entry` round-trips the address and
+// preserves attrs). Re-exporting them here keeps every existing caller
+// (`crate::mmu::make_entry`, `crate::mmu::level_index`, the per-arch backends'
+// `use crate::mmu::{...}`) byte-for-byte unchanged, while the proofs and the
+// kernel share ONE implementation -- zero model drift, zero behavior change.
+// ---------------------------------------------------------------------------
+pub use tb_encode::paging::{
+    entry_addr, entry_is_valid, level_index, make_entry, ENTRIES, ENTRY_ADDR_MASK, PAGE_SIZE,
+    SHIFT_1G, SHIFT_2M, SHIFT_4K, SHIFT_512G,
+};
 
 /// One 4 KiB translation table: 512 × `u64` entries, 4096-aligned, so its
 /// base address is directly plantable into a parent table entry, `CR3`, or

@@ -17,6 +17,11 @@
 //! Field/bit values: Intel SDM Vol 3C §24.6 + Appendix A.3/A.4.
 
 use super::vmxon::rdmsr;
+// Task #49: the pure `(desired|allowed0)&allowed1` gate now lives in the
+// host-verifiable, Kani-proven `tb-encode` crate. We CALL it here; only the
+// `rdmsr` of the capability MSR (the silicon-unsafe read) stays in tb-hal. The
+// emitted control words are byte-identical to the former inline implementation.
+use tb_encode::vmx::adjust;
 use super::{
     IA32_VMX_BASIC, IA32_VMX_ENTRY_CTLS, IA32_VMX_EXIT_CTLS, IA32_VMX_PINBASED_CTLS,
     IA32_VMX_PROCBASED_CTLS, IA32_VMX_PROCBASED_CTLS2, IA32_VMX_TRUE_ENTRY_CTLS,
@@ -55,14 +60,6 @@ pub(super) struct Controls {
     pub(super) exit: u32,
     /// VM-entry controls.
     pub(super) entry: u32,
-}
-
-/// `final = (desired | allowed0) & allowed1` against a capability MSR whose low
-/// dword is allowed-0 and high dword is allowed-1.
-fn adjust(desired: u32, cap_msr: u64) -> u32 {
-    let allowed0 = cap_msr as u32;
-    let allowed1 = (cap_msr >> 32) as u32;
-    (desired | allowed0) & allowed1
 }
 
 /// Run the adjust algorithm for the minimal L2.0 control set and return the five
