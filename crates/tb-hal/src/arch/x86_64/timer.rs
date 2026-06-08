@@ -297,18 +297,26 @@ fn run_canary() -> bool {
 /// `true` iff at least [`CANARY_TICKS`] ticks were observed AND the canary state
 /// survived every async entry uncorrupted. Touches NO scheduler (that is M9).
 pub fn timer_demo() -> bool {
+    // TEMP M8 microvm+KVM diagnostic (issue #36): print the step reached so the
+    // QEMU-microvm+KVM lane reveals exactly where the boot faults (it works under
+    // TCG + tb-vmm/KVM). Removed once the LAPIC/timer fault is root-caused.
+    crate::serial_write_str("  m8.1 map-lapic\n");
     // 1. Map the LAPIC register page UC into the PML4[3] device window; fail
     //    closed if a page-table frame is unavailable.
     if !super::mmu::map_device_page(LAPIC_WINDOW_VA, LAPIC_PHYS_BASE) {
         return false;
     }
+    crate::serial_write_str("  m8.2 lapic-enable\n");
     // 2. Enable the LAPIC + arm the periodic timer (still masked by IF=0).
     lapic_enable();
+    crate::serial_write_str("  m8.2b lapic-arm\n");
     lapic_timer_arm();
+    crate::serial_write_str("  m8.3 sti+canary\n");
     // 3. Take the kernel's FIRST asynchronous interrupts across the canary.
     irq_enable();
     let canary_ok = run_canary();
     irq_disable();
+    crate::serial_write_str("  m8.4 disarm\n");
     // 4. Mask + stop the timer so no IRQ survives into the halt path.
     lapic_timer_disarm();
     canary_ok && crate::tick_count() >= CANARY_TICKS
