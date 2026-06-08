@@ -1997,6 +1997,208 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M16: infer OK\n"); // <-- the M16 DoD marker
 
+    // --- M17: sleep-time consolidation / reflection / forgetting daemons ------
+    // Three sleep-time memory daemons (CONSOLIDATE / REFLECT / FORGET) realized as
+    // ONE bounded maintenance cycle driven through the already-wired
+    // M_MEM_CONSOLIDATE=20 method (Rights::CONSOLIDATE), off the critical path.
+    // The timer is DISARMED through every self-test (RefCell discipline), so the
+    // marker drives the cycle SYNCHRONOUSLY over a WITNESS-A home (the M13 idiom);
+    // ZERO new unsafe (all the M17 work is safe mutation of the M13 substrate).
+    // DoD marker: "M17: consolidate OK".
+    {
+        use tb_hal::caps::{self, Handle};
+
+        fn m17_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M17: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        // A capability-checked dispatch against `h` in `tbl` (the M13/M16 idiom).
+        fn disp(
+            tbl: &mut tb_hal::caps::HandleTable,
+            h: tb_hal::caps::Handle,
+            method: u32,
+            a: [u64; 4],
+        ) -> tb_hal::caps::SysReturn {
+            tb_hal::caps::dispatch(
+                tbl,
+                &tb_hal::caps::SyscallArgs {
+                    method,
+                    handle: h,
+                    args: a,
+                },
+            )
+        }
+
+        let ok = caps::SysStatus::Ok as u32;
+        let den = caps::SysStatus::Denied as u32;
+        let badcap = caps::SysStatus::BadCap as u32;
+        const TOK_DUP: u64 = 0x2001; // two near-duplicate records share this token
+        const TOK_STALE: u64 = 0x2002; // one low-importance/low-utility/stale record
+        const TOK_NOISE: u64 = 0x2003; // accumulator + aging fodder (importance 9)
+        const V_STALE: u64 = 0x0000_CAFE;
+        const V_DUP_A: u64 = 0x0000_00D1;
+        const V_DUP_B: u64 = 0x0000_00D2;
+
+        // ============ WITNESS A -- kernel-side over caps::dispatch ============
+        let mut tbl = caps::HandleTable::with_capacity(16);
+        let all = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL)
+            .union(caps::Rights::CONSOLIDATE);
+        let home = match tbl.mint_memory_home(all) {
+            Some(h) => h,
+            None => m17_fail("could not mint a CONSOLIDATE-righted memory home"),
+        };
+
+        // 1. SEED STALE first -> records index 0 (inside the first SWEEP_BATCH
+        //    window), importance 1 (low), never recalled (low BLA, low utility).
+        let r_stale = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_STALE, V_STALE, 1]);
+        if r_stale.status != caps::SysStatus::Ok {
+            m17_fail("seed stale write was not Ok");
+        }
+        let id_stale = r_stale.value;
+
+        // 2. SEED the near-duplicate pair on TOK_DUP (importance 9). The later
+        //    write (id_b, larger t_created) is the deterministic distill survivor.
+        let r_a = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_DUP, V_DUP_A, 9]);
+        let r_b = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_DUP, V_DUP_B, 9]);
+        if r_a.status != caps::SysStatus::Ok || r_b.status != caps::SysStatus::Ok {
+            m17_fail("seed dup pair write was not Ok");
+        }
+        let id_a = r_a.value;
+
+        // 3. DRIVE the importance accumulator past 150 AND advance the clock so the
+        //    stale record ages beyond MIN_AGE (bla_raw(0, ~43) ~= -1160 < -1000).
+        for i in 0..40u64 {
+            if disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_NOISE, i, 9]).status != caps::SysStatus::Ok {
+                m17_fail("noise write was not Ok");
+            }
+        }
+
+        // 3b. WITNESS the >=150 trigger BEFORE the cycle (op=7 reads imp_accum).
+        let acc = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [7, 0, 0, 0]);
+        if acc.status != caps::SysStatus::Ok || acc.value < 150 {
+            m17_fail("importance accumulator did not cross the 150 trigger");
+        }
+
+        // 4. DRIVE ONE bounded consolidation cycle SYNCHRONOUSLY (op=3).
+        let cyc = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [3, 0, 0, 0]);
+        if cyc.status != caps::SysStatus::Ok || cyc.value < 1 {
+            m17_fail("synchronous consolidation cycle (op=3) returned no effect");
+        }
+
+        // 5. ASSERT DISTILL: TOK_DUP now recalls ONLY the survivor (the loser is
+        //    t_invalid -> filtered in STAGE 1); the survivor carries cites/supersedes.
+        let rec = disp(&mut tbl, home, caps::M_MEM_RECALL, [TOK_DUP, 0, 1, 0]);
+        if rec.status != caps::SysStatus::Ok {
+            m17_fail("post-distill recall of TOK_DUP did not return Ok");
+        }
+        let h_rec = Handle::from_raw(rec.value);
+        let insp = disp(&mut tbl, h_rec, caps::M_OBJECT_INSPECT, [0, 0, 0, 0]);
+        if insp.status != caps::SysStatus::Ok || insp.value != caps::ObjKind::MemoryRecord as u64 {
+            m17_fail("recalled survivor did not resolve to a MemoryRecord");
+        }
+        let surv = disp(&mut tbl, h_rec, caps::M_MEM_READ, [0, 0, 0, 0]);
+        if surv.status != caps::SysStatus::Ok || surv.value == id_a {
+            m17_fail("distill survivor was the merged-away loser (wrong tie-break)");
+        }
+        let survivor_id = surv.value;
+        let lc = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [8, survivor_id, 0, 0]);
+        if lc.status != caps::SysStatus::Ok || lc.value < 1 {
+            m17_fail("distill survivor carries no supersedes/cites links");
+        }
+
+        // 6. ASSERT REFLECT (deterministic): op=4 writes a NEW insight (cites-back).
+        let refl = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [4, 0, 0, 0]);
+        if refl.status != caps::SysStatus::Ok || refl.value < 1 {
+            m17_fail("reflect (op=4) did not produce an insight record");
+        }
+        let insight_id = refl.value;
+        let lc2 = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [8, insight_id, 0, 0]);
+        if lc2.status != caps::SysStatus::Ok || lc2.value < 1 {
+            m17_fail("reflection insight carries no cites-back links");
+        }
+        let dval = disp(&mut tbl, home, caps::M_MEM_READ, [insight_id, 0, 0, 0]);
+        if dval.status != caps::SysStatus::Ok || dval.value == 0 {
+            m17_fail("reflection insight value (digest) was zero");
+        }
+
+        // 6b. MODEL-BRIDGED REFLECT (wired NOW via the deterministic M16 mock):
+        //     op=6 reads the digest, the daemon-task model XOR-transforms it
+        //     (digest ^ 0xA110_C0DE), op=4 writes that token back as the insight.
+        let dig = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [6, 0, 0, 0]);
+        if dig.status != caps::SysStatus::Ok {
+            m17_fail("reflect_digest (op=6) did not return Ok");
+        }
+        let digest = dig.value;
+        let (s, sraw) = tb_hal::agent_model_open(agent_c, "model:mock/echo").unwrap_or((badcap, 0));
+        if s != ok {
+            m17_fail("model:mock/echo open for the reflect bridge was not Ok");
+        }
+        let sess = Handle::from_raw(sraw);
+        let (s, tok) = tb_hal::agent_model_dispatch(agent_c, caps::M_MODEL_INVOKE, sess, digest)
+            .unwrap_or((badcap, 0));
+        if s != ok || tok != (digest ^ 0xA110_C0DE) {
+            m17_fail("model bridge did not return the deterministic transform");
+        }
+        let ins2 = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [4, tok, 0, 0]);
+        if ins2.status != caps::SysStatus::Ok || ins2.value < 1 {
+            m17_fail("model-bridged reflect (op=4 token=a) did not write an insight");
+        }
+        let rv2 = disp(&mut tbl, home, caps::M_MEM_READ, [ins2.value, 0, 0, 0]);
+        if rv2.status != caps::SysStatus::Ok || rv2.value != tok {
+            m17_fail("model-bridged insight value != digest ^ 0xA110_C0DE");
+        }
+
+        // 7. ASSERT FORGET: the stale record is GONE from recall (demoted tier 5),
+        //    YET still addressable over the T2 floor (the swap-out, not free()).
+        if disp(&mut tbl, home, caps::M_MEM_RECALL, [TOK_STALE, 0, 1, 0]).status
+            == caps::SysStatus::Ok
+        {
+            m17_fail("demoted stale record still appeared in the hot recall set");
+        }
+        let sread = disp(&mut tbl, home, caps::M_MEM_READ, [id_stale, 0, 0, 0]);
+        if sread.status != caps::SysStatus::Ok || sread.value != V_STALE {
+            m17_fail("demoted record is no longer M_MEM_READ-addressable (T2 floor lost)");
+        }
+
+        // 8. T2 FLOOR INTEGRITY: the merged-away dup loser's EPISODE is intact --
+        //    distill tombstoned only the DERIVED T3 record, never the T2 source.
+        let aread = disp(&mut tbl, home, caps::M_MEM_READ, [id_a, 0, 0, 0]);
+        if aread.status != caps::SysStatus::Ok || aread.value != V_DUP_A {
+            m17_fail("distilled-away loser's T2 episode was destroyed (lossless floor)");
+        }
+
+        tb_hal::serial_write_str(
+            "mem: distilled + reflected + demoted, T2 floor intact\n",
+        );
+
+        // 9. CONSOLIDATE-RIGHT-GATED DENIAL (two ways): a home lacking CONSOLIDATE
+        //    is Denied at the required_right gate; an ordinary agent's born-with
+        //    home (READ|WRITE|RECALL) is likewise Denied via the daemon facade.
+        let home_ro = match tbl.mint_memory_home(caps::Rights::READ.union(caps::Rights::RECALL)) {
+            Some(h) => h,
+            None => m17_fail("could not mint the read-only memory home"),
+        };
+        if disp(&mut tbl, home_ro, caps::M_MEM_CONSOLIDATE, [3, 0, 0, 0]).status
+            != caps::SysStatus::Denied
+        {
+            m17_fail("CONSOLIDATE on a home lacking CONSOLIDATE was not Denied");
+        }
+        let (s, _) = tb_hal::agent_consolidate_cycle(agent_c).unwrap_or((ok, 0));
+        if s != den {
+            m17_fail("agent_consolidate_cycle on a born-with home was not Denied");
+        }
+        tb_hal::serial_write_str(
+            "mem: consolidation cycle is CONSOLIDATE-gated (rights-denied both ways)\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M17: consolidate OK\n"); // <-- the M17 DoD marker
+
     tb_hal::halt()
 }
 

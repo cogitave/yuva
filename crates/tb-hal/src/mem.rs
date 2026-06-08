@@ -39,6 +39,43 @@ const NODE_QUOTA: usize = 256;
 /// Token write-amplification cap (KeyKOS space-bank); writes beyond it fail-closed.
 const TOKEN_QUOTA: u64 = 1 << 20;
 
+// --- M17 sleep-time consolidation / reflection / forgetting constants ---------
+// All fixed-point integer (deterministic / replayable), beside SCALE/TOKEN_QUOTA.
+
+/// GA importance-accumulator trigger: the daemon's PRIMARY wake condition.
+#[allow(dead_code)]
+const IMP_ACCUM_THRESHOLD: u32 = 150;
+/// FORGET demote floor on the raw ACT-R BLA(d=0.5): a `count==0` record demotes
+/// once its age passes ~30 ticks (the BLA zero-crossing scales as `4*(count+1)^2`,
+/// so frequently-accessed records earn a proportionally longer reprieve for free).
+const THETA_DEMOTE: i64 = -1000;
+/// Flashbulb pin: `importance >= IMP_PIN` is never demoted on age alone.
+const IMP_PIN: i64 = 8;
+/// EvolveR utility pin: a proven-useful record (`s >= 0.6`) is retained; the
+/// default-counter utility (500) stays demotable.
+const UTIL_PIN: i64 = 600;
+/// Grace window: brand-new records (`age < MIN_AGE`) are immune to FORGET.
+const MIN_AGE: u64 = 16;
+/// FORGET sweep batch: records scanned per cycle from the wrapping clock-hand.
+const SWEEP_BATCH: usize = 64;
+/// DISTILL batch: near-duplicate clusters collapsed per cycle.
+const DISTILL_BATCH: usize = 32;
+/// REFLECT window: recent high-salience records folded into one insight.
+const REFLECT_WINDOW: usize = 16;
+/// REFLECT insight importance (mid-band: above-default, below flashbulb-pin).
+const REFLECT_IMP: u8 = 5;
+/// REFLECT digest seed (golden-ratio constant; non-zero so a digest is non-zero).
+const REFLECT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+/// Typed link kinds (`MemRecord.links`): the schema's cites/relates/supersedes.
+const LINK_CITES: u8 = 0;
+#[allow(dead_code)]
+const LINK_RELATES: u8 = 1;
+const LINK_SUPERSEDES: u8 = 2;
+/// Recall tiers: HOT (3) is the hot recall candidate set; COLD (5) is demoted
+/// (dropped from recall STAGE 1 yet still `M_MEM_READ`-addressable over T2).
+const TIER_HOT: u8 = 3;
+const TIER_COLD: u8 = 5;
+
 // --- fixed-point integer math (no floats: deterministic, FPU-hazard-free) -----
 
 /// `log2(x) * SCALE` as an integer (`0` for `x <= 1`): floor part from the
@@ -266,6 +303,12 @@ struct MemRecord {
     t_invalid: u64,
     c_succ: u32,
     c_use: u32,
+    /// M17: typed semantic edges (kind, target_id) -- cites/relates/supersedes.
+    links: Vec<(u8, u64)>,
+    /// M17: recall tier ([`TIER_HOT`] in the hot set; [`TIER_COLD`] = demoted).
+    tier: u8,
+    /// M17: provenance (0 episodic, 1 reflection insight, 2 distilled survivor).
+    provenance: u8,
 }
 
 /// The T3 store: records plus a record-level inverted index (`token -> record
@@ -329,6 +372,13 @@ pub(crate) struct MemSubstrate {
     clock: u64,
     quota: Quota,
     backing: Box<dyn BackingStore>,
+    /// M17: GA importance accumulator (the >=150 consolidation trigger).
+    imp_accum: u32,
+    /// M17: the clock at the last completed consolidation cycle (freshness mark).
+    #[allow(dead_code)]
+    last_consolidated_epoch: u64,
+    /// M17: the wrapping FORGET clock-hand (kswapd cursor) persisted across cycles.
+    consol_cursor: u64,
 }
 
 impl MemSubstrate {
@@ -362,6 +412,9 @@ impl MemSubstrate {
                 records: 0,
             },
             backing: Box::new(RamStore::default()),
+            imp_accum: 0,
+            last_consolidated_epoch: 0,
+            consol_cursor: 0,
         }
     }
 
@@ -384,13 +437,32 @@ impl MemSubstrate {
     /// Append a new record to T2 and index it into T3 (instant read-your-writes).
     fn add(&mut self, key: u64, value: u64, packed: u64) -> Option<u64> {
         let imp = ((packed & 0xFF) as u8).clamp(1, 10); // GA poignancy 1..=10
+        // M17: accumulate GA importance toward the consolidation trigger (>=150).
+        self.imp_accum = self.imp_accum.saturating_add(imp as u32);
+        self.push_record(key, value, imp, 0, Vec::new())
+    }
+
+    /// M17: the single record-append helper shared by [`MemSubstrate::add`] and
+    /// [`MemSubstrate::reflect_inner`], so the T2 episode + T3 record + inverted
+    /// index + quota stay in lockstep and ALL three new safe fields
+    /// (`links`/`tier`/`provenance`) are set in ONE place. Returns the new id, or
+    /// `None` when the write-amplification quota is exhausted (fail-soft).
+    fn push_record(
+        &mut self,
+        token: u64,
+        value: u64,
+        importance: u8,
+        provenance: u8,
+        links: Vec<(u8, u64)>,
+    ) -> Option<u64> {
+        let imp = importance.clamp(1, 10);
         if self.quota.tokens_written.saturating_add(1) > TOKEN_QUOTA {
             return None;
         }
         let id = self.t2.next_id;
         self.t2.log.push(Episode {
             id,
-            content_tok: key,
+            content_tok: token,
             value,
             t_created: self.clock,
             t_invalid: 0,
@@ -400,7 +472,7 @@ impl MemSubstrate {
         let ridx = self.t3.records.len() as u32;
         self.t3.records.push(MemRecord {
             id,
-            token: key,
+            token,
             importance: imp,
             count: 0,
             last_ts: [0; 10],
@@ -409,8 +481,11 @@ impl MemSubstrate {
             t_invalid: 0,
             c_succ: 0,
             c_use: 0,
+            links,
+            tier: TIER_HOT,
+            provenance,
         });
-        self.t3.lexical.entry(key).or_insert_with(Vec::new).push(ridx);
+        self.t3.lexical.entry(token).or_insert_with(Vec::new).push(ridx);
         self.t3.num_docs = self.t3.num_docs.saturating_add(1);
         self.t3.total_len = self.t3.total_len.saturating_add(1);
         self.quota.tokens_written = self.quota.tokens_written.saturating_add(1);
@@ -463,6 +538,9 @@ impl MemSubstrate {
             let r = &self.t3.records[ri as usize];
             if r.t_invalid != 0 {
                 continue; // bitemporal asof filter (tombstoned)
+            }
+            if r.tier != TIER_HOT {
+                continue; // M17: FORGET-demoted (tier 5) leaves the hot recall set
             }
             if self.finsts.contains(r.id) {
                 continue; // exclude_recent (Finsts)
@@ -523,7 +601,7 @@ impl MemSubstrate {
     /// `tb_mem_manage` / consolidate: the minimal SYNCHRONOUS maintenance op
     /// (the async kswapd-style daemon is M17). `op`: 0 = tombstone id `a`,
     /// 1 = add link, 2 = T1 GC. Returns the count of affected records.
-    pub(crate) fn consolidate(&mut self, op: u64, a: u64, _b: u64, _c: u64) -> u64 {
+    pub(crate) fn consolidate(&mut self, op: u64, a: u64, b: u64, c: u64) -> u64 {
         match op {
             0 => {
                 let mut n = 0u64;
@@ -542,12 +620,220 @@ impl MemSubstrate {
                 self.clock = self.clock.wrapping_add(1);
                 n
             }
-            1 => 0,             // add typed link (forward-compat)
+            1 => {
+                // M17: FILL the link stub -- LINK from=a to=b kind=c. Push the
+                // typed edge (cites/relates/supersedes) onto record `a`'s links.
+                let mut n = 0u64;
+                for r in self.t3.records.iter_mut() {
+                    if r.id == a {
+                        r.links.push((c as u8, b));
+                        n = 1;
+                        break;
+                    }
+                }
+                n
+            }
             2 => {
-                self.t1.gc();   // demote / reachability-GC T1
+                self.t1.gc(); // demote / reachability-GC T1
+                0
+            }
+            // M17 op-selector space (NO new ABI method -- all ride M_MEM_CONSOLIDATE).
+            3 => self.consolidation_cycle(), // one bounded distill+reflect+forget cycle
+            4 => self.reflect_inner(a).unwrap_or(0), // reflect(model_token=a) -> insight id
+            5 => self.forget_sweep(),        // BLA-decay demote sweep -> demoted count
+            6 => self.reflect_digest(),      // READ-ONLY deterministic digest (model bridge)
+            7 => self.imp_accum as u64,      // READ-ONLY importance accumulator
+            8 => {
+                // READ-ONLY link_count of record id `a`.
+                for r in self.t3.records.iter() {
+                    if r.id == a {
+                        return r.links.len() as u64;
+                    }
+                }
                 0
             }
             _ => 0,
         }
+    }
+
+    /// M17: `true` once accumulated GA importance has crossed the consolidation
+    /// trigger -- the daemon's PRIMARY (importance-overflow) wake condition.
+    #[allow(dead_code)]
+    fn over_threshold(&self) -> bool {
+        self.imp_accum >= IMP_ACCUM_THRESHOLD
+    }
+
+    /// M17 CONSOLIDATE/distill: collapse near-duplicate live T3 records sharing a
+    /// token into ONE durable survivor with supersedes+cites links, NEVER touching
+    /// the T2 journal. TWO-PHASE (immutable plan, then mutable apply) so the borrow
+    /// checker is satisfied with zero unsafe. Returns the count of merged-away losers.
+    fn distill(&mut self) -> u64 {
+        // PHASE A (immutable): scan the deterministic lexical BTreeMap, plan each
+        // near-duplicate cluster's (survivor, losers). Cap at DISTILL_BATCH clusters.
+        let mut plan: Vec<(usize, Vec<usize>)> = Vec::new();
+        for postings in self.t3.lexical.values() {
+            let mut live: Vec<usize> = Vec::new();
+            for &ri in postings.iter() {
+                let r = &self.t3.records[ri as usize];
+                if r.t_invalid == 0 && r.tier == TIER_HOT {
+                    live.push(ri as usize);
+                }
+            }
+            if live.len() < 2 {
+                continue; // not a duplicate cluster
+            }
+            // SURVIVOR = max importance; tie-break by largest t_created, then
+            // smallest id (a fixed, documented order so the merge is deterministic).
+            let mut surv = live[0];
+            for &idx in live.iter() {
+                let r = &self.t3.records[idx];
+                let s = &self.t3.records[surv];
+                let better = r.importance > s.importance
+                    || (r.importance == s.importance && r.t_created > s.t_created)
+                    || (r.importance == s.importance
+                        && r.t_created == s.t_created
+                        && r.id < s.id);
+                if better {
+                    surv = idx;
+                }
+            }
+            let losers: Vec<usize> = live.into_iter().filter(|&idx| idx != surv).collect();
+            plan.push((surv, losers));
+            if plan.len() >= DISTILL_BATCH {
+                break;
+            }
+        }
+        // PHASE B (mutable): tombstone ONLY the derived T3 duplicate (never the T2
+        // source episode), append supersedes+cites links to the survivor.
+        let mut merged = 0u64;
+        for (surv, losers) in plan.iter() {
+            for &loser in losers.iter() {
+                let loser_id = self.t3.records[loser].id;
+                self.t3.records[loser].t_invalid = self.clock;
+                self.t3.records[*surv].links.push((LINK_SUPERSEDES, loser_id));
+                self.t3.records[*surv].links.push((LINK_CITES, loser_id));
+                merged += 1;
+            }
+            self.t3.records[*surv].provenance = 2; // distilled survivor
+        }
+        if merged > 0 {
+            self.clock = self.clock.wrapping_add(1);
+        }
+        merged
+    }
+
+    /// M17 REFLECT (READ-ONLY): the deterministic fixed-point digest over the recent
+    /// high-salience slice (the model-bridge seam reads this via op=6, transforms it
+    /// at the daemon-task layer, then writes it back through op=4). Must traverse
+    /// IDENTICALLY to [`MemSubstrate::reflect_inner`] so op=6 == what op=4 would fold.
+    fn reflect_digest(&self) -> u64 {
+        let mut digest: u64 = REFLECT_SEED;
+        let mut n = 0usize;
+        for r in self.t3.records.iter().rev() {
+            if r.t_invalid != 0 || r.tier != TIER_HOT || r.provenance == 1 {
+                continue; // skip tombstoned/demoted + bounded depth (one reflection level)
+            }
+            digest = digest.rotate_left(7) ^ r.token ^ (r.importance as u64);
+            n += 1;
+            if n >= REFLECT_WINDOW {
+                break;
+            }
+        }
+        digest
+    }
+
+    /// M17 REFLECT (WRITE): fold the recent high-salience T3 slice into a NEW insight
+    /// record (provenance=1) with cites-back links; `model_token != 0` substitutes a
+    /// daemon-task-supplied (e.g. model-transformed) token for the pure digest. Bumps
+    /// each cited source's importance (+1, saturating at 10) so reflected-upon memories
+    /// resist FORGET. Returns the new insight id, or `None` (empty slice / quota).
+    fn reflect_inner(&mut self, model_token: u64) -> Option<u64> {
+        let mut cites: Vec<u64> = Vec::new();
+        let mut digest: u64 = REFLECT_SEED;
+        for r in self.t3.records.iter().rev() {
+            if r.t_invalid != 0 || r.tier != TIER_HOT || r.provenance == 1 {
+                continue; // bounded depth: do not reflect on prior reflections
+            }
+            digest = digest.rotate_left(7) ^ r.token ^ (r.importance as u64);
+            cites.push(r.id);
+            if cites.len() >= REFLECT_WINDOW {
+                break;
+            }
+        }
+        if cites.is_empty() {
+            return None;
+        }
+        let insight_token = if model_token != 0 { model_token } else { digest };
+        let links: Vec<(u8, u64)> = cites.iter().map(|&id| (LINK_CITES, id)).collect();
+        let new_id = self.push_record(insight_token, insight_token, REFLECT_IMP, 1, links)?;
+        // REPLAY-STRENGTHENS: bump cited sources so reflection resists forgetting.
+        for &cid in cites.iter() {
+            for r in self.t3.records.iter_mut() {
+                if r.id == cid {
+                    r.importance = r.importance.saturating_add(1).min(10);
+                    break;
+                }
+            }
+        }
+        Some(new_id)
+    }
+
+    /// M17 FORGET: fixed-point ACT-R BLA(d=0.5) decay sweep over a BOUNDED window
+    /// `[consol_cursor .. consol_cursor + SWEEP_BATCH)` from the persisted clock-hand.
+    /// DEMOTES (tier HOT->COLD) only records SIMULTANEOUSLY stale AND low-importance
+    /// AND low-utility AND past the grace window -- monotone KEEP->DEMOTE, the T2
+    /// journal is NEVER popped/truncated/age-tombstoned. Returns the demoted count.
+    fn forget_sweep(&mut self) -> u64 {
+        let len = self.t3.records.len();
+        if len == 0 {
+            return 0;
+        }
+        let start = (self.consol_cursor % len as u64) as usize;
+        let budget = if SWEEP_BATCH < len { SWEEP_BATCH } else { len };
+        let mut idx = start;
+        let mut n = 0u64;
+        for _ in 0..budget {
+            let demote = {
+                let r = &self.t3.records[idx];
+                if r.t_invalid != 0 || r.tier != TIER_HOT {
+                    false
+                } else {
+                    let age = self.clock.saturating_sub(r.t_created);
+                    if age < MIN_AGE {
+                        false // grace: brand-new records are immune
+                    } else {
+                        let bla = bla_raw(r.count, age);
+                        // EvolveR utility s (fixed-point); default counters give 500.
+                        let util = (r.c_succ as i64 + 1) * SCALE / (r.c_use as i64 + 2);
+                        // AND-gate (high-value survival): all three must hold.
+                        bla < THETA_DEMOTE && (r.importance as i64) < IMP_PIN && util < UTIL_PIN
+                    }
+                }
+            };
+            if demote {
+                self.t3.records[idx].tier = TIER_COLD;
+                n += 1;
+            }
+            idx = (idx + 1) % len;
+        }
+        // Advance the persisted clock-hand (wraps), so the next cycle resumes.
+        self.consol_cursor = (start as u64 + budget as u64) % len as u64;
+        n
+    }
+
+    /// M17: ONE bounded maintenance cycle = distill + reflect + forget_sweep, then
+    /// reset the importance accumulator, mark the freshness epoch, and flush (advancing
+    /// the epoch the foreground reads before trusting T3). Returns the aggregate
+    /// affected count. This is the synchronous body the CONSOLIDATE daemon drives.
+    fn consolidation_cycle(&mut self) -> u64 {
+        let mut n = self.distill();
+        if self.reflect_inner(0).is_some() {
+            n += 1;
+        }
+        n += self.forget_sweep();
+        self.imp_accum = 0;
+        self.last_consolidated_epoch = self.clock;
+        let _ = self.backing.flush();
+        n
     }
 }

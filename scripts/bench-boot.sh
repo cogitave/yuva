@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITER="${ITER:-10}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-20}"
 FIRST_MARKER="hello from rust_main"
-FINAL_MARKER="M16: infer OK"
+FINAL_MARKER="M17: consolidate OK"
 
 case "${ARCH}" in
   x86_64)

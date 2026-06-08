@@ -1284,7 +1284,7 @@ pub fn agent_spawn(manifest: &'static AgentManifest, kstack: &'static mut [usize
     // table (never closed), so the born-with set + M14 endpoints + M15 blocks +
     // M16 sessions must all coexist. (The M11/M12 ObjFull algebra tests use their
     // OWN explicitly-sized tables, so this bound is independent of them.)
-    let mut table = caps::HandleTable::with_capacity(32);
+    let mut table = caps::HandleTable::with_capacity(48);
     let mh_rights = caps::Rights::READ
         .union(caps::Rights::WRITE)
         .union(caps::Rights::RECALL);
@@ -1416,6 +1416,24 @@ pub fn agent_mem_dispatch(
     };
     let ret = caps::dispatch(&mut ap.table, &args);
     Some((ret.status as u32, ret.value))
+}
+
+/// M17: the sleep-time CONSOLIDATE daemon facade -- drive ONE bounded maintenance
+/// cycle (distill + reflect + forget_sweep) through `task`'s born-with memory home
+/// at the M11 chokepoint (`M_MEM_CONSOLIDATE` op=3, `Rights::CONSOLIDATE`-gated).
+/// Returns `(status, affected_count)`; `None` if `task` is not a live agent. A
+/// normal agent born WITHOUT `CONSOLIDATE` (`mh_rights = READ|WRITE|RECALL`) is
+/// correctly `Denied` -- the daemon proper mints its own CONSOLIDATE-righted home.
+pub fn agent_consolidate_cycle(task: Task) -> Option<(u32, u64)> {
+    agent_mem_dispatch(task, caps::M_MEM_CONSOLIDATE, 3, 0, 0, 0)
+}
+
+/// M17: READ-ONLY observability facade -- read `task`'s GA importance accumulator
+/// (`M_MEM_CONSOLIDATE` op=7) so the >=150 consolidation trigger is witnessable.
+/// `Denied` for an agent lacking `CONSOLIDATE`, mirroring [`agent_consolidate_cycle`].
+#[allow(dead_code)]
+pub fn agent_mem_accumulator(task: Task) -> Option<(u32, u64)> {
+    agent_mem_dispatch(task, caps::M_MEM_CONSOLIDATE, 7, 0, 0, 0)
 }
 
 /// M14: open ONE ordered, bounded, bidirectional IPC channel between agents `a`
