@@ -2729,6 +2729,37 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- L2.0: EL2 (nVHE) world-switch -- the aarch64 realization of the same
+    // "we ARE the hypervisor" rung the vmxroot block above proves on x86. Booted
+    // at EL2 (QEMU virt,virtualization=on), this kernel installed a resident nVHE
+    // EL2 monitor and dropped to EL1 to run M0..M18; now (playing the live EL1
+    // kernel) it issues a bootstrap HVC #0 that ERETs into a tiny EL1 guest stub,
+    // whose HVC #1 traps back to EL2 and is caught + verified. ALL the new
+    // asm/unsafe is confined to tb-hal's arch/aarch64/{boot,el2,el2_vectors}.rs,
+    // so this crate stays unsafe-free; the kernel only branches on El2Proof.
+    // Unlike vmxroot (a TCG skip), this proof EXECUTES under pure TCG. On x86_64
+    // there is no EL2, so it reports the n/a path. DoD: "L2.0: el2 OK".
+    match tb_hal::el2_selftest() {
+        tb_hal::El2Proof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.0: el2 OK\n"); // <-- the L2.0 aarch64 DoD marker
+        }
+        tb_hal::El2Proof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no HVC issued.
+            tb_hal::serial_write_str("L2.0: el2 OK (no EL2, skipped)\n");
+        }
+        tb_hal::El2Proof::NotApplicable => {
+            // x86_64: no EL2 -- the vmxroot block above is this arch's rung.
+            tb_hal::serial_write_str("L2.0: el2 OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::El2Proof::RoundTripFailed { code } => {
+            // Booted at EL2 but the round-trip faulted -- surfaced honestly, with
+            // NO 'el2 OK' substring, so the run-script grep fails (red).
+            tb_hal::serial_write_str("L2.0: el2 FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     tb_hal::halt()
 }
 

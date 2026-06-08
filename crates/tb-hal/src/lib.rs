@@ -2233,9 +2233,68 @@ pub fn vmx_selftest() -> VmxProof {
     arch::vmx_selftest()
 }
 
-/// L2.0: aarch64 has no VMX — the EL2 world-switch is a later L2 sub-milestone,
-/// so this reports [`VmxProof::NotApplicable`] (the kernel prints the n/a marker).
+/// L2.0: aarch64 has no VMX — the EL2 world-switch is the aarch64 realization of
+/// this rung (see [`el2_selftest`]), so this reports [`VmxProof::NotApplicable`]
+/// (the kernel prints the n/a marker).
 #[cfg(target_arch = "aarch64")]
 pub fn vmx_selftest() -> VmxProof {
     VmxProof::NotApplicable
+}
+
+// ===========================================================================
+// L2.0: EL2 (nVHE) world-switch self-test facade (the aarch64 L2 sovereignty
+// track — the ARM realization of the x86 VMX-root rung).
+//
+// The aarch64 proof that TABOS *is* the hypervisor: booted at EL2 (QEMU
+// `virt,virtualization=on`), installed a resident nVHE EL2 monitor, dropped to
+// EL1 to run M0..M18 unchanged, then at this slot does a real EL1<->EL2
+// world-switch — a bootstrap `HVC #0` from the running EL1 kernel ERETs into a
+// tiny EL1 guest stub, whose `HVC #1` traps back to EL2 and is caught. ALL the
+// silicon-unsafe/asm is confined to tb-hal's `arch/aarch64/{boot,el2,el2_vectors}.rs`,
+// so the framekernel invariant SURVIVES: this crate stays unsafe-free and the
+// kernel only branches on the returned `El2Proof`. Unlike L2.0 vmxroot (which
+// only SKIPS under TCG), this proof actually EXECUTES under pure TCG. On x86_64
+// (no EL2) it is N/A — exactly mirroring the `VmxProof`/`vmx_selftest` block.
+// ===========================================================================
+
+/// L2.0 EL2 world-switch self-test outcome (returned to the kernel for marker
+/// rendering). Mirrors [`VmxProof`] one EL up: the proof is a closed
+/// ERET->guest->HVC->EL2 round-trip rather than a VMLAUNCH/VM-exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum El2Proof {
+    /// This arch has no EL2 hypervisor level (x86_64): VMX-root is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`, no `virtualization=on`): no
+    /// resident monitor exists, so no HVC is issued — a graceful green skip
+    /// (mirrors [`VmxProof::Unavailable`], no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and issued the bootstrap HVC, but the monitor reported a
+    /// fault instead of a clean round-trip; `code` is the nonzero diagnostic
+    /// (booted-EL2 but failed — surfaced honestly as a red marker).
+    RoundTripFailed {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the EL1->EL2->EL1-guest->EL2->EL1 world-switch ran and the
+    /// guest's HVC was caught with its magic verified; `hvc_imm` is the guest's
+    /// trap-back immediate (1, the expected value).
+    Proven {
+        /// The guest HVC immediate that closed the round-trip (1 == `hvc #1`).
+        hvc_imm: u64,
+    },
+}
+
+/// L2.0: run the EL2 (nVHE) world-switch self-test (aarch64), or report
+/// [`El2Proof::NotApplicable`] on x86_64. See [`El2Proof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_selftest() -> El2Proof {
+    arch::el2_selftest()
+}
+
+/// L2.0: x86_64 has no EL2 — the VMX-root world-switch (see [`vmx_selftest`]) is
+/// this arch's realization of the rung, so this reports
+/// [`El2Proof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_selftest() -> El2Proof {
+    El2Proof::NotApplicable
 }

@@ -27,7 +27,9 @@
 //! now a REAL handler (`__vec_el0_sync` -> `aarch64_el0_sync_handler` in
 //! `user.rs`); the rest of the Lower-EL quadrant remains a fatal stub.
 
-mod boot; // _start; arms VBAR_EL1; pure side-effect (`global_asm!`) module.
+mod boot; // _start; EL-aware bring-up + nVHE EL2-monitor install; arms VBAR_EL1.
+mod el2; // L2.0: resident nVHE EL2 monitor (HVC handler) + el2_selftest() facade.
+mod el2_vectors; // L2.0: VBAR_EL2 table + EL2 save path; pure `global_asm!` module.
 mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
 mod pmm; // M6: QEMU `virt` boot memory-map source (hard-coded map + DTB reserve).
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
@@ -38,6 +40,7 @@ mod uaccess; // M14.1: cross-address-space user-buffer copy (the only new aarch6
 mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
+pub use el2::el2_selftest; // L2.0: the safe EL2 world-switch self-test facade.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
     map_user_in_root, mmu_init, mmu_selftest, switch_root,

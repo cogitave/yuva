@@ -13,7 +13,8 @@
 #
 # Invocation sources:
 #   * QEMU `virt` board: UART0 = ARM PL011 @ 0x0900_0000, FDT pointer in x0,
-#     `-kernel <ELF>` enters at EL1 (QEMU docs; dtb dumped via -machine dumpdtb).
+#     `-kernel <ELF>` enters at EL2 under `virtualization=on` (the L2.0 monitor
+#     drops to EL1 for M0..M18) (QEMU docs; dtb dumped via -machine dumpdtb).
 #   * `-nographic` already routes the serial onto stdio AND muxes the monitor;
 #     additionally passing `-serial stdio` makes QEMU abort with
 #     "cannot use stdio by multiple character devices", so we deliberately do
@@ -24,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="L2.0: vmxroot OK"
+MARKER="el2 OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then
@@ -32,8 +33,13 @@ if ! command -v "${QEMU}" >/dev/null 2>&1; then
     exit 127
 fi
 
-# -M virt          : QEMU AArch64 'virt' machine (PL011 @ 0x09000000, GICv2, FDT)
-# -cpu cortex-a72  : real A72; guest entry = EL1h, MMU off, DAIF masked, x0=FDT
+# -M virt,virtualization=on,gic-version=2 : QEMU AArch64 'virt'; virtualization=on
+#                    exposes EL2 so the vCPU enters at EL2h (the L2.0 nVHE EL2
+#                    monitor installs there, then drops to EL1 for M0..M18);
+#                    gic-version=2 pins the GICv2 GICD/GICC MMIO M8 hard-codes.
+# -cpu cortex-a72  : real A72 (pure ARMv8.0 -> guaranteed nVHE, E2H RES0). With
+#                    virtualization=on, guest entry = EL2h, MMU off, DAIF masked,
+#                    x0=FDT; without it the vCPU enters at EL1h (green skip path).
 # -m 128M          : virt RAM = 0x4000_0000..0x4800_0000; image links at +512 KiB
 # -nographic       : headless; PL011 -> this terminal's stdio (see note above)
 # -no-reboot       : do not loop on a fatal guest event
@@ -41,7 +47,7 @@ fi
 set +e
 OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     "${QEMU}" \
-        -M virt \
+        -M virt,virtualization=on,gic-version=2 \
         -cpu cortex-a72 \
         -m 128M \
         -nographic \

@@ -36,6 +36,7 @@ SECTIONS
     .text : ALIGN(0x800) {
         KEEP(*(.text._start))      /* boot entry -- must be e_entry           */
         KEEP(*(.text._vectors))    /* VBAR_EL1 table, self-aligned to 2 KiB   */
+        KEEP(*(.text._el2_vectors))/* L2.0 VBAR_EL2 table, self-aligned 2 KiB */
         *(.text .text.*)
     }
 
@@ -56,8 +57,12 @@ SECTIONS
         *(COMMON)
         . = ALIGN(16);
         __boot_stack_bottom = .;
-        . = . + 0x4000;            /* 16 KiB boot stack                       */
+        . = . + 0x4000;            /* 16 KiB boot stack (SP_EL1)              */
         __boot_stack_top = .;
+        . = ALIGN(16);
+        __el2_stack_bottom = .;
+        . = . + 0x4000;            /* L2.0: 16 KiB resident EL2-monitor stack */
+        __el2_stack_top = .;       /* SP_EL2; single-accessor, EL1 never used */
     }
     . = ALIGN(16);
     __bss_end = .;
