@@ -1,7 +1,113 @@
 # TABOS Architecture Draft
 
-> Status: v1.0 draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**.
-> Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M18 agent-native milestone chain plus the first sovereignty-L2 rung (L2.0) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
+
+---
+
+## Implementation status (as built)
+
+This document is the design north-star; the honest design→reality map as of the
+M18 capstone is below. The authoritative, executable record is the cumulative
+serial-marker chain the kernel prints on every boot ([MILESTONES](MILESTONES.md)
+· [ROADMAP-V2](ROADMAP-V2.md)); the markers cited below are exactly those strings.
+
+**Built and CI-green on both architectures (x86_64 + aarch64):**
+
+- **Kernel approach (§1.2–1.4).** The framekernel decision is realized: all
+  `unsafe` + asm is confined to `crates/tb-hal`; the `kernel` crate carries
+  **zero `unsafe {}` blocks** (not literally crate-level `#![forbid(unsafe_code)]`
+  only because `#[unsafe(no_mangle)]` on `rust_main` is itself an unsafe
+  attribute); and the pure leaves (`crates/tb-caps-core`, and `tb-hal`'s
+  `caps`/`mem`/`ipc`/`blocks`/`infer` modules) are `#![forbid(unsafe_code)]`. The
+  hardware foundation (boot, traps, context switch, MMU, user/ring) is M0–M4;
+  dynamic memory is M5–M7; preemption M8–M9; per-agent address spaces M10.
+  Single-vCPU throughout (SMP is the biggest deferred debt, first designed at L2.6).
+- **Kernel object model + capability handles (§2).** M11 (`M11: caps OK`) ships
+  the per-principal, generation-checked, rights-masked `Handle` table, the closed
+  `SysStatus` enum (not negative-errno), and a single numbered capability-checked
+  syscall dispatcher — zero ambient authority. The `Rights` bitset includes the
+  §2 agent-semantic rights (`INVOKE_MODEL`/`SPAWN_AGENT`/`WRITE_PROCEDURAL`/
+  `RECALL`/`CONSOLIDATE`/`EMIT_EXTERNAL`/`DELEGATE_BUDGET`). The birth protocol is
+  M12 (`M12: agent OK`): `tb_agent_spawn(manifest)` mints an `AgentProcess` in its
+  own address space holding **only** its manifest-declared handles. The
+  rights-subset / no-confused-deputy invariant of this model is **machine-proven
+  by Kani** (see Verification posture below).
+- **Syscall surface (§4).** Realized as additive method numbers routed through the
+  one M11 dispatch chokepoint: `mem` (M13 — `tb_mem_write/read/recall/consolidate`),
+  `agent` spawn (M12), `cap` meta-ops narrow/transfer/revoke (M11/M14), channel IPC
+  (M14), shared blocks (M15) and `infer` invoke (M16). The richer DAG/QoS/budget/
+  consent surface of §4–§6 is partially landed (ordered streams + capability-passing
+  channels at M14; the `{cost,speed,intelligence}` preference vector + `model:`
+  router at M16) and partly still [PROPOSAL].
+- **IPC + protocol layering (§9).** M14 (`M14: ipc OK`) is the single canonical
+  kernel IPC dialect: capability-passing channels (a `Handle` **moves** across
+  address spaces via the TRANSFER right with dup-attenuation — the auditable
+  authority-flow edge), bounded ordered rings, peer-closed semantics. **M14.1**
+  (`M14.1: payload OK`) adds variable-length byte payloads via a kernel-heap bounce
+  buffer (`copy_to_user`/`copy_from_user`, the only new unsafe, confined to the
+  per-arch `arch/*/uaccess.rs` modules); **M14.2** (`M14.2: blocking-recv OK`)
+  closes the recv-blocks-on-empty / send-wakes-peer scheduler↔IPC round-trip. The
+  MCP/A2A/ACP/ANP userspace bridge daemons remain future work.
+- **Memory-central (§3 union dirs, §8 persistence).** M13 (`M13: memory OK`) gives
+  every agent a default tiered substrate (T0 context registers / T1 working graph /
+  T2 append-only bi-temporal episodic journal / lexical T3 semantic store with
+  activation-ranked recall — all fixed-point/deterministic) behind the born-with
+  memory-home handle. M15 (`M15: blocks OK`) adds shared memory blocks + a session
+  blackboard; M16 fills the inert T3 dense channel; M17 (`M17: consolidate OK`)
+  adds the sleep-time consolidation / reflection / forgetting daemons. Backing is
+  RAM behind a `BackingStore` trait — durable virtio-blk persistence (the §8
+  orthogonal-persistence vision) is future.
+- **LLM-agnostic (§4 infer, §6 context scheduler).** M16 (`M16: infer OK`) is the
+  `model:` scheme: a safe in-kernel **router** binds whichever backend registered
+  the scheme (`model:anthropic/opus` ≡ `model:local/llama` behind one contract,
+  gated by `INVOKE_MODEL`), proven backend-agnostic with a deterministic mock
+  provider; the real Anthropic/OpenAI adapters + the vsock GPU/CUDA driver-VM sit
+  behind the same `InferBackend` trait on the L2 track.
+- **Frozen kernel boundary (§7.6, §10).** M18 (`M18: evolve OK`) realizes the
+  frozen-kernel / evolving-userspace split as **capability geometry** on the M11
+  rights layer: the held-out evaluators + append-only lineage live in a kernel
+  domain that is **never** minted into any agent's handle table, so the whole
+  self-improvement safety guarantee **reduces to the M11 rights-mask invariant**
+  (which is exactly why that invariant carries a Kani proof). Adds the T4
+  procedural/skill tier with verification-before-commit.
+
+**Verification posture.** M11's capability rights-subset / no-confused-deputy
+invariant is machine-proven by **Kani** over `crates/tb-caps-core` — the single
+source of truth for the `Rights` algebra and the generation-checked `CapTable`,
+which `tb-hal` re-exports verbatim and wraps as `CapTable<Rc<Object>>`, so the
+kernel and the proofs verify the **exact same code (zero model drift)**: 12
+`#[kani::proof]` harnesses (`src/proofs.rs`) in three tiers — the `Rights` algebra
+over the full 2³² bit space, one proof per capability operation on the real
+`CapTable`, and an inductive single-step no-widen preservation proof (plus a
+bounded-sequence cross-check and a documented negative control). The `kani.yml`
+lane fails closed unless every harness verifies and the count matches the pinned
+constant, then emits `M11: caps-subset PROVEN`. Four CI lanes guard the tree:
+**ci** (build + boot both arches under pure QEMU-TCG, grepping the cumulative
+marker), **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
+`/dev/kvm`), **l2-nested-vmx** (the real L2.0 VMX-root proof under nested KVM), and
+**kani**.
+
+**Sovereignty-L2 (§1.2 host substrate).** The L2 track — TABOS as its own minimal
+Type-1 microhypervisor, replacing `/dev/kvm` with `tb-core` — has started. **L2.0**
+prints two lines every boot. On x86_64, `L2.0: vmxroot OK` covers VMXON + a minimal
+VMCS + an EPT identity map + a world-switch + a 1-instruction nested guest whose
+VM-exit is caught — all silicon-unsafe confined to
+`crates/tb-hal/src/arch/x86_64/vmx/`; **but under QEMU-TCG (and most hosted CI) the
+VMX CPUID bit is refused, so this is a graceful skip**
+(`L2.0: vmxroot OK (vmx unavailable, skipped)`) — the real VMLAUNCH/world-switch
+proof is gated on a nested-VMX substrate (the `l2-nested-vmx` lane) that hosted CI
+lacks. On aarch64, `L2.0: el2 OK` is a **genuine, executing** nVHE EL2 world-switch
+(HVC→ERET→EL1 guest stub→HVC→EL2 round-trip) that runs under pure TCG on a stock
+runner. Each boot prints both lines; the off-arch one is a green `n/a`. The full
+L2.0→L2.9 plan is [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md).
+
+**Still design-stage [PROPOSAL].** The richer scheduling algebra (§5 — Soar
+preferences, impasse traps, ACT-R retrieval pricing, QoS admission control), the
+context/token resource scheduler with local+remote driver families (§6), the
+signed-manifest / human-approval / isolation-ladder mechanisms (§7.3–§7.5), and the
+MCP/A2A/ACP/ANP bridge daemons (§9) are not yet built — they remain the design
+targets this document sets.
 
 ---
 

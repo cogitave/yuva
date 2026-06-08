@@ -1,11 +1,18 @@
 # TABOS Milestones & Development Pipeline
 
-> Status: the v1 kernel-foundation chain **M0 → M4 is complete and green on both
-> architectures** (x86_64 + aarch64), verified by booting under QEMU on every
-> change. This document records what each milestone delivers, how it is proven,
-> and how the codebase is built and run.
+> Status: the agent-native milestone chain **M0 → M18 is complete and CI-green on
+> both architectures** (x86_64 + aarch64), plus the first sovereignty-L2 rung
+> **L2.0** (x86_64 VMX-root + aarch64 EL2 world-switch) — every milestone verified
+> by booting under QEMU (and, on x86_64, the project's own `tb-vmm`/KVM) on every
+> change. M11's capability rights-subset invariant is additionally **machine-proven
+> by Kani** (marker `M11: caps-subset PROVEN`). This document records what each
+> milestone delivers, how it is proven, and how the codebase is built and run; the
+> full sequenced, risk-analysed v2 plan with per-milestone detail is
+> **[ROADMAP-V2](ROADMAP-V2.md)**.
 > Related: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) (the assembly plan
-> these milestones implement) · [SOVEREIGNTY](SOVEREIGNTY.md) · [BUILD](../BUILD.md).
+> the M0–M4 milestones implement) · [ROADMAP-V2](ROADMAP-V2.md) (the M5→M18
+> detail) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) (the L2 track) ·
+> [SOVEREIGNTY](SOVEREIGNTY.md) · [BUILD](../BUILD.md).
 
 ---
 
@@ -14,28 +21,40 @@
 TABOS is a from-scratch, `no_std` Rust kernel with **zero Linux code or design**
 inherited (see [SOVEREIGNTY](SOVEREIGNTY.md)). It follows the *framekernel*
 pattern: **all `unsafe` and all assembly live in one foundation crate,
-`tb-hal`**; every layer above it is compiled with `#![forbid(unsafe_code)]`. The
+`tb-hal`**; every layer above it is safe Rust. The pure leaves —
+`crates/tb-caps-core` and `tb-hal`'s `caps`/`mem`/`ipc`/`blocks`/`infer`/`heap`/
+`pmm` modules — are literally `#![forbid(unsafe_code)]`, and the `kernel` crate
+itself carries **zero `unsafe {}` blocks** (it is not crate-level `forbid` only
+because `#[unsafe(no_mangle)]` on `rust_main` is itself an unsafe *attribute*,
+which the `unsafe_code` lint flags). The
 kernel boots as a guest on a Firecracker/KVM-class virtual machine (for
 development we boot it under QEMU). Two architectures are first-class:
 **x86_64** (PVH boot) and **aarch64** (PE/Linux Image boot on QEMU `virt`).
 
 ```
-kernel/                 #![forbid(unsafe_code)] — the entry shim + milestone self-tests
+kernel/                 entry shim + cumulative milestone self-tests; ZERO `unsafe {}`
+                        blocks (not literally crate-level forbid only because
+                        `#[unsafe(no_mangle)]` on `rust_main` is an unsafe attribute)
+crates/tb-caps-core/    #![forbid(unsafe_code)] — the host-verifiable M11 capability
+                        core (Rights + CapTable); the SAME code the kernel runs, Kani-proven
 crates/tb-hal/          the ONLY crate where unsafe + asm is allowed
   src/mmu.rs            shared typed page-table layer (PageTable512)
-  src/arch/x86_64/      boot, serial, gdt, idt, trap, sched, mmu, user
-  src/arch/aarch64/     boot, serial, vectors, trap, sched, mmu, user
+  src/{caps,mem,ipc,blocks,infer,heap,pmm}.rs   safe-Rust leaves, each #![forbid(unsafe_code)]
+  src/arch/x86_64/      boot, serial, gdt, idt, trap, sched, mmu, user, timer, uaccess, vmx/
+  src/arch/aarch64/     boot, serial, vectors, trap, sched, mmu, user, timer, uaccess, el2
 targets/*.json          custom no_std target specs (build-std)
 kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M4)
+## 2. The milestone chain (M0 → M18, + L2.0)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
 milestones cumulatively, so every boot is a full regression of M0 through the
-latest. Today a successful boot prints all 14 lines below.
+latest. A green boot prints the M0–M4 foundation trace (below), then the M5–M18
+agent-native markers, then the two L2.0 sovereignty lines — the complete ordered
+sequence is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -45,7 +64,8 @@ latest. Today a successful boot prints all 14 lines below.
 | **M3** | MMU + page tables | splice a 4 KiB mapping into the live boot tables; remap + `invlpg` | **cold MMU bring-up**: MAIR/TCR/TTBR0 → `SCTLR.M\|C\|I`; Break-Before-Make remap + TLBI | `M3: mmu OK` |
 | **M4** | User/ring boundary | ring3 via `iretq`; user `int 0x80` through a DPL=3 gate; `TSS.rsp0`; user pages `U/S=1` | EL0 via `eret` (SPSR=EL0t); user `svc #0` → Lower-EL Sync handler; ESR.EC=0x15; pages AP=0b01/AF/UXN | `M4: user/ring OK` |
 
-Full cumulative serial output of a green boot:
+The M0–M4 foundation trace of a green boot (the M5–M18 agent-native markers and
+the two L2.0 lines that follow are in the complete sequence further below):
 
 ```
 hello from rust_main
@@ -103,6 +123,160 @@ M0–M4 under both PVH/QEMU and tb-boot/tb-vmm). The next rung, **L2**, replaces
 the host kernel's KVM with the project's own Type-1 microhypervisor —
 see [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
 
+### The v2 agent-native chain (M5 → M18)
+
+M0–M4 built the hardware foundation; the v2 chain turns it into the agent-native
+OS the four pillars describe (agent-native · LLM-agnostic · memory-central ·
+self-improving). Each milestone is one cumulative serial-marker DoD under the
+same QEMU + `tb-vmm` harness, and — the **framekernel dividend** — the only new
+`unsafe`/asm in the whole chain lives in `tb-hal`; the security-critical
+capability (M11), memory (M13/M15/M17) and self-improvement (M18) layers add
+**zero** new unsafe. Per-milestone design, risk analysis and self-test detail are
+in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
+
+| Milestone | Capability | DoD marker | New `unsafe`/asm (all in `tb-hal`) |
+|---|---|---|---|
+| **M5** | Bootstrap kernel heap + `#[global_allocator]` (`alloc` online) | `M5: alloc OK` | `KernelHeap` `GlobalAlloc` over a `.bss` arena |
+| **M6** | Physical frame allocator from the boot memory map | `M6: frame alloc OK` | boot-map parse + intrusive free-frame stack |
+| **M7** | Frame-backed growable kernel heap | `M7: heap OK` | `map_heap_frames` (a higher-half heap VA window) |
+| **M8** | Async interrupt + monotonic timer tick (no switch) | `M8: timer OK` | LAPIC / GICv2 + timer IRQ stub (first `sti`/`daifclr`) |
+| **M9** | Preemptive scheduler (involuntary full-context switch) | `M9: preempt OK` | from-IRQ-context switch (M2 cooperative switch reused) |
+| **M10** | Per-agent address spaces (memory isolation) | `M10: addrspace OK` | `map_in_root` + root swap (CR3 / TTBR0_EL1) |
+| **M11** | Capability handle table + object model + agent-native syscall ABI | `M11: caps OK` | per-arch register-lift syscall shim **only** |
+| **M12** | Agent runtime — `AgentProcess` as a scheduled, isolated entity | `M12: agent OK` | user-frame launch + preemption fold-in |
+| **M13** | Default tiered memory substrate (T0–T3 + `tb_mem_*` ABI) | `M13: memory OK` | none (safe `mem.rs`) |
+| **M14** | Inter-agent IPC — capability-passing channels + ordered streams | `M14: ipc OK` | none (safe `ipc.rs`; cap moved by handle) |
+| **M14.1** | Variable-length byte payload (bounce buffer, `MAX_PAYLOAD = 4096`) | `M14.1: payload OK` | `copy_to_user`/`copy_from_user` in `arch/*/uaccess.rs` |
+| **M14.2** | recv-blocks-on-empty / send-wakes-peer scheduler↔IPC round-trip | `M14.2: blocking-recv OK` | none |
+| **M15** | Shared memory blocks + session blackboard | `M15: blocks OK` | none (reuses M10 map machinery) |
+| **M16** | LLM-agnostic inference bridge (the `model:` scheme) | `M16: infer OK` | none yet (mock backend; virtio ring deferred with the real provider) |
+| **M17** | Sleep-time consolidation / reflection / forgetting daemons | `M17: consolidate OK` | none |
+| **M18** | Frozen-kernel self-improvement harness + held-out evaluators + T4 skill tier | `M18: evolve OK` | none |
+
+Capability-passing IPC (M14) is the multi-agent north star and landed in three
+serial steps: **M14** is the channel core — a `Handle` MOVES across address
+spaces via the TRANSFER right with dup-attenuation (the auditable authority-flow
+edge) over bounded ordered rings with peer-closed semantics, the cap carried by
+handle, **zero** new unsafe; **M14.1** adds the variable-length byte payload
+through a kernel-heap bounce buffer, where the mapping- and bounds-checked
+`copy_to_user`/`copy_from_user` are the *only* M14 unsafe and are confined to the
+new per-arch `arch/{x86_64,aarch64}/uaccess.rs` modules (`ipc.rs` stays
+`#![forbid(unsafe_code)]`); **M14.2** closes the recv-blocks-off-the-run-queue /
+send-wakes-the-peer scheduler↔IPC round-trip.
+
+### L2.0 — the first sovereignty-L2 rung (VMX-root / EL2 world-switch)
+
+After M18 the kernel prints the first rung of the **L2 sovereignty track** —
+TABOS as its own minimal Type-1 microhypervisor, replacing `/dev/kvm` with
+`tb-core` (full plan: [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md)). L2.0
+emits **two** lines every boot, one per architecture; the off-arch line is a
+green `n/a`:
+
+- **x86_64 — `L2.0: vmxroot OK`.** The VMX-root path: `VMXON` → a minimal `VMCS`
+  (host state from the live kernel context; a long-mode guest) → an EPT identity
+  map → a `global_asm!` world-switch into a 1-instruction nested guest (`CPUID`)
+  → catch its VM-exit via `VMREAD(exit-reason)` → `VMXOFF`. All silicon-unsafe is
+  confined to the new `crates/tb-hal/src/arch/x86_64/vmx/` subtree, driven by the
+  safe `tb_hal::vmx_selftest() -> VmxProof` facade. **Honest status: on the local
+  and hosted-CI substrate this is a graceful skip.** QEMU-TCG (and the hosted
+  GitHub runners) refuse the VMX CPUID bit, so the probe returns `Unavailable`
+  and the marker prints as `L2.0: vmxroot OK (vmx unavailable, skipped)` — the
+  same allow-skip discipline as `vmm-boot`. The **real** VMLAUNCH / world-switch
+  / caught-exit proof is gated on a nested-VMX substrate (`-cpu host,+vmx` with
+  L0 `kvm_intel nested=1`) that hosted CI lacks; that is the dedicated
+  `l2-nested-vmx` lane, where the `Proven { exit_reason: 10 }` path fires and
+  prints the bare `L2.0: vmxroot OK`. On aarch64 this line prints as
+  `L2.0: vmxroot OK (x86-only, n/a on aarch64)`.
+- **aarch64 — `L2.0: el2 OK`.** A **genuine, executing** nVHE EL2 world-switch.
+  TABOS boots at **EL2** under QEMU `virt,virtualization=on,gic-version=2 -cpu
+  cortex-a72`, installs a resident EL2 monitor (`VBAR_EL2` + `HCR_EL2.RW`), drops
+  to EL1 so the entire M0..M18 chain runs at EL1 byte-for-byte, then issues a
+  bootstrap `HVC #0` that the monitor `ERET`s into a tiny EL1 guest stub whose
+  `HVC #1` traps back to EL2 and is caught and verified (magic `0xE12`) — a real
+  EL1↔EL2 round-trip. The silicon-unsafe is confined to
+  `crates/tb-hal/src/arch/aarch64/{boot,el2,el2_vectors}.rs` behind a safe
+  `el2_selftest() -> El2Proof` facade. **This is the one L2 rung whose
+  world-switch is NOT a CI skip** — it actually runs under pure TCG on a stock
+  runner (`scripts/run-aarch64.sh` greps `el2 OK`). On x86_64 this line prints as
+  `L2.0: el2 OK (aarch64-only, n/a on x86_64)`.
+
+### The complete cumulative DoD-marker sequence
+
+A green boot prints the M0–M4 foundation trace shown above, then the following
+markers in order — every milestone runs cumulatively, so each boot is a full
+regression of M0 through L2.0:
+
+```
+tb-boot: contract v0 OK          # only on the tb-vmm / tb-boot v0 path
+hello from rust_main             # M0
+M1: traps OK
+M2: context-switch OK
+M3: mmu OK
+M4: user/ring OK
+M5: alloc OK
+M6: frame alloc OK
+M7: heap OK
+M8: timer OK
+M9: preempt OK
+M10: addrspace OK
+M11: caps OK
+M12: agent OK
+M13: memory OK
+M14: ipc OK
+M14.1: payload OK
+M14.2: blocking-recv OK
+M15: blocks OK
+M16: infer OK
+M17: consolidate OK
+M18: evolve OK
+L2.0: vmxroot OK                 # x86_64: real proof on the nested-VMX lane, else "(vmx unavailable, skipped)"; aarch64 prints "(x86-only, n/a on aarch64)"
+L2.0: el2 OK                     # aarch64: genuine EL2 world-switch under TCG; x86_64 prints "(aarch64-only, n/a on x86_64)"
+```
+
+Each line is a hard `grep` target in the per-arch run script; a missing or
+`FAIL` marker is always a non-zero exit (the run scripts bound the boot with a
+wall-clock timeout, since the kernel halts after the last marker rather than
+exiting).
+
+### Verification posture
+
+Two machine-checked guarantees back the chain:
+
+- **M11 capability proof (Kani).** The rights-subset / no-confused-deputy
+  invariant — *a capability meta-op can only ever narrow authority, and a forged
+  handle resolves to no authority beyond its slot's* — is machine-proven by
+  **Kani** over `crates/tb-caps-core`, the **single source of truth** for the
+  `Rights` algebra and the generation-checked `CapTable`. `tb-hal` re-exports
+  `Rights`/`Handle`/`SysStatus` verbatim and wraps `CapTable<Rc<Object>>`, so the
+  kernel and the proofs verify the **exact same code — zero model drift**. The
+  suite is **12 `#[kani::proof]` harnesses** (`crates/tb-caps-core/src/proofs.rs`)
+  in three tiers: the `Rights` algebra over the full 2³² bit space (complete
+  bit-vector proofs), one proof per capability operation on the real `CapTable`,
+  and an inductive single-step no-widen preservation proof (plus a
+  bounded-sequence cross-check and a documented negative control that fails if
+  `intersect`'s `&` is swapped for `|`). The `.github/workflows/kani.yml` lane
+  runs `cargo kani -p tb-caps-core` and `scripts/verify-caps.sh` **fails closed**
+  unless every harness verifies *and* the success count equals the pinned
+  constant, then emits `M11: caps-subset PROVEN`. This is what makes M18's
+  frozen-kernel boundary a proof and not a hope: M18's self-improvement safety
+  **reduces to** this M11 invariant (the held-out evaluators are simply objects
+  no agent's handle table can ever name).
+- **Framekernel invariant.** All `unsafe` + asm is confined to `crates/tb-hal`.
+  The `kernel` crate contains **zero `unsafe {}` blocks** (it is not crate-level
+  `#![forbid(unsafe_code)]` only because `#[unsafe(no_mangle)]` on `rust_main` is
+  itself an unsafe *attribute*, which the `unsafe_code` lint flags). The pure
+  leaves — `tb-caps-core` and `tb-hal`'s `caps.rs`/`mem.rs`/`ipc.rs`/`blocks.rs`/
+  `infer.rs` (plus `heap.rs`/`pmm.rs`) — are literally `#![forbid(unsafe_code)]`.
+
+Four CI lanes guard the tree:
+
+| Lane | Workflow | What it proves |
+|---|---|---|
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..L2.0) |
+| **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
+| **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
+| **kani** | `kani.yml` | the M11 rights-subset proof → `M11: caps-subset PROVEN` |
+
 ## 3. Development pipeline
 
 Each milestone was built with the same loop, and the same loop applies going
@@ -157,34 +331,31 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
 
 ## 5. What's next
 
-- **MV — `tb-vmm`** (the **L1** sovereignty rung) — **done.** The project's own
-  thin **userspace** VMM on the rust-vmm crates now boots the kernel through the
-  sovereign `tb-boot v0` contract (64-bit long-mode entry; no PVH note, no `A0`
-  trampoline on that path). Implemented and green; see **§2 → "MV — owned boot
-  via `tb-vmm`"** above. Remaining follow-up: an aarch64 `tb-vmm` arch backend
-  (`KVM_ARM_VCPU_INIT`) — today `tb-vmm` configures the x86_64 vCPU only.
+The v2 agent-native chain (M0–M18) and the **L1** sovereignty rung (`tb-vmm`) are
+complete and CI-green; **L2.0** (the first **L2** rung) has landed. What remains
+is the rest of the L2 track plus a set of named debts:
+
 - **L2 — `tb-core`** (the **north-star**): TABOS as its own minimal Type-1
-  microhypervisor (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + scheduling, <10K-LOC
-  TCB), with the proprietary GPU/CUDA stack quarantined in a confined Linux driver
-  VM. This is where "full sovereignty" lands. See
-  [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
-- **v2 — the agent-native milestone chain (M5 → M18)**: the active track. M0–M4
-  built the hardware foundation; v2 turns it into the agent-native OS the four
-  pillars describe — dynamic memory (M5–M7), preemption (M8–M9), address spaces
-  (M10), the capability-based syscall ABI (M11 — whose rights-subset /
-  no-confused-deputy invariant is now machine-proven by Kani over the
-  host-verifiable `crates/tb-caps-core` (the SAME Rights/CapTable code the kernel
-  runs), CI marker `M11: caps-subset PROVEN`), the agent runtime (M12), the
-  default tiered memory substrate (M13/M15/M17), inter-agent IPC (M14 — with
-  the M14.1 byte-payload `copy_to_user`/`copy_from_user` bounce-buffer round-trip
-  across two agent address spaces, sub-marker `M14.1: payload OK`), the
-  LLM-agnostic inference bridge (M16), and the frozen-kernel self-improvement
-  harness (M18). Each is one cumulative serial-marker DoD under the same QEMU +
-  tb-vmm harness. The full, sequenced, risk-analysed plan — with the exact DoD
-  marker and framekernel `unsafe` placement per milestone — is
-  **[ROADMAP-V2](ROADMAP-V2.md)**. Currently building **M5** (`M5: alloc OK`).
-- **L2 — `tb-core`** (the **north-star**, parallel track): TABOS as its own
-  minimal Type-1 microhypervisor; where "full sovereignty" lands. See
-  [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md).
-- **G0 spec-freeze**: closing the remaining P0 open questions
+  microhypervisor (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + sovereign scheduling,
+  <10K-LOC TCB), replacing `/dev/kvm` and quarantining the proprietary GPU/CUDA
+  stack in a confined Linux driver VM — where **full sovereignty** lands. **L2.0
+  is done** (x86_64 `vmxroot` — a graceful skip pending a nested-VMX lane;
+  aarch64 `el2` — a genuine executing EL2 world-switch under TCG; see §2). The
+  ten-rung plan L2.0→L2.9 (EPT-demand handling, the full exit set, the
+  device-model seam, the real-TABOS nested guest, sovereign scheduling, SMP, the
+  bare-metal UEFI Type-1 launch, the IOMMU, and the full split-VMM) is tracked in
+  **[SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md)** (ladder context:
+  [SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)).
+- **aarch64 `tb-vmm` backend** — `tb-vmm` configures the x86_64 vCPU only; an
+  aarch64 arch backend (`KVM_ARM_VCPU_INIT`) plus an aarch64 `tb-boot` producer +
+  an `_tb_start`-equivalent EL1 entry are the prerequisites for an ARM L1/L2 boot
+  path (today the aarch64 kernel `_start` consumes `x0`=FDT).
+- **Durable persistence** — M13's tiered substrate is RAM-backed behind a
+  `BackingStore` trait; a durable virtio-blk backing milestone is deferred.
+- **SMP** — M0–M18 are single-vCPU (preemptive time-multiplex on one core); SMP
+  is the biggest latent debt and is first designed at L2.6.
+- **Real inference backends** — M16 ships a deterministic mock provider; the real
+  Anthropic/OpenAI adapters and the vsock GPU/CUDA driver-VM sit behind the same
+  `InferBackend` trait on the L2 track.
+- **G0 spec-freeze** — closing the remaining P0 open questions
   ([OPEN-QUESTIONS](OPEN-QUESTIONS.md)) before freezing the v1 ABI.
