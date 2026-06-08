@@ -178,6 +178,10 @@ const MAGIC_F: u64 = 0x2020_2020_2020_200F;
 static STACK_AGENT_A: TaskStack<4096> = TaskStack::new();
 /// Agent B's KERNEL stack.
 static STACK_AGENT_B: TaskStack<4096> = TaskStack::new();
+/// M13 agent C's KERNEL stack (born-with-home substrate witness).
+static STACK_AGENT_C: TaskStack<4096> = TaskStack::new();
+/// M13 agent D's KERNEL stack (per-agent isolation witness).
+static STACK_AGENT_D: TaskStack<4096> = TaskStack::new();
 
 /// Agent A's manifest grants: a read/write/recall memory home + a readable
 /// budget. NO `EMIT_EXTERNAL` / `INVOKE_MODEL`, so its emit-external syscall is
@@ -1355,6 +1359,177 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M12: agent OK\n"); // <-- the M12 DoD marker
+
+    // --- M13: the default tiered, persistent, recallable memory substrate -----
+    // Every agent's born-with ObjKind::MemoryHome now carries a REAL per-agent
+    // tiered substrate (T0 registers + T1 working graph + T2 episodic journal +
+    // T3 lexical semantic store), reached ONLY through the M11 dispatch
+    // chokepoint, rights-gated, namespaced memory:private/<agent>. The timer is
+    // already disarmed (single-threaded, interrupts masked -- exactly the
+    // discipline the substrate's RefCell relies on). Two witnesses: (A) kernel-
+    // side, driving caps::dispatch directly with the full [u64;4] encoding, and
+    // (B) through the ACTUAL born-with home of freshly spawned agents (proving it
+    // is a real per-agent guarantee, not a local toy). DoD marker: "M13: memory OK".
+    {
+        use tb_hal::caps::{self, Handle, ObjKind, Rights, SysStatus};
+
+        fn m13_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M13: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        // A capability-checked dispatch against `h` in `tbl` with the full
+        // pointer-free [u64;4] inline-arg encoding.
+        fn disp(
+            tbl: &mut tb_hal::caps::HandleTable,
+            h: tb_hal::caps::Handle,
+            method: u32,
+            a: [u64; 4],
+        ) -> tb_hal::caps::SysReturn {
+            tb_hal::caps::dispatch(
+                tbl,
+                &tb_hal::caps::SyscallArgs {
+                    method,
+                    handle: h,
+                    args: a,
+                },
+            )
+        }
+
+        const TOK_K: u64 = 0x1001; // a synthetic query/lexical token id (no embeddings)
+        const TOK_J: u64 = 0x1002; // a different token (must NOT match a TOK_K recall)
+        const V0: u64 = 0x0000_BEEF; // value scalar; read-back proves instant RYW
+        let ok = SysStatus::Ok as u32;
+
+        // ============ WITNESS A -- kernel-side over caps::dispatch ============
+        let mut tbl = caps::HandleTable::with_capacity(16);
+        let all = Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::RECALL)
+            .union(Rights::CONSOLIDATE);
+        let home = match tbl.mint_memory_home(all) {
+            Some(h) => h,
+            None => m13_fail("could not mint a memory home with all rights"),
+        };
+
+        // 1. WRITE three records (op=ADD). The high-importance + most-recent
+        //    TOK_K record (id_win) must win recall; id_old (TOK_K, low imp) is the
+        //    runner-up; id_other (TOK_J) must never match a TOK_K query.
+        let r_old = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_K, 0x1111, 3]);
+        if r_old.status != SysStatus::Ok {
+            m13_fail("write of id_old was not Ok");
+        }
+        let id_old = r_old.value;
+        let r_other = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_J, 0x2222, 7]);
+        if r_other.status != SysStatus::Ok {
+            m13_fail("write of id_other was not Ok");
+        }
+        let r_win = disp(&mut tbl, home, caps::M_MEM_WRITE, [0, TOK_K, V0, 9]);
+        if r_win.status != SysStatus::Ok {
+            m13_fail("write of id_win was not Ok");
+        }
+        let id_win = r_win.value;
+
+        // 2. READ-YOUR-WRITES (instant, append-only T2): read id_win -> V0.
+        let ryw = disp(&mut tbl, home, caps::M_MEM_READ, [id_win, 0, 0, 0]);
+        if ryw.status != SysStatus::Ok || ryw.value != V0 {
+            m13_fail("read-your-writes did not return the written value");
+        }
+        tb_hal::serial_write_str("mem: read-your-writes OK (instant, append-only T2)\n");
+
+        // 3. RECALL (activation-ranked) -> copy-on-retrieve MemoryRecord.
+        let rec = disp(&mut tbl, home, caps::M_MEM_RECALL, [TOK_K, 0, 1, 0]);
+        if rec.status != SysStatus::Ok {
+            m13_fail("activation recall did not return Ok");
+        }
+        let h_rec = Handle::from_raw(rec.value);
+        let insp = disp(&mut tbl, h_rec, caps::M_OBJECT_INSPECT, [0, 0, 0, 0]);
+        if insp.status != SysStatus::Ok || insp.value != ObjKind::MemoryRecord as u64 {
+            m13_fail("recall handle did not resolve to a MemoryRecord (copy-on-retrieve)");
+        }
+        let rid = disp(&mut tbl, h_rec, caps::M_MEM_READ, [0, 0, 0, 0]);
+        if rid.status != SysStatus::Ok || rid.value != id_win {
+            m13_fail("recall did not rank the high-importance recent record first");
+        }
+        // retrieve_next: the Finsts ring excludes id_win -> advances to id_old.
+        let rec2 = disp(&mut tbl, home, caps::M_MEM_RECALL, [TOK_K, 1, 1, 0]);
+        if rec2.status != SysStatus::Ok {
+            m13_fail("retrieve_next recall did not return Ok");
+        }
+        let rid2 = disp(&mut tbl, Handle::from_raw(rec2.value), caps::M_MEM_READ, [0, 0, 0, 0]);
+        if rid2.status != SysStatus::Ok || rid2.value != id_old || rid2.value == id_win {
+            m13_fail("Finsts did not advance to the next candidate (loop not broken)");
+        }
+        tb_hal::serial_write_str("mem: activation recall ranked + Finsts advanced (id_win -> id_old)\n");
+
+        // 4. CONSOLIDATE (gated SUCCESS -- this home HOLDS CONSOLIDATE).
+        let cons = disp(&mut tbl, home, caps::M_MEM_CONSOLIDATE, [0, id_old, 0, 0]);
+        if cons.status != SysStatus::Ok || cons.value < 1 {
+            m13_fail("gated consolidate (tombstone) did not run");
+        }
+        tb_hal::serial_write_str("mem: gated consolidate tombstoned a record (CONSOLIDATE right)\n");
+
+        // 5. RIGHTS-DENIED paths (fall straight out of the required_right gate).
+        let home_ro = match tbl.mint_memory_home(Rights::READ.union(Rights::RECALL)) {
+            Some(h) => h,
+            None => m13_fail("could not mint the read-only memory home"),
+        };
+        if disp(&mut tbl, home_ro, caps::M_MEM_WRITE, [0, TOK_K, 1, 1]).status != SysStatus::Denied {
+            m13_fail("WRITE on a home lacking WRITE was not Denied");
+        }
+        if disp(&mut tbl, home_ro, caps::M_MEM_CONSOLIDATE, [0, 0, 0, 0]).status != SysStatus::Denied {
+            m13_fail("CONSOLIDATE on a home lacking CONSOLIDATE was not Denied");
+        }
+        if disp(&mut tbl, home_ro, 99, [0, 0, 0, 0]).status != SysStatus::BadMethod {
+            m13_fail("an unknown method was not BadMethod (closed method set changed)");
+        }
+        tb_hal::serial_write_str("mem: rights-denied paths Denied + closed method set intact\n");
+
+        // ============ WITNESS B -- through the ACTUAL born-with home ============
+        // Spawn two fresh agents; each is BORN with a real substrate behind its
+        // memory_home (agent_spawn -> mint_memory_home). The timer stays disarmed,
+        // so they never run a user instruction -- we drive their substrate from the
+        // kernel through agent_mem_dispatch (the M11 chokepoint).
+        let agent_c = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_C.take());
+        let agent_d = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_D.take());
+
+        let (s, id_c) = match tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_WRITE, 0, TOK_K, V0, 5)
+        {
+            Some(x) => x,
+            None => m13_fail("agent C is not a live agent"),
+        };
+        if s != ok {
+            m13_fail("agent C WRITE to its born-with home was not Ok");
+        }
+        let (s, v) = tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_READ, id_c, 0, 0, 0)
+            .unwrap_or((SysStatus::BadCap as u32, 0));
+        if s != ok || v != V0 {
+            m13_fail("agent C read-your-writes failed on its born-with home");
+        }
+        let (s, _h) = tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_RECALL, TOK_K, 0, 1, 0)
+            .unwrap_or((SysStatus::BadCap as u32, 0));
+        if s != ok {
+            m13_fail("agent C recall failed on its born-with home");
+        }
+        let (s, _) = tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_CONSOLIDATE, 0, id_c, 0, 0)
+            .unwrap_or((ok, 0));
+        if s != SysStatus::Denied as u32 {
+            m13_fail("agent C consolidate was not Denied (born-with home lacks CONSOLIDATE)");
+        }
+        // per-agent isolation: agent D's substrate cannot see agent C's record.
+        let (s, v) = tb_hal::agent_mem_dispatch(agent_d, caps::M_MEM_READ, id_c, 0, 0, 0)
+            .unwrap_or((SysStatus::BadCap as u32, 0));
+        if s == ok && v == V0 {
+            m13_fail("agent D read agent C's private memory (per-agent isolation breach)");
+        }
+        tb_hal::serial_write_str(
+            "agent: born-with home is a real per-agent substrate (write/recall Ok, consolidate Denied, isolated)\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M13: memory OK\n"); // <-- the M13 DoD marker
 
     tb_hal::halt()
 }

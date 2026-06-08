@@ -36,6 +36,7 @@
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 /// An unforgeable, generation-tagged reference into a per-principal
 /// [`HandleTable`]: `(generation:u32) << 32 | slot:u32`, one opaque `u64`.
@@ -219,6 +220,16 @@ pub enum ObjKind {
 pub struct Object {
     /// The kind tag of this object.
     pub kind: ObjKind,
+    /// M13: the optional per-agent tiered memory substrate. Present ONLY on a
+    /// born-with [`ObjKind::MemoryHome`] (one substrate per home = the
+    /// `memory:private/<agent>` namespace); `None` for identity-only objects.
+    /// Interior-mutable (safe `RefCell`) so [`dispatch`] reaches `&mut` through a
+    /// shared `Rc<Object>`; sound because M13 dispatch runs single-core with
+    /// interrupts masked (no reentrant borrow).
+    mem: Option<RefCell<crate::mem::MemSubstrate>>,
+    /// M13: an inline scalar payload. A copy-on-retrieve [`ObjKind::MemoryRecord`]
+    /// carries the recalled record id here; `0` for objects without one.
+    scalar: u64,
 }
 
 /// The neutral, fully-owned syscall descriptor the per-arch register-lift shim
@@ -312,6 +323,12 @@ pub const M_MEM_CONSOLIDATE: u32 = 20;
 pub const M_EMIT_EXTERNAL: u32 = 21;
 /// Delegate a budget slice (needs DELEGATE_BUDGET; body lands M12).
 pub const M_BUDGET_DELEGATE: u32 = 22;
+/// M13: write episodic/semantic memory (needs WRITE; body lands M13). KEPT
+/// distinct from [`M_MEM_WRITE_PROC`] (=18, WRITE_PROCEDURAL) so the privileged
+/// T4 procedural write preserves the CoALA risk asymmetry (lands M18).
+pub const M_MEM_WRITE: u32 = 23;
+/// M13: read a memory record by id -- instant read-your-writes (needs READ).
+pub const M_MEM_READ: u32 = 24;
 
 /// Map a method number to the single right it requires, or `None` for an
 /// unknown method (-> [`SysStatus::BadMethod`]). This closes the method space.
@@ -328,6 +345,8 @@ fn required_right(method: u32) -> Option<Rights> {
         M_MEM_WRITE_PROC => Rights::WRITE_PROCEDURAL,
         M_MEM_RECALL => Rights::RECALL,
         M_MEM_CONSOLIDATE => Rights::CONSOLIDATE,
+        M_MEM_WRITE => Rights::WRITE,
+        M_MEM_READ => Rights::READ,
         M_EMIT_EXTERNAL => Rights::EMIT_EXTERNAL,
         M_BUDGET_DELEGATE => Rights::DELEGATE_BUDGET,
         _ => return None,
@@ -420,7 +439,44 @@ impl HandleTable {
     /// Mint a brand-new object of `kind` and its first handle with `rights`.
     /// `None` when the table is full (`ObjFull`).
     pub fn mint(&mut self, kind: ObjKind, rights: Rights) -> Option<Handle> {
-        self.alloc(rights, Rc::new(Object { kind }))
+        self.alloc(
+            rights,
+            Rc::new(Object {
+                kind,
+                mem: None,
+                scalar: 0,
+            }),
+        )
+    }
+
+    /// M13: mint a born-with [`ObjKind::MemoryHome`] whose body is a fresh, empty
+    /// per-agent [`crate::mem::MemSubstrate`] (the `memory:private/<agent>`
+    /// namespace -- one substrate per home). `None` when the table is at `cap`
+    /// (`ObjFull`). The substrate is the M11-chokepoint-only door to memory:
+    /// dispatch reaches it ONLY by resolving this handle.
+    pub fn mint_memory_home(&mut self, rights: Rights) -> Option<Handle> {
+        self.alloc(
+            rights,
+            Rc::new(Object {
+                kind: ObjKind::MemoryHome,
+                mem: Some(RefCell::new(crate::mem::MemSubstrate::new())),
+                scalar: 0,
+            }),
+        )
+    }
+
+    /// M13: mint a copy-on-retrieve [`ObjKind::MemoryRecord`] working copy
+    /// carrying `scalar` (the recalled record id) with READ rights. `None` on
+    /// `ObjFull` (the caller maps it to a closed status; never a panic).
+    fn mint_record(&mut self, scalar: u64) -> Option<Handle> {
+        self.alloc(
+            Rights::READ,
+            Rc::new(Object {
+                kind: ObjKind::MemoryRecord,
+                mem: None,
+                scalar,
+            }),
+        )
     }
 
     /// The rights currently attached to `h`, or `None` if it does not resolve.
@@ -519,9 +575,94 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         },
         M_HANDLE_REVOKE => SysReturn::status(table.revoke(args.handle)),
         M_HANDLE_CLOSE => SysReturn::status(table.close(args.handle)),
+        // M13: the rights-gated memory verbs route to the caller's OWN substrate
+        // behind this MemoryHome handle (the chokepoint-only door). Clone the
+        // `Rc<Object>` out and drop the slot/RefCell borrow BEFORE minting the
+        // copy-on-retrieve MemoryRecord, so the table `&mut` never aliases the
+        // in-flight substrate borrow (single-core, interrupts masked -> no
+        // reentrant borrow_mut).
+        M_MEM_WRITE => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.mem {
+                Some(cell) => {
+                    match cell.borrow_mut().write(
+                        args.args[0],
+                        args.args[1],
+                        args.args[2],
+                        args.args[3],
+                    ) {
+                        Some(id) => SysReturn::ok(id),
+                        None => SysReturn::err(SysStatus::NoMem),
+                    }
+                }
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        M_MEM_READ => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match obj.kind {
+                ObjKind::MemoryHome => match &obj.mem {
+                    Some(cell) => match cell.borrow().read(args.args[0]) {
+                        Some(v) => SysReturn::ok(v),
+                        None => SysReturn::err(SysStatus::BadCap),
+                    },
+                    None => SysReturn::err(SysStatus::BadCap),
+                },
+                // A copy-on-retrieve record hands back its inline scalar (id).
+                ObjKind::MemoryRecord => SysReturn::ok(obj.scalar),
+                _ => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        M_MEM_RECALL => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            let rec = match &obj.mem {
+                Some(cell) => cell.borrow_mut().recall(
+                    args.args[0],
+                    args.args[1],
+                    args.args[2],
+                    args.args[3],
+                ),
+                None => return SysReturn::err(SysStatus::BadCap),
+            };
+            // The substrate borrow is dropped above; now mint the working copy.
+            match rec {
+                Some(id) => match table.mint_record(id) {
+                    Some(h) => SysReturn::ok(h.raw()),
+                    None => SysReturn::err(SysStatus::ObjFull),
+                },
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        M_MEM_CONSOLIDATE => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.mem {
+                Some(cell) => {
+                    let n = cell.borrow_mut().consolidate(
+                        args.args[0],
+                        args.args[1],
+                        args.args[2],
+                        args.args[3],
+                    );
+                    SysReturn::ok(n)
+                }
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
         // M_HANDLE_TRANSFER is kernel-mediated (it needs a destination table);
-        // its TRANSFER right is verified above. Agent-semantic methods are
-        // rights-checked stubs at M11 (bodies land in M12+). Both report Ok.
+        // its TRANSFER right is verified above. Remaining agent-semantic methods
+        // are rights-checked stubs at M11 (bodies land in later milestones).
         _ => SysReturn::ok(0),
     }
 }

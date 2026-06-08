@@ -39,6 +39,7 @@ extern crate alloc;
 
 mod arch;
 pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
+mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
@@ -1282,7 +1283,10 @@ pub fn agent_spawn(manifest: &'static AgentManifest, kstack: &'static mut [usize
     let bs_rights = caps::Rights::READ
         .union(caps::Rights::WRITE)
         .union(caps::Rights::TRANSFER);
-    let memory_home = match table.mint(caps::ObjKind::MemoryHome, mh_rights) {
+    // M13: the born-with home now carries a REAL per-agent tiered substrate
+    // (mint_memory_home attaches a fresh MemSubstrate) -- the memory:private/<agent>
+    // namespace reachable ONLY through this handle via the M11 dispatch chokepoint.
+    let memory_home = match table.mint_memory_home(mh_rights) {
         Some(h) => h,
         None => task_api_fatal("agent_spawn: could not mint the memory home"),
     };
@@ -1374,6 +1378,35 @@ pub fn agent_syscall_current(method: u64, handle: u64, a0: u64, a1: u64) -> Opti
     if args.method == caps::M_EMIT_EXTERNAL && ret.status == caps::SysStatus::Denied {
         AGENT_DENIED_OK[slot].store(true, Ordering::Release);
     }
+    Some((ret.status as u32, ret.value))
+}
+
+/// M13: kernel-side facade driving a numbered, capability-checked memory method
+/// against `task`'s OWN born-with memory home (the per-agent substrate; `AGENTS`
+/// is private). Runs the full [`caps::dispatch`] against the agent's table with
+/// ALL four inline args plumbed, returning `(status, value)` -- or `None` if
+/// `task` is not a live agent. This is the through-the-born-with-home witness:
+/// it proves the substrate is a real per-agent guarantee reached only through
+/// the M11 chokepoint, not a local toy.
+pub fn agent_mem_dispatch(
+    task: Task,
+    method: u32,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+) -> Option<(u32, u64)> {
+    let slot = task.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method,
+        handle: ap.memory_home,
+        args: [a0, a1, a2, a3],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
     Some((ret.status as u32, ret.value))
 }
 

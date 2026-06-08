@@ -20,7 +20,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M12: agent OK'
+MARKER='M13: memory OK'
 TIMEOUT_SECS="${VMM_TIMEOUT:-30}"
 
 if [[ ! -e /dev/kvm ]]; then
