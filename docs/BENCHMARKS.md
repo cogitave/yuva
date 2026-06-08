@@ -42,12 +42,35 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (currently
-  `M9: preempt OK`). This is boot **plus the entire M0…latest self-test** (M2's
-  1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB
-  page-table-mapped + pattern-verified heap growths, M8's
-  first-async-interrupt register-integrity canary, and M9's round-robin
-  preemption of two no-yield spin tasks across ≥100 involuntary switches), so it
-  is labelled separately and is **not** a pure boot number.
+  `M18: evolve OK`). This is boot **plus the entire M0…M18 self-test** (M2's
+  1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB heap
+  growths, M8's interrupt canary, M9's ≥100 involuntary switches, and the
+  M10–M18 isolation / capability / memory / IPC / inference / consolidation /
+  evolve self-tests), so it is labelled separately and is **emphatically not** a
+  boot number — it is an exhaustive correctness suite that happens to run at boot.
+
+**In-guest cycle counters (the VMM-independent, honest guest-only figures).**
+The kernel reads `rdtsc` (x86_64) / `CNTPCT_EL0` (aarch64) at `rust_main` entry
+and prints two deltas on serial — these exclude the VMM/host floor entirely:
+
+- **`boot-ready-cycles`** = `rust_main` entry → **serial up (M0 done), before any
+  self-test**. This is the unikernel-class *first-guest-instruction → ready*
+  figure (the apples-to-apples metric vs Unikraft ~1 ms / OSv ~4–5 ms, **class 1**).
+  Measured: it is a *tiny fraction of a percent* of the self-test span — e.g.
+  locally under TCG, `boot-ready` ≈ 2.0 M cycles (x86_64) vs the `boot-cycles`
+  self-test span ≈ 5.2 B (≈0.04 %); aarch64 ≈ 32 k vs ≈ 63 M — i.e. **TABOS's
+  actual boot is essentially instantaneous; every large number elsewhere on this
+  page is self-test work or the VMM floor, not boot.** The quotable figure is
+  this counter from a `--release` build under `tb-vmm`, KVM (see §5); the KVM
+  `vmm-boot` CI job emits it on every push.
+- **`boot-cycles`** = `rust_main` entry → just after the **M8** marker. Spans the
+  M0–M8 self-test; a *correctness*-cost gauge, NOT a boot figure.
+
+> Caveat on the harness wall-clock: `bench-boot.sh`'s `full=NA` under
+> `qemu -M microvm -accel kvm` is an **untested config** — CI exercises `ci`
+> (QEMU/TCG) and `vmm-boot` (our own `tb-vmm`/KVM, which DOES reach
+> `M18: evolve OK`); the QEMU-microvm+KVM path is not yet a CI lane, so treat its
+> `full` as unverified until that lane (or the in-guest counter above) lands.
 
 **Accel is auto-detected.** **Only the KVM number is a boot figure.** TCG
 (software emulation) inflates boot 10–50× and is reported solely as a portable

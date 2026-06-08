@@ -279,6 +279,17 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("hello from rust_main\n");
 
+    // Clean guest-only BOOT-TO-READY figure: `rust_main` entry -> serial up
+    // (M0 done), BEFORE any M1.. self-test runs. This is the unikernel-class
+    // "first guest instruction -> ready" number for honest cross-system
+    // comparison (Unikraft ~1 ms / OSv ~4-5 ms, guest-only). It is VMM-
+    // independent and is NOT the `boot-cycles` line below, which deliberately
+    // spans the entire M0..M8 self-test and is therefore NOT a boot figure.
+    let boot_ready = tb_hal::read_cycle_counter();
+    tb_hal::serial_write_str("boot-ready-cycles=");
+    write_hex_u64(boot_ready.wrapping_sub(boot_c0));
+    tb_hal::serial_write_byte(b'\n');
+
     // --- M1 proof (kept): install traps, take a breakpoint, resume ---------
     tb_hal::install_traps();
     tb_hal::set_trap_hook(trap_hook);
