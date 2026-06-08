@@ -72,7 +72,10 @@
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::mmu::PageTable512;
+use crate::mmu::{
+    entry_addr, entry_is_valid, level_index, make_entry, PageTable512, ENTRIES, PAGE_SIZE,
+    SHIFT_1G, SHIFT_2M, SHIFT_4K,
+};
 
 // ===========================================================================
 // Virtual layout
@@ -120,6 +123,20 @@ const BLOCK_DEVICE: u64 = DESC_BLOCK | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_DE
 const BLOCK_NORMAL: u64 = DESC_BLOCK | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_NORMAL;
 /// 4 KiB Normal leaf at L3: page | AF | SH | attr1 (= 0x707 over the PA).
 const PAGE_NORMAL: u64 = DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_NORMAL;
+
+/// Privileged execute-never, bit[53]: EL1 cannot execute this page (Linux
+/// `PTE_PXN (1 << 53)`). Set on the M7 heap leaves — the heap holds data.
+const DESC_PXN: u64 = 1 << 53;
+/// User (EL0) execute-never, bit[54] (Linux `PTE_UXN (1 << 54)`). Also set on
+/// the M7 heap leaves, completing no-execute at BOTH ELs.
+const DESC_UXN: u64 = 1 << 54;
+/// Table / TTBR0 output-address mask: bits[47:12] (the 4 KiB-granule next-level
+/// table PA; the M3 typed [`crate::mmu::entry_addr`] uses the same subset).
+const TTBR_BADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+/// M7 kernel-heap 4 KiB leaf: page | AF | inner-SH | Normal-WB, EL1 RW
+/// (AP[2:1] = 0b00, no EL0), no-execute at either EL (PXN | UXN). Data only.
+const PAGE_KERNEL_RW_NX: u64 =
+    DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_NORMAL | DESC_PXN | DESC_UXN;
 
 // ===========================================================================
 // MAIR_EL1 / TCR_EL1 / SCTLR_EL1 values (verified -- module doc)
@@ -526,4 +543,140 @@ pub fn mmu_selftest() -> bool {
     // ...while frame A still holds its own value -- proving the remap moved
     // the translation rather than aliasing a single frame.
     frame_read_ident(&FRAME_A) == MAGIC_A
+}
+
+// ===========================================================================
+// M7: frame-backed growable kernel-heap window (this milestone).
+//
+// `map_heap_frames` grows the heap by pulling 4 KiB frames from M6 and splicing
+// them into the LIVE TTBR0_EL1 hierarchy through the M3 typed layer — the same
+// publish-then-`dsb`/`isb` dance `mmu_selftest` / `user::user_demo` perform for
+// their first map, but kernel-only, RW + NX, mapping MANY frames and REUSING
+// intermediate L2/L3 tables across grows. All the unsafe + barriers live here;
+// `heap.rs` (no asm) only calls this safe-ish primitive.
+// ===========================================================================
+
+/// Base VA of the kernel-heap window: `4 * 2^30` = `L1[4]` — a vacant root slot
+/// (identity uses L1[0..1], M3 `mmu_selftest` uses L1[2], M4 `user` uses L1[3]),
+/// OUTSIDE the identity map `[0, 2 GiB)`. Within the 39-bit (T0SZ=25) VA space.
+const HEAP_WINDOW_BASE: u64 = 0x1_0000_0000;
+
+/// Window VA span cap: 1 GiB — a single `L2[0..512]` subtree under `L1[4]`
+/// (512 L3 tables, 2 MiB each), far more than any milestone heap needs.
+const HEAP_WINDOW_SIZE: u64 = 0x4000_0000;
+
+/// The per-arch kernel-heap window VA range `(base, size)` for `heap.rs`.
+pub fn heap_window() -> (u64, u64) {
+    (HEAP_WINDOW_BASE, HEAP_WINDOW_SIZE)
+}
+
+/// Read the live `TTBR0_EL1` (the L1 translation-table base + CnP/ASID bits).
+fn read_ttbr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: TTBR0_EL1 is an EL1-readable system register; a side-effect-free
+    // load with no memory or stack effect, NZCV preserved. We run at EL1.
+    unsafe {
+        core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Zero all 512 entries of a freshly-allocated table frame, through its identity
+/// address (M6 frames sit in the identity-mapped RAM gigabyte, so PA == VA). A
+/// new table MUST start all-invalid; M6 only wrote a stale link word into it.
+///
+/// # Safety
+/// `table` is a 4 KiB-aligned, identity-mapped frame this code exclusively owns
+/// (just popped from M6 and not yet linked into any live hierarchy).
+unsafe fn zero_table(table: *mut u64) {
+    let mut i = 0;
+    while i < ENTRIES {
+        write_volatile(table.add(i), 0);
+        i += 1;
+    }
+}
+
+/// Return the child table referenced by `parent[idx]`, creating it from a fresh,
+/// zeroed M6 frame (spliced as a TABLE descriptor, then REUSED by later grows)
+/// when the slot is invalid. `None` only on physical-frame OOM.
+///
+/// # Safety
+/// `parent` is a live, identity-mapped 512-entry table; `idx < 512`. Writes are
+/// volatile; the caller publishes them with `dsb ishst` before the walker runs.
+unsafe fn ensure_table(parent: *mut u64, idx: usize) -> Option<*mut u64> {
+    let slot = parent.add(idx);
+    let entry = read_volatile(slot);
+    if entry_is_valid(entry) {
+        return Some(entry_addr(entry) as *mut u64);
+    }
+    let frame = crate::frame_alloc()?;
+    zero_table(frame as *mut u64);
+    write_volatile(slot, make_entry(frame, DESC_TABLE));
+    Some(frame as *mut u64)
+}
+
+/// Map ONE page `va` -> a fresh M6 frame under the live `l1`, building any
+/// missing `L1[4] -> L2 -> L3` table along the way. `false` on physical-frame
+/// OOM. On OOM mid-walk an interior table already spliced in by `ensure_table`
+/// is RETAINED (reused by a later grow via the `entry_is_valid` fast path) and
+/// the data frame is never pulled — the page is left fully unmapped, never half.
+///
+/// # Safety
+/// EL1, MMU live; `l1` is the live root just read from TTBR0_EL1; `va` is a
+/// canonical, currently-INVALID window VA in `L1[4]`; every M6 frame is
+/// identity-mapped RAM, so each table pointer dereferences directly.
+unsafe fn map_one_heap_page(l1: *mut u64, va: u64) -> bool {
+    let l2 = match ensure_table(l1, level_index(va, SHIFT_1G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let l3 = match ensure_table(l2, level_index(va, SHIFT_2M)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let data = match crate::frame_alloc() {
+        Some(p) => p,
+        None => return false,
+    };
+    // Leaf: Normal-WB, EL1 RW, no-execute (PXN|UXN), kernel-only. A data page.
+    write_volatile(
+        l3.add(level_index(va, SHIFT_4K)),
+        make_entry(data, PAGE_KERNEL_RW_NX),
+    );
+    true
+}
+
+/// Map `n` contiguous pages from `start_va` to `n` freshly-allocated M6 frames
+/// (intermediate L2/L3 tables ALSO from M6), each leaf Normal-WB RW + no-exec,
+/// kernel-only, and report how many pages were actually mapped (`< n` ONLY on
+/// physical-frame OOM, with no half-mapped page). One `dsb ishst; isb`
+/// publishes the whole batch to the table walker.
+///
+/// The live L1 base is read from TTBR0_EL1 ONCE here and threaded into every
+/// per-page walk (the root never changes mid-grow), so a multi-page grow issues
+/// a single system-register read rather than one per page.
+///
+/// First-map only — each window VA goes INVALID -> valid exactly once, so NO
+/// TLBI is needed: entries that fault are never cached (Arm ARM D8.14; the same
+/// rule `mmu_selftest`'s first map relies on).
+pub fn map_heap_frames(start_va: u64, n: usize) -> usize {
+    let l1 = (read_ttbr0_el1() & TTBR_BADDR_MASK) as *mut u64;
+    let mut mapped = 0usize;
+    while mapped < n {
+        let va = start_va + (mapped as u64) * (PAGE_SIZE as u64);
+        // SAFETY: EL1, single vCPU, interrupts masked; `va` is a canonical,
+        // not-yet-mapped window VA; `l1` is the live root (TTBR0_EL1) and all
+        // M6 frames are identity-mapped RAM, so every table pointer derefs.
+        if !unsafe { map_one_heap_page(l1, va) } {
+            break; // physical-frame OOM
+        }
+        mapped += 1;
+    }
+    if mapped > 0 {
+        // Publish every descriptor write to the table walker, then resync the
+        // pipeline so the heap's first access through these VAs translates.
+        dsb_ishst();
+        isb();
+    }
+    mapped
 }

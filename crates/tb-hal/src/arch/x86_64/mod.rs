@@ -90,7 +90,7 @@ pub use sched::{ctx_switch, task_stack_init};
 // IA32_EFER.NXE once after `install_traps`; `mmu_selftest` builds, proves and
 // remaps the 4 KiB test mapping entirely inside tb-hal, returning pass/fail.
 // (Same names + signatures as the aarch64 arm, one uniform contract.)
-pub use mmu::{mmu_init, mmu_selftest};
+pub use mmu::{heap_window, map_heap_frames, mmu_init, mmu_selftest};
 
 // M4: the safe user/ring surface, re-exported through `arch/mod.rs` so `lib.rs`
 // can expose `tb_hal::user_demo`. Drops to ring3, runs the stub's `int 0x80`,

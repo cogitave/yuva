@@ -51,7 +51,10 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::mmu::PageTable512;
+use crate::mmu::{
+    entry_addr, entry_is_valid, level_index, make_entry, PageTable512, ENTRIES, PAGE_SIZE,
+    SHIFT_1G, SHIFT_2M, SHIFT_4K, SHIFT_512G,
+};
 
 // ---------------------------------------------------------------------------
 // Architectural constants (verified — see module header).
@@ -71,6 +74,11 @@ const PTE_P: u64 = 1 << 0;
 
 /// Paging-entry bit 1: Read/Write (SDM Table 4-15; Linux `_PAGE_BIT_RW`).
 const PTE_RW: u64 = 1 << 1;
+
+/// Paging-entry bit 63: Execute-Disable / XD (architectural only because
+/// `mmu_init` set IA32_EFER.NXE; SDM Table 4-15; Linux `_PAGE_BIT_NX`). The M7
+/// kernel-heap leaves set it — the heap holds data, never executable code.
+const PTE_NX: u64 = 1 << 63;
 
 /// Physical-address field of any paging entry: bits 51:12 (SDM Table 4-15).
 /// Masking with it also strips flag/ignored bits (and XD) when walking.
@@ -409,4 +417,133 @@ pub fn mmu_selftest() -> bool {
         // (6) Remap proof.
         read_volatile(test_va) == MAGIC_B
     }
+}
+
+// ===========================================================================
+// M7: frame-backed growable kernel-heap window (this milestone).
+//
+// `map_heap_frames` grows the heap by pulling 4 KiB frames from M6 and splicing
+// them into the LIVE CR3 hierarchy through the M3 typed layer — the same
+// publish-bottom-up dance `mmu_selftest` / `user::map_user_pages` perform, but
+// kernel-only (NO U/S), RW + NX, mapping MANY frames and REUSING intermediate
+// tables across grows (a present interior entry is walked, not rebuilt). All
+// the unsafe lives here; `heap.rs` (no asm) only calls this safe-ish primitive.
+// ===========================================================================
+
+/// Base VA of the kernel-heap window: `2 * 2^39` = `PML4[2]` — a vacant
+/// top-level slot (boot uses `PML4[0]`, M4 `user` uses `PML4[1]`), OUTSIDE the
+/// identity map `[0, 1 GiB)`. Canonical (bits 63:48 sign-extend bit 47 = 0).
+const HEAP_WINDOW_BASE: u64 = 0x0000_0100_0000_0000;
+
+/// Window VA span cap: 1 GiB — a single `PDPT[0] -> PD[0..512]` subtree (512
+/// page tables, 2 MiB each), far more than any milestone heap needs, while
+/// keeping the whole window inside one third-level subtree.
+const HEAP_WINDOW_SIZE: u64 = 0x4000_0000;
+
+/// The per-arch kernel-heap window VA range `(base, size)` for `heap.rs`.
+pub fn heap_window() -> (u64, u64) {
+    (HEAP_WINDOW_BASE, HEAP_WINDOW_SIZE)
+}
+
+/// Zero all 512 entries of a freshly-allocated table frame, through its identity
+/// address (M6 frames sit below 1 GiB, so PA == VA). A new table MUST start
+/// all-not-present; M6 only wrote a stale free-list link word into it.
+///
+/// # Safety
+/// `table` is a 4 KiB-aligned, identity-mapped frame this code exclusively owns
+/// (just popped from M6 and not yet linked into any live hierarchy).
+unsafe fn zero_table(table: *mut u64) {
+    let mut i = 0;
+    while i < ENTRIES {
+        write_volatile(table.add(i), 0);
+        i += 1;
+    }
+}
+
+/// Return the child table referenced by `parent[idx]`, creating it from a fresh,
+/// zeroed M6 frame (spliced in as `P|RW`, then REUSED by later grows) when the
+/// slot is empty. `None` only when M6 has no frame for a missing table.
+///
+/// # Safety
+/// `parent` is a live, identity-mapped 512-entry table; `idx < 512`. Entry
+/// reads/writes are volatile (the page walker reads them behind the compiler).
+unsafe fn ensure_table(parent: *mut u64, idx: usize) -> Option<*mut u64> {
+    let slot = parent.add(idx);
+    let entry = read_volatile(slot);
+    if entry_is_valid(entry) {
+        return Some(entry_addr(entry) as *mut u64);
+    }
+    let frame = crate::frame_alloc()?;
+    zero_table(frame as *mut u64);
+    // Interior entry: Present | RW, kernel-only (no U/S). NX rides on the LEAF;
+    // a P|RW interior entry does not by itself grant execute permission.
+    write_volatile(slot, make_entry(frame, PTE_P | PTE_RW));
+    Some(frame as *mut u64)
+}
+
+/// Map ONE page `va` -> a fresh M6 frame under the live `pml4`, building any
+/// missing `PML4[2] -> PDPT -> PD -> PT` table along the way. `false` on
+/// physical-frame OOM. On OOM mid-walk an interior table already spliced in by
+/// `ensure_table` is RETAINED (reused by a later grow via the `entry_is_valid`
+/// fast path) and the data frame is simply never pulled — so the page is left
+/// fully unmapped, never half-mapped.
+///
+/// # Safety
+/// Ring 0, single vCPU; `pml4` is the live root just read from CR3; `va` is a
+/// canonical, currently-unmapped window VA in `PML4[2]`; every M6 frame is
+/// identity-mapped, so each table pointer dereferences directly.
+unsafe fn map_one_heap_page(pml4: *mut u64, va: u64) -> bool {
+    let pdpt = match ensure_table(pml4, level_index(va, SHIFT_512G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let pd = match ensure_table(pdpt, level_index(va, SHIFT_1G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let pt = match ensure_table(pd, level_index(va, SHIFT_2M)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let data = match crate::frame_alloc() {
+        Some(p) => p,
+        None => return false,
+    };
+    // Leaf: Present | RW | NX, kernel-only (no U/S). A data page, never executed.
+    write_volatile(
+        pt.add(level_index(va, SHIFT_4K)),
+        make_entry(data, PTE_P | PTE_RW | PTE_NX),
+    );
+    true
+}
+
+/// Map `n` contiguous pages from `start_va` to `n` freshly-allocated M6 frames
+/// (intermediate page-table frames ALSO from M6), each leaf RW + NX, kernel-only,
+/// and report how many pages were actually mapped (`< n` ONLY on physical-frame
+/// OOM, with no half-mapped page — a page is either fully mapped or skipped).
+/// `heap.rs` then donates `[start_va, start_va + mapped*4096)` to its free list.
+///
+/// The live PML4 base is read from CR3 ONCE here and threaded into every
+/// per-page walk (the root never changes mid-grow), so a multi-page grow issues
+/// a single control-register read rather than one per page.
+///
+/// First-map only — each window VA is mapped exactly ONCE (a 0 -> 1 Present
+/// transition), so NO `invlpg` is needed: the TLB never caches not-present
+/// entries (SDM Vol 3A §4.10.4.3).
+pub fn map_heap_frames(start_va: u64, n: usize) -> usize {
+    // SAFETY: ring 0, single vCPU, interrupts masked; CR3 holds the live PML4
+    // base, and the boot PML4 + every M6 frame are identity-mapped low RAM, so
+    // the masked root value is a directly-dereferenceable table pointer.
+    let pml4 = unsafe { (read_cr3() & PTE_ADDR_MASK) as *mut u64 };
+    let mut mapped = 0usize;
+    while mapped < n {
+        let va = start_va + (mapped as u64) * (PAGE_SIZE as u64);
+        // SAFETY: see above; `va` is a canonical, not-yet-mapped window VA and
+        // `pml4` is the live root, so every table pointer dereferences directly.
+        if !unsafe { map_one_heap_page(pml4, va) } {
+            break; // physical-frame OOM: stop, return the count fully mapped
+        }
+        mapped += 1;
+    }
+    mapped
 }

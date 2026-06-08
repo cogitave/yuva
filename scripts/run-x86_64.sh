@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M4 (x86_64).
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M7 (x86_64).
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M5: alloc OK" appears on serial (the newest cumulative-boot milestone; the
-# kernel drops to ring 3, the user stub issues `int 0x80`, the kernel handles it
-# and returns). M0's hello, M1's trap round-trip, M2's ping-pong and M3's
-# "M3: mmu OK" all print earlier in the same boot, so one run proves every
-# milestone. Fail-closed: a wall-clock timeout bounds the run (the kernel halts
-# rather than exiting), and a missing marker is a non-zero exit.
+# "M7: heap OK" appears on serial (the newest cumulative-boot milestone; the
+# kernel grows its frame-backed heap past the fixed 2 MiB arena and proves it).
+# M0's hello, M1's trap round-trip, M2's ping-pong, M3's "M3: mmu OK", M4's
+# "M4: user/ring OK", M5's "M5: alloc OK" and M6's "M6: frame alloc OK" all
+# print earlier in the same boot, so one run proves every milestone. Fail-closed:
+# a wall-clock timeout bounds the run (the kernel halts rather than exiting), and
+# a missing marker is a non-zero exit.
 #
 # PVH is selected automatically by QEMU from the XEN_ELFNOTE_PHYS32_ENTRY note
 # in the ELF (see crates/tb-hal/src/arch/x86_64/boot.rs + kernel/linker/x86_64.ld).
@@ -23,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M6: frame alloc OK'
+MARKER='M7: heap OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 

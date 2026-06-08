@@ -20,8 +20,15 @@
 //! out is EXACTLY `[ptr, ptr + size)` and [`HeapState::dealloc`] can reconstruct
 //! it from `ptr` + `Layout` alone, with no per-allocation boundary tag.
 //!
-//! This allocator algebra is REUSED UNCHANGED by M7; only the backing store
-//! ([`ARENA`] + the [`init`] call) changes there. Keep it store-agnostic.
+//! This allocator algebra is REUSED UNCHANGED by M7: M7 keeps every line of the
+//! free-list / coalescing / splitting math above and only adds a SECOND backing
+//! store — a frame-backed, kernel-only VA window that [`HeapState::grow`] maps
+//! on demand (pulling M6 frames through the per-arch
+//! [`crate::arch::map_heap_frames`] splice) and donates to this same free list
+//! via [`HeapState::insert_free_region`]. The fixed `.bss` [`ARENA`] stays as
+//! the bootstrap store; the window lifts the heap off its 2 MiB cap so `alloc`
+//! scales with real RAM. Still store-agnostic — `grow` is the only new hook,
+//! and it disappears entirely while the window is disabled (the pure M5 path).
 //!
 //! SINGLE-CORE ASSUMPTION — the global allocator static must be `Sync`, yet
 //! `GlobalAlloc::alloc` only takes `&self`. We mirror the M2 `TaskStack`
@@ -44,6 +51,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// 256 MiB with the kernel at 1 MiB, so 2 MiB of zero-init heap fits with vast
 /// headroom inside the identity-mapped low window both boot paths establish.
 const ARENA_BYTES: usize = 2 * 1024 * 1024;
+
+/// Bytes per page/frame (4 KiB granule, both arches) — the unit the M7 window
+/// maps in. The free-list algebra is page-size-agnostic; only the window grow
+/// path below deals in whole pages.
+const PAGE: usize = 4096;
+
+/// Pages mapped per on-demand grow when a request is smaller than one chunk —
+/// amortises the page-table splice + TLB work over many future allocations
+/// (256 pages = 1 MiB). A request LARGER than a chunk maps exactly what it needs.
+const GROW_CHUNK_PAGES: usize = 256;
 
 /// In-place header at the start of every FREE region. The payload bytes of an
 /// allocated region never carry this; only free regions do (intrusive list).
@@ -144,6 +161,23 @@ struct HeapState {
     used: usize,
     /// Maximum `used` ever observed — the heap high-water mark.
     high_water: usize,
+    /// Whether the M7 frame-backed window has been enabled (via
+    /// [`crate::heap_window_init`]). While `false` the allocator is the pure M5
+    /// `.bss`-arena allocator — [`HeapState::grow`] is a no-op.
+    window_enabled: bool,
+    /// Base VA of the kernel-heap window (set by [`HeapState::window_init`];
+    /// retained for symmetry with `arena_start` and for M10's per-agent address
+    /// spaces, which re-use this window base).
+    window_base: u64,
+    /// Next unmapped VA in the window — the cursor [`HeapState::grow`] advances
+    /// contiguously, so successive grows produce VA-adjacent (coalescing) slices.
+    window_next: u64,
+    /// One-past-the-end VA of the window (its hard VA cap).
+    window_end: u64,
+    /// DATA-page bytes currently mapped into the window (the M7 stat;
+    /// monotonically rises as the heap grows — the window never unmaps). Does
+    /// NOT include the intermediate page-table frames `grow` also pulls.
+    window_bytes: usize,
 }
 
 impl HeapState {
@@ -156,6 +190,11 @@ impl HeapState {
             initialized: false,
             used: 0,
             high_water: 0,
+            window_enabled: false,
+            window_base: 0,
+            window_next: 0,
+            window_end: 0,
+            window_bytes: 0,
         }
     }
 
@@ -235,15 +274,39 @@ impl HeapState {
         }
     }
 
-    /// First-fit allocation with front/back splitting. Returns a `size`-byte,
-    /// `align`-aligned pointer, or null on out-of-arena (never panics — the
-    /// `GlobalAlloc` contract requires `alloc` to signal failure with null).
+    /// First-fit allocation with front/back splitting, then GROW-AND-RETRY.
+    ///
+    /// Runs one first-fit pass ([`Self::try_fit`]); on no-fit it asks the
+    /// frame-backed window to [`Self::grow`] and retries, looping until either
+    /// the request is satisfied or growth makes no progress (window disabled,
+    /// window VA exhausted, or true physical-frame OOM) — at which point it
+    /// returns null. Never panics (the `GlobalAlloc` contract requires `alloc`
+    /// to signal failure with null). The M5 first-fit/split/coalesce algebra in
+    /// [`Self::try_fit`] is BYTE-IDENTICAL to the M5 allocator; only this
+    /// grow-on-miss wrapper is new, and it is inert until the window is enabled.
     fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let (size, align) = match required(layout) {
             Some(v) => v,
             None => return core::ptr::null_mut(),
         };
+        loop {
+            if let Some(ptr) = self.try_fit(size, align) {
+                return ptr;
+            }
+            // No region fits. Grow the frame-backed window by at least enough to
+            // cover this request, then retry the SAME first-fit pass. `grow`
+            // returns false only when no further progress is possible (window
+            // disabled / VA exhausted / physical-frame OOM) → signal OOM.
+            if !self.grow(size) {
+                return core::ptr::null_mut();
+            }
+        }
+    }
 
+    /// One first-fit pass over the current free list — the UNCHANGED M5 algebra:
+    /// first fit, unlink, return the front/back split remainders to the list,
+    /// account the bytes. `Some(ptr)` on a fit, `None` if no region fits.
+    fn try_fit(&mut self, size: usize, align: usize) -> Option<*mut u8> {
         let mut prev: *mut FreeBlock = core::ptr::null_mut();
         let mut cur = self.head;
         while !cur.is_null() {
@@ -280,15 +343,82 @@ impl HeapState {
                 if self.used > self.high_water {
                     self.high_water = self.used;
                 }
-                return alloc_start as *mut u8;
+                return Some(alloc_start as *mut u8);
             }
 
             prev = cur;
             cur = next;
         }
+        // No region fit in this pass.
+        None
+    }
 
-        // No region fit: out of arena. Signal failure with null (no panic).
-        core::ptr::null_mut()
+    /// Enable the M7 frame-backed growable window over `[base, base + size)` — a
+    /// kernel-only, RW + NX VA range OUTSIDE the identity map. Idempotent. No
+    /// frames are mapped here; [`Self::grow`] maps them lazily on first miss.
+    /// Until this is called the allocator is the pure M5 `.bss`-arena allocator.
+    fn window_init(&mut self, base: u64, size: u64) {
+        if self.window_enabled {
+            return;
+        }
+        self.window_base = base;
+        self.window_next = base;
+        self.window_end = base.saturating_add(size);
+        self.window_bytes = 0;
+        self.window_enabled = true;
+    }
+
+    /// Grow the heap by mapping fresh physical frames into the next contiguous
+    /// slice of the kernel-heap VA window and donating that slice to the free
+    /// list. `false` (no progress) when the window is disabled, its VA range is
+    /// exhausted, or no physical frame could be mapped (true OOM).
+    ///
+    /// The slice is VA-ADJACENT to the previous one, so [`Self::insert_free_region`]
+    /// coalesces successive grows into one large CONTIGUOUS free region — which
+    /// is exactly what lets a single >4 KiB allocation (a `Vec` outgrowing one
+    /// page) be served even though the backing physical frames are SCATTERED:
+    /// the window supplies contiguous virtual addresses over non-contiguous RAM.
+    fn grow(&mut self, min_bytes: usize) -> bool {
+        if !self.window_enabled {
+            return false;
+        }
+        let remaining = self.window_end.saturating_sub(self.window_next);
+        if remaining < PAGE as u64 {
+            return false; // window VA exhausted
+        }
+        // Map at least enough whole pages for the request, at least one grow
+        // chunk (amortise), clamped to the window's remaining VA.
+        let need_pages = (min_bytes + PAGE - 1) / PAGE;
+        let want_pages = if need_pages > GROW_CHUNK_PAGES {
+            need_pages
+        } else {
+            GROW_CHUNK_PAGES
+        };
+        let room_pages = (remaining / PAGE as u64) as usize;
+        let req_pages = if want_pages > room_pages {
+            room_pages
+        } else {
+            want_pages
+        };
+        if req_pages == 0 {
+            return false;
+        }
+        // tb-hal's per-arch primitive: pull `req_pages` 4 KiB frames from M6 (+
+        // any intermediate page-table frames it needs, ALSO from M6), splice
+        // them through the M3 typed page-table layer so `[window_next,
+        // window_next + mapped*PAGE)` maps to them RW+NX kernel-only, and report
+        // how many pages it actually mapped (`< req_pages` only on frame OOM).
+        let mapped = crate::arch::map_heap_frames(self.window_next, req_pages);
+        if mapped == 0 {
+            return false; // out of physical frames
+        }
+        let bytes = mapped * PAGE;
+        let region = self.window_next;
+        self.window_next += bytes as u64;
+        self.window_bytes += bytes;
+        // Donate the freshly mapped, contiguous slice to the SAME M5 free list.
+        self.insert_free_region(region as usize, bytes);
+        true
     }
 
     /// Return a region previously handed out by [`HeapState::alloc`] with the
@@ -422,6 +552,21 @@ unsafe impl GlobalAlloc for Heap {
 /// Lay the heap down over the static [`ARENA`]. Idempotent; call once early.
 pub(crate) fn init() {
     GLOBAL_HEAP.with(|s| s.init(ARENA.base(), ARENA_BYTES));
+}
+
+/// Enable the M7 frame-backed growable window (see [`HeapState::window_init`]).
+/// The window VA range is the per-arch [`crate::arch::heap_window`] constant.
+/// Idempotent; call once after M6 (`pmm_init`) so a grow can pull real frames.
+pub(crate) fn window_init() {
+    let (base, size) = crate::arch::heap_window();
+    GLOBAL_HEAP.with(|s| s.window_init(base, size));
+}
+
+/// DATA-page bytes currently mapped into the growable window (excludes the
+/// intermediate page-table frames a grow also pulls). `0` before the first
+/// grow; rises monotonically as the heap scales past the arena.
+pub(crate) fn window_bytes() -> usize {
+    GLOBAL_HEAP.with(|s| s.window_bytes)
 }
 
 /// Bytes currently handed out (the no-leak baseline metric).

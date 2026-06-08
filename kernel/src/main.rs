@@ -452,23 +452,30 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     // (5) Drive the allocator to exhaustion: exactly `total` frames come out,
-    //     then frame_alloc fail-closes to None. M6 is the last milestone before
-    //     halt, so these frames are intentionally not reclaimed (no Vec needed).
+    //     then frame_alloc fail-closes to None. M7 now FOLLOWS M6 and grows the
+    //     kernel heap from real frames, so the drained pool is RECLAIMED here
+    //     (collected into a `with_capacity` Vec so the drain itself never
+    //     reallocs) and the free count is asserted back to `total` afterwards.
+    //     This drain Vec is served from the still-fixed 2 MiB .bss arena (the
+    //     window is not enabled until the M7 block below), so it costs
+    //     `total * 8` bytes; the M3 identity clamp keeps usable RAM <= ~1 GiB
+    //     and the run scripts pin -m 256M / -m 128M, so it sits well inside the
+    //     arena (~0.5 MiB / ~0.25 MiB respectively).
     drop(frames);
     let free_before = tb_hal::pmm_free_frames();
-    let mut got: usize = 0;
+    let mut drained: Vec<u64> = Vec::with_capacity(free_before);
     loop {
         match tb_hal::frame_alloc() {
             Some(pa) => {
                 if pa % 4096 != 0 {
                     m6_fail("frame from the exhaustion drain is misaligned");
                 }
-                got += 1;
+                drained.push(pa);
             }
             None => break,
         }
     }
-    if got != free_before {
+    if drained.len() != free_before {
         m6_fail("exhaustion drained a different count than the free total");
     }
     if tb_hal::frame_alloc().is_some() {
@@ -477,8 +484,171 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     if tb_hal::pmm_free_frames() != 0 {
         m6_fail("free count nonzero at full exhaustion");
     }
+    // Reclaim the whole pool so M7's growable heap has frames to map.
+    {
+        let mut i = 0;
+        while i < drained.len() {
+            if !tb_hal::frame_free(drained[i]) {
+                m6_fail("reclaim after the exhaustion drain was rejected");
+            }
+            i += 1;
+        }
+    }
+    if tb_hal::pmm_free_frames() != total {
+        m6_fail("free count did not return to total after the exhaustion reclaim");
+    }
+    drop(drained);
 
     tb_hal::serial_write_str("M6: frame alloc OK\n"); // <-- the M6 DoD marker
+
+    // --- M7: frame-backed GROWABLE kernel heap -----------------------------
+    // Re-back the M5 free-list with a kernel-only VA window (RW + NX, OUTSIDE
+    // the identity map) that GROWS ON DEMAND by pulling 4 KiB frames from the M6
+    // allocator and mapping them through the M3 typed page-table layer — lifting
+    // the heap off M5's fixed 2 MiB .bss arena. The allocator ALGEBRA (free-list
+    // + coalescing + alignment) is byte-for-byte the M5 code; only the backing
+    // store + the grow hook changed. ALL the page-table splicing, the frame
+    // pulls and the writes THROUGH the mapped window VAs live in tb-hal; this
+    // forbid(unsafe_code)-class crate only calls the safe facade, uses `alloc`
+    // types, and compares numbers. DoD marker: "M7: heap OK".
+    tb_hal::serial_write_str("heap-test: enabling frame-backed growable window\n");
+
+    // Local fail helper (matches the m5_fail / m6_fail style; safe serial only).
+    let m7_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M7: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    // Baselines: the heap is empty (M5/M6 left used-bytes at 0) and the PMM pool
+    // is full again (the M6 exhaustion drain was reclaimed just above).
+    let heap_baseline = tb_hal::heap_used_bytes();
+    let pmm_baseline = tb_hal::pmm_free_frames();
+    if pmm_baseline == 0 {
+        m7_fail("no free frames to grow the heap from");
+    }
+
+    tb_hal::heap_window_init();
+
+    // A single CONTIGUOUS buffer well past the old 2 MiB arena: 4 MiB of u64
+    // (524288 elements) via `with_capacity` forces ONE 4 MiB allocation that the
+    // 2 MiB arena physically cannot satisfy — it can only come from the
+    // contiguous-VA, frame-backed window (scattered RAM, contiguous VA).
+    const BIG: usize = 512 * 1024; // 524288 u64 = 4 MiB, > the old 2 MiB arena
+    const STRIDE: u64 = 0x9E37_79B9_7F4A_7C15; // odd => bijective over u64
+    {
+        let mut v: Vec<u64> = Vec::with_capacity(BIG);
+        if v.capacity() < BIG {
+            m7_fail("contiguous 4 MiB reservation failed");
+        }
+        // Write a pattern THROUGH every mapped page, then read it back: any
+        // mis-mapped page would #PF / data-abort here (the trap hook halts and
+        // the marker never prints) — so a clean readback proves the mapping.
+        let mut k: u64 = 0;
+        while (k as usize) < BIG {
+            v.push(k.wrapping_mul(STRIDE));
+            k += 1;
+        }
+        let mut k2: u64 = 0;
+        while (k2 as usize) < BIG {
+            if v[k2 as usize] != k2.wrapping_mul(STRIDE) {
+                m7_fail("frame-backed buffer corrupted (mis-mapping)");
+            }
+            k2 += 1;
+        }
+        if v.len() != BIG {
+            m7_fail("contiguous buffer length wrong");
+        }
+        // The heap grew PAST the old 2 MiB arena...
+        if tb_hal::heap_high_water() <= 2 * 1024 * 1024 {
+            m7_fail("heap never grew past the 2 MiB arena");
+        }
+        // ...the growth mapped real frames into the window...
+        if tb_hal::heap_window_mapped_bytes() == 0 {
+            m7_fail("window mapped no frames for the growth");
+        }
+        // ...and consumed REAL physical frames from M6 (free count dropped).
+        if tb_hal::pmm_free_frames() >= pmm_baseline {
+            m7_fail("growth consumed no physical frames");
+        }
+    } // v dropped -> its 4 MiB returns to the free list (still frame-backed)
+
+    // No HEAP leak: every byte handed out above is back on the free list.
+    if tb_hal::heap_used_bytes() != heap_baseline {
+        m7_fail("heap leak: used-bytes above baseline after drop");
+    }
+
+    // REUSE without consuming fresh frames: the window keeps its frames mapped,
+    // so a second 4 MiB allocation must be served from the already-mapped,
+    // now-free window region — `pmm_free_frames` must NOT drop any further. This
+    // is the strict no-FRAME-leak evidence: the retained frames are REUSABLE,
+    // not lost (retention == reuse).
+    let pmm_after_first = tb_hal::pmm_free_frames();
+    {
+        let mut v2: Vec<u64> = Vec::with_capacity(BIG);
+        let mut k: u64 = 0;
+        while (k as usize) < BIG {
+            v2.push(!k.wrapping_mul(STRIDE));
+            k += 1;
+        }
+        let mut k2: u64 = 0;
+        while (k2 as usize) < BIG {
+            if v2[k2 as usize] != !k2.wrapping_mul(STRIDE) {
+                m7_fail("reused frame-backed buffer corrupted");
+            }
+            k2 += 1;
+        }
+    } // v2 dropped
+    if tb_hal::pmm_free_frames() != pmm_after_first {
+        m7_fail("second growth consumed fresh frames instead of reusing the window");
+    }
+    if tb_hal::heap_used_bytes() != heap_baseline {
+        m7_fail("heap leak after the reuse pass");
+    }
+
+    // Also exercise the REALLOC path (a Vec doubling its capacity) past the
+    // arena, proving the grow hook services the UNCHANGED M5 first-fit/coalesce
+    // algebra through repeated alloc/free churn — not just one big up-front map.
+    {
+        let mut v3: Vec<u64> = Vec::new();
+        let mut k: u64 = 0;
+        while (k as usize) < BIG {
+            v3.push(k ^ STRIDE);
+            k += 1;
+        }
+        if v3.len() != BIG {
+            m7_fail("realloc-grown vector length wrong");
+        }
+        if (v3.capacity() as u64) < BIG as u64 {
+            m7_fail("realloc-grown vector never grew past one page");
+        }
+        let mut k2: u64 = 0;
+        while (k2 as usize) < BIG {
+            if v3[k2 as usize] != (k2 ^ STRIDE) {
+                m7_fail("realloc-grown vector corrupted across reallocs");
+            }
+            k2 += 1;
+        }
+    } // v3 dropped
+    if tb_hal::heap_used_bytes() != heap_baseline {
+        m7_fail("heap leak after the realloc pass");
+    }
+
+    // FRAME accounting (growable design that RETAINS its window frames): grow()
+    // pulled real frames from M6 — `pmm_free_frames` dropped below the M6
+    // baseline — and the heap KEEPS them mapped for reuse, so the count does NOT
+    // climb back to `pmm_baseline`. That is NOT a leak: every pulled frame is
+    // either a live page-table frame or a data frame owned by the window's free
+    // list, and the reuse pass above proved those frames are handed back out.
+    // M5's own no-leak metric (heap used-bytes == baseline, asserted above) is
+    // what proves nothing was lost at the allocator level; the M5 algebra has
+    // no give-back hook by design (the spec-sanctioned "keeps its frames" case).
+    if tb_hal::pmm_free_frames() >= pmm_baseline {
+        m7_fail("window unexpectedly returned all frames (frame accounting)");
+    }
+
+    tb_hal::serial_write_str("M7: heap OK\n"); // <-- the M7 DoD marker
     tb_hal::halt()
 }
 

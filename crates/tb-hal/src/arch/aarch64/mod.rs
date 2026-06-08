@@ -36,7 +36,7 @@ mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
 mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
-pub use mmu::{mmu_init, mmu_selftest};
+pub use mmu::{heap_window, map_heap_frames, mmu_init, mmu_selftest};
 pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init};
 pub use serial::{serial_init, serial_write_byte};

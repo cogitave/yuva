@@ -9,7 +9,7 @@
 #                This is the purest BOOT time: VMM init + kernel entry + M0
 #                serial bring-up. The closest apples-to-apples vs other kernels'
 #                "boot to first output".
-#   * t_full   = spawn -> the final cumulative milestone marker ("M5: alloc OK").
+#   * t_full   = spawn -> the final cumulative milestone marker ("M7: heap OK").
 #                This is boot + the WHOLE M0..latest self-test (incl. M2's
 #                1000-round cooperative ping-pong), so it is "boot + self-test",
 #                NOT pure boot — reported separately and labelled as such.
@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITER="${ITER:-10}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-20}"
 FIRST_MARKER="hello from rust_main"
-FINAL_MARKER="M6: frame alloc OK"
+FINAL_MARKER="M7: heap OK"
 
 case "${ARCH}" in
   x86_64)

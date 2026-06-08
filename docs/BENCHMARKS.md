@@ -42,10 +42,10 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (currently
-  `M6: frame alloc OK`). This is boot **plus the entire M0…latest self-test**
-  (incl. M2's 1000-round cooperative ping-pong AND M6's one-time seeding of every
-  usable 4 KiB frame onto the free-frame stack — ~65 k link-writes for a 256 MiB
-  guest), so it is labelled separately and is **not** a pure boot number.
+  `M7: heap OK`). This is boot **plus the entire M0…latest self-test** (M2's
+  1000-round ping-pong, M6's ~65 k free-frame `seed()`, and M7's three 4 MiB
+  page-table-mapped + pattern-verified heap growths), so it is labelled
+  separately and is **not** a pure boot number.
 
 **Accel is auto-detected.** **Only the KVM number is a boot figure.** TCG
 (software emulation) inflates boot 10–50× and is reported solely as a portable
@@ -53,20 +53,24 @@ upper bound — *never* compared against another system's KVM result. (This is
 the single most common way "microVM boot" numbers become accidentally
 non-comparable.)
 
-### TABOS measured — today (M6, kernel boots a self-test then halts)
+### TABOS measured — today (M7, kernel boots a self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
 | x86_64 (QEMU `microvm`) | **KVM** (GitHub CI runner) | **~47 ms** (VMM-spawn-bound) | refreshed each `vmm-boot` CI run's step summary | nested-virt CI runner; **VMM/host-spawn-bound, not guest-bound** (see below) |
-| x86_64 (QEMU `microvm`) | TCG (local WSL2) | ~28 ms (median) | ~135 ms | emulated; **not** a comparable boot figure |
-| aarch64 (QEMU `virt`) | TCG (local WSL2) | ~29 ms | ~86 ms | emulated; **not** a comparable boot figure |
+| x86_64 (QEMU `microvm`) | TCG (local WSL2) | ~28 ms (median) | ~1.09 s | emulated; **not** a comparable boot figure |
+| aarch64 (QEMU `virt`) | TCG (local WSL2) | ~28 ms | ~1.16 s | emulated; **not** a comparable boot figure |
 
-> **boot-to-first-output** is stable across M5→M6 (~28 ms TCG — just VMM-spawn +
-> M0 serial). **boot+selftest** grew at M6 (~51→135 ms TCG on x86_64) entirely
-> because M6's `seed()` pushes *every* usable 4 KiB frame onto the free-frame
-> stack once at init — ~65 k identity-mapped link-writes for a 256 MiB guest —
-> which TCG software-emulates byte-by-byte. Under KVM (hardware writes) that
-> seeding is sub-millisecond; it is one-time init work, not "boot".
+> **boot-to-first-output** is stable across M5→M7 (~28 ms TCG — just VMM-spawn +
+> M0 serial). **boot+selftest** keeps growing as each milestone adds *self-test*
+> work that TCG emulates byte-by-byte: M6 added ~65 k free-frame `seed()`
+> link-writes (~51→135 ms), and M7's self-test allocates + page-table-maps +
+> writes + reads back **three 4 MiB buffers (12 MiB)** through the growable
+> kernel-heap window — ~3 k frame mappings plus 24 MiB of pattern traffic — which
+> pushes the TCG figure to ~1.1 s. **None of this is "boot":** it is one-time
+> init + an exhaustive correctness self-test, all hardware-fast under KVM (the
+> guest boot to first output is unchanged at ~28 ms). The honest TABOS claim
+> stays architectural (§4), measured guest-only at M8.
 
 > **Read these numbers correctly — they measure the harness's t0 (VMM process
 > spawn), not the TABOS kernel.** The clearest evidence: the KVM run on the CI

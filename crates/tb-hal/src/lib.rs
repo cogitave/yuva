@@ -517,6 +517,48 @@ pub fn heap_selftest() -> bool {
 }
 
 // ===========================================================================
+// M7: frame-backed GROWABLE kernel heap (this milestone)
+// ===========================================================================
+//
+// Re-back the M5 free-list allocator with a kernel-only VA window (RW + NX,
+// OUTSIDE the identity map) that GROWS ON DEMAND: when no existing free region
+// fits a request, the allocator pulls 4 KiB frames from the M6 physical frame
+// allocator (plus any intermediate page-table frames it needs, ALSO from M6),
+// splices them through the M3 typed page-table layer (`PageTable512`) so the
+// next CONTIGUOUS chunk of the window maps to those possibly-scattered frames,
+// and donates that chunk to the SAME M5 free list. The allocator ALGEBRA
+// (first-fit + coalescing + alignment) is byte-for-byte the M5 code; only the
+// backing store + the grow hook are new. ALL the page-table writes, the M6
+// frame pulls, and the writes THROUGH the mapped window VAs live in tb-hal
+// (`heap.rs` + the per-arch `map_heap_frames`); the `#![forbid(unsafe_code)]`
+// kernel only calls the safe facade below and uses `alloc` types. DoD marker:
+// "M7: heap OK".
+
+/// Enable the M7 frame-backed growable kernel heap.
+///
+/// Installs the kernel-heap VA window (the per-arch range, OUTSIDE the identity
+/// map) and arms the allocator's grow-on-miss path. After this, an allocation
+/// that no existing free region can satisfy triggers an on-demand map of fresh
+/// M6 frames into the window, then a retry; only if that map fails (true OOM)
+/// does `alloc` return null. Idempotent; call once after [`pmm_init`] (M6).
+///
+/// Before this is called the heap is exactly the M5 fixed `.bss`-arena
+/// allocator (the grow hook is inert), so M0-M6 behaviour is unchanged.
+pub fn heap_window_init() {
+    heap::window_init();
+}
+
+/// DATA-page bytes currently mapped into the growable heap window — `0` until
+/// the first grow, then climbing as the heap scales past the fixed 2 MiB `.bss`
+/// arena. Counts only the data pages donated to the free list, NOT the
+/// intermediate page-table frames the grow also pulls from M6 (so it slightly
+/// under-counts total frames consumed). The M7 self-test reads it only to
+/// confirm real frames backed the growth (it rises as [`pmm_free_frames`] drops).
+pub fn heap_window_mapped_bytes() -> usize {
+    heap::window_bytes()
+}
+
+// ===========================================================================
 // M6: physical frame allocator over the active boot memory map (this milestone)
 // ===========================================================================
 //
