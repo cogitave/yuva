@@ -216,6 +216,12 @@ pub enum ObjKind {
     Namespace,
     /// An untyped / test object with no subsystem payload yet.
     Generic,
+    /// M15: a shared-memory block -- one or more pinned M6 frames mapped into
+    /// MULTIPLE agent roots at once (the session blackboard's backing object).
+    /// APPENDED after `Generic` so every prior `#[repr(u32)]` discriminant (which
+    /// `M_OBJECT_INSPECT` returns raw) stays stable. Distinct from `Skill` (the
+    /// T4 procedural-memory kind), which is NOT a shared-memory object.
+    Block,
 }
 
 /// A kernel object: identity (its [`ObjKind`]) plus, in later milestones, its
@@ -243,6 +249,13 @@ pub struct Object {
     /// hold an `Rc` clone of the SAME core, so the two per-principal tables stay
     /// disjoint yet rendezvous on it.
     chan: Option<(Rc<crate::ipc::Channel>, u8)>,
+    /// M15: the optional SHARED-MEMORY block body. Present ONLY on an
+    /// [`ObjKind::Block`] minted by [`HandleTable::mint_block`]: an `Rc` clone of
+    /// the shared [`crate::blocks::Block`] core (its pinned M6 frames + the
+    /// RECORD-plane CAS store); `None` for identity-only objects. EVERY member's
+    /// table holds an `Rc` clone of the SAME core, so mapping it into N roots
+    /// makes the SAME physical bytes appear in N address spaces (true sharing).
+    block: Option<Rc<crate::blocks::Block>>,
 }
 
 /// The neutral, fully-owned syscall descriptor the per-arch register-lift shim
@@ -356,6 +369,22 @@ pub const M_CHAN_RECV: u32 = 26;
 /// is always allowed). Flips the peer-closed flag; the peer drains its backlog
 /// first, then observes [`SysStatus::PeerClosed`].
 pub const M_CHAN_CLOSE: u32 = 27;
+/// M15: MAP a shared block into the CALLER's address space (needs READ; the
+/// page WRITE bit is granted only if the handle ALSO holds WRITE, i.e.
+/// `writable = want && rights.contains(WRITE)`). ADDRESS-SPACE-dependent, so the
+/// BODY rides the kernel facade [`crate::agent_block_map`] (dispatch holds only
+/// `&mut HandleTable`, not the `AddressSpace`); the number stays registered for
+/// the future EL0 syscall gate that DOES know the current agent's space.
+pub const M_BLOCK_MAP: u32 = 28;
+/// M15: voluntary member detach (needs no right). DEFERRED -- no unmap primitive
+/// exists yet (blocks are pinned for the kernel-session lifetime); the number is
+/// reserved so the closed method space stays stable.
+pub const M_BLOCK_UNMAP: u32 = 29;
+/// M15: RECORD-plane CAS/versioned write on the blackboard (needs WRITE).
+/// `args[0]`=slot off, `args[1]`=value, `args[2]`=expected version.
+pub const M_BLOCK_WRITE: u32 = 30;
+/// M15: RECORD-plane read-latest on the blackboard (needs READ). `args[0]`=off.
+pub const M_BLOCK_READ: u32 = 31;
 
 /// Map a method number to the single right it requires, or `None` for an
 /// unknown method (-> [`SysStatus::BadMethod`]). This closes the method space.
@@ -377,6 +406,10 @@ fn required_right(method: u32) -> Option<Rights> {
         M_CHAN_SEND => Rights::WRITE,
         M_CHAN_RECV => Rights::READ,
         M_CHAN_CLOSE => Rights::NONE,
+        M_BLOCK_MAP => Rights::READ,
+        M_BLOCK_UNMAP => Rights::NONE,
+        M_BLOCK_WRITE => Rights::WRITE,
+        M_BLOCK_READ => Rights::READ,
         M_EMIT_EXTERNAL => Rights::EMIT_EXTERNAL,
         M_BUDGET_DELEGATE => Rights::DELEGATE_BUDGET,
         _ => return None,
@@ -476,6 +509,7 @@ impl HandleTable {
                 mem: None,
                 scalar: 0,
                 chan: None,
+                block: None,
             }),
         )
     }
@@ -493,6 +527,7 @@ impl HandleTable {
                 mem: Some(RefCell::new(crate::mem::MemSubstrate::new())),
                 scalar: 0,
                 chan: None,
+                block: None,
             }),
         )
     }
@@ -508,6 +543,7 @@ impl HandleTable {
                 mem: None,
                 scalar,
                 chan: None,
+                block: None,
             }),
         )
     }
@@ -530,8 +566,50 @@ impl HandleTable {
                 mem: None,
                 scalar: 0,
                 chan: Some((chan, side)),
+                block: None,
             }),
         )
+    }
+
+    /// M15: mint an [`ObjKind::Block`] capability carrying a real shared-memory
+    /// body -- an `Rc` clone of the shared [`crate::blocks::Block`] core -- with
+    /// `rights`. Each member agent gets its OWN handle (over the same core) into
+    /// THEIR table; all members rendezvous on the `Rc`, so the one segment's
+    /// frames map into each member root separately (true sharing). `None` on
+    /// `ObjFull`.
+    pub(crate) fn mint_block(
+        &mut self,
+        rights: Rights,
+        blk: Rc<crate::blocks::Block>,
+    ) -> Option<Handle> {
+        self.alloc(
+            rights,
+            Rc::new(Object {
+                kind: ObjKind::Block,
+                mem: None,
+                scalar: 0,
+                chan: None,
+                block: Some(blk),
+            }),
+        )
+    }
+
+    /// M15: resolve `h` to its block body for the map facade. `BadCap`/`Stale`
+    /// from the fail-closed [`HandleTable::live`] resolve; `BadCap` when the live
+    /// object carries no block payload (a non-block cap presented to a block
+    /// method). Returns the slot's `Rights` (so the facade re-enforces the
+    /// single-sourced `required_right(M_BLOCK_MAP)==READ` gate + `min(request,
+    /// rights)`) plus an `Rc` clone of the shared core.
+    pub(crate) fn block_of(
+        &self,
+        h: Handle,
+    ) -> Result<(Rights, Rc<crate::blocks::Block>), SysStatus> {
+        let i = self.live(h)?;
+        let o = self.slots[i].object.clone().ok_or(SysStatus::Stale)?;
+        match &o.block {
+            Some(b) => Ok((self.slots[i].rights, b.clone())),
+            None => Err(SysStatus::BadCap),
+        }
     }
 
     /// The rights currently attached to `h`, or `None` if it does not resolve.
@@ -882,6 +960,43 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                 None => SysReturn::err(SysStatus::BadCap),
             }
         }
+        // M15: RECORD-plane CAS write on the shared block behind `args.handle`
+        // (WRITE gated above). Clone the `Rc<Object>` OUT and drop the slot
+        // borrow BEFORE touching `block.records` (the M_MEM_*/M_CHAN_* single-
+        // &mut-at-a-time discipline -> no reentrant borrow_mut). A losing CAS
+        // surfaces WouldBlock; a non-block object -> BadCap.
+        M_BLOCK_WRITE => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.block {
+                Some(b) => match b.cas_write(args.args[0], args.args[1], args.args[2]) {
+                    Some(v) => SysReturn::ok(v),
+                    None => SysReturn::err(SysStatus::WouldBlock),
+                },
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        // M15: RECORD-plane read-latest (READ gated above). Same clone-out
+        // discipline; an unwritten slot or a non-block object -> BadCap.
+        M_BLOCK_READ => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.block {
+                Some(b) => match b.read_latest(args.args[0]) {
+                    Some(v) => SysReturn::ok(v),
+                    None => SysReturn::err(SysStatus::BadCap),
+                },
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        // M_BLOCK_MAP / M_BLOCK_UNMAP are ADDRESS-SPACE-dependent; their bodies
+        // ride the kernel facade `agent_block_map` (dispatch holds no
+        // AddressSpace). Reached here only via the future EL0 gate, they fall
+        // through to the rights-checked stub below.
         // M_HANDLE_TRANSFER is kernel-mediated (it needs a destination table);
         // its TRANSFER right is verified above. Remaining agent-semantic methods
         // are rights-checked stubs at M11 (bodies land in later milestones).

@@ -1690,8 +1690,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         if s != den {
             m14_fail("sending an endpoint into its own channel was not Denied");
         }
-        //    (e) unknown method 28 -> BadMethod (the closed method set is intact).
-        let (s, _) = tb_hal::agent_cap_dispatch(agent_c, 28, ep_a, 0, 0).unwrap_or((ok, 0));
+        //    (e) unknown method 33 -> BadMethod (the closed method set is intact;
+        //        28..=31 are now the M15 block methods, so probe a still-free number).
+        let (s, _) = tb_hal::agent_cap_dispatch(agent_c, 33, ep_a, 0, 0).unwrap_or((ok, 0));
         if s != badmethod {
             m14_fail("an unknown channel method was not BadMethod");
         }
@@ -1739,6 +1740,152 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M14: ipc OK\n"); // <-- the M14 DoD marker
+
+    // --- M15: shared memory blocks + session blackboard ----------------------
+    // A shared-memory BLOCK = one or more pinned M6 frames owned by an
+    // ObjKind::Block capability, MAPPED into MULTIPLE agents' address spaces at
+    // once (M10 map_in_space) so every member sees the SAME physical bytes (vs
+    // M14, which COPIES). Permission is rights-derived at the M11 chokepoint:
+    // writable = want && handle_rights.contains(WRITE). The session blackboard is
+    // the well-known shared block all members attach; its RECORD plane is a
+    // kernel-mediated CAS/versioned store (update-once-visible-everywhere). We
+    // reuse the already-born agent_c + agent_d as the two session members (no new
+    // task slots). The timer is disarmed (single-core, interrupts masked -- the
+    // discipline the safe Block bookkeeping relies on). map_in_space leaves are
+    // KERNEL-only, so the marker rides kernel-side I/O under each root (the
+    // M10/M13/M14 pattern). ZERO new unsafe. DoD marker: "M15: blocks OK".
+    {
+        use tb_hal::caps::{self, Handle, Rights, SysStatus};
+
+        fn m15_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M15: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        let ok = SysStatus::Ok as u32;
+        let den = SysStatus::Denied as u32;
+        let badcap = SysStatus::BadCap as u32;
+        let badmethod = SysStatus::BadMethod as u32;
+        let rd = Rights::READ.bits();
+        let block_va = tb_hal::BLOCK_WINDOW_VA;
+
+        // 1. CREATE one 1-page block; Rc-clone a Block handle into BOTH members
+        //    (hb_c full RW member, hb_d plain RW member over the SAME core).
+        let (hb_c, hb_d) = match tb_hal::agent_block_create(agent_c, agent_d, 1) {
+            Some(x) => x,
+            None => m15_fail("block create failed"),
+        };
+
+        // 2. MAP into BOTH roots at the same VA -- both now translate block_va to
+        //    the SAME frame PA in two different address spaces.
+        let (s, _) =
+            tb_hal::agent_block_map(agent_c, hb_c, true, block_va).unwrap_or((badcap, 0));
+        if s != ok {
+            m15_fail("map into C not Ok");
+        }
+        let (s, _) =
+            tb_hal::agent_block_map(agent_d, hb_d, true, block_va).unwrap_or((badcap, 0));
+        if s != ok {
+            m15_fail("map into D not Ok");
+        }
+
+        // 3. TRUE SHARING (the north-star): A writes the shared frame under its
+        //    OWN root; B reads the SAME bytes under its OWN root. Rides kernel-
+        //    side I/O because map_in_space leaves are kernel-only.
+        tb_hal::address_space_switch_root(tb_hal::agent_root_pa(agent_c));
+        let _ = tb_hal::addr_store_load(block_va, 0xB10C);
+        tb_hal::address_space_switch_root(tb_hal::agent_root_pa(agent_d));
+        let seen = tb_hal::addr_load(block_va);
+        tb_hal::address_space_switch_default();
+        if seen != 0xB10C {
+            m15_fail("B did not read the bytes A wrote (no true sharing)");
+        }
+        tb_hal::serial_write_str("blocks: A wrote, B read the SAME bytes (true sharing)\n");
+
+        // 4. RO REJECTION (cap-layer, portable -- CR0.WP=0 makes the hardware RO
+        //    write-fault unobservable kernel-side on x86_64): narrow hb_d to drop
+        //    WRITE; the RO handle's M_BLOCK_WRITE is Denied at the gate, and its
+        //    write-requesting map is downgraded to RO (writable=min(req,rights)).
+        let (s, hb_d_ro_raw) =
+            tb_hal::agent_block_dispatch(agent_d, caps::M_HANDLE_NARROW, hb_d, rd as u64, 0, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok || hb_d_ro_raw == 0 {
+            m15_fail("narrow hb_d (drop WRITE) failed");
+        }
+        let hb_d_ro = Handle::from_raw(hb_d_ro_raw);
+        let (s, _) =
+            tb_hal::agent_block_dispatch(agent_d, caps::M_BLOCK_WRITE, hb_d_ro, 0, 0xDEAD, 0)
+                .unwrap_or((ok, 0));
+        if s != den {
+            m15_fail("RO handle M_BLOCK_WRITE was not Denied");
+        }
+        let (s, _) = tb_hal::agent_block_map(agent_d, hb_d_ro, true, block_va + 0x1000)
+            .unwrap_or((badcap, 0));
+        if s != ok {
+            m15_fail("RO (downgraded) map not Ok");
+        }
+        if tb_hal::agent_block_member_writable(agent_d, hb_d_ro, block_va + 0x1000) != Some(false) {
+            m15_fail("RO map was not downgraded to RO (writable flag not false)");
+        }
+        tb_hal::serial_write_str("blocks: RO handle write Denied + map downgraded to RO\n");
+
+        // 5. RECORD-plane blackboard (the well-known shared block both members
+        //    attached): C publishes a versioned record; D reads the SAME record
+        //    back through the SAME shared Rc<Block> -- update-once-visible-
+        //    everywhere via the kernel-mediated CAS store.
+        let (s, _) =
+            tb_hal::agent_block_dispatch(agent_c, caps::M_BLOCK_WRITE, hb_c, 0, 0x1234, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok {
+            m15_fail("C record write not Ok");
+        }
+        let (s, v) = tb_hal::agent_block_dispatch(agent_d, caps::M_BLOCK_READ, hb_d, 0, 0, 0)
+            .unwrap_or((badcap, 0));
+        if s != ok || v != 0x1234 {
+            m15_fail("D did not read C's record (blackboard not shared)");
+        }
+        tb_hal::serial_write_str(
+            "blocks: C wrote record, D read it (update-once-visible-everywhere)\n",
+        );
+
+        // 6. DENIED / NON-BLOCK / BAD-METHOD paths (the closed status surface).
+        let gen = match tb_hal::agent_mint_generic(agent_c, Rights::READ.union(Rights::WRITE)) {
+            Some(h) => h,
+            None => m15_fail("mint generic non-block cap failed"),
+        };
+        let (s, _) = tb_hal::agent_block_dispatch(agent_c, caps::M_BLOCK_READ, gen, 0, 0, 0)
+            .unwrap_or((ok, 0));
+        if s != badcap {
+            m15_fail("M_BLOCK_READ on a non-block was not BadCap");
+        }
+        let (s, _) = tb_hal::agent_block_map(agent_c, gen, false, block_va).unwrap_or((ok, 0));
+        if s != badcap {
+            m15_fail("M_BLOCK_MAP on a non-block was not BadCap");
+        }
+        let (s, no_read_raw) =
+            tb_hal::agent_block_dispatch(agent_c, caps::M_HANDLE_NARROW, hb_c, 0, 0, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok {
+            m15_fail("narrow hb_c to empty rights failed");
+        }
+        let no_read = Handle::from_raw(no_read_raw);
+        let (s, _) =
+            tb_hal::agent_block_map(agent_c, no_read, false, block_va).unwrap_or((ok, 0));
+        if s != den {
+            m15_fail("map with a READ-less block handle was not Denied");
+        }
+        let (s, _) = tb_hal::agent_block_dispatch(agent_c, 32, hb_c, 0, 0, 0).unwrap_or((ok, 0));
+        if s != badmethod {
+            m15_fail("unknown block method 32 was not BadMethod");
+        }
+        tb_hal::serial_write_str(
+            "blocks: non-block BadCap + READ-less Denied + bad-method BadMethod\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M15: blocks OK\n"); // <-- the M15 DoD marker
 
     tb_hal::halt()
 }

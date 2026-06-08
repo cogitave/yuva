@@ -41,6 +41,7 @@ mod arch;
 pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
 mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
 mod ipc; // M14: SAFE inter-agent IPC channel core (bounded ordered FIFO + cap move).
+mod blocks; // M15: SAFE shared-memory block core (pinned M6 frames + RECORD CAS).
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
@@ -1577,4 +1578,150 @@ pub fn agent_root_pa(task: Task) -> u64 {
         .as_ref()
         .map(|a| a.space.root_pa())
         .unwrap_or(0)
+}
+
+// ===========================================================================
+// M15: shared memory blocks + session blackboard
+// ===========================================================================
+//
+// A `blocks::Block` owns one or more pinned M6 frames and is reached as an
+// `ObjKind::Block` capability through the M11 chokepoint. Sharing = mint an `Rc`
+// clone Block handle into EACH member's table (`agent_block_create`) and map the
+// SAME frames into each member's own root (`agent_block_map`) at `BLOCK_WINDOW_VA`
+// -- so every member translates that VA to the SAME physical frame (true
+// sharing). Permission is rights-derived at the chokepoint: `writable = want &&
+// rights.contains(WRITE)`. The RECORD-plane CAS/read (the session blackboard's
+// update-once-visible-everywhere) rides the M11 `dispatch` arms via
+// `agent_block_dispatch`. The map path reuses M10 `map_in_space` -> ZERO new
+// unsafe; frames are pinned for the kernel-session lifetime (no unmap yet).
+
+/// The dedicated, VACANT top-level window each agent maps its shared blocks into,
+/// clear of the agent's own code/stack (`AGENT_CODE_VA`). x86_64 = `PML4[5]`
+/// (sibling of the agent code slot `PML4[4]`); a layout-lock const-assert pins
+/// the slot so a future change cannot silently collide with code/stack.
+#[cfg(target_arch = "x86_64")]
+pub const BLOCK_WINDOW_VA: u64 = 0x0000_0280_0000_0000;
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!((BLOCK_WINDOW_VA >> 39) & 0x1FF == 5);
+
+/// aarch64 = `L1[7]` (sibling of the agent code slot `L1[6]`).
+#[cfg(target_arch = "aarch64")]
+pub const BLOCK_WINDOW_VA: u64 = 0x0000_0001_C000_0000;
+#[cfg(target_arch = "aarch64")]
+const _: () = assert!((BLOCK_WINDOW_VA >> 30) & 0x1FF == 7);
+
+/// M15: create ONE shared block of `n_pages` pinned M6 frames and mint an `Rc`
+/// clone Block handle into EACH of agents `a` and `b` (the `agent_channel_connect`
+/// precedent -- two SEPARATE `AGENTS.slot()` scopes so no two `&mut AgentProcess`
+/// overlap). `a` gets full member rights (READ|WRITE|TRANSFER|DUP), `b` a plain
+/// member (READ|WRITE); observers are produced by NARROWing to drop WRITE. `None`
+/// on frame OOM (the block frees its partial allocation first), a bad task, or a
+/// full table.
+pub fn agent_block_create(a: Task, b: Task, n_pages: usize) -> Option<(caps::Handle, caps::Handle)> {
+    let sa = a.raw();
+    let sb = b.raw();
+    if sa >= MAX_TASKS || sb >= MAX_TASKS || sa == sb {
+        return None;
+    }
+    let blk = blocks::Block::create(n_pages)?;
+    let full = caps::Rights::READ
+        .union(caps::Rights::WRITE)
+        .union(caps::Rights::TRANSFER)
+        .union(caps::Rights::DUP);
+    let member = caps::Rights::READ.union(caps::Rights::WRITE);
+    let ha = {
+        let ap_a = AGENTS.slot(sa).as_mut()?;
+        ap_a.table.mint_block(full, blk.clone())?
+    };
+    let hb = {
+        let ap_b = AGENTS.slot(sb).as_mut()?;
+        ap_b.table.mint_block(member, blk)?
+    };
+    Some((ha, hb))
+}
+
+/// M15: ATTACH the block named by `h` into `t`'s OWN address space at `base_va`,
+/// one [`map_in_space`] per frame. Re-enforces the SINGLE-SOURCED chokepoint
+/// algebra (the dispatch path holds only `&mut HandleTable`, not the
+/// `AddressSpace`, so the body must ride here -- the `agent_chan_recv_full`
+/// precedent): the `required_right(M_BLOCK_MAP)==READ` gate, then `writable =
+/// want_writable && rights.contains(WRITE)` (a READ-only handle requesting write
+/// is downgraded to an RO mapping -- the literal `min(request, rights)`).
+/// Returns `(status, base_va)`: `Ok` + `base_va`, or `BadCap`/`Stale` (resolve),
+/// `Denied` (READ-less handle), `NoMem` (intermediate-table frame OOM). `None`
+/// only if `t` is not an agent.
+pub fn agent_block_map(
+    t: Task,
+    h: caps::Handle,
+    want_writable: bool,
+    base_va: u64,
+) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let (rights, blk) = match ap.table.block_of(h) {
+        Ok(x) => x,
+        Err(e) => return Some((e as u32, 0)),
+    };
+    if !rights.contains(caps::Rights::READ) {
+        return Some((caps::SysStatus::Denied as u32, 0));
+    }
+    let writable = want_writable && rights.contains(caps::Rights::WRITE);
+    let space = ap.space;
+    let mut i = 0;
+    while i < blk.n_pages() {
+        let va = base_va + (i as u64) * 0x1000;
+        if !map_in_space(space, va, blk.frames()[i], writable) {
+            return Some((caps::SysStatus::NoMem as u32, 0));
+        }
+        i += 1;
+    }
+    blk.record_member(space.root_pa(), base_va, writable);
+    Some((caps::SysStatus::Ok as u32, base_va))
+}
+
+/// M15: drive a numbered, capability-checked [`caps::dispatch`] against `t`'s OWN
+/// table with an explicit `handle` + three inline args -- the RECORD-plane door
+/// the self-test uses for `M_BLOCK_WRITE`/`M_BLOCK_READ` and the block-handle
+/// NARROW (the `agent_cap_dispatch` precedent, widened to a third arg for the CAS
+/// expected-version). Returns `(status, value)`.
+pub fn agent_block_dispatch(
+    t: Task,
+    method: u32,
+    handle: caps::Handle,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method,
+        handle,
+        args: [a0, a1, a2, 0],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    Some((ret.status as u32, ret.value))
+}
+
+/// M15 test cross-check: the recorded `writable` flag of `t`'s most recent
+/// mapping of block `h` at `base_va`, or `None` if it does not resolve. Lets the
+/// self-test OBSERVE that a READ-only handle's write-requesting map was
+/// downgraded to RO (`min(request, rights)` dropped WRITE) -- the PORTABLE
+/// cross-check, since CR0.WP=0 makes the hardware RO-write-fault unobservable
+/// kernel-side on x86_64.
+pub fn agent_block_member_writable(t: Task, h: caps::Handle, base_va: u64) -> Option<bool> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let root_pa = ap.space.root_pa();
+    let (_rights, blk) = ap.table.block_of(h).ok()?;
+    blk.member_writable(root_pa, base_va)
 }
