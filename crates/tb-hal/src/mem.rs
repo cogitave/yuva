@@ -76,6 +76,22 @@ const LINK_SUPERSEDES: u8 = 2;
 const TIER_HOT: u8 = 3;
 const TIER_COLD: u8 = 5;
 
+// --- M18 T4 PROCEDURAL/SKILL tier constants (all fixed-point, deterministic) --
+
+/// A freshly-proposed skill: INERT (utility 0), never beats the deliberative
+/// path -- the shadow/canary state until the frozen harness admits it.
+const SKILL_PROPOSED: u8 = 0;
+/// A skill the frozen held-out evaluator admitted (verification-before-commit).
+const SKILL_ADMITTED: u8 = 1;
+/// ACT-R / EvolveR utility learning rate alpha=0.2 as an integer divisor (U +=
+/// (R-U)/5). Keeps the trust-promotion update FPU-free and replayable.
+const UTIL_ALPHA_DIV: i64 = 5;
+/// The held-out evaluator's kernel-private transform seed (golden-ratio const,
+/// the `REFLECT_SEED` discipline) -- non-zero so an all-zero body still mixes.
+const SKILL_XFORM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+/// FNV-style odd multiplier mixing the held-out input into the transform.
+const SKILL_XFORM_MUL: u64 = 0x0000_0100_0000_01B3;
+
 // --- fixed-point integer math (no floats: deterministic, FPU-hazard-free) -----
 
 /// `log2(x) * SCALE` as an integer (`0` for `x <= 1`): floor part from the
@@ -102,6 +118,21 @@ fn bla_raw(count: u32, age: u64) -> i64 {
     let freq = ln_fixed(2 * (count as u64 + 1)); // frequency term
     let recency = ln_fixed(age + 1) / 2; // 0.5 * ln(age) decay
     freq - recency
+}
+
+/// M18: the deterministic fixed-point transform modeling a candidate skill's
+/// behavior on one held-out input (the held-out evaluator's KERNEL-PRIVATE
+/// scoring rule -- the same no-float discipline as recall). It is SENSITIVE to
+/// `body`, so only the secret target body reproduces every held-out expected
+/// value: a skill that games a visible slice still misses the held-out set. The
+/// candidate never runs in the evaluator's sandbox, so it can neither introspect
+/// nor rewrite this function (the "validate, not just hide" sharpening).
+fn skill_transform(body: u64, input: u64) -> u64 {
+    let mut h = body ^ SKILL_XFORM_SEED;
+    h = h.rotate_left((input & 63) as u32);
+    h ^= input.wrapping_mul(SKILL_XFORM_MUL);
+    h = h.rotate_left(17) ^ (body >> 7);
+    h
 }
 
 /// Min-max normalize `vals[i]` over the candidate set into `[0, SCALE]`; a
@@ -358,6 +389,37 @@ struct Quota {
     records: u32,
 }
 
+// --- T4: procedural / skill store (M18; executable skills + EvolveR utility) --
+
+/// One T4 PROCEDURAL/SKILL record (MEMORY-SPEC T4 "executable skills + distilled
+/// principles; write is privileged"). `body_tok` is the executable/WASM-component
+/// token (inline scalar at M18, like every other tier); the EvolveR counters +
+/// `util` start at 0 so a learned skill EARNS trust (ACT-R production compilation),
+/// and `tier` is the PROPOSED(inert)/ADMITTED(trusted) canary state the frozen
+/// harness -- never the agent -- flips. `lineage` is the immutable provenance log.
+#[allow(dead_code)]
+struct SkillRecord {
+    id: u64,
+    body_tok: u64,
+    desc_tok: u64,
+    iface_tok: u64,
+    embedding: u64,
+    c_succ: u32,
+    c_use: u32,
+    util: u32,
+    lineage: Vec<u64>,
+    tier: u8,
+    provenance: u8,
+}
+
+/// The T4 store: id-addressed skills plus the current best ADMITTED held-out
+/// score (the no-regression watermark the frozen harness admits strictly above).
+struct ProceduralStore {
+    skills: Vec<SkillRecord>,
+    next_id: u64,
+    best_score: u32,
+}
+
 // --- the substrate -----------------------------------------------------------
 
 /// The per-agent tiered memory substrate behind one born-with `MemoryHome`.
@@ -379,6 +441,8 @@ pub(crate) struct MemSubstrate {
     last_consolidated_epoch: u64,
     /// M17: the wrapping FORGET clock-hand (kswapd cursor) persisted across cycles.
     consol_cursor: u64,
+    /// M18: the T4 PROCEDURAL/SKILL store (the privileged WRITE_PROCEDURAL tier).
+    t4: ProceduralStore,
 }
 
 impl MemSubstrate {
@@ -415,6 +479,11 @@ impl MemSubstrate {
             imp_accum: 0,
             last_consolidated_epoch: 0,
             consol_cursor: 0,
+            t4: ProceduralStore {
+                skills: Vec::new(),
+                next_id: 0,
+                best_score: 0,
+            },
         }
     }
 
@@ -835,5 +904,191 @@ impl MemSubstrate {
         self.last_consolidated_epoch = self.clock;
         let _ = self.backing.flush();
         n
+    }
+
+    // --- M18 T4 PROCEDURAL/SKILL tier --------------------------------------
+
+    /// M18 `M_MEM_WRITE_PROC` body: the privileged T4 procedural write, gated by
+    /// `Rights::WRITE_PROCEDURAL` at the M11 chokepoint. An OP-SELECTOR rides
+    /// `op` (the M17 `consolidate(op,..)` precedent -- NO new ABI method): op0
+    /// ADD_SKILL, op1 UPDATE_UTILITY, op2 READ_SKILL (own body), op3 LINK_LINEAGE,
+    /// op4 READ_TIER (own tier). Returns the op scalar, or `None` (-> `NoMem`)
+    /// when the write-amplification quota is exhausted (fail-closed).
+    pub(crate) fn write_proc(&mut self, op: u64, a: u64, b: u64, c: u64) -> Option<u64> {
+        match op {
+            0 => self.skill_add(a, b, c),    // ADD_SKILL(body=a, desc=b, iface/embed packed=c)
+            1 => self.skill_bump_util(a, b), // UPDATE_UTILITY(id=a, reward!=0 => success)
+            2 => self.skill_read_body(a),    // READ_SKILL(id=a) -> own body_tok
+            3 => self.skill_link(a, b),      // LINK_LINEAGE(id=a, parent=b)
+            4 => self.skill_read_tier(a),    // READ_TIER(id=a) -> tier (PROPOSED/ADMITTED)
+            _ => Some(0),                    // NOOP
+        }
+    }
+
+    /// Find the store index of skill `id`, or `None`.
+    fn skill_idx(&self, id: u64) -> Option<usize> {
+        self.t4.skills.iter().position(|s| s.id == id)
+    }
+
+    /// ADD_SKILL: push an INERT PROPOSED skill (utility 0, never beats the
+    /// deliberative path until admitted), reusing the T2/T3 `TOKEN_QUOTA`
+    /// write-amplification cap so a flood of proposals fails-closed (`None`).
+    fn skill_add(&mut self, body: u64, desc: u64, packed: u64) -> Option<u64> {
+        if self.quota.tokens_written.saturating_add(1) > TOKEN_QUOTA {
+            return None; // KeyKOS space-bank: proposals fail-closed past the bound
+        }
+        let id = self.t4.next_id;
+        self.t4.skills.push(SkillRecord {
+            id,
+            body_tok: body,
+            desc_tok: desc,
+            iface_tok: packed & 0xFFFF_FFFF,
+            embedding: packed >> 32,
+            c_succ: 0,
+            c_use: 0,
+            util: 0,
+            lineage: Vec::new(),
+            tier: SKILL_PROPOSED,
+            provenance: 0,
+        });
+        self.t4.next_id = self.t4.next_id.wrapping_add(1);
+        self.quota.tokens_written = self.quota.tokens_written.saturating_add(1);
+        self.clock = self.clock.wrapping_add(1);
+        Some(id)
+    }
+
+    /// UPDATE_UTILITY: the agent bumps its OWN skill usage counters; the EvolveR
+    /// utility `s=(c_succ+1)*SCALE/(c_use+2)` (the `forget_sweep` rule) is recomputed.
+    fn skill_bump_util(&mut self, id: u64, reward: u64) -> Option<u64> {
+        let i = self.skill_idx(id)?;
+        let s = &mut self.t4.skills[i];
+        s.c_use = s.c_use.saturating_add(1);
+        if reward != 0 {
+            s.c_succ = s.c_succ.saturating_add(1);
+        }
+        s.util = (((s.c_succ as i64 + 1) * SCALE) / (s.c_use as i64 + 2)).max(0) as u32;
+        self.clock = self.clock.wrapping_add(1);
+        Some(s.util as u64)
+    }
+
+    /// READ_SKILL: the agent reads back the body_tok of its OWN skill `id`.
+    fn skill_read_body(&self, id: u64) -> Option<u64> {
+        let i = self.skill_idx(id)?;
+        Some(self.t4.skills[i].body_tok)
+    }
+
+    /// READ_TIER: the agent reads back the PROPOSED/ADMITTED tier of its OWN skill.
+    fn skill_read_tier(&self, id: u64) -> Option<u64> {
+        let i = self.skill_idx(id)?;
+        Some(self.t4.skills[i].tier as u64)
+    }
+
+    /// LINK_LINEAGE: append a parent/provenance id to the agent's OWN skill
+    /// lineage (the DGM archive-lineage seam); returns the new lineage length.
+    fn skill_link(&mut self, id: u64, parent: u64) -> Option<u64> {
+        let i = self.skill_idx(id)?;
+        self.t4.skills[i].lineage.push(parent);
+        self.clock = self.clock.wrapping_add(1);
+        Some(self.t4.skills[i].lineage.len() as u64)
+    }
+
+    /// M18 HARNESS-ONLY (kernel-side; NOT method-numbered, so unreachable from
+    /// `dispatch`): the `(body_tok, tier)` of skill `id`, for the frozen harness
+    /// to score + the self-test to witness. `None` if no such skill.
+    pub(crate) fn skill_get(&self, id: u64) -> Option<(u64, u8)> {
+        let i = self.skill_idx(id)?;
+        let s = &self.t4.skills[i];
+        Some((s.body_tok, s.tier))
+    }
+
+    /// M18 HARNESS-ONLY ADMIT (kernel-side; never the agent): flip skill `id`
+    /// PROPOSED->ADMITTED ONLY when `score` STRICTLY improves on the store's best
+    /// admitted held-out score (no-regression / EXCEL rung). On admit: EvolveR
+    /// utility `U += (R-U)/5` (alpha=0.2), raise the watermark, and append the
+    /// reward to the immutable lineage. On reject: stay PROPOSED/inert and append
+    /// a `0` REJECT marker to the lineage. Returns `true` iff admitted.
+    pub(crate) fn skill_admit(&mut self, id: u64, score: u32) -> bool {
+        let best = self.t4.best_score;
+        let i = match self.skill_idx(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        self.clock = self.clock.wrapping_add(1);
+        if score > best {
+            let s = &mut self.t4.skills[i];
+            s.tier = SKILL_ADMITTED;
+            s.c_use = s.c_use.saturating_add(1);
+            s.c_succ = s.c_succ.saturating_add(1);
+            let u = s.util as i64;
+            let r = score as i64;
+            s.util = (u + (r - u) / UTIL_ALPHA_DIV).max(0) as u32;
+            s.lineage.push(score as u64);
+            self.t4.best_score = score;
+            true
+        } else {
+            self.t4.skills[i].lineage.push(0); // rejected-into-lineage (DGM verdict)
+            false
+        }
+    }
+
+    /// M18 HARNESS-ONLY: count of ADMITTED skills (the trust-promotion witness).
+    pub(crate) fn skill_count_admitted(&self) -> u64 {
+        self.t4
+            .skills
+            .iter()
+            .filter(|s| s.tier == SKILL_ADMITTED)
+            .count() as u64
+    }
+
+    /// M18 HARNESS-ONLY: the lineage length of skill `id` (admitted AND rejected
+    /// proposals both grow it -- the immutable, agent-unwritable provenance log).
+    pub(crate) fn skill_lineage_len(&self, id: u64) -> u64 {
+        match self.skill_idx(id) {
+            Some(i) => self.t4.skills[i].lineage.len() as u64,
+            None => 0,
+        }
+    }
+
+    /// M18 FROZEN-DOMAIN seeding (kernel-side): seed `n` deterministic held-out
+    /// `(input -> expected)` episodes where `expected = skill_transform(target,
+    /// input)`. Stored as ordinary T2 records so [`MemSubstrate::score_candidate`]
+    /// scores against the SAME journal the improving agent holds NO handle to.
+    pub(crate) fn seed_heldout(&mut self, target: u64, base: u64, n: u64) {
+        let mut k = 0u64;
+        while k < n {
+            let input = base
+                .wrapping_add(k)
+                .wrapping_mul(0x0010_0001)
+                .wrapping_add(0x51);
+            let expected = skill_transform(target, input);
+            let _ = self.push_record(input, expected, 5, 0, Vec::new());
+            k += 1;
+        }
+    }
+
+    /// M18 FROZEN held-out EVALUATOR (kernel-side, READ-ONLY): model the candidate
+    /// `body`'s behavior with [`skill_transform`] and score it over THIS substrate's
+    /// held-out `(input -> expected)` episodes -- the fraction of cases where
+    /// `f(body, input) == expected`, normalized to `[0, SCALE]`. Pure, no floats,
+    /// deterministic. Runs in the frozen domain (the agent has no handle to this
+    /// substrate), so a body that games a visible slice still misses the held-out
+    /// set: Goodharting/overfitting scores low and is rejected by the no-regression
+    /// rule. Returns `0` when no held-out case exists.
+    pub(crate) fn score_candidate(&self, body: u64) -> u32 {
+        let mut total = 0i64;
+        let mut hit = 0i64;
+        for e in self.t2.log.iter() {
+            if e.t_invalid != 0 {
+                continue;
+            }
+            total += 1;
+            if skill_transform(body, e.content_tok) == e.value {
+                hit += 1;
+            }
+        }
+        if total == 0 {
+            return 0;
+        }
+        ((hit * SCALE) / total) as u32
     }
 }

@@ -2199,6 +2199,209 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M17: consolidate OK\n"); // <-- the M17 DoD marker
 
+    // --- M18: frozen-kernel self-improvement harness + held-out evaluator -----
+    // An agent extends its OWN T4 skill library under a FROZEN-KERNEL /
+    // EVOLVING-USERSPACE split: a held-out evaluator + test set live in a
+    // kernel-owned eval_tbl/eval_home NEVER minted into any agent table, so the
+    // improving agent provably cannot READ the held-out set nor WRITE the
+    // evaluator. The whole guarantee REDUCES TO the M11 rights-mask invariant
+    // (a handle resolves only against the table it is presented to). Skill writes
+    // ride the EXISTING M_MEM_WRITE_PROC=18 arm (WRITE_PROCEDURAL-gated, an
+    // op-selector inside -- NO new ABI method); the harness is a kernel facade,
+    // NOT method-numbered, so an agent literally cannot invoke it. The timer is
+    // disarmed (single-core, interrupts masked -- the RefCell discipline holds);
+    // ZERO new unsafe. DoD marker: "M18: evolve OK".
+    {
+        use tb_hal::caps::{self, Handle};
+
+        fn m18_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M18: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        // The M13/M16/M17 capability-checked dispatch helper (full [u64;4] args).
+        fn disp(
+            tbl: &mut tb_hal::caps::HandleTable,
+            h: tb_hal::caps::Handle,
+            method: u32,
+            a: [u64; 4],
+        ) -> tb_hal::caps::SysReturn {
+            tb_hal::caps::dispatch(
+                tbl,
+                &tb_hal::caps::SyscallArgs {
+                    method,
+                    handle: h,
+                    args: a,
+                },
+            )
+        }
+
+        let ok = caps::SysStatus::Ok as u32;
+        let den = caps::SysStatus::Denied as u32;
+
+        // write_proc op-selector (rides M_MEM_WRITE_PROC -- NO new ABI method).
+        const OP_ADD: u64 = 0; // ADD_SKILL
+        const OP_READ: u64 = 2; // READ_SKILL -> own body_tok
+        const OP_READ_TIER: u64 = 4; // READ_TIER -> own PROPOSED/ADMITTED tier
+        const PROPOSED: u64 = 0;
+        const ADMITTED: u64 = 1;
+        // Witness-A local secret target (the agent does not know it; the test,
+        // being kernel-side, hands the matching GOOD body to prove admission).
+        const TARGET: u64 = 0x0000_ABCD_0000_1234;
+        const BODY_GOOD: u64 = TARGET; // generalizes -> perfect held-out score
+        const BODY_OVERFIT: u64 = 0x0000_DEAD_0000_9999; // games visible, misses held-out
+        const DESC: u64 = 0x0000_0DE5; // NL-description token (inert at M18)
+        const IFACE: u64 = 0x0000_1FAC; // WIT-interface token (inert at M18)
+        const EVAL_BASE_A: u64 = 0x0000_2000;
+        const EVAL_N_A: u64 = 6;
+
+        // ===== the FROZEN evaluator domain: kernel-owned, never agent-named =====
+        let mut eval_tbl = caps::HandleTable::with_capacity(8);
+        let eval_all = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL);
+        let eval_home = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m18_fail("could not mint the kernel-owned evaluator home"),
+        };
+        if !eval_tbl.eval_seed_heldout(eval_home, TARGET, EVAL_BASE_A, EVAL_N_A) {
+            m18_fail("could not seed the held-out test set");
+        }
+
+        // ===== the improving agent's tables (WRITE_PROCEDURAL home + plain home) =
+        let mut tbl = caps::HandleTable::with_capacity(16);
+        let wp = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL)
+            .union(caps::Rights::WRITE_PROCEDURAL);
+        let home_wp = match tbl.mint_memory_home(wp) {
+            Some(h) => h,
+            None => m18_fail("could not mint the WRITE_PROCEDURAL skill home"),
+        };
+        let ro = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL);
+        let home_ro = match tbl.mint_memory_home(ro) {
+            Some(h) => h,
+            None => m18_fail("could not mint the ordinary born-with home"),
+        };
+
+        // (1) GOOD SKILL ADMITTED. Propose via WRITE_PROCEDURAL (the right bites
+        //     POSITIVELY on a granted home): it lands PROPOSED/inert (util 0).
+        let p = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_ADD, BODY_GOOD, DESC, IFACE]);
+        if p.status != caps::SysStatus::Ok {
+            m18_fail("propose GOOD via WRITE_PROCEDURAL was not Ok");
+        }
+        let id_good = p.value;
+        let t0 = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_READ_TIER, id_good, 0, 0]);
+        if t0.status != caps::SysStatus::Ok || t0.value != PROPOSED {
+            m18_fail("a freshly-proposed skill was not PROPOSED/inert");
+        }
+        let ln0 = tbl.skill_lineage_len(home_wp, id_good).unwrap_or(0);
+        // The FROZEN harness scores BODY_GOOD on the held-out set -> strictly
+        // improves -> admits (PROPOSED->ADMITTED). The agent never sees the inputs.
+        let (adm, _score) = tbl.harness_admit(home_wp, id_good, &eval_tbl, eval_home);
+        if !adm {
+            m18_fail("the GOOD skill (perfect held-out score) was not admitted");
+        }
+        let t1 = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_READ_TIER, id_good, 0, 0]);
+        if t1.status != caps::SysStatus::Ok || t1.value != ADMITTED {
+            m18_fail("the admitted skill did not flip PROPOSED->ADMITTED");
+        }
+        if tbl.skill_lineage_len(home_wp, id_good).unwrap_or(0) <= ln0 {
+            m18_fail("admission did not grow the immutable lineage log");
+        }
+        // OP_READ hands back the agent's OWN body_tok (id-addressed, own skill).
+        let rb = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_READ, id_good, 0, 0]);
+        if rb.status != caps::SysStatus::Ok || rb.value != BODY_GOOD {
+            m18_fail("READ_SKILL did not return the agent's own body_tok");
+        }
+
+        // (2) BAD / GOODHARTING SKILL REJECTED. BODY_OVERFIT games a visible slice
+        //     but does NOT improve the held-out score -> harness leaves it PROPOSED
+        //     (inert), appends a reject verdict to lineage, admitted-count unchanged.
+        let pbad = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_ADD, BODY_OVERFIT, DESC, IFACE]);
+        if pbad.status != caps::SysStatus::Ok {
+            m18_fail("propose OVERFIT via WRITE_PROCEDURAL was not Ok");
+        }
+        let id_bad = pbad.value;
+        let lnb0 = tbl.skill_lineage_len(home_wp, id_bad).unwrap_or(0);
+        let admitted_before = tbl.skill_admitted_count(home_wp).unwrap_or(0);
+        let (adm_bad, _s) = tbl.harness_admit(home_wp, id_bad, &eval_tbl, eval_home);
+        if adm_bad {
+            m18_fail("the overfitting skill was admitted (Goodhart leaked through)");
+        }
+        let tb_bad = disp(&mut tbl, home_wp, caps::M_MEM_WRITE_PROC, [OP_READ_TIER, id_bad, 0, 0]);
+        if tb_bad.status != caps::SysStatus::Ok || tb_bad.value != PROPOSED {
+            m18_fail("the rejected skill did not stay PROPOSED/inert");
+        }
+        if tbl.skill_admitted_count(home_wp).unwrap_or(0) != admitted_before {
+            m18_fail("a rejected skill changed the admitted count");
+        }
+        if tbl.skill_lineage_len(home_wp, id_bad).unwrap_or(0) <= lnb0 {
+            m18_fail("the rejection was not appended to the lineage log");
+        }
+
+        // (3) PROVABLY CANNOT READ THE HELD-OUT SET: it lives ONLY in eval_tbl,
+        //     never minted into tbl, so no handle the agent holds resolves it; a
+        //     fabricated raw handle against tbl -> BadCap / Stale (authority lives
+        //     in the slot, not the handle). No agent_* facade takes eval_tbl.
+        let forged = disp(&mut tbl, Handle::from_raw(0x0000_0001_0000_00FF), caps::M_MEM_READ, [0, 0, 0, 0]);
+        if forged.status != caps::SysStatus::BadCap && forged.status != caps::SysStatus::Stale {
+            m18_fail("a fabricated handle resolved (the held-out set was nameable)");
+        }
+
+        // (4) PROVABLY CANNOT WRITE THE EVALUATOR (Goodhart-stop): a home WITHOUT
+        //     WRITE_PROCEDURAL is Denied at the rights gate (the live M11 idiom);
+        //     and eval_home is unnameable from tbl (proven above). Both reduce to
+        //     the rights-mask invariant.
+        let d = disp(&mut tbl, home_ro, caps::M_MEM_WRITE_PROC, [OP_ADD, BODY_OVERFIT, DESC, IFACE]);
+        if d.status != caps::SysStatus::Denied {
+            m18_fail("a skill write on a home lacking WRITE_PROCEDURAL was not Denied");
+        }
+
+        // (5) CLOSED-SET INTACT: an unknown method is still BadMethod (the M11/M16
+        //     `method 33 == BadMethod` proof is untouched -- NO new ABI number).
+        let bm = disp(&mut tbl, home_wp, 0xDEAD, [0, 0, 0, 0]);
+        if bm.status != caps::SysStatus::BadMethod {
+            m18_fail("unknown method 0xDEAD was not BadMethod (closed set drifted)");
+        }
+
+        tb_hal::serial_write_str(
+            "mem: skill proposed via WRITE_PROCEDURAL, frozen evaluator admitted-good + rejected-bad, held-out set unreadable + evaluator unwritable (Denied/BadCap)\n",
+        );
+
+        // ===== WITNESS B -- end-to-end through a spawned agent's M11 chokepoint ==
+        // Reuse the already-born agent_c (MANIFEST_A: born-with home is
+        // READ|WRITE|RECALL, NO WRITE_PROCEDURAL). The harness facade grants a
+        // SEPARATE WRITE_PROCEDURAL skill-home (the agent_model_open precedent).
+        let (s, gid) = tb_hal::agent_skill_propose(agent_c, OP_ADD, tb_hal::HARNESS_GOOD_BODY, DESC, IFACE)
+            .unwrap_or((caps::SysStatus::BadMethod as u32, 0));
+        if s != ok {
+            m18_fail("agent_skill_propose on the granted WRITE_PROCEDURAL home was not Ok");
+        }
+        let (s, adm_b) =
+            tb_hal::agent_evolve_request(agent_c, gid).unwrap_or((caps::SysStatus::BadMethod as u32, false));
+        if s != ok || !adm_b {
+            m18_fail("agent_evolve_request did not admit the GOOD skill through the chokepoint");
+        }
+        // An ordinary agent proposing through its BORN-WITH home (no
+        // WRITE_PROCEDURAL) is Denied at the rights gate -- the CoALA asymmetry.
+        let (s, _) = tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_WRITE_PROC, OP_ADD, tb_hal::HARNESS_BAD_BODY, DESC, IFACE)
+            .unwrap_or((ok, 0));
+        if s != den {
+            m18_fail("a born-with-home skill write (no WRITE_PROCEDURAL) was not Denied");
+        }
+
+        tb_hal::serial_write_str(
+            "mem: frozen boundary == the M11 rights-mask invariant (WRITE_PROCEDURAL gates propose; evaluator domain unnameable)\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M18: evolve OK\n"); // <-- the M18 DoD marker
+
     tb_hal::halt()
 }
 

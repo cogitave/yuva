@@ -1208,6 +1208,12 @@ struct AgentProcess {
     budget: caps::Handle,
     /// Identity = the task slot / agent id.
     principal: u32,
+    /// M18: the SEPARATE `WRITE_PROCEDURAL` T4 skill-home, minted KERNEL-MEDIATED
+    /// by [`agent_skill_propose`] on first use (the `agent_model_open` INVOKE_MODEL
+    /// grant precedent) -- NEVER the born-with episodic home (which stays
+    /// `READ|WRITE|RECALL`, so an ordinary skill write is `Denied`). `Handle::NULL`
+    /// until the self-improver first proposes.
+    skill_home: caps::Handle,
 }
 
 /// The agent registry: `[Option<AgentProcess>; MAX_TASKS]` indexed by task slot,
@@ -1342,6 +1348,7 @@ pub fn agent_spawn(manifest: &'static AgentManifest, kstack: &'static mut [usize
         bootstrap,
         budget,
         principal: slot as u32,
+        skill_home: caps::Handle::NULL,
     });
 
     // 6. Enqueue for the round-robin timer (append after the current queue).
@@ -1805,4 +1812,98 @@ pub fn agent_model_dispatch(
     };
     let ret = caps::dispatch(&mut ap.table, &args);
     Some((ret.status as u32, ret.value))
+}
+
+// ===========================================================================
+// M18: frozen-kernel self-improvement harness (held-out evaluator + skill tier)
+// ===========================================================================
+//
+// An agent extends its OWN T4 skill library under a FROZEN-KERNEL /
+// EVOLVING-USERSPACE split. The held-out evaluator + test set live in a
+// kernel-owned `eval_tbl`/`eval_home` NEVER minted into any agent's table, so the
+// improving agent provably cannot READ the held-out set nor WRITE the evaluator:
+// the whole guarantee REDUCES TO the M11 rights-mask invariant. ZERO new unsafe
+// (these facades are safe code over the existing blessed `AGENTS` registry); NO
+// new ABI method (skill writes ride the existing `M_MEM_WRITE_PROC=18` arm; the
+// harness is a kernel facade, not method-numbered, so an agent cannot invoke it).
+
+/// M18: the GOOD candidate body == the held-out evaluator's SECRET target, so it
+/// generalizes and scores a perfect held-out result. (The self-test, being
+/// kernel-side, hands the improver this matching body to witness admission; a
+/// real searching agent does not know it.)
+pub const HARNESS_GOOD_BODY: u64 = 0x0000_600D_5C11_0001;
+/// M18: an OVERFITTING candidate body that games a visible slice but MISSES the
+/// held-out set -- it never strictly improves the held-out score, so it is
+/// rejected (the Goodhart-stop).
+pub const HARNESS_BAD_BODY: u64 = 0x0000_BAD0_5C11_0002;
+/// M18: deterministic base offset for the harness's held-out inputs.
+const EVAL_BASE: u64 = 0x0000_0000_00E5_7000;
+/// M18: held-out test-set size (the EXCEL-rung regression suite cardinality).
+const EVAL_N: u64 = 6;
+
+/// M18: PROPOSE a candidate skill into `task`'s OWN T4 procedural store through
+/// the M11 chokepoint (`M_MEM_WRITE_PROC=18`, `WRITE_PROCEDURAL`-gated). The
+/// `WRITE_PROCEDURAL` skill-home is a SEPARATE object minted KERNEL-MEDIATED on
+/// first use (the `agent_model_open` INVOKE_MODEL-grant precedent) -- NEVER the
+/// born-with episodic home (which stays `READ|WRITE|RECALL`, so an ordinary skill
+/// write is `Denied`). `op` rides the `write_proc` op-selector (0=ADD_SKILL ...).
+/// Returns `(status, value)`; `None` if `task` is not a live agent.
+pub fn agent_skill_propose(task: Task, op: u64, a: u64, b: u64, c: u64) -> Option<(u32, u64)> {
+    let slot = task.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    if ap.skill_home == caps::Handle::NULL {
+        // Kernel-mediated grant: a DISTINCT skill-home carrying WRITE_PROCEDURAL
+        // (the manifest never declares it -- the agent_model_open precedent).
+        let wp = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL)
+            .union(caps::Rights::WRITE_PROCEDURAL);
+        match ap.table.mint_memory_home(wp) {
+            Some(h) => ap.skill_home = h,
+            None => return Some((caps::SysStatus::ObjFull as u32, 0)),
+        }
+    }
+    let args = caps::SyscallArgs {
+        method: caps::M_MEM_WRITE_PROC,
+        handle: ap.skill_home,
+        args: [op, a, b, c],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    Some((ret.status as u32, ret.value))
+}
+
+/// M18: the kernel-owned EVOLVE harness for `task`'s PROPOSED skill `skill_id`
+/// (NOT a dispatch method -- it builds the kernel-owned FROZEN evaluator the agent
+/// holds no handle to; the `agent_model_open` kernel-mediated precedent). Builds a
+/// throwaway `eval_tbl`/`eval_home`, seeds the held-out set from the secret target
+/// ([`HARNESS_GOOD_BODY`]), scores the candidate via the frozen evaluator, and
+/// admits PROPOSED->ADMITTED ONLY on strict improvement (the EXCEL rung). The
+/// `eval_home` handle is NEVER returned or accepted, so the frozen boundary ==
+/// the M11 rights-mask invariant. Returns `(status, admitted)`; `None` if `task`
+/// is not a live agent.
+pub fn agent_evolve_request(task: Task, skill_id: u64) -> Option<(u32, bool)> {
+    let slot = task.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    // The FROZEN evaluator domain: kernel-owned, never minted into ANY agent table.
+    let mut eval_tbl = caps::HandleTable::with_capacity(4);
+    let eval_home = eval_tbl.mint_memory_home(
+        caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL),
+    )?;
+    eval_tbl.eval_seed_heldout(eval_home, HARNESS_GOOD_BODY, EVAL_BASE, EVAL_N);
+    let ap = AGENTS.slot(slot).as_mut()?;
+    if ap.skill_home == caps::Handle::NULL {
+        return Some((caps::SysStatus::BadCap as u32, false));
+    }
+    let (admitted, _score) = ap
+        .table
+        .harness_admit(ap.skill_home, skill_id, &eval_tbl, eval_home);
+    // eval_tbl / eval_home drop HERE -- the frozen domain never leaves the kernel.
+    Some((caps::SysStatus::Ok as u32, admitted))
 }

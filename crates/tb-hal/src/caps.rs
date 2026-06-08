@@ -794,6 +794,121 @@ impl HandleTable {
     }
 }
 
+/// M18 -- the FROZEN-evaluator harness surface (kernel-side, NOT method-numbered).
+///
+/// These helpers reach a [`MemSubstrate`] behind a [`ObjKind::MemoryHome`] handle
+/// for the kernel-owned self-improvement harness. They are DELIBERATELY NOT wired
+/// into [`dispatch`] (the closed numbered method set stays frozen at M11), so an
+/// agent literally cannot invoke them -- the evaluator scores from a kernel domain
+/// the agent has no handle/right to. The whole guarantee REDUCES TO the M11
+/// rights-mask invariant: a handle resolves ONLY against the table it is presented
+/// to, so an agent can never name the kernel-owned `eval_tbl`/`eval_home`.
+impl HandleTable {
+    /// Reach the substrate behind `h` and read `(body_tok, tier)` of skill `id`
+    /// (harness/self-test witness). `None` if `h` does not resolve, carries no
+    /// substrate, or has no such skill.
+    fn skill_get_of(&self, h: Handle, id: u64) -> Option<(u64, u8)> {
+        let i = self.live(h).ok()?;
+        let o = self.slots[i].object.as_ref()?;
+        o.mem.as_ref()?.borrow().skill_get(id)
+    }
+
+    /// Score `body` against the FROZEN held-out set in the substrate behind `h`
+    /// (the evaluator domain). `None` if `h` does not resolve or carries no
+    /// substrate. Single short-lived immutable borrow (no reentrancy).
+    fn score_of(&self, h: Handle, body: u64) -> Option<u32> {
+        let i = self.live(h).ok()?;
+        let o = self.slots[i].object.as_ref()?;
+        Some(o.mem.as_ref()?.borrow().score_candidate(body))
+    }
+
+    /// Flip skill `id` PROPOSED->ADMITTED in the substrate behind `h` iff `score`
+    /// strictly improves. Clones the `Rc<Object>` out and drops the slot borrow
+    /// BEFORE `borrow_mut` (the M_MEM_WRITE discipline). `false` on any miss.
+    fn skill_admit_of(&mut self, h: Handle, id: u64, score: u32) -> bool {
+        let i = match self.live(h) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let o = match self.slots[i].object.clone() {
+            Some(o) => o,
+            None => return false,
+        };
+        match &o.mem {
+            Some(cell) => cell.borrow_mut().skill_admit(id, score),
+            None => false,
+        }
+    }
+
+    /// M18 kernel-side: seed the held-out `(input -> expected)` test set into the
+    /// FROZEN evaluator substrate behind `eval_home`, deriving each expected from
+    /// the secret `target`. `eval_home` lives only in a kernel-owned table never
+    /// minted into any agent's table. Returns `false` if it does not resolve.
+    pub fn eval_seed_heldout(&mut self, eval_home: Handle, target: u64, base: u64, n: u64) -> bool {
+        let i = match self.live(eval_home) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let o = match self.slots[i].object.clone() {
+            Some(o) => o,
+            None => return false,
+        };
+        match &o.mem {
+            Some(cell) => {
+                cell.borrow_mut().seed_heldout(target, base, n);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// M18 ADMISSION (kernel-side; the EXCEL rung): read the PROPOSED skill
+    /// `skill_id` from the substrate behind `skill_home` in THIS table, score its
+    /// body_tok against the held-out set behind `eval_home` in the kernel-owned
+    /// `eval_tbl`, and flip it PROPOSED->ADMITTED ONLY on strict improvement (no
+    /// regression). Returns `(admitted, score)`. The improving agent holds NO
+    /// handle to `eval_tbl`/`eval_home`, so the held-out set is unreadable and the
+    /// verdict unforgeable -- the frozen boundary == the M11 rights-mask invariant.
+    pub fn harness_admit(
+        &mut self,
+        skill_home: Handle,
+        skill_id: u64,
+        eval_tbl: &HandleTable,
+        eval_home: Handle,
+    ) -> (bool, u32) {
+        let body = match self.skill_get_of(skill_home, skill_id) {
+            Some((b, _t)) => b,
+            None => return (false, 0),
+        };
+        let score = match eval_tbl.score_of(eval_home, body) {
+            Some(s) => s,
+            None => return (false, 0),
+        };
+        let admitted = self.skill_admit_of(skill_home, skill_id, score);
+        (admitted, score)
+    }
+
+    /// M18 self-test witness: the PROPOSED/ADMITTED tier of skill `id` behind `h`.
+    pub fn skill_tier_of(&self, h: Handle, id: u64) -> Option<u8> {
+        self.skill_get_of(h, id).map(|(_b, t)| t)
+    }
+
+    /// M18 self-test witness: count of ADMITTED skills behind `h` (trust promotion).
+    pub fn skill_admitted_count(&self, h: Handle) -> Option<u64> {
+        let i = self.live(h).ok()?;
+        let o = self.slots[i].object.as_ref()?;
+        Some(o.mem.as_ref()?.borrow().skill_count_admitted())
+    }
+
+    /// M18 self-test witness: lineage length of skill `id` behind `h` (admitted
+    /// AND rejected proposals both grow the immutable, agent-unwritable log).
+    pub fn skill_lineage_len(&self, h: Handle, id: u64) -> Option<u64> {
+        let i = self.live(h).ok()?;
+        let o = self.slots[i].object.as_ref()?;
+        Some(o.mem.as_ref()?.borrow().skill_lineage_len(id))
+    }
+}
+
 /// THE one numbered, capability-checked dispatcher (pure, safe). Resolves
 /// `args.handle` against the CALLER's `table`, checks the right the method
 /// requires, runs the method, and returns a CLOSED [`SysReturn`]. This is the
@@ -850,6 +965,32 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                         args.args[3],
                     ) {
                         Some(id) => SysReturn::ok(id),
+                        None => SysReturn::err(SysStatus::NoMem),
+                    }
+                }
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        // M18: the privileged T4 PROCEDURAL write (WRITE_PROCEDURAL gated above).
+        // Route to the caller's OWN substrate via the SAME clone-Rc-out / drop-
+        // slot-borrow-before-borrow_mut discipline as the M_MEM_WRITE arm (single-
+        // core, interrupts masked -> no reentrant borrow_mut). The procedural verbs
+        // (ADD_SKILL / UPDATE_UTILITY / READ_SKILL / LINK_LINEAGE / READ_TIER) ride
+        // an OP-SELECTOR in args[0] -- the M17 pattern, so NO new ABI method number.
+        M_MEM_WRITE_PROC => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.mem {
+                Some(cell) => {
+                    match cell.borrow_mut().write_proc(
+                        args.args[0],
+                        args.args[1],
+                        args.args[2],
+                        args.args[3],
+                    ) {
+                        Some(v) => SysReturn::ok(v),
                         None => SysReturn::err(SysStatus::NoMem),
                     }
                 }
