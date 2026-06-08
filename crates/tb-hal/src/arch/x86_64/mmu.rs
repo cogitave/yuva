@@ -80,6 +80,16 @@ const PTE_RW: u64 = 1 << 1;
 /// kernel-heap leaves set it — the heap holds data, never executable code.
 const PTE_NX: u64 = 1 << 63;
 
+/// Paging-entry bit 3: Page-Write-Through (PWT). With PCD it selects the PAT
+/// index; M8 maps the LAPIC MMIO page with `PWT|PCD` = PAT entry 3 = strong-UC
+/// (the power-up IA32_PAT default `mmu_init` kept) so device reads/writes are
+/// uncacheable (SDM Vol 3A §11.12.4, Table 11-11; Linux `_PAGE_BIT_PWT 3`).
+const PTE_PWT: u64 = 1 << 3;
+
+/// Paging-entry bit 4: Page-Cache-Disable (PCD). See [`PTE_PWT`] (Linux
+/// `_PAGE_BIT_PCD 4`).
+const PTE_PCD: u64 = 1 << 4;
+
 /// Physical-address field of any paging entry: bits 51:12 (SDM Table 4-15).
 /// Masking with it also strips flag/ignored bits (and XD) when walking.
 const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -546,4 +556,60 @@ pub fn map_heap_frames(start_va: u64, n: usize) -> usize {
         mapped += 1;
     }
     mapped
+}
+
+// ===========================================================================
+// M8: uncacheable device-MMIO page mapper (LAPIC bring-up).
+//
+// The LAPIC register block (PA 0xFEE0_0000) sits in the FOURTH GiB — ABOVE the
+// boot identity map [0, 1 GiB) (boot.rs maps exactly 512 x 2 MiB pages), so that
+// PA is UNMAPPED. Map a FRESH 4 KiB kernel VA in the vacant `PML4[3]` device
+// window to the device PA with `PWT|PCD` set (PAT entry 3 = strong UC) and NX
+// (an MMIO register page is never executed). This fresh page is the SOLE
+// mapping of the LAPIC — there is NO WB alias to resolve, so no super-page split
+// is needed. Reuses the same `ensure_table` walk `map_heap_frames` uses
+// (intermediate PDPT/PD/PT pulled from M6 frames); `timer.rs` accesses the
+// LAPIC through the returned window VA.
+// ===========================================================================
+
+/// Map ONE 4 KiB page `va` -> device physical `pa` as strong-uncacheable,
+/// kernel-only, no-execute (`P|RW|PWT|PCD|NX` = PAT entry 3) under the live
+/// `pml4`, building any missing `PDPT/PD/PT` from M6 frames. `false` on
+/// physical-frame OOM.
+///
+/// # Safety
+/// Ring 0, single vCPU; `pml4` is the live root from CR3; `va` is a canonical,
+/// currently-unmapped device-window VA; `pa` is a 4 KiB-aligned device PA. Every
+/// M6 table frame is identity-mapped, so each table pointer dereferences directly.
+unsafe fn map_one_device_page(pml4: *mut u64, va: u64, pa: u64) -> bool {
+    let pdpt = match ensure_table(pml4, level_index(va, SHIFT_512G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let pd = match ensure_table(pdpt, level_index(va, SHIFT_1G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let pt = match ensure_table(pd, level_index(va, SHIFT_2M)) {
+        Some(t) => t,
+        None => return false,
+    };
+    write_volatile(
+        pt.add(level_index(va, SHIFT_4K)),
+        make_entry(pa, PTE_P | PTE_RW | PTE_PWT | PTE_PCD | PTE_NX),
+    );
+    invlpg(va as usize); // 0->1 transition; belt-and-suspenders (SDM §4.10.4.3)
+    true
+}
+
+/// Map the single 4 KiB device page `va` -> `pa` (strong-UC, kernel-only, NX)
+/// into the LIVE CR3 hierarchy. `false` on physical-frame OOM. Used by `timer.rs`
+/// to bring the LAPIC register page into a UC kernel device window (`PML4[3]`).
+pub(super) fn map_device_page(va: u64, pa: u64) -> bool {
+    // SAFETY: ring 0, single vCPU, interrupts masked; CR3 holds the live PML4
+    // base (identity-mapped low RAM), so the masked value is a directly
+    // dereferenceable table pointer, and `map_one_device_page` only splices a
+    // fresh, vacant device-window VA.
+    let pml4 = unsafe { (read_cr3() & PTE_ADDR_MASK) as *mut u64 };
+    unsafe { map_one_device_page(pml4, va, pa) }
 }

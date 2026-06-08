@@ -135,11 +135,17 @@ const SYSCALL_VECTOR: usize = 0x80;
 /// ring0 proves we genuinely trapped back FROM ring3 (b"...0xCAFE").
 const EXPECTED_ARG: u64 = 0xCAFE;
 
-/// Ring3 `RFLAGS`: reserved bit 1 (always 1) + IF (bit 9). There is no IRQ
-/// source wired in the QEMU `microvm` we target, and the stub executes only
-/// two instructions before `int 0x80`, so IF=1 is safe (Intel SDM Vol.1
-/// §3.4.3 EFLAGS). This matches the M4 spec's `0x202`.
-const USER_RFLAGS: u64 = 0x202;
+/// Ring3 `RFLAGS`: ONLY reserved bit 1 (always 1); IF (bit 9) is left CLEAR so
+/// ring3 runs with interrupts MASKED. M0–M4 take NO asynchronous interrupt by
+/// design — M8 is the first interrupt-enable (docs/ROADMAP-V2.md §3: "M0–M4 ran
+/// fully masked"). Entering ring3 with IF=1 (the old `0x202`) opened a tiny
+/// window — the two stub instructions before `int 0x80` — in which a stray
+/// asynchronous event could be delivered into the fatal trap path (seen as an
+/// intermittent fault under QEMU TCG, whose event timing is host-load-dependent
+/// and differs from KVM's in-kernel APIC); keeping IF=0 closes it. The stub's
+/// `int 0x80` still traps fine with IF=0 (software interrupts ignore IF), and
+/// the kernel issues no `sti` before M8 (Intel SDM Vol.1 §3.4.3 EFLAGS).
+const USER_RFLAGS: u64 = 0x2;
 
 // ---------------------------------------------------------------------------
 // Round-trip observation state (single-vCPU, interrupts masked since boot).

@@ -161,6 +161,20 @@ pub(super) extern "C" fn x86_trap_handler(frame: *mut TrapFrame) {
     // SAFETY: `__alltraps` passes rsp pointing at a fully-populated TrapFrame.
     let f = unsafe { &*frame };
     let vector = f.vector;
+
+    // M8: external (asynchronous) LAPIC interrupts arrive on vectors >= 32. The
+    // timer vector (0x20) bumps the monotonic tick + EOIs the LAPIC; the
+    // spurious vector (0xFF) just resumes (Intel SDM Vol.3A §11.9: no EOI). Any
+    // OTHER vector returns false and falls through to the synchronous-fault
+    // classification below (correctly fatal). A recognised IRQ never consults
+    // the SYNCHRONOUS trap hook (whose kernel policy halts on anything but #BP),
+    // and on return `__alltraps` restores the FULL frame and `iretq`s back to
+    // the exact interrupted instruction. (M4's `int 0x80` bypasses this handler
+    // via its dedicated DPL3 gate, so it is unaffected.)
+    if super::timer::try_handle_irq(vector) {
+        return;
+    }
+
     let error_code = f.error_code & 0xFFFF_FFFF; // CPU error code is 32-bit
 
     let kind = match vector {

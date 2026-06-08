@@ -9,7 +9,7 @@
 #                This is the purest BOOT time: VMM init + kernel entry + M0
 #                serial bring-up. The closest apples-to-apples vs other kernels'
 #                "boot to first output".
-#   * t_full   = spawn -> the final cumulative milestone marker ("M7: heap OK").
+#   * t_full   = spawn -> the final cumulative milestone marker ("M8: timer OK").
 #                This is boot + the WHOLE M0..latest self-test (incl. M2's
 #                1000-round cooperative ping-pong), so it is "boot + self-test",
 #                NOT pure boot — reported separately and labelled as such.
@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITER="${ITER:-10}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-20}"
 FIRST_MARKER="hello from rust_main"
-FINAL_MARKER="M7: heap OK"
+FINAL_MARKER="M8: timer OK"
 
 case "${ARCH}" in
   x86_64)
@@ -72,18 +72,29 @@ one_run() {
   local -a argv; mapfile -d '' -t argv < <(qemu_argv)
   local t0 first_ts="" full_ts=""
   t0="$(date +%s.%N)"
-  coproc QPROC { exec "${argv[@]}" 2>&1; }
-  local qpid="${QPROC_PID}"
+  # Capture serial to a temp LOG FILE and poll it with `grep` — do NOT drain a
+  # live `coproc` read loop. The old loop ran a `$(date)` command substitution
+  # per line; bash closes a coprocess's fds inside that subshell, so under KVM —
+  # where the whole M0..M7 self-test streams out in a single burst — every line
+  # after the first was dropped and the FINAL marker was never matched (full=NA
+  # every iteration, while first still landed). Polling a regular file keeps
+  # QEMU's real PID for the watchdog, and a post-run grep drains any marker
+  # flushed in the last write before exit/kill.
+  local log; log="$(mktemp)"
+  "${argv[@]}" >"${log}" 2>&1 & local qpid=$!
   ( sleep "${BENCH_TIMEOUT}"; kill "${qpid}" 2>/dev/null ) & local watch=$!
-  local line ts
-  while IFS= read -r line <&"${QPROC[0]}"; do
-    ts="$(date +%s.%N)"
-    [[ -z "${first_ts}" && "${line}" == *"${FIRST_MARKER}"* ]] && first_ts="${ts}"
-    if [[ "${line}" == *"${FINAL_MARKER}"* ]]; then full_ts="${ts}"; break; fi
+  while kill -0 "${qpid}" 2>/dev/null; do
+    [[ -z "${first_ts}" ]] && grep -qF -- "${FIRST_MARKER}" "${log}" && first_ts="$(date +%s.%N)"
+    if grep -qF -- "${FINAL_MARKER}" "${log}"; then full_ts="$(date +%s.%N)"; break; fi
+    sleep 0.002
   done
+  # Final drain: a marker in the last buffered write still counts (timed now).
+  [[ -z "${first_ts}" ]] && grep -qF -- "${FIRST_MARKER}" "${log}" 2>/dev/null && first_ts="$(date +%s.%N)"
+  [[ -z "${full_ts}" ]] && grep -qF -- "${FINAL_MARKER}" "${log}" 2>/dev/null && full_ts="$(date +%s.%N)"
   kill "${qpid}" 2>/dev/null || true
   kill "${watch}" 2>/dev/null || true
   wait "${qpid}" 2>/dev/null || true
+  rm -f "${log}"
   awk -v t0="${t0}" -v f="${first_ts:-NA}" -v g="${full_ts:-NA}" 'BEGIN{
     if (f=="NA") printf "NA "; else printf "%.3f ", (f-t0)*1000;
     if (g=="NA") printf "NA\n"; else printf "%.3f\n", (g-t0)*1000;

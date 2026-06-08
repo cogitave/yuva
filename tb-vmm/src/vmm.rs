@@ -74,6 +74,24 @@ impl Vmm {
 
         let vm = kvm.create_vm()?;
 
+        // M8: create the in-kernel interrupt controller (KVM_CREATE_IRQCHIP =
+        // PIC + IOAPIC + a per-vCPU in-kernel LAPIC) BEFORE the vCPU, so the
+        // vCPU is born owning an in-kernel LAPIC and the guest's LAPIC + LAPIC
+        // timer -- M8's ONLY interrupt source on this microvm-class guest -- are
+        // emulated in-kernel and timer IRQs are injected automatically. Without
+        // it the GPA 0xFEE0_0000 is unmapped MMIO the Bus silently drops, the
+        // timer never fires, `timer_demo()` returns false, and "M8: timer OK"
+        // never prints. NOTE: with an in-kernel LAPIC the guest's terminal
+        // `cli; hlt` no longer surfaces as KVM_EXIT_HLT (KVM parks the vCPU
+        // in-kernel), so the run reaches the wall-clock guard; the serial device
+        // flushes every byte (serial.rs `transmit`), so the marker is already in
+        // the captured output by then -- exactly how scripts/run-vmm-x86_64.sh
+        // (grep over OUTPUT under `timeout --foreground`) decides PASS. The
+        // guest enters in long mode and never uses the real-mode TSS/identity
+        // map, so the existing late `set_tss_address` in arch::setup remains
+        // sufficient.
+        vm.create_irq_chip()?;
+
         // Guest RAM + KVM memslots.
         let ram = GuestRam::new(config.mem_bytes)?;
         ram.register_with_kvm(&vm)?;

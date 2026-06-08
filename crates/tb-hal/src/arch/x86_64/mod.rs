@@ -64,6 +64,13 @@ pub mod user;
 // boot-info pointer is dereferenced for M6.
 pub mod pmm;
 
+// M8 async interrupt + timer: the LAPIC UC bring-up (PML4[3] device window via
+// `mmu::map_device_page`), the periodic LAPIC timer on IDT vector 0x20, the IRQ
+// recognise/EOI/tick path `trap.rs` calls (`try_handle_irq`), the
+// register-integrity canary, and the `rdtsc` in-guest cycle counter. All the M8
+// x86_64 unsafe/asm lives here.
+pub mod timer;
+
 pub use serial::{serial_init, serial_write_byte};
 
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
@@ -102,6 +109,11 @@ pub use user::user_demo;
 // `crate::pmm` can call `crate::arch::pmm_collect_regions`. Same name +
 // signature as the aarch64 arm, one uniform contract.
 pub use pmm::pmm_collect_regions;
+
+// M8: the safe async-interrupt + timer surface (periodic LAPIC timer + first
+// async IRQ) plus the `rdtsc` in-guest cycle counter, re-exported so `lib.rs`
+// can expose `tb_hal::timer_demo` / `tb_hal::read_cycle_counter`.
+pub use timer::{read_cycle_counter, timer_demo};
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

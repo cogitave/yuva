@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M7 (x86_64).
+# scripts/run-x86_64.sh - QEMU launcher + Definition-of-Done check for M8 (x86_64).
 #
 # Boots the PVH ELF kernel under QEMU 'microvm' (the machine type Firecracker is
 # modelled on), wires legacy 16550 COM1 to stdio, and asserts the EXACT marker
-# "M7: heap OK" appears on serial (the newest cumulative-boot milestone; the
-# kernel grows its frame-backed heap past the fixed 2 MiB arena and proves it).
-# M0's hello, M1's trap round-trip, M2's ping-pong, M3's "M3: mmu OK", M4's
-# "M4: user/ring OK", M5's "M5: alloc OK" and M6's "M6: frame alloc OK" all
+# "M8: timer OK" appears on serial (the newest cumulative-boot milestone; the
+# kernel brings up the LAPIC + LAPIC timer and takes its first async interrupt).
+# M0's hello, M1's trap round-trip, M2's ping-pong, "M3: mmu OK",
+# "M4: user/ring OK", "M5: alloc OK", "M6: frame alloc OK" and "M7: heap OK" all
 # print earlier in the same boot, so one run proves every milestone. Fail-closed:
 # a wall-clock timeout bounds the run (the kernel halts rather than exiting), and
 # a missing marker is a non-zero exit.
@@ -24,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M7: heap OK'
+MARKER='M8: timer OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 

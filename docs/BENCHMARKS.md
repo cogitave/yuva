@@ -42,10 +42,11 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (currently
-  `M7: heap OK`). This is boot **plus the entire M0…latest self-test** (M2's
-  1000-round ping-pong, M6's ~65 k free-frame `seed()`, and M7's three 4 MiB
-  page-table-mapped + pattern-verified heap growths), so it is labelled
-  separately and is **not** a pure boot number.
+  `M8: timer OK`). This is boot **plus the entire M0…latest self-test** (M2's
+  1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB
+  page-table-mapped + pattern-verified heap growths, and M8's
+  first-async-interrupt register-integrity canary), so it is labelled separately
+  and is **not** a pure boot number.
 
 **Accel is auto-detected.** **Only the KVM number is a boot figure.** TCG
 (software emulation) inflates boot 10–50× and is reported solely as a portable
@@ -53,7 +54,7 @@ upper bound — *never* compared against another system's KVM result. (This is
 the single most common way "microVM boot" numbers become accidentally
 non-comparable.)
 
-### TABOS measured — today (M7, kernel boots a self-test then halts)
+### TABOS measured — today (M8, kernel boots a self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
@@ -61,7 +62,7 @@ non-comparable.)
 | x86_64 (QEMU `microvm`) | TCG (local WSL2) | ~28 ms (median) | ~1.09 s | emulated; **not** a comparable boot figure |
 | aarch64 (QEMU `virt`) | TCG (local WSL2) | ~28 ms | ~1.16 s | emulated; **not** a comparable boot figure |
 
-> **boot-to-first-output** is stable across M5→M7 (~28 ms TCG — just VMM-spawn +
+> **boot-to-first-output** is stable across M5→M8 (~28 ms TCG — just VMM-spawn +
 > M0 serial). **boot+selftest** keeps growing as each milestone adds *self-test*
 > work that TCG emulates byte-by-byte: M6 added ~65 k free-frame `seed()`
 > link-writes (~51→135 ms), and M7's self-test allocates + page-table-maps +
@@ -86,13 +87,18 @@ non-comparable.)
 > KVM the whole self-test streams out before the reader settles; this is a
 > harness-robustness limitation, tracked, not a kernel issue.)
 >
-> So a clean, VMM-independent **guest-only** boot figure (the one that places
-> TABOS next to Unikraft/OSv in Bucket 1) requires **in-guest cycle timing**
-> (`rdtsc` / `CNTVCT`+`CNTFRQ`) — which lands at **M8** (the timer milestone),
-> where a second clock (guest-first-instruction → ready) is added. Until then,
-> the honest, defensible TABOS claim is **architectural** (§4): the firmware +
-> bootloader + decompress + Linux-kernel-init budget — tens to hundreds of ms in
-> Bucket 2 — that a from-scratch PVH/`tb-boot` kernel **never executes at all**.
+> A clean, VMM-independent **guest-only** boot figure (the one that places TABOS
+> next to Unikraft/OSv in Bucket 1) needs **in-guest cycle timing** — which
+> **landed at M8**: `tb_hal::read_cycle_counter()` reads `rdtsc` (x86_64) /
+> `CNTPCT_EL0` (aarch64), the kernel samples it at `rust_main` entry and just
+> after the `M8: timer OK` marker, and prints the guest-only delta as a
+> `boot-cycles=0x…` serial line — a monotonic span (vCPU-first-instruction →
+> M0..M8 self-test done) independent of the VMM/host floor. The next refinement
+> is a true guest-first-instruction → agent-ready second clock once an
+> agent-ready state exists. The standing architectural claim (§4) is unchanged:
+> the firmware + bootloader + decompress + Linux-kernel-init budget — tens to
+> hundreds of ms in Bucket 2 — that a from-scratch PVH/`tb-boot` kernel **never
+> executes at all**.
 
 ## 3. The comparison — grouped so it is apples-to-apples
 
@@ -178,6 +184,19 @@ from-scratch kernel never runs.
   state yet, so the only honest metric right now is *VMM-start → serial marker,
   KVM*. When TABOS gains an agent-ready state, the second clock
   (guest-first-instruction → agent-ready) is added and reported alongside.
+- **Quotable figures come from a `--release` build under `tb-vmm`, timed by an
+  in-guest cycle counter — never a `debug` build or QEMU wall-clock.** (Standing
+  rule, 2026-06-07.) A `debug/tabos-kernel` wall-clock number under QEMU/KVM
+  conflates three things we do *not* want in a TABOS figure: unoptimized guest
+  code, QEMU's heavyweight device-model VMM floor (tens of ms vs Firecracker's
+  ~6 ms thin-VMM floor — i.e. **a QEMU wall-clock can be *slower* than
+  Firecracker purely from the VMM, telling us nothing about TABOS**), and host
+  scheduling noise. The defensible number is **`rdtsc` (x86_64) / `CNTPCT_EL0`
+  (aarch64) read in-guest, release build, under `tb-vmm`** — which **landed at
+  M8**: `tb_hal::read_cycle_counter()` is sampled at `rust_main` entry and just
+  after the `M8: timer OK` marker, and the kernel prints the guest-only
+  `boot-cycles=0x…` delta. `boot-to-first-output` under QEMU/KVM remains only a
+  coarse, VMM-floor-dominated sanity figure, not a competitor comparison.
 - Figures marked low-confidence (marketing: "<125 ms" bare, "2 orders faster
   than docker", "fastest Wasm VM", "zero cold start") are flagged, never quoted
   bare.

@@ -340,8 +340,9 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 | **M5** (bootstrap heap / `alloc`) | ✅ **complete**, CI-green (x86_64 + aarch64 QEMU + tb-vmm/`/dev/kvm`) |
 | **M6** (frame allocator from boot map) | ✅ **complete**, CI-green (PVH + tb-vmm/TbBootInfo + aarch64 QEMU-`virt` map) |
 | **M7** (frame-backed growable heap) | ✅ **complete**, CI-green (kernel-heap window in PML4[2]/L1[4], M6 frames mapped via M3 tables; M5 algebra unchanged) |
-| **M8** (async interrupt + timer tick) | ⏳ **in progress** (next increment) |
-| M9 – M18 | ⬜ planned (this document) |
+| **M8** (async interrupt + timer tick) | ✅ **complete**, CI-green (x86_64 LAPIC + LAPIC timer on IDT vec 0x20 via a UC device window in PML4[3]; aarch64 GICv2 + EL1 physical timer PPI 30 through the `__vec_irq` slot; first `sti`/`daifclr`, register-integrity canary across many ticks, timer re-masked; in-guest `rdtsc`/`CNTPCT_EL0` cycle counter) |
+| **M9** (preemptive scheduler) | ⏳ **in progress** (next increment) |
+| M10 – M18 | ⬜ planned (this document) |
 | L2 (own Type-1 microhypervisor) | ⬜ parallel north-star track ([SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)) |
 
 Every milestone increment is shipped by the same pipeline — codified as the

@@ -125,7 +125,7 @@ __exception_vectors:
     VEC_SLOT __vec_other          // 0x180 SError / vSError
     // --- Current EL with SPx (EL1h) -- this is where our kernel runs ---------
     VEC_SLOT __vec_sync           // 0x200 Synchronous  <-- real handler (M1)
-    VEC_SLOT __vec_other          // 0x280 IRQ / vIRQ   (masked in M1)
+    VEC_SLOT __vec_irq            // 0x280 IRQ / vIRQ   <-- real handler (M8)
     VEC_SLOT __vec_other          // 0x300 FIQ / vFIQ   (masked in M1)
     VEC_SLOT __vec_other          // 0x380 SError / vSError
     // --- Lower EL using AArch64 (EL0) ---------------------------------------
@@ -148,6 +148,10 @@ __vec_sync:                       // Current-EL-SPx synchronous: brk/undef/abort
 __vec_other:                      // every other vector: unexpected -> fatal
     SAVE_CONTEXT
     mov  x1, #1                   // source = 1: unexpected vector
+    b    __trap_dispatch
+__vec_irq:                        // Current-EL-SPx IRQ: the M8 periodic timer
+    SAVE_CONTEXT
+    mov  x1, #2                   // source = 2: asynchronous IRQ (current EL)
     b    __trap_dispatch
 __vec_el0_sync:                   // Lower-EL-AArch64 synchronous: EL0 SVC (M4)
     SAVE_CONTEXT

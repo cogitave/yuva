@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M7: frame-backed heap).
+# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M8: async timer tick).
 #
 # Boots the aarch64 tb-os image under QEMU, captures the PL011 serial stream,
-# and asserts the executable Definition-of-Done marker "M7: heap OK" (the
-# kernel grows its frame-backed heap past the fixed 2 MiB arena and proves it).
+# and asserts the executable Definition-of-Done marker "M8: timer OK" (the
+# kernel brings up GICv2 + the EL1 physical timer and takes its first async IRQ).
 # M0's hello, M1's trap round-trip, M2's ping-pong, "M3: mmu OK",
-# "M4: user/ring OK", "M5: alloc OK" and "M6: frame alloc OK" all print earlier
-# in the same boot.
+# "M4: user/ring OK", "M5: alloc OK", "M6: frame alloc OK" and "M7: heap OK" all
+# print earlier in the same boot.
 # Doubles as the cargo runner for target aarch64-tabos-none (cargo passes the
 # freshly built ELF as $1) and is runnable by hand on WSL2.
 #
@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M7: heap OK"
+MARKER="M8: timer OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

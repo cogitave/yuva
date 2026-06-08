@@ -28,7 +28,7 @@
 #![deny(missing_docs)]
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 mod arch;
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
@@ -641,4 +641,86 @@ pub fn pmm_addr_reserved(pa: u64) -> bool {
 /// entry free-count (no leak). Mirrors M5's [`heap_selftest`].
 pub fn pmm_selftest() -> bool {
     pmm::selftest()
+}
+
+// ===========================================================================
+// M8: asynchronous interrupt + monotonic timer tick (this milestone)
+// ===========================================================================
+//
+// The kernel's FIRST asynchronous-interrupt machinery: a periodic hardware
+// timer (x86_64 LAPIC timer / aarch64 EL1 physical timer via GICv2) fires while
+// interrupts are briefly unmasked, the per-arch IRQ entry path saves + restores
+// the FULL register frame, and control returns to the exact interrupted
+// instruction. The monotonic tick counter and the (M9-facing) IRQ hook are
+// arch-neutral SAFE state HERE -- a single source of truth -- while every
+// register poke (LAPIC/GIC MMIO, the timer system registers, `sti`/`cli` and
+// `daifclr`/`daifset`, the cycle counter) lives in `arch::*::timer`. NO
+// scheduler is touched -- M9 will register an IRQ hook that calls `schedule()`.
+
+/// Monotonic count of timer ticks taken since boot. Bumped by [`dispatch_irq`]
+/// from each arch IRQ handler (the single place a tick is counted); read by the
+/// M8 self-test and, later, the scheduler. `AtomicU64`: written from interrupt
+/// context, read from the foreground on one core (no contention, just
+/// visibility).
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Registered async-IRQ hook (`fn(irq_id)`) reinterpreted as `usize`; `0` means
+/// "no hook -> only the tick is counted". M9 registers `schedule()` here so a
+/// tick drives an involuntary switch. SEPARATE from the synchronous
+/// [`TRAP_HOOK`]: a timer IRQ carries none of [`TrapInfo`]'s fault semantics
+/// (`fault_addr` / `cause` / Resume-vs-Halt), and the kernel's trap policy halts
+/// on anything but `#BP`, so preemption must never thread through it.
+static IRQ_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Total timer ticks observed since boot. The M8 self-test asserts this
+/// advanced across the canary window; M9 reads it for scheduling quanta.
+pub fn tick_count() -> u64 {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
+
+/// Register the safe per-tick async-IRQ hook (`fn(irq_id)`), invoked from
+/// [`dispatch_irq`] AFTER the tick counter is bumped. A plain `fn(u64)` so it
+/// lives in the `#![forbid(unsafe_code)]` kernel; M9 points it at `schedule()`.
+/// Replaces any previous hook.
+pub fn set_irq_hook(hook: fn(u64)) {
+    IRQ_HOOK.store(hook as usize, Ordering::Release);
+}
+
+/// Dispatch one asynchronous interrupt: bump the monotonic tick, then run the
+/// registered IRQ hook (if any). Called by each per-arch timer handler with the
+/// platform interrupt id (x86_64 IDT vector / aarch64 GIC INTID) once it has
+/// acked the controller -- the single safe boundary between the raw IRQ entry
+/// asm (per-arch, `unsafe`) and policy (safe; M9's `schedule()`).
+pub(crate) fn dispatch_irq(irq_id: u64) {
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    let raw = IRQ_HOOK.load(Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: `raw` is non-zero, so `set_irq_hook` produced it from a valid
+        // `fn(u64)` via `hook as usize`; a function pointer and `usize` are
+        // pointer-sized and this is the exact inverse cast.
+        let hook: fn(u64) = unsafe { core::mem::transmute::<usize, fn(u64)>(raw) };
+        hook(irq_id);
+    }
+}
+
+/// Run the in-HAL async-interrupt + timer self-test; `true` = pass.
+///
+/// Brings up the interrupt controller + a periodic timer (x86_64: map the LAPIC
+/// UC, enable it + the LAPIC timer on IDT vector `0x20`; aarch64: init GICv2 +
+/// the EL1 physical timer on PPI 30), unmasks interrupts for the FIRST time in
+/// the whole kernel, spins a register-integrity canary across many ticks, then
+/// re-masks the timer + interrupts. Returns `true` iff at least the required
+/// number of ticks were observed AND the canary's recomputation matched across
+/// every async interrupt (proving the full frame was saved/restored). Touches
+/// NO scheduler.
+pub fn timer_demo() -> bool {
+    arch::timer_demo()
+}
+
+/// Read the in-guest cycle counter for honest boot benchmarking: x86_64 `rdtsc`
+/// (TSC), aarch64 `CNTPCT_EL0` (physical counter). A monotonic, VMM-independent
+/// clock the kernel samples at entry and after the M8 marker to print a
+/// guest-only `boot-cycles` figure (see docs/BENCHMARKS.md §2/§5).
+pub fn read_cycle_counter() -> u64 {
+    arch::read_cycle_counter()
 }

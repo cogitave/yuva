@@ -72,6 +72,7 @@ const EC_BRK64: u64 = 0x3C; // BRK from AArch64
 
 // Source tag passed in x1 by the `vectors.rs` trampolines.
 const SOURCE_SYNC_CURRENT_SPX: u64 = 0; // real handler (synchronous, our EL)
+const SOURCE_IRQ: u64 = 2; // M8: Current-EL-SPx IRQ (the async timer tick)
 
 #[inline(always)]
 fn read_esr_el1() -> u64 {
@@ -106,6 +107,16 @@ fn read_far_el1() -> u64 {
 /// [`TrapAction::Halt`] it parks the core via [`crate::halt`] and never returns.
 #[no_mangle]
 pub extern "C" fn aarch64_trap_handler(frame: *mut TrapFrame, source: u64) {
+    // M8: an asynchronous IRQ (source tag 2 from `__vec_irq`) -- the EL1
+    // physical timer via GICv2. Ack + tick + EOI live in `timer.rs`; we then
+    // RESUME the exact interrupted instruction (ELR_EL1 is left UNTOUCHED,
+    // unlike the synchronous `brk`), and never consult the synchronous trap hook
+    // (whose policy halts). It returns before the raw frame is dereferenced.
+    if source == SOURCE_IRQ {
+        super::timer::handle_irq();
+        return;
+    }
+
     // SAFETY: `frame` is the SP that the vector trampoline produced after its
     // 0x110-byte `SAVE_CONTEXT` push -- a fully-initialised, 16-aligned
     // `TrapFrame` that stays live for this whole call. Single core, with

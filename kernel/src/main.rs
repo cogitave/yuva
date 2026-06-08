@@ -119,6 +119,13 @@ static B_VERIFIED: AtomicBool = AtomicBool::new(false);
 ///   * aarch64 (`_start`): `x0` = FDT blob (MV is an x86_64-first follow-up).
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main(boot_info: usize) -> ! {
+    // --- M8 in-guest timing: sample the cycle counter at the EARLIEST point --
+    // A pure register read (x86_64 `rdtsc` / aarch64 `CNTPCT_EL0`, needs no
+    // init); paired with a second read just after the M8 marker to print a
+    // guest-only `boot-cycles` delta spanning the whole M0..M8 self-test — the
+    // honest, VMM-independent figure (see docs/BENCHMARKS.md). Still unsafe-free.
+    let boot_c0 = tb_hal::read_cycle_counter();
+
     // --- M0 proof (kept verbatim): serial first-light ----------------------
     tb_hal::serial_init();
 
@@ -649,6 +656,45 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M7: heap OK\n"); // <-- the M7 DoD marker
+
+    // --- M8: async interrupt + monotonic timer tick (NO scheduler) ---------
+    // Bring up the interrupt controller (x86_64 LAPIC / aarch64 GICv2) + a
+    // periodic timer and take the kernel's FIRST asynchronous interrupt (M0..M7
+    // ran fully masked behind cli / DAIF.I), resuming the EXACT interrupted
+    // instruction with every register intact — proven by a register-integrity
+    // canary that runs across many ticks while an AtomicU64 tick counter
+    // advances; the timer is then masked again. NO scheduler is touched (that is
+    // M9). ALL the controller pokes, the first `sti` / `daifclr`, the IRQ entry
+    // asm and the cycle counter live in tb-hal; this forbid(unsafe_code)-class
+    // crate only calls the safe facade and branches on the bool. DoD: "M8: timer OK".
+    tb_hal::serial_write_str("timer-test: taking the first async interrupt\n");
+
+    // Local fail helper (matches the m5_fail / m6_fail / m7_fail style; safe only).
+    let m8_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M8: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    if !tb_hal::timer_demo() {
+        m8_fail("no ticks observed or register/state corruption across an IRQ");
+    }
+    // The monotonic tick counter advanced under the async timer.
+    if tb_hal::tick_count() == 0 {
+        m8_fail("tick counter did not advance");
+    }
+
+    tb_hal::serial_write_str("M8: timer OK\n"); // <-- the M8 DoD marker
+
+    // In-guest timing: ENTRY -> here is a pure guest-only span (rdtsc / CNTPCT),
+    // the defensible benchmark figure (docs/BENCHMARKS.md §5). Printed AFTER the
+    // marker so the marker stays the exact cumulative DoD string.
+    let boot_c1 = tb_hal::read_cycle_counter();
+    tb_hal::serial_write_str("boot-cycles=");
+    write_hex_u64(boot_c1.wrapping_sub(boot_c0));
+    tb_hal::serial_write_byte(b'\n');
+
     tb_hal::halt()
 }
 

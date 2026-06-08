@@ -3,8 +3,13 @@
 #
 # Boots the SAME kernel ELF the QEMU/PVH path boots, but through tb-vmm + the
 # tb-boot v0 contract (direct 64-bit long mode, NO PVH note, NO A0 trampoline),
-# and asserts the exact marker "M7: heap OK" on the guest serial console (M0-M6,
-# including "M6: frame alloc OK", all print earlier in the same boot).
+# and asserts the exact marker "M8: timer OK" on the guest serial console (M0-M7,
+# including "M7: heap OK", all print earlier in the same boot). M8 makes tb-vmm
+# create an in-kernel interrupt controller (KVM_CREATE_IRQCHIP) so the guest's
+# LAPIC timer fires; with an in-kernel LAPIC the kernel's terminal `cli; hlt`
+# parks IN-kernel (no KVM_EXIT_HLT), so tb-vmm runs to the wall-clock timeout
+# while the serial device has already flushed every marker byte to the captured
+# OUTPUT -- the grep over OUTPUT is the verdict, exactly like the QEMU runners.
 # Requires a usable /dev/kvm; if absent it SKIPS (exit 0) with a clear message.
 #
 # Usage:   scripts/run-vmm-x86_64.sh [path/to/kernel-elf]
@@ -15,7 +20,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M7: heap OK'
+MARKER='M8: timer OK'
 TIMEOUT_SECS="${VMM_TIMEOUT:-30}"
 
 if [[ ! -e /dev/kvm ]]; then
