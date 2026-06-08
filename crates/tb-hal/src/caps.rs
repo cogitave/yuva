@@ -963,6 +963,58 @@ impl HandleTable {
         (SysStatus::Ok, admitted)
     }
 
+    /// M18.2 -- read a candidate's score against ONE held-out partition behind
+    /// `eval_home` in THIS (kernel-owned) table (kernel-side; NOT method-numbered,
+    /// so unreachable from [`dispatch`]). The rotating-partition harness uses it to
+    /// (a) compute the VISIBLE metric the agent self-optimizes against and (b)
+    /// witness, fail-closed, that a body tuned to the VISIBLE partition is NOT the
+    /// body the rotated SCORING partition ranks highest -- the anti-Goodhart
+    /// decoupling. `None` if `eval_home` does not resolve in this table (the M11
+    /// cross-table invariant: a handle resolves only against the table presented).
+    pub fn eval_score(&self, eval_home: Handle, body: u64) -> Option<u32> {
+        self.score_of(eval_home, body)
+    }
+
+    /// M18.2 ROTATING ADMISSION (kernel-side; the anti-Goodhart generalization of
+    /// [`Self::harness_admit`]). Instead of ONE frozen evaluator, score `skill_id`
+    /// against ONE held-out partition CHOSEN from `eval_homes` -- a set of `>1`
+    /// kernel-owned partitions, each capability-protected EXACTLY like the single
+    /// M18 evaluator (unnameable/unreadable/unwritable from any agent table) -- by
+    /// the kernel-side `rotation` counter: `idx = rotation % N`. The improving agent
+    /// holds NO handle to `eval_tbl` or any partition and can neither read nor
+    /// influence `rotation`, so it can neither OBSERVE which partition will score a
+    /// given merge nor overfit it; the VISIBLE metric it can measure is a DIFFERENT
+    /// partition, so tuning the visible score does not control the real score. Flips
+    /// PROPOSED->ADMITTED ONLY on strict improvement (the no-regression / EXCEL
+    /// rung). Returns `(admitted, idx, score)` where `idx` is the chosen partition.
+    /// Fail-closed: an empty partition set never admits. The whole guarantee REDUCES
+    /// TO the M11 rights-mask invariant -- a handle resolves only against the table
+    /// it is presented to, so the kernel-owned partitions stay agent-unnameable.
+    pub fn harness_admit_rotating(
+        &mut self,
+        skill_home: Handle,
+        skill_id: u64,
+        eval_tbl: &HandleTable,
+        eval_homes: &[Handle],
+        rotation: u64,
+    ) -> (bool, usize, u32) {
+        let n = eval_homes.len();
+        if n == 0 {
+            return (false, 0, 0); // no held-out partition -> fail-closed (never admit)
+        }
+        let idx = (rotation % n as u64) as usize;
+        let body = match self.skill_get_of(skill_home, skill_id) {
+            Some((b, _t)) => b,
+            None => return (false, idx, 0),
+        };
+        let score = match eval_tbl.score_of(eval_homes[idx], body) {
+            Some(s) => s,
+            None => return (false, idx, 0),
+        };
+        let admitted = self.skill_admit_of(skill_home, skill_id, score);
+        (admitted, idx, score)
+    }
+
     /// M18 self-test witness: the PROPOSED/ADMITTED tier of skill `id` behind `h`.
     pub fn skill_tier_of(&self, h: Handle, id: u64) -> Option<u8> {
         self.skill_get_of(h, id).map(|(_b, t)| t)

@@ -2989,6 +2989,291 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M18.1: approval-gate OK\n"); // <-- the M18.1 DoD marker
 
+    // --- M18.2: ROTATING HELD-OUT EVALUATOR PARTITION (anti-Goodhart) ----------
+    //     SELF-IMPROVEMENT-SPEC ("Measurer-measured separation"): a SINGLE visible
+    //     metric WILL be Goodharted, so MULTIPLE held-out evaluators are the
+    //     default. This GENERALIZES the M18 single frozen evaluator into a SET of N
+    //     kernel-owned held-out partitions, each capability-protected EXACTLY like
+    //     the M18 evaluator -- it lives ONLY in a kernel-owned `eval_tbl`, never
+    //     minted into any agent table, so it is unnameable/unreadable/unwritable
+    //     from any agent table (the guarantee REDUCES TO the M11 rights-mask
+    //     invariant: a handle resolves only against the table it is presented to).
+    //     A kernel-side ROTATION counter the agent can neither read nor influence
+    //     (`idx = rotation % N`) selects WHICH partition scores a given merge; the
+    //     VISIBLE metric the agent can measure to self-optimize is a DIFFERENT
+    //     partition, so a candidate tuned to the visible metric does NOT thereby
+    //     control its real (rotated, hidden) score -- the structural anti-Goodhart
+    //     DECOUPLING. ADDITIVE on top of M18 + M18.1; ZERO new ABI method (the
+    //     harness is a kernel facade, not method-numbered, so an agent cannot
+    //     invoke it), ZERO new unsafe, ZERO new Rights bit. The self-test PROVES,
+    //     fail-closed: (a) >1 held-out partitions, none nameable/readable/writable
+    //     from an agent table; (b) the rotation selects a scoring partition the
+    //     agent cannot observe; (c) the visible metric is decoupled from the
+    //     scoring partition. DoD marker: "M18.2: held-out OK".
+    //
+    //     STACK NOTE: M0..L2.0 already run in ONE huge `rust_main` frame that sits
+    //     near the aarch64 16 KiB boot stack (x86_64's is 64 KiB); at -O0 every
+    //     lexical block's locals coexist in that single frame, so this self-test
+    //     lives in its OWN `#[inline(never)]` function to keep rust_main's frame
+    //     from growing past the aarch64 boot stack.
+    #[inline(never)]
+    fn m182_held_out_selftest() {
+        use tb_hal::caps::{self, Handle};
+
+        fn m182_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M18.2: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        fn disp(
+            tbl: &mut caps::HandleTable,
+            h: Handle,
+            method: u32,
+            a: [u64; 4],
+        ) -> caps::SysReturn {
+            caps::dispatch(
+                tbl,
+                &caps::SyscallArgs {
+                    method,
+                    handle: h,
+                    args: a,
+                },
+            )
+        }
+
+        // write_proc op-selector (rides M_MEM_WRITE_PROC -- NO new ABI method).
+        const OP_ADD: u64 = 0; // ADD_SKILL (ordinary)
+        const PROPOSED: u8 = 0;
+        const ADMITTED: u8 = 1;
+        const DESC: u64 = 0x0000_0DE5; // NL-description token (inert at M18.2)
+        const IFACE: u64 = 0x0000_1FAC; // WIT-interface token (inert at M18.2)
+
+        // Each partition has a DISTINCT secret target -> a distinct held-out
+        // transform, so the body that is perfect on one partition is sub-perfect on
+        // every other (the cross-partition Goodhart-resistance the M18
+        // `skill_transform` already provides). `TARGET_VIS` seeds the VISIBLE
+        // metric; `TARGET_H{0,1,2}` seed the N=3 held-out SCORING partitions.
+        const TARGET_VIS: u64 = 0x0000_71B1_0000_5151;
+        const TARGET_H0: u64 = 0x0000_A101_0000_0001;
+        const TARGET_H1: u64 = 0x0000_B202_0000_0002;
+        const TARGET_H2: u64 = 0x0000_C303_0000_0003;
+        const VIS_BASE: u64 = 0x0000_4000;
+        const H0_BASE: u64 = 0x0000_5000;
+        const H1_BASE: u64 = 0x0000_6000;
+        const H2_BASE: u64 = 0x0000_7000;
+        const N_CASES: u64 = 8;
+
+        // ===== the kernel-owned EVALUATOR DOMAIN: N=3 held-out SCORING partitions
+        //       + 1 VISIBLE partition, NONE ever minted into an agent table =======
+        let mut eval_tbl = caps::HandleTable::with_capacity(8);
+        let eval_all = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL);
+
+        let vis_home = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m182_fail("could not mint the visible partition"),
+        };
+        if !eval_tbl.eval_seed_heldout(vis_home, TARGET_VIS, VIS_BASE, N_CASES) {
+            m182_fail("could not seed the visible partition");
+        }
+        let h0 = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m182_fail("could not mint held-out partition 0"),
+        };
+        if !eval_tbl.eval_seed_heldout(h0, TARGET_H0, H0_BASE, N_CASES) {
+            m182_fail("could not seed held-out partition 0");
+        }
+        let h1 = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m182_fail("could not mint held-out partition 1"),
+        };
+        if !eval_tbl.eval_seed_heldout(h1, TARGET_H1, H1_BASE, N_CASES) {
+            m182_fail("could not seed held-out partition 1");
+        }
+        let h2 = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m182_fail("could not mint held-out partition 2"),
+        };
+        if !eval_tbl.eval_seed_heldout(h2, TARGET_H2, H2_BASE, N_CASES) {
+            m182_fail("could not seed held-out partition 2");
+        }
+        let eval_homes = [h0, h1, h2];
+        let n = eval_homes.len();
+
+        // (a) THERE ARE >1 HELD-OUT PARTITIONS, each resolves ONLY in the kernel-
+        //     owned table, and NONE is the visible partition.
+        if n < 2 {
+            m182_fail("the held-out partition set is not larger than one");
+        }
+        for p in 0..n {
+            if eval_tbl.eval_score(eval_homes[p], 0).is_none() {
+                m182_fail("a held-out partition did not resolve in the kernel-owned table");
+            }
+            if eval_homes[p] == vis_home {
+                m182_fail("a scoring partition aliased the visible partition");
+            }
+        }
+
+        // ===== the improving agent's tables: WRITE_PROCEDURAL skill homes + a
+        //       born-with home that LACKS WRITE_PROCEDURAL (the unwritable witness).
+        let mut tbl = caps::HandleTable::with_capacity(16);
+        let wp = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL)
+            .union(caps::Rights::WRITE_PROCEDURAL);
+        let ro = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL);
+        let home_g = match tbl.mint_memory_home(wp) {
+            Some(h) => h,
+            None => m182_fail("could not mint the genuine-merit skill home"),
+        };
+        let home_r = match tbl.mint_memory_home(wp) {
+            Some(h) => h,
+            None => m182_fail("could not mint the rotation-advance skill home"),
+        };
+        let home_ro = match tbl.mint_memory_home(ro) {
+            Some(h) => h,
+            None => m182_fail("could not mint the born-with home"),
+        };
+
+        // (a, cont.) UNWRITABLE: a skill write on a home lacking WRITE_PROCEDURAL is
+        //     Denied at the rights gate (the live M11 idiom); the eval partitions
+        //     are ADDITIONALLY unnameable from `tbl` (proven in (b)). Both reduce to
+        //     the rights-mask invariant.
+        let d = disp(&mut tbl, home_ro, caps::M_MEM_WRITE_PROC, [OP_ADD, TARGET_H0, DESC, IFACE]);
+        if d.status != caps::SysStatus::Denied {
+            m182_fail("a skill write on a home lacking WRITE_PROCEDURAL was not Denied");
+        }
+
+        // (b) THE ROTATION SELECTS A SCORING PARTITION THE AGENT CANNOT OBSERVE.
+        //     b1 -- GENUINE ROTATION: two consecutive kernel-side rotation values
+        //     score two candidates against DIFFERENT partitions. id_a is proposed
+        //     and scored at rotation 0 (partition 0); id_b at rotation 1 (partition
+        //     1). idx0 != idx1 proves the rotation advances; the agent supplies no
+        //     input to the selector.
+        let pa = disp(&mut tbl, home_r, caps::M_MEM_WRITE_PROC, [OP_ADD, TARGET_H0, DESC, IFACE]);
+        if pa.status != caps::SysStatus::Ok {
+            m182_fail("propose rotation-witness candidate A was not Ok");
+        }
+        let id_a = pa.value;
+        let pb = disp(&mut tbl, home_r, caps::M_MEM_WRITE_PROC, [OP_ADD, TARGET_H1, DESC, IFACE]);
+        if pb.status != caps::SysStatus::Ok {
+            m182_fail("propose rotation-witness candidate B was not Ok");
+        }
+        let id_b = pb.value;
+        let (_, idx0, _) = tbl.harness_admit_rotating(home_r, id_a, &eval_tbl, &eval_homes, 0);
+        let (_, idx1, _) = tbl.harness_admit_rotating(home_r, id_b, &eval_tbl, &eval_homes, 1);
+        if idx0 == idx1 {
+            m182_fail("the rotation did not advance to a different scoring partition");
+        }
+        //     b2 -- UNOBSERVABLE: the agent holds NO handle to `eval_tbl`, so it can
+        //     never name the selected partition. A fabricated raw handle against the
+        //     AGENT table is BadCap/Stale (authority lives in the slot, not the
+        //     handle -- the live M18 idiom), so the agent cannot read which
+        //     partition scored it.
+        let forged = disp(&mut tbl, Handle::from_raw(0x0000_0001_0000_00FF), caps::M_MEM_READ, [0, 0, 0, 0]);
+        if forged.status != caps::SysStatus::BadCap && forged.status != caps::SysStatus::Stale {
+            m182_fail("a fabricated handle resolved (a scoring partition was nameable from an agent table)");
+        }
+
+        // (c) THE VISIBLE METRIC IS DECOUPLED FROM THE SCORING PARTITION. The hidden
+        //     scoring partition for this witness is p_star (= rotation 0 -> 0). V is
+        //     the body tuned to the VISIBLE metric (== TARGET_VIS, perfect on
+        //     vis_home); G is the body matching the hidden scoring partition (==
+        //     TARGET_H0). The two metrics rank V and G OPPOSITELY, so optimizing the
+        //     visible metric does not optimize the real score.
+        let p_star: usize = 0;
+        let v_body = TARGET_VIS;
+        let g_body = TARGET_H0;
+        let vis_v = match eval_tbl.eval_score(vis_home, v_body) {
+            Some(s) => s,
+            None => m182_fail("visible-metric score did not resolve"),
+        };
+        let vis_g = match eval_tbl.eval_score(vis_home, g_body) {
+            Some(s) => s,
+            None => m182_fail("visible-metric score of G did not resolve"),
+        };
+        let sc_v = match eval_tbl.eval_score(eval_homes[p_star], v_body) {
+            Some(s) => s,
+            None => m182_fail("hidden-scorer score of V did not resolve"),
+        };
+        let sc_g = match eval_tbl.eval_score(eval_homes[p_star], g_body) {
+            Some(s) => s,
+            None => m182_fail("hidden-scorer score of G did not resolve"),
+        };
+        // The VISIBLE metric prefers the visible-tuned body; the HIDDEN scorer
+        // prefers the matched body. Tuning the visible score does NOT raise (in fact
+        // anti-correlates with) the real score -> decoupled.
+        if vis_v <= vis_g {
+            m182_fail("the visible-tuned body was not best on the visible metric");
+        }
+        if sc_g <= sc_v {
+            m182_fail("the hidden scorer did not rank the matched body above the visible-tuned body");
+        }
+        // CROSS-PARTITION: a body matched to the scoring partition does NOT
+        // generalize to the next partition the rotation would pick -- overfitting
+        // ANY single partition gives no Goodhart cover once the rotation moves.
+        let other = (p_star + 1) % n;
+        let sc_g_other = match eval_tbl.eval_score(eval_homes[other], g_body) {
+            Some(s) => s,
+            None => m182_fail("cross-partition score of G did not resolve"),
+        };
+        if sc_g <= sc_g_other {
+            m182_fail("a body matched to one partition generalized to another (rotation gave no cover)");
+        }
+
+        // (c, admit path) The GENUINE-MERIT candidate G -- matching the hidden
+        //     scoring partition p_star -- is ADMITTED through the rotating scorer, so
+        //     the rotation does not break the M18 admit path.
+        let pg = disp(&mut tbl, home_g, caps::M_MEM_WRITE_PROC, [OP_ADD, g_body, DESC, IFACE]);
+        if pg.status != caps::SysStatus::Ok {
+            m182_fail("propose the genuine-merit candidate G was not Ok");
+        }
+        let id_g = pg.value;
+        let (adm_g, idx_g, _sg) = tbl.harness_admit_rotating(home_g, id_g, &eval_tbl, &eval_homes, p_star as u64);
+        if !adm_g || idx_g != p_star {
+            m182_fail("the matched candidate was not admitted by the rotated scoring partition");
+        }
+        if tbl.skill_tier_of(home_g, id_g) != Some(ADMITTED) {
+            m182_fail("the admitted matched candidate did not flip PROPOSED->ADMITTED");
+        }
+        if tbl.skill_admitted_count(home_g).unwrap_or(0) != 1 {
+            m182_fail("the admitted matched candidate did not raise the admitted count");
+        }
+
+        // (c, reject path) With the bar now set by a genuinely-scored skill, a
+        //     candidate TUNED TO THE VISIBLE METRIC (V, perfect on vis_home) scored
+        //     against the SAME hidden partition is REJECTED and stays PROPOSED --
+        //     tuning the visible metric did NOT control the real score. FAIL-CLOSED.
+        let pv = disp(&mut tbl, home_g, caps::M_MEM_WRITE_PROC, [OP_ADD, v_body, DESC, IFACE]);
+        if pv.status != caps::SysStatus::Ok {
+            m182_fail("propose the visible-tuned candidate V was not Ok");
+        }
+        let id_v = pv.value;
+        let before = tbl.skill_admitted_count(home_g).unwrap_or(0);
+        let (adm_v, _iv, _sv) = tbl.harness_admit_rotating(home_g, id_v, &eval_tbl, &eval_homes, p_star as u64);
+        if adm_v {
+            m182_fail("a visible-tuned candidate was admitted (the visible metric controlled the real score)");
+        }
+        if tbl.skill_tier_of(home_g, id_v) != Some(PROPOSED) {
+            m182_fail("a rejected visible-tuned candidate did not stay PROPOSED");
+        }
+        if tbl.skill_admitted_count(home_g).unwrap_or(before + 1) != before {
+            m182_fail("a rejected visible-tuned candidate changed the admitted count");
+        }
+
+        tb_hal::serial_write_str(
+            "mem: N>1 held-out partitions kernel-owned + unnameable, rotation (kernel counter) picks the hidden scorer != the visible partition, visible-tuned candidate rejected by the rotated scorer (anti-Goodhart decoupling == the M11 rights-mask invariant)\n",
+        );
+    }
+    m182_held_out_selftest();
+
+    tb_hal::serial_write_str("M18.2: held-out OK\n"); // <-- the M18.2 DoD marker
+
     // --- L2.0: VMX-root + 1-instruction nested guest + caught VM-exit --------
     // The FIRST rung of the L2 sovereignty track (tb-core, a from-scratch Type-1
     // microhypervisor): the smallest proof that TABOS *is* the hypervisor. The
