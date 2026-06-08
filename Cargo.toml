@@ -13,6 +13,11 @@
 resolver = "2"
 members = [
     "crates/tb-boot",
+    # M11 proof: the host-verifiable capability core (Rights algebra + generic
+    # CapTable). Listed BEFORE tb-hal, which re-exports it and wraps
+    # CapTable<Rc<Object>>. Builds for the HOST triple under plain cargo (no
+    # build-std), so `cargo kani -p tb-caps-core` works cleanly.
+    "crates/tb-caps-core",
     "crates/tb-hal",
     "kernel",
 ]

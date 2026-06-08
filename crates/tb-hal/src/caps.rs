@@ -35,163 +35,17 @@
 //! generation equals the live, OCCUPIED slot's generation.
 
 use alloc::rc::Rc;
-use alloc::vec::Vec;
 use core::cell::RefCell;
 
-/// An unforgeable, generation-tagged reference into a per-principal
-/// [`HandleTable`]: `(generation:u32) << 32 | slot:u32`, one opaque `u64`.
-/// Process-local and meaningless in any other principal's table (Zircon model).
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Handle(u64);
+use tb_caps_core::CapTable;
 
-impl Handle {
-    /// Bit width of the slot field (the low half of the handle).
-    const SLOT_BITS: u32 = 32;
-
-    /// The reserved invalid handle. Generation 0 is never issued, so a zeroed
-    /// argument register can never resolve to a live capability.
-    pub const NULL: Handle = Handle(0);
-
-    /// Construct a handle from a `generation` and `slot` index.
-    #[inline]
-    pub const fn new(generation: u32, slot: u32) -> Self {
-        Handle(((generation as u64) << Self::SLOT_BITS) | slot as u64)
-    }
-
-    /// Rebuild a handle from a raw `u64` (e.g. one lifted out of a trap frame).
-    /// The value is UNTRUSTED -- it is re-validated field-by-field on every
-    /// [`HandleTable::live`]-backed resolve.
-    #[inline]
-    pub const fn from_raw(value: u64) -> Self {
-        Handle(value)
-    }
-
-    /// The raw `u64` encoding, for stashing in a register or atomic.
-    #[inline]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-
-    /// The generation field (high 32 bits).
-    #[inline]
-    pub const fn generation(self) -> u32 {
-        (self.0 >> Self::SLOT_BITS) as u32
-    }
-
-    /// The slot index (low 32 bits).
-    #[inline]
-    pub const fn slot(self) -> u32 {
-        self.0 as u32
-    }
-}
-
-/// A 32-bit rights bitset: structural rights plus the agent-semantic rights the
-/// later milestones gate on. The ONLY narrowing primitive is [`Rights::intersect`]
-/// (bitwise AND), so rights can only ever be DROPPED -- never amplified.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Rights(u32);
-
-impl Rights {
-    /// The empty rights set (authorises nothing; satisfies a no-right method).
-    pub const NONE: Rights = Rights(0);
-    /// Read / inspect the object.
-    pub const READ: Rights = Rights(1 << 0);
-    /// Mutate the object.
-    pub const WRITE: Rights = Rights(1 << 1);
-    /// Move this capability into another principal's table.
-    pub const TRANSFER: Rights = Rights(1 << 2);
-    /// Duplicate this capability (mint a sibling handle to the same object).
-    pub const DUP: Rights = Rights(1 << 3);
-    /// Revoke this capability (bump the slot generation).
-    pub const REVOKE: Rights = Rights(1 << 4);
-    /// Invoke a model inference session (M16).
-    pub const INVOKE_MODEL: Rights = Rights(1 << 5);
-    /// Spawn an agent (M12).
-    pub const SPAWN_AGENT: Rights = Rights(1 << 6);
-    /// Write procedural memory (M13).
-    pub const WRITE_PROCEDURAL: Rights = Rights(1 << 7);
-    /// Recall from memory (M13).
-    pub const RECALL: Rights = Rights(1 << 8);
-    /// Consolidate memory (M17).
-    pub const CONSOLIDATE: Rights = Rights(1 << 9);
-    /// Emit an externally-visible effect (gated by human authorization).
-    pub const EMIT_EXTERNAL: Rights = Rights(1 << 10);
-    /// Delegate a slice of a budget to a child (M12).
-    pub const DELEGATE_BUDGET: Rights = Rights(1 << 11);
-
-    /// The raw bits of this rights set.
-    #[inline]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    /// Build a rights set from raw bits (used to interpret a NARROW mask; the
-    /// mask can only ever DROP bits via [`Rights::intersect`], never amplify).
-    #[inline]
-    pub const fn from_bits(bits: u32) -> Rights {
-        Rights(bits)
-    }
-
-    /// The union of two rights sets. Used only to BUILD an authority a principal
-    /// already holds -- never to widen an existing capability.
-    #[inline]
-    pub const fn union(self, other: Rights) -> Rights {
-        Rights(self.0 | other.0)
-    }
-
-    /// Monotonic attenuation: the intersection of two rights sets. The result is
-    /// ALWAYS a subset of both operands (`(a & m)` is a subset of `a`) -- this
-    /// is the one rights-changing primitive, so narrowing can never amplify.
-    #[inline]
-    pub const fn intersect(self, mask: Rights) -> Rights {
-        Rights(self.0 & mask.0)
-    }
-
-    /// `true` iff `self` carries every right in `need` (the dispatch gate).
-    #[inline]
-    pub const fn contains(self, need: Rights) -> bool {
-        (self.0 & need.0) == need.0
-    }
-
-    /// `true` iff every right in `self` is also in `sup` -- the attenuation
-    /// invariant predicate the proof discharges.
-    #[inline]
-    pub const fn is_subset_of(self, sup: Rights) -> bool {
-        (self.0 & sup.0) == self.0
-    }
-}
-
-/// The CLOSED result status of every capability operation -- a total Rust enum,
-/// NOT a negative errno. An unrepresentable error is a compile error.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u32)]
-pub enum SysStatus {
-    /// The operation succeeded.
-    Ok = 0,
-    /// The handle does not name a slot in this table (out of range / never
-    /// allocated) -- not even a stale one.
-    BadCap = 1,
-    /// The method number is not part of the closed method set.
-    BadMethod = 2,
-    /// The capability is live but lacks the right the method requires.
-    Denied = 3,
-    /// The handle's generation does not match the live slot, or the slot is
-    /// vacant (use-after-revoke / use-after-transfer) -- O(1) detection.
-    Stale = 4,
-    /// The operation would block (reserved for M14 channels).
-    WouldBlock = 5,
-    /// Out of memory while performing the operation.
-    NoMem = 6,
-    /// The table (or object registry) is at capacity.
-    ObjFull = 7,
-    /// M14: the channel's peer endpoint has been closed -- a `send` to a closed
-    /// peer, or a `recv` on an inbox that is empty AND whose peer has closed (the
-    /// backlog is drained first, THEN this surfaces). Kept LAST so the closed
-    /// status surface stays total.
-    PeerClosed = 8,
-}
+// M11 -- the capability rights algebra ([`Rights`]), the unforgeable
+// generation-tagged [`Handle`], and the closed [`SysStatus`] now live in the
+// host-verifiable `tb-caps-core` crate, so the kernel and the Kani proof
+// harnesses verify the EXACT SAME bit/slot/generation logic (zero model drift).
+// They are re-exported VERBATIM here so `tb_hal::caps::{Rights, Handle,
+// SysStatus}` stays byte-identical for the kernel and the M11..M18 witnesses.
+pub use tb_caps_core::{Handle, Rights, SysStatus};
 
 /// The closed set of kernel object kinds. Identity-only at M11; per-subsystem
 /// payload is attached by the milestone that introduces each kind.
@@ -425,87 +279,34 @@ fn required_right(method: u32) -> Option<Rights> {
     })
 }
 
-/// One table slot: a generation, the rights mask, and the object. An OCCUPIED
-/// slot has `object.is_some()`; a vacant/revoked slot has `object == None`, and
-/// any handle to it resolves [`SysStatus::Stale`].
-struct Slot {
-    generation: u32,
-    rights: Rights,
-    object: Option<Rc<Object>>,
-}
-
-/// The per-principal handle table -- the unit of authority. Heap-backed; a LIFO
-/// free list reuses revoked slots (their generation already bumped, so prior
-/// handles stay `Stale`). `cap` bounds the table fail-closed (`ObjFull`).
+/// The per-principal handle table -- the unit of authority. A thin `tb-hal`
+/// wrapper over the host-verifiable [`CapTable`]`<Rc<Object>>`: the generic core
+/// owns ALL slot/generation/free-list/rights logic (and is exactly what the Kani
+/// harnesses prove); this wrapper adds only the `Rc<Object>` payload helpers
+/// (`mint_*`) and the object-aware dispatch surface.
 pub struct HandleTable {
-    slots: Vec<Slot>,
-    free: Vec<u32>,
-    cap: usize,
+    core: CapTable<Rc<Object>>,
 }
 
 impl HandleTable {
     /// A new empty table that will hold at most `cap` live capabilities.
     pub fn with_capacity(cap: usize) -> Self {
         HandleTable {
-            slots: Vec::new(),
-            free: Vec::new(),
-            cap,
+            core: CapTable::with_capacity(cap),
         }
     }
 
-    /// Resolve `h` to its live slot index, fail-closed. `BadCap` if the slot is
-    /// out of range; `Stale` if the slot is vacant (use-after-revoke) or its
-    /// generation does not match. The occupancy check is INDEPENDENT of the
-    /// generation match, so a forged handle whose generation happens to equal a
-    /// vacant slot's can never resolve `Ok`.
+    /// Resolve `h` to its live slot index, fail-closed (delegates to the proven
+    /// [`CapTable::live`]): `BadCap` if the slot is out of range; `Stale` if it is
+    /// vacant (use-after-revoke) or its generation does not match.
     fn live(&self, h: Handle) -> Result<usize, SysStatus> {
-        let i = h.slot() as usize;
-        let s = self.slots.get(i).ok_or(SysStatus::BadCap)?;
-        if s.object.is_none() {
-            return Err(SysStatus::Stale);
-        }
-        if s.generation != h.generation() {
-            return Err(SysStatus::Stale);
-        }
-        Ok(i)
+        self.core.live(h)
     }
 
-    /// Place `object` with `rights` into a free or fresh slot, returning its
-    /// handle, or `None` when the table is at `cap` (`ObjFull`).
+    /// Place `object` with `rights` into a free or fresh slot (delegates to the
+    /// proven [`CapTable::alloc`]), or `None` when the table is at `cap`.
     fn alloc(&mut self, rights: Rights, object: Rc<Object>) -> Option<Handle> {
-        if let Some(idx) = self.free.pop() {
-            let s = &mut self.slots[idx as usize];
-            // The generation was already bumped when this slot was freed.
-            s.rights = rights;
-            s.object = Some(object);
-            return Some(Handle::new(s.generation, idx));
-        }
-        if self.slots.len() >= self.cap {
-            return None;
-        }
-        let idx = self.slots.len() as u32;
-        self.slots.push(Slot {
-            generation: 1,
-            rights,
-            object: Some(object),
-        });
-        Some(Handle::new(1, idx))
-    }
-
-    /// Vacate slot `i`: drop the object and bump the generation so every extant
-    /// handle resolves `Stale`. On generation overflow the slot is RETIRED (not
-    /// returned to the free list), so a security generation is never silently
-    /// wrapped.
-    fn free_slot(&mut self, i: usize) {
-        let s = &mut self.slots[i];
-        s.object = None;
-        match s.generation.checked_add(1) {
-            Some(g) => {
-                s.generation = g;
-                self.free.push(i as u32);
-            }
-            None => { /* retire: overflowed generation, never reuse this slot */ }
-        }
+        self.core.alloc(rights, object)
     }
 
     /// Mint a brand-new object of `kind` and its first handle with `rights`.
@@ -643,49 +444,41 @@ impl HandleTable {
         h: Handle,
     ) -> Result<(Rights, Rc<crate::blocks::Block>), SysStatus> {
         let i = self.live(h)?;
-        let o = self.slots[i].object.clone().ok_or(SysStatus::Stale)?;
+        let o = self.core.object_at(i).clone().ok_or(SysStatus::Stale)?;
         match &o.block {
-            Some(b) => Ok((self.slots[i].rights, b.clone())),
+            Some(b) => Ok((self.core.rights_at(i), b.clone())),
             None => Err(SysStatus::BadCap),
         }
     }
 
     /// The rights currently attached to `h`, or `None` if it does not resolve.
+    /// Delegates to the proven [`CapTable::rights_of`].
     pub fn rights_of(&self, h: Handle) -> Option<Rights> {
-        self.live(h).ok().map(|i| self.slots[i].rights)
+        self.core.rights_of(h)
     }
 
     /// Duplicate `h`: a sibling handle to the SAME object with the SAME rights.
-    /// `None` if `h` does not resolve or the table is full.
+    /// `None` if `h` does not resolve or the table is full. Delegates to the
+    /// proven [`CapTable::dup`].
     pub fn dup(&mut self, h: Handle) -> Option<Handle> {
-        let i = self.live(h).ok()?;
-        let rights = self.slots[i].rights;
-        let object = self.slots[i].object.clone()?;
-        self.alloc(rights, object)
+        self.core.dup(h)
     }
 
     /// Narrow (attenuate) `h`: a new handle to the same object whose rights are
     /// `old & mask` -- ALWAYS a subset of `old`, by construction. `None` if `h`
-    /// does not resolve or the table is full.
+    /// does not resolve or the table is full. Delegates to the proven
+    /// [`CapTable::narrow`].
     pub fn narrow(&mut self, h: Handle, mask: Rights) -> Option<Handle> {
-        let i = self.live(h).ok()?;
-        let rights = self.slots[i].rights.intersect(mask);
-        let object = self.slots[i].object.clone()?;
-        self.alloc(rights, object)
+        self.core.narrow(h, mask)
     }
 
     /// Per-slot generation revoke of `h`: `Ok` and the slot is vacated (every
     /// extant handle to it now resolves `Stale`, O(1)); otherwise the resolve
     /// error. NOTE: this is the privileged MECHANISM; the REVOKE-right gate is
-    /// enforced for unprivileged callers by [`dispatch`].
+    /// enforced for unprivileged callers by [`dispatch`]. Delegates to the proven
+    /// [`CapTable::revoke`].
     pub fn revoke(&mut self, h: Handle) -> SysStatus {
-        match self.live(h) {
-            Ok(i) => {
-                self.free_slot(i);
-                SysStatus::Ok
-            }
-            Err(e) => e,
-        }
+        self.core.revoke(h)
     }
 
     /// Close one handle. At M11 (per-slot revoke) this is identical to
@@ -699,16 +492,10 @@ impl HandleTable {
     /// with the same rights, in `dst`, then vacate the source slot. `None`
     /// (leaving the source intact) if `h` does not resolve or `dst` is full --
     /// the object is never lost. The raw handle value is NEVER reused across
-    /// tables; the receiver gets a new slot + generation.
+    /// tables; the receiver gets a new slot + generation. Delegates to the proven
+    /// [`CapTable::transfer_to`].
     pub fn transfer_to(&mut self, h: Handle, dst: &mut HandleTable) -> Option<Handle> {
-        let i = self.live(h).ok()?;
-        let rights = self.slots[i].rights;
-        let object = self.slots[i].object.clone()?;
-        // ATOMIC: attach into `dst` FIRST; only vacate the source AFTER it lands,
-        // so a full `dst` never strands the object (M11 all-or-nothing preserved).
-        let moved = dst.attach((object, rights))?;
-        self.free_slot(i);
-        Some(moved)
+        self.core.transfer_to(h, &mut dst.core)
     }
 
     /// M14 -- the SEND half of [`HandleTable::transfer_to`], split across an IPC
@@ -718,20 +505,18 @@ impl HandleTable {
     /// Rights)` is parked in the message; while parked NO table holds a handle --
     /// the `Rc` alone keeps the object alive. The caller MUST confirm the outbox
     /// has space BEFORE calling this, so a `WouldBlock` send never detaches.
+    /// Delegates to the proven [`CapTable::detach`].
     pub(crate) fn detach(&mut self, h: Handle) -> Result<(Rc<Object>, Rights), SysStatus> {
-        let i = self.live(h)?;
-        let rights = self.slots[i].rights;
-        let object = self.slots[i].object.clone().ok_or(SysStatus::Stale)?;
-        self.free_slot(i);
-        Ok((object, rights))
+        self.core.detach(h)
     }
 
     /// M14 -- the RECV half of [`HandleTable::transfer_to`]: install a parked,
     /// in-transit capability into THIS table, yielding a fresh slot + generation
     /// (the raw handle value is never reused across tables). Object identity (the
-    /// `Rc`) and `rights` ride intact. `None` on `ObjFull`.
+    /// `Rc`) and `rights` ride intact. `None` on `ObjFull`. Delegates to the
+    /// proven [`CapTable::attach`].
     pub(crate) fn attach(&mut self, parked: (Rc<Object>, Rights)) -> Option<Handle> {
-        self.alloc(parked.1, parked.0)
+        self.core.attach(parked)
     }
 
     /// M14 -- the RECV body shared by [`dispatch`] and the kernel-side facade:
@@ -746,7 +531,7 @@ impl HandleTable {
             Ok(i) => i,
             Err(e) => return (e, 0, 0),
         };
-        let ep_obj = match self.slots[i].object.clone() {
+        let ep_obj = match self.core.object_at(i).clone() {
             Some(o) => o,
             None => return (SysStatus::Stale, 0, 0),
         };
@@ -787,7 +572,7 @@ impl HandleTable {
             Ok(i) => i,
             Err(e) => return (e, 0, 0),
         };
-        if !self.slots[i].rights.contains(Rights::READ) {
+        if !self.core.rights_at(i).contains(Rights::READ) {
             return (SysStatus::Denied, 0, 0);
         }
         self.chan_recv_body(ep)
@@ -809,7 +594,7 @@ impl HandleTable {
     /// substrate, or has no such skill.
     fn skill_get_of(&self, h: Handle, id: u64) -> Option<(u64, u8)> {
         let i = self.live(h).ok()?;
-        let o = self.slots[i].object.as_ref()?;
+        let o = self.core.object_at(i).as_ref()?;
         o.mem.as_ref()?.borrow().skill_get(id)
     }
 
@@ -818,7 +603,7 @@ impl HandleTable {
     /// substrate. Single short-lived immutable borrow (no reentrancy).
     fn score_of(&self, h: Handle, body: u64) -> Option<u32> {
         let i = self.live(h).ok()?;
-        let o = self.slots[i].object.as_ref()?;
+        let o = self.core.object_at(i).as_ref()?;
         Some(o.mem.as_ref()?.borrow().score_candidate(body))
     }
 
@@ -830,7 +615,7 @@ impl HandleTable {
             Ok(i) => i,
             Err(_) => return false,
         };
-        let o = match self.slots[i].object.clone() {
+        let o = match self.core.object_at(i).clone() {
             Some(o) => o,
             None => return false,
         };
@@ -849,7 +634,7 @@ impl HandleTable {
             Ok(i) => i,
             Err(_) => return false,
         };
-        let o = match self.slots[i].object.clone() {
+        let o = match self.core.object_at(i).clone() {
             Some(o) => o,
             None => return false,
         };
@@ -896,7 +681,7 @@ impl HandleTable {
     /// M18 self-test witness: count of ADMITTED skills behind `h` (trust promotion).
     pub fn skill_admitted_count(&self, h: Handle) -> Option<u64> {
         let i = self.live(h).ok()?;
-        let o = self.slots[i].object.as_ref()?;
+        let o = self.core.object_at(i).as_ref()?;
         Some(o.mem.as_ref()?.borrow().skill_count_admitted())
     }
 
@@ -904,7 +689,7 @@ impl HandleTable {
     /// AND rejected proposals both grow the immutable, agent-unwritable log).
     pub fn skill_lineage_len(&self, h: Handle, id: u64) -> Option<u64> {
         let i = self.live(h).ok()?;
-        let o = self.slots[i].object.as_ref()?;
+        let o = self.core.object_at(i).as_ref()?;
         Some(o.mem.as_ref()?.borrow().skill_lineage_len(id))
     }
 }
@@ -924,12 +709,12 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         Ok(i) => i,
         Err(e) => return SysReturn::err(e),
     };
-    if !table.slots[i].rights.contains(need) {
+    if !table.core.rights_at(i).contains(need) {
         return SysReturn::err(SysStatus::Denied);
     }
     match args.method {
         M_OBJECT_INSPECT => {
-            let kind = match &table.slots[i].object {
+            let kind = match table.core.object_at(i) {
                 Some(o) => o.kind as u64,
                 None => 0,
             };
@@ -952,7 +737,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // in-flight substrate borrow (single-core, interrupts masked -> no
         // reentrant borrow_mut).
         M_MEM_WRITE => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -978,7 +763,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // (ADD_SKILL / UPDATE_UTILITY / READ_SKILL / LINK_LINEAGE / READ_TIER) ride
         // an OP-SELECTOR in args[0] -- the M17 pattern, so NO new ABI method number.
         M_MEM_WRITE_PROC => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -998,7 +783,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
             }
         }
         M_MEM_READ => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1016,7 +801,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
             }
         }
         M_MEM_RECALL => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1039,7 +824,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
             }
         }
         M_MEM_CONSOLIDATE => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1063,7 +848,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // outbox space check happens BEFORE any `detach`, so a WouldBlock send
         // never strands a detached-and-lost capability.
         M_CHAN_SEND => {
-            let ep_obj = match table.slots[i].object.clone() {
+            let ep_obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1089,12 +874,12 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                     Err(e) => return SysReturn::err(e),
                 };
                 // The carried cap must hold TRANSFER (the M_HANDLE_TRANSFER gate).
-                if !table.slots[ci].rights.contains(Rights::TRANSFER) {
+                if !table.core.rights_at(ci).contains(Rights::TRANSFER) {
                     return SysReturn::err(SysStatus::Denied);
                 }
                 // Reject sending an endpoint into its OWN channel (Zircon
                 // NOT_SUPPORTED): the carried object IS this channel's core.
-                if let Some(carried) = table.slots[ci].object.clone() {
+                if let Some(carried) = table.core.object_at(ci).clone() {
                     if let Some((carried_chan, _)) = &carried.chan {
                         if Rc::ptr_eq(carried_chan, &chan) {
                             return SysReturn::err(SysStatus::Denied);
@@ -1127,7 +912,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // M14: CLOSE this endpoint (no right required). Flips the peer-closed flag;
         // the peer drains its backlog, then observes PeerClosed.
         M_CHAN_CLOSE => {
-            let ep_obj = match table.slots[i].object.clone() {
+            let ep_obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1145,7 +930,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // &mut-at-a-time discipline -> no reentrant borrow_mut). A losing CAS
         // surfaces WouldBlock; a non-block object -> BadCap.
         M_BLOCK_WRITE => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1160,7 +945,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // M15: RECORD-plane read-latest (READ gated above). Same clone-out
         // discipline; an unwritten slot or a non-block object -> BadCap.
         M_BLOCK_READ => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };
@@ -1188,7 +973,7 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // HandleTable`. A non-session cap presented to a model method -> BadCap
         // (the M_BLOCK_WRITE wrong-payload branch).
         M_MODEL_INVOKE => {
-            let obj = match table.slots[i].object.clone() {
+            let obj = match table.core.object_at(i).clone() {
                 Some(o) => o,
                 None => return SysReturn::err(SysStatus::Stale),
             };

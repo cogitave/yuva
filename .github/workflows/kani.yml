@@ -1,0 +1,49 @@
+# TABOS M11 capability proof gate (Kani).
+#
+# Machine-proves the rights-subset / no-confused-deputy invariant over the
+# host-verifiable `tb-caps-core` crate -- the SAME Rights algebra + CapTable<O>
+# slot/generation logic the kernel runs (zero model drift). The proofs are pure
+# SAFE, single-threaded, asm-free Rust, squarely inside Kani's supported subset.
+#
+# This runs on ubuntu-latest only (Kani CI supports x86_64-unknown-linux-gnu).
+# The official model-checking/kani-github-action installs Kani's OWN pinned
+# toolchain (independent of rust-toolchain.toml), so -Zbuild-std never
+# contaminates the host verification, then scripts/verify-caps.sh asserts ZERO
+# failures AND that the SUCCESSFUL count equals the pinned EXPECTED_HARNESSES
+# before emitting the DoD marker `M11: caps-subset PROVEN` (fail-closed).
+#
+# NOT a required check / no branch-protection changes here -- the lane is
+# advisory until the orchestrator promotes it.
+
+name: kani
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prove-caps:
+    name: prove M11 rights-subset (Kani)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
+      - name: Run Kani over tb-caps-core
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: '-p tb-caps-core --output-format=terse'
+
+      # Re-runs the proofs and FAILS CLOSED unless every harness verifies AND the
+      # SUCCESSFUL count matches the pinned constant, then emits the DoD marker.
+      - name: Assert proof marker (fail-closed harness count)
+        run: bash scripts/verify-caps.sh

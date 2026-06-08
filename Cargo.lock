@@ -15,8 +15,13 @@ name = "tb-boot"
 version = "0.1.0"
 
 [[package]]
+name = "tb-caps-core"
+version = "0.1.0"
+
+[[package]]
 name = "tb-hal"
 version = "0.1.0"
 dependencies = [
  "tb-boot",
+ "tb-caps-core",
 ]

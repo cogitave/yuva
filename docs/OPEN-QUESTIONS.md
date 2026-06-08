@@ -24,6 +24,7 @@
 
 | P | Question | Context |
 |---|---|---|
+| ✅ RESOLVED | **Is the capability attenuation invariant (rights-subset / no-amplification, no-confused-deputy) machine-proven or only boot-tested?** Now MACHINE-PROVEN: Kani harnesses in `crates/tb-caps-core` verify the `Rights` algebra over the full `u32` space, every per-op derivation, an inductive single-step no-widen, and the forged-handle/revoke unforgeability — over the SAME code the kernel runs (zero model drift). CI marker `M11: caps-subset PROVEN`. The deeper *intent*-encoding confused-deputy question (first P0 row) stays open. | Resolved 2026-06-08 · task #38 · [kani.yml](../.github/workflows/kani.yml) |
 | P0 | **The binding between LLM-generated text and a kernel handle**: which representation in the tool-call text binds to an unforgeable token; how is confused-deputy (prompt-injection abusing a legitimate capability) constrained — the rights mask bounds the blast-radius but does not encode *intent* | The sharpest question of the isolation research |
 | P0 | Capability granularity: can a single hierarchy be designed that losslessly carries MCP feature-level + A2A skill-level + ANP service-level declarations? | Risk of lossy translation in bridges |
 | P1 | KeyKOS-style universal persistence × revocation × external (non-transactional) resources: the remote-API/model-session handles in a restored agent's possession did not roll back — what is the contract? | [ARCHITECTURE §8](ARCHITECTURE.md) |

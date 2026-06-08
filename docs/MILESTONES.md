@@ -171,7 +171,10 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
 - **v2 — the agent-native milestone chain (M5 → M18)**: the active track. M0–M4
   built the hardware foundation; v2 turns it into the agent-native OS the four
   pillars describe — dynamic memory (M5–M7), preemption (M8–M9), address spaces
-  (M10), the capability-based syscall ABI (M11), the agent runtime (M12), the
+  (M10), the capability-based syscall ABI (M11 — whose rights-subset /
+  no-confused-deputy invariant is now machine-proven by Kani over the
+  host-verifiable `crates/tb-caps-core` (the SAME Rights/CapTable code the kernel
+  runs), CI marker `M11: caps-subset PROVEN`), the agent runtime (M12), the
   default tiered memory substrate (M13/M15/M17), inter-agent IPC (M14), the
   LLM-agnostic inference bridge (M16), and the frozen-kernel self-improvement
   harness (M18). Each is one cumulative serial-marker DoD under the same QEMU +

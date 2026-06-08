@@ -22,3 +22,9 @@ publish = false
 # crate's typed `#[repr(C)]` readers + constants instead of hand-coded offsets.
 # No cycle: tb-boot depends on nothing; the kernel already depends on both.
 tb-boot = { path = "../tb-boot" }
+
+# M11: the host-verifiable capability core (no_std, forbid(unsafe_code)). tb-hal
+# re-exports its `Rights`/`Handle`/`SysStatus` verbatim and wraps its generic
+# `CapTable<Rc<Object>>`, so the kernel and the Kani harnesses verify the EXACT
+# SAME rights/slot/generation logic (zero model drift).
+tb-caps-core = { path = "../tb-caps-core" }

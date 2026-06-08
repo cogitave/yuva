@@ -1,0 +1,30 @@
+# tb-caps-core: the host-verifiable capability CORE for TABOS M11.
+#
+# Single source of truth for the capability rights algebra (`Rights`) and the
+# payload-agnostic authority table (`CapTable<O>` over `SlotCore<O>`), plus the
+# unforgeable generation-tagged `Handle` and the closed `SysStatus`. The kernel
+# reaches this code through `tb-hal`, which re-exports `Rights`/`Handle`/
+# `SysStatus` and wraps `CapTable<Rc<Object>>`; the Kani harnesses in
+# `src/proofs.rs` verify the EXACT SAME code (zero model drift).
+#
+# `#![no_std]` + `#![forbid(unsafe_code)]` + `extern crate alloc` (it needs only
+# `Vec`). It builds for the HOST triple under plain `cargo` because the repo
+# keeps `-Zbuild-std` OUT of the global `.cargo/config.toml` (bundled only in the
+# `kbuild` alias), so `cargo kani -p tb-caps-core` compiles cleanly without
+# build-std interference.
+
+[package]
+name = "tb-caps-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+
+[dependencies]
+
+# Kani sets `cfg(kani)` on the target crate; the `#[cfg(kani)]` harnesses are
+# inert under a normal build. Declaring the cfg keeps Rust >= 1.80 from emitting
+# an `unexpected_cfgs` warning under the kernel's pinned nightly (Kani usage.html).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
