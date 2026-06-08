@@ -1752,6 +1752,175 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M14: ipc OK\n"); // <-- the M14 DoD marker
 
+    // --- M14.1: byte-payload IPC -- copy_to_user/copy_from_user round-trip ----
+    // A message can now ALSO carry a variable-length BYTE payload, copied across
+    // two agents' ISOLATED address spaces: the sender's bytes are pulled into a
+    // kernel-heap bounce buffer by copy_from_user at send, and pushed into the
+    // receiver's OWN address space by copy_to_user at recv. The two raw copy
+    // primitives' unsafe lives ONLY in crates/tb-hal/src/arch/*/uaccess.rs; the
+    // kernel orchestrates through the SAFE agent_chan_send_bytes /
+    // agent_chan_recv_bytes facades (each resolves its agent's address-space
+    // root). The timer is disarmed (single-core, interrupts masked). We reuse
+    // agent_c (sender) + agent_d (receiver); a FRESH channel is opened because
+    // the M14 block above left its channel peer-closed. The positive proof is a
+    // 1024-byte known pattern minted in agent_c's user buffer that round-trips
+    // byte-for-byte into agent_d's user buffer through a DISTINCT physical frame;
+    // the fail-closed proofs are an oversize send (Denied), a copy_to_user to an
+    // unmapped dst (Fault, message re-deliverable), a too-small recv buffer
+    // (Fault, no-discard), and a WRITE-less endpoint (Denied). DoD sub-marker:
+    // "M14.1: payload OK".
+    {
+        use tb_hal::caps::{self, Handle, Rights, SysStatus};
+
+        fn m14_1_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M14.1: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        let ok = SysStatus::Ok as u32;
+        let den = SysStatus::Denied as u32;
+        let fault = SysStatus::Fault as u32;
+
+        // A deterministic, per-word non-trivial pattern (Fibonacci-hashing
+        // constant -> 128 distinct words across the 1024-byte payload).
+        let pat = |i: u64| -> u64 { 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i.wrapping_add(1)) };
+        const LEN: usize = 1024;
+        const NWORDS: u64 = (LEN as u64) / 8;
+
+        // 1. A FRESH bounded (cap=4) channel: ep0 (side 0) in agent_c, ep1
+        //    (side 1) in agent_d, sharing one Rc<Channel>.
+        let (ep0, ep1) = match tb_hal::agent_channel_connect(agent_c, agent_d, 4) {
+            Some(x) => x,
+            None => m14_1_fail("byte-payload channel connect failed"),
+        };
+
+        // 2. Map a writable USER buffer into BOTH agents' OWN address spaces.
+        let (buf_c, pa_c) = match tb_hal::agent_map_user_buffer(agent_c) {
+            Some(x) => x,
+            None => m14_1_fail("map user buffer into the sender failed"),
+        };
+        let (buf_d, pa_d) = match tb_hal::agent_map_user_buffer(agent_d) {
+            Some(x) => x,
+            None => m14_1_fail("map user buffer into the receiver failed"),
+        };
+        // The two buffers MUST live in DISTINCT physical frames (a genuine cross-
+        // address-space transfer, never an alias of one frame).
+        if pa_c == pa_d {
+            m14_1_fail("sender and receiver buffers share a PA (no real cross-space copy)");
+        }
+
+        // 3. SEED the sender's frame with the pattern through ITS frame's kernel
+        //    identity alias (PA == VA in the boot identity / RAM-gigabyte window),
+        //    and ZERO the receiver's frame so a stale-byte false match is
+        //    impossible.
+        let mut i = 0u64;
+        while i < NWORDS {
+            let _ = tb_hal::addr_store_load(pa_c + i * 8, pat(i));
+            let _ = tb_hal::addr_store_load(pa_d + i * 8, 0);
+            i += 1;
+        }
+
+        // 4. SEND the 1024-byte payload agent_c -> agent_d (copy_from_user pulls
+        //    it into the kernel bounce buffer).
+        let (s, _) =
+            tb_hal::agent_chan_send_bytes(agent_c, ep0, 0x5A5A, 0, buf_c, LEN).unwrap_or((den, 0));
+        if s != ok {
+            m14_1_fail("byte-payload send was not Ok");
+        }
+        // 5. RECV into agent_d's OWN buffer (copy_to_user pushes it across the
+        //    space); expect Ok, the inline payload, no moved cap, 1024 bytes.
+        let (s, payload, moved, blen) =
+            tb_hal::agent_chan_recv_bytes(agent_d, ep1, buf_d, LEN).unwrap_or((den, 0, 0, 0));
+        if s != ok || payload != 0x5A5A || moved != 0 || blen != LEN {
+            m14_1_fail("byte-payload recv did not deliver (Ok, 0x5A5A, no cap, 1024 bytes)");
+        }
+        // 6. VERIFY byte-for-byte: read agent_d's frame back through ITS identity
+        //    alias and assert equality with the sent pattern.
+        let mut i = 0u64;
+        while i < NWORDS {
+            if tb_hal::addr_load(pa_d + i * 8) != pat(i) {
+                m14_1_fail("received bytes did not match the sent pattern");
+            }
+            i += 1;
+        }
+        tb_hal::serial_write_str(
+            "ipc: byte payload copy_to/from_user round-trips across two agent address spaces (distinct PAs)\n",
+        );
+
+        // 7. FAIL-CLOSED #1: an oversize send (> MAX_PAYLOAD) is Denied; nothing
+        //    is enqueued (the recv chain below stays exact).
+        let (s, _) =
+            tb_hal::agent_chan_send_bytes(agent_c, ep0, 0, 0, buf_c, 4097).unwrap_or((ok, 0));
+        if s != den {
+            m14_1_fail("oversize (> MAX_PAYLOAD) byte send was not Denied");
+        }
+
+        // 8. FAIL-CLOSED #2: a copy_to_user to an UNMAPPED dst VA faults, and the
+        //    message is NOT consumed -- a retry with the GOOD buffer delivers it.
+        let (s, _) =
+            tb_hal::agent_chan_send_bytes(agent_c, ep0, 0x1234, 0, buf_c, LEN).unwrap_or((den, 0));
+        if s != ok {
+            m14_1_fail("byte send for the unmapped-dst test was not Ok");
+        }
+        let bad_dst = buf_d + 0x1000; // the next page in the slot is unmapped
+        let (s, _, _, _) =
+            tb_hal::agent_chan_recv_bytes(agent_d, ep1, bad_dst, LEN).unwrap_or((ok, 0, 0, 0));
+        if s != fault {
+            m14_1_fail("recv into an unmapped dst VA was not Fault");
+        }
+        let (s, _, _, blen) =
+            tb_hal::agent_chan_recv_bytes(agent_d, ep1, buf_d, LEN).unwrap_or((den, 0, 0, 0));
+        if s != ok || blen != LEN {
+            m14_1_fail("the copy-faulted message was not re-deliverable (it was lost)");
+        }
+
+        // 9. FAIL-CLOSED #3: a recv whose dst_cap is SMALLER than the queued byte
+        //    length faults WITHOUT discarding (Zircon BUFFER_TOO_SMALL); a retry
+        //    with a big-enough buffer still delivers it.
+        let (s, _) =
+            tb_hal::agent_chan_send_bytes(agent_c, ep0, 0x9999, 0, buf_c, LEN).unwrap_or((den, 0));
+        if s != ok {
+            m14_1_fail("byte send for the too-small-buffer test was not Ok");
+        }
+        let (s, _, _, _) =
+            tb_hal::agent_chan_recv_bytes(agent_d, ep1, buf_d, 512).unwrap_or((ok, 0, 0, 0));
+        if s != fault {
+            m14_1_fail("recv with dst_cap < queued byte_len was not Fault");
+        }
+        let (s, _, _, blen) =
+            tb_hal::agent_chan_recv_bytes(agent_d, ep1, buf_d, LEN).unwrap_or((den, 0, 0, 0));
+        if s != ok || blen != LEN {
+            m14_1_fail("the too-small-buffer message was discarded (no-discard violated)");
+        }
+
+        // 10. RIGHTS: a byte send on a WRITE-less endpoint is Denied (the payload
+        //     send requires WRITE, exactly like the scalar M_CHAN_SEND).
+        let (s, ep0_no_w) = tb_hal::agent_cap_dispatch(
+            agent_c,
+            caps::M_HANDLE_NARROW,
+            ep0,
+            Rights::READ.bits() as u64,
+            0,
+        )
+        .unwrap_or((den, 0));
+        if s != ok || ep0_no_w == 0 {
+            m14_1_fail("narrow of the endpoint (drop WRITE) failed");
+        }
+        let (s, _) =
+            tb_hal::agent_chan_send_bytes(agent_c, Handle::from_raw(ep0_no_w), 0, 0, buf_c, 8)
+                .unwrap_or((ok, 0));
+        if s != den {
+            m14_1_fail("byte send on a WRITE-less endpoint was not Denied");
+        }
+        tb_hal::serial_write_str(
+            "ipc: byte payload fail-closed (oversize Denied, copy-fault + too-small no-discard, WRITE-gated)\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M14.1: payload OK\n"); // <-- the M14.1 DoD sub-marker
+
     // --- M15: shared memory blocks + session blackboard ----------------------
     // A shared-memory BLOCK = one or more pinned M6 frames owned by an
     // ObjKind::Block capability, MAPPED into MULTIPLE agents' address spaces at

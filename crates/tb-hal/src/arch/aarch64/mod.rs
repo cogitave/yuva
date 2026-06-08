@@ -34,18 +34,24 @@ mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
 mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
 mod timer; // M8: GICv2 + EL1 physical timer (PPI 30); IRQ ack/EOI/tick + CNTPCT.
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
+mod uaccess; // M14.1: cross-address-space user-buffer copy (the only new aarch64 unsafe).
 mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
-    mmu_init, mmu_selftest, switch_root,
+    map_user_in_root, mmu_init, mmu_selftest, switch_root,
 };
 pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 pub use serial::{serial_init, serial_write_byte};
 pub use timer::{read_cycle_counter, sched_irq_unmask, timer_demo, timer_disarm, timer_rearm};
 pub use trap::breakpoint;
+// M14.1: the safe cross-address-space user-buffer copy surface (the walk + the
+// byte copy via the EL1 identity alias), re-exported through `arch/mod.rs` so
+// the kernel facade drives the bounce-buffer fill/drain. Same names + signatures
+// as the x86_64 arm, one uniform contract.
+pub use uaccess::{copy_from_user, copy_to_user};
 pub use user::{agent_map_space, agent_traps_init, caps_user_probe, user_demo};
 
 /// M12: program the running agent's kernel stack for the privilege-change frame.

@@ -18,27 +18,59 @@
 //! single-core with interrupts masked, so no reentrant borrow). No atomics, no
 //! lock, no `&'static mut` (single-core buys nothing from a crossbeam ring).
 //!
-//! The variable-length BYTE payload (via `copy_to_user`/`copy_from_user` across
-//! the two address spaces) is the ONLY part of the ROADMAP M14 surface that adds
-//! `unsafe`; it is DELIBERATELY DEFERRED. The marker self-test rides the inline-
-//! scalar payload (`Message::payload`) with the capability moved by handle, at
-//! zero new unsafe.
+//! M14.1: a message may ALSO carry a variable-length BYTE payload -- a
+//! kernel-heap [`alloc::boxed::Box<[u8]>`] bounce buffer (`Message::bytes`,
+//! capped at [`MAX_PAYLOAD`]) filled by a sender-side `copy_from_user` and
+//! drained by a receiver-side `copy_to_user`. THIS module stays
+//! `#![forbid(unsafe_code)]`: the `Box<[u8]>` is safe heap (the same soundness
+//! argument the `Rc`/`RefCell` rings already discharge); the ONLY new `unsafe`
+//! -- the cross-address-space page-table walk + physical copy -- is confined to
+//! the per-arch `crate::arch::{x86_64,aarch64}::uaccess` modules, reached here
+//! only through the kernel facade (`crate::caps::HandleTable::chan_send_bytes` /
+//! `chan_recv_bytes`). `None` bytes = the existing inline-scalar-only path.
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
+use alloc::boxed::Box;
+
 use crate::caps::{Object, Rights};
 
+/// M14.1: the maximum BYTE-payload length one message may carry -- one page.
+/// A send over this bound is rejected `SysStatus::Denied` (anything larger is
+/// explicitly the M15 shared-block path); the bound caps worst-case kernel-heap
+/// pressure at `MAX_PAYLOAD * ring_depth` and matches seL4's one-page IPC buffer.
+pub const MAX_PAYLOAD: usize = 4096;
+
 /// One in-transit message: an inline scalar `payload` (the "bytes" at the M14
-/// inline-ABI) plus an OPTIONAL parked capability -- the moved cap's object
+/// inline-ABI), an OPTIONAL variable-length BYTE payload (M14.1, the kernel-heap
+/// bounce buffer), plus an OPTIONAL parked capability -- the moved cap's object
 /// identity (`Rc<Object>`) and its `Rights`, riding from sender to receiver while
 /// NO table holds a handle to it (the `Rc` alone keeps the object alive).
 pub struct Message {
     /// The inline scalar payload.
     pub payload: u64,
+    /// M14.1: the optional kernel-owned BYTE-payload bounce buffer (safe heap;
+    /// `<= MAX_PAYLOAD` bytes), filled by the sender's `copy_from_user` and
+    /// drained by the receiver's `copy_to_user`. `None` = no byte payload (the
+    /// existing inline-scalar-only message).
+    pub bytes: Option<Box<[u8]>>,
     /// The 0-or-1 parked, in-transit capability (`None` for a bytes-only message).
     pub cap: Option<(Rc<Object>, Rights)>,
+}
+
+impl Message {
+    /// The length of the carried BYTE payload (`0` when there is none). Used by
+    /// the receiver to peek the head's size BEFORE popping, so a too-small
+    /// destination buffer can fail-closed without discarding the message
+    /// (Zircon `zx_channel_read` BUFFER_TOO_SMALL-without-discard semantics).
+    pub fn byte_len(&self) -> usize {
+        match &self.bytes {
+            Some(b) => b.len(),
+            None => 0,
+        }
+    }
 }
 
 /// A single per-direction FIFO bounded at `cap` (the backpressure depth). A

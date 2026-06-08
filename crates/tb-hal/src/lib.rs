@@ -1612,6 +1612,108 @@ pub fn agent_root_pa(task: Task) -> u64 {
 }
 
 // ===========================================================================
+// M14.1: byte-payload IPC -- copy_to_user / copy_from_user bounce buffer
+// ===========================================================================
+//
+// A message can carry a variable-length BYTE payload copied across two agents'
+// isolated address spaces. The payload travels as a kernel-heap `Box<[u8]>`
+// parked in the `ipc::Message` (one copy IN at send via `copy_from_user`, one
+// copy OUT at recv via `copy_to_user`), reached ONLY through the kernel facades
+// below (the M15 `agent_block_map` precedent -- an address-space-dependent op
+// must ride the facade because `caps::dispatch` holds only `&mut HandleTable`,
+// not the agent root). The two raw copy primitives' unsafe is confined to the
+// per-arch `arch::*::uaccess` modules; these facades + `caps.rs` stay safe.
+
+/// The dedicated, VACANT top-level window an agent maps its M14.1 byte-payload
+/// scratch buffer into, clear of the agent's own code/stack (`AGENT_CODE_VA`,
+/// `PML4[4]`) and shared blocks (`BLOCK_WINDOW_VA`, `PML4[5]`). x86_64 =
+/// `PML4[6]`; a layout-lock const-assert pins the slot.
+#[cfg(target_arch = "x86_64")]
+pub const AGENT_BUF_VA: u64 = 0x0000_0300_0000_0000;
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!((AGENT_BUF_VA >> 39) & 0x1FF == 6);
+
+/// aarch64 = `L1[8]` (sibling of agent code `L1[6]` and block window `L1[7]`).
+#[cfg(target_arch = "aarch64")]
+pub const AGENT_BUF_VA: u64 = 0x0000_0002_0000_0000;
+#[cfg(target_arch = "aarch64")]
+const _: () = assert!((AGENT_BUF_VA >> 30) & 0x1FF == 8);
+
+/// M14.1: map ONE fresh, writable 4 KiB USER scratch page into `t`'s OWN address
+/// space at [`AGENT_BUF_VA`] (a vacant top-level slot), with `U/S`/`AP[1]` at
+/// every level so the `copy_to_user`/`copy_from_user` walk reaches it. Returns
+/// `(AGENT_BUF_VA, frame_pa)` -- the VA the copy primitives translate AND the
+/// physical frame, so a kernel-side self-test can seed/verify the bytes through
+/// the frame's identity alias and assert two agents' buffers have DISTINCT PAs.
+/// `None` if `t` is not a live agent or on physical-frame OOM (the frame is
+/// returned first, so a failed map leaks nothing).
+pub fn agent_map_user_buffer(t: Task) -> Option<(u64, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let root = {
+        let ap = AGENTS.slot(slot).as_ref()?;
+        ap.space.root_pa()
+    };
+    let pa = frame_alloc()?;
+    if !arch::map_user_in_root(root, AGENT_BUF_VA, pa, true, false) {
+        // Mapping OOM (intermediate-table frame): return the data frame so no
+        // frame is leaked, then fail closed.
+        let _ = frame_free(pa);
+        return None;
+    }
+    Some((AGENT_BUF_VA, pa))
+}
+
+/// M14.1: drive a BYTE-PAYLOAD send against `t`'s OWN table -- resolve `t`'s
+/// address-space root (the sender side of `copy_from_user`) and run
+/// [`caps::HandleTable::chan_send_bytes`] (WRITE-gated, atomic, fail-closed).
+/// `payload` is the inline scalar, `cap_h` the raw handle of an optional cap to
+/// MOVE (`0` = none), `(src_uva, len)` the sender-space byte buffer. Returns
+/// `(status, 0)` (a send has no scalar return), or `None` if `t` is not a live
+/// agent.
+pub fn agent_chan_send_bytes(
+    t: Task,
+    ep: caps::Handle,
+    payload: u64,
+    cap_h: u64,
+    src_uva: u64,
+    len: usize,
+) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let root = ap.space.root_pa();
+    let st = ap.table.chan_send_bytes(ep, payload, cap_h, root, src_uva, len);
+    Some((st as u32, 0))
+}
+
+/// M14.1: drive a BYTE-PAYLOAD recv against `t`'s OWN table -- resolve `t`'s
+/// address-space root (the receiver side of `copy_to_user`) and run
+/// [`caps::HandleTable::chan_recv_bytes`] (READ-gated, peek-before-pop,
+/// push-front-restore on a copy fault). `(dst_uva, dst_cap)` is the
+/// receiver-space destination buffer + its capacity. Returns `(status, inline
+/// payload, moved-handle-raw, byte-len)`, or `None` if `t` is not a live agent.
+pub fn agent_chan_recv_bytes(
+    t: Task,
+    ep: caps::Handle,
+    dst_uva: u64,
+    dst_cap: usize,
+) -> Option<(u32, u64, u64, usize)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let root = ap.space.root_pa();
+    let (st, payload, moved, blen) = ap.table.chan_recv_bytes(ep, root, dst_uva, dst_cap);
+    Some((st as u32, payload, moved, blen))
+}
+
+// ===========================================================================
 // M15: shared memory blocks + session blackboard
 // ===========================================================================
 //

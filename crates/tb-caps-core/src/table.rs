@@ -81,9 +81,16 @@ pub enum SysStatus {
     ObjFull = 7,
     /// M14: the channel's peer endpoint has been closed -- a `send` to a closed
     /// peer, or a `recv` on an inbox that is empty AND whose peer has closed (the
-    /// backlog is drained first, THEN this surfaces). Kept LAST so the closed
-    /// status surface stays total.
+    /// backlog is drained first, THEN this surfaces).
     PeerClosed = 8,
+    /// M14.1: a user-buffer copy fault or precondition miss on a BYTE-payload
+    /// send/recv -- the per-page `copy_to_user`/`copy_from_user` walk hit a
+    /// not-present / not-user / not-writable / not-in-physmap leaf, OR the
+    /// receive buffer was too small for the queued payload. Fail-closed: NOTHING
+    /// was enqueued (send) or dequeued (recv) when this surfaces. Appended AFTER
+    /// `PeerClosed = 8` so every prior discriminant stays stable; kept LAST so
+    /// the closed status surface stays total.
+    Fault = 9,
 }
 
 /// One table slot: a generation, the rights mask, and the object payload. An

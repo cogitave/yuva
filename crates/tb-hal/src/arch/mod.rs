@@ -33,26 +33,52 @@
 //!   * plus the boot entry (`_start`, via `global_asm!`) and the
 //!     XEN_ELFNOTE_PHYS32_ENTRY note (x86_64 only), which the linker keeps.
 
+/// M14.1: the CLOSED, pure-data fault a cross-address-space user-buffer copy
+/// (`copy_to_user` / `copy_from_user`) can raise -- one variant per real
+/// software-page-walk failure, fail-closed by default. Never an errno / negative
+/// int; the IPC layer maps EVERY variant to the single `caps::SysStatus::Fault`.
+/// Declared here (arch-neutral) and produced identically by both per-arch
+/// `uaccess` backends, so the kernel orchestrates one contract across arches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CopyFault {
+    /// A controlling paging-structure entry (interior or leaf) was not
+    /// present/valid -- or an unexpected huge/block leaf appeared in the user
+    /// range (TABOS maps only 4 KiB user leaves, so it is rejected fail-closed).
+    NotPresent,
+    /// A controlling entry lacked user (EL0 / `U/S`) accessibility at some level
+    /// of the walk -- a supervisor-only page presented as a user buffer.
+    NotUser,
+    /// The leaf is user-readable but read-only, and the copy needed write
+    /// access (`copy_to_user` to a non-writable destination page).
+    NotWritable,
+    /// The translated frame fell OUTSIDE the boot identity / physmap window, so
+    /// the kernel supervisor alias used for the copy would be a wild deref --
+    /// asserted before any access, so the copy never reads/writes out of range.
+    NotInPhysmap,
+}
+
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
-    address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe, ctx_switch,
-    current_root, halt, heap_window, install_traps, m3_test_va_intact, map_heap_frames, map_in_root,
-    mmu_init, mmu_selftest, pmm_collect_regions, read_cycle_counter, sched_irq_unmask,
-    serial_init, serial_write_byte, set_kernel_stack, switch_root, task_stack_init,
-    task_stack_init_user, timer_demo, timer_disarm, timer_rearm, user_demo, vmx_selftest,
+    address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe,
+    copy_from_user, copy_to_user, ctx_switch, current_root, halt, heap_window, install_traps,
+    m3_test_va_intact, map_heap_frames, map_in_root, map_user_in_root, mmu_init, mmu_selftest,
+    pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
+    set_kernel_stack, switch_root, task_stack_init, task_stack_init_user, timer_demo, timer_disarm,
+    timer_rearm, user_demo, vmx_selftest,
 };
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::{
-    address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe, ctx_switch,
-    current_root, halt, heap_window, install_traps, m3_test_va_intact, map_heap_frames, map_in_root,
-    mmu_init, mmu_selftest, pmm_collect_regions, read_cycle_counter, sched_irq_unmask,
-    serial_init, serial_write_byte, set_kernel_stack, switch_root, task_stack_init,
-    task_stack_init_user, timer_demo, timer_disarm, timer_rearm, user_demo,
+    address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe,
+    copy_from_user, copy_to_user, ctx_switch, current_root, halt, heap_window, install_traps,
+    m3_test_va_intact, map_heap_frames, map_in_root, map_user_in_root, mmu_init, mmu_selftest,
+    pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
+    set_kernel_stack, switch_root, task_stack_init, task_stack_init_user, timer_demo, timer_disarm,
+    timer_rearm, user_demo,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

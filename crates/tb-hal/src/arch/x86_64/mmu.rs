@@ -721,7 +721,11 @@ unsafe fn ensure_table_user(parent: *mut u64, idx: usize) -> Option<*mut u64> {
 /// reach it. Leaf = `P | U/S | (RW if writable) | (NX if !exec)`. `va` must sit
 /// in a top-level slot the kernel root leaves vacant (`PML4[4]`). `false` on
 /// physical-frame OOM. The root is not live, so no `invlpg` is needed.
-pub(super) fn map_user_in_root(
+///
+/// M14.1: `pub` (was `pub(super)`) so the kernel facade `agent_map_user_buffer`
+/// can map a writable USER scratch page whose leaves carry `U/S=1` at every
+/// level -- exactly what `copy_to_user`/`copy_from_user`'s walk requires.
+pub fn map_user_in_root(
     root_pa: u64,
     va: u64,
     pa: u64,

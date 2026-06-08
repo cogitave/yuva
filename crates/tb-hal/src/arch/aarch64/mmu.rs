@@ -777,7 +777,11 @@ unsafe fn map_one_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> boo
 /// Intermediate L2/L3 are plain table descriptors (no APTable restriction), so
 /// the leaf governs EL0 access. `va` must sit in a vacant root slot (`L1[6]`).
 /// `false` on physical-frame OOM.
-pub(super) fn map_user_in_root(
+///
+/// M14.1: `pub` (was `pub(super)`) so the kernel facade `agent_map_user_buffer`
+/// can map a writable EL0 scratch page whose L3 leaf carries `AP[1]` (EL0
+/// access) + `AF` -- exactly what `copy_to_user`/`copy_from_user`'s walk requires.
+pub fn map_user_in_root(
     root_pa: u64,
     va: u64,
     pa: u64,

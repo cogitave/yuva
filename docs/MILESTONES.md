@@ -175,7 +175,9 @@ milestone rather than exiting), so a missing marker is always a non-zero exit.
   no-confused-deputy invariant is now machine-proven by Kani over the
   host-verifiable `crates/tb-caps-core` (the SAME Rights/CapTable code the kernel
   runs), CI marker `M11: caps-subset PROVEN`), the agent runtime (M12), the
-  default tiered memory substrate (M13/M15/M17), inter-agent IPC (M14), the
+  default tiered memory substrate (M13/M15/M17), inter-agent IPC (M14 — with
+  the M14.1 byte-payload `copy_to_user`/`copy_from_user` bounce-buffer round-trip
+  across two agent address spaces, sub-marker `M14.1: payload OK`), the
   LLM-agnostic inference bridge (M16), and the frozen-kernel self-improvement
   harness (M18). Each is one cumulative serial-marker DoD under the same QEMU +
   tb-vmm harness. The full, sequenced, risk-analysed plan — with the exact DoD

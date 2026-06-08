@@ -57,7 +57,7 @@ session** (preemptive scheduling + capability-passing IPC).
 | **M11** | Capability handle table + kernel object model + agent-native syscall ABI | agent-native | `M11: caps OK` | M7, M4 |
 | **M12** | Agent runtime — `AgentProcess` as a first-class scheduled, isolated entity | agent-native | `M12: agent OK` | M11, M10, M9 |
 | **M13** | Default tiered memory substrate (T0/T1/T2 + lexical T3 + `tb_mem_*` ABI) | memory-central | `M13: memory OK` | M12, M11 |
-| **M14** | Inter-agent IPC — capability-passing channels + ordered streams | multi-agent | `M14: ipc OK` | M12, M11, M9 |
+| **M14** | Inter-agent IPC — capability-passing channels + ordered streams (+ M14.1 byte payload: `copy_to_user`/`copy_from_user` bounce buffer, `MAX_PAYLOAD=4096`, two new arch `uaccess.rs` unsafe modules) | multi-agent | `M14: ipc OK` → `M14.1: payload OK` | M12, M11, M9 |
 | **M15** | Shared memory blocks + session blackboard | memory-central | `M15: blocks OK` | M14, M13, M10 |
 | **M16** | LLM-agnostic inference bridge (the `model:` scheme) | LLM-agnostic | `M16: infer OK` | M14, M12, M8 |
 | **M17** | Sleep-time consolidation / reflection / forgetting daemons | memory-central | `M17: consolidate OK` | M13, M16, M9 |
@@ -234,8 +234,20 @@ the M9 run queue); `send` makes it runnable (the IPC↔scheduler wake path). A
 message can carry a `Handle`, which **moves** out of the sender's table into the
 receiver's via the TRANSFER right with dup-attenuation — the auditable
 authority-flow edge. **Only `copy_to_user`/`copy_from_user` are new unsafe**
-(bounds- and mapping-checked cross-address-space copies; SMAP/PAN-aware later).
-Self-test (the multi-agent north star): A sends B bytes + a derived-narrowed
+(bounds- and mapping-checked cross-address-space copies). **M14.1 — byte payload
+landed** (`M14.1: payload OK`): a message can carry a variable-length BYTE payload
+via a kernel-heap **bounce buffer** (`ipc::MAX_PAYLOAD = 4096`, one page) — a
+sender-side `copy_from_user` fills it, a receiver-side `copy_to_user` drains it
+into the receiver's OWN address space. The two raw copy primitives (a software
+page-table walk against an explicit root + a byte copy through the kernel
+supervisor identity alias, SMAP/PAN-immune by construction) are confined to the
+NEW per-arch `arch/{x86_64,aarch64}/uaccess.rs` unsafe modules; `ipc.rs`/`caps.rs`
+and the kernel stay zero-unsafe, orchestrating through the safe tb-hal facade.
+Fail-closed: oversize → `Denied`, copy-fault / too-small-buffer → `Fault` with no
+message loss (peek-before-pop, push-front-restore). The **zero-copy** alternative
+for bulk data is the M15 shared-memory block path. The recv-blocks-on-empty /
+send-wakes-peer scheduler↔IPC integration remains the additive layer (reserved
+`M14.2`). Self-test (the multi-agent north star): A sends B bytes + a derived-narrowed
 capability; B, which had blocked on `recv` and is preemptively scheduled in its
 own address space, wakes, receives the exact bytes + capability and uses it
 (A no longer can), and replies; a third observer on a task stream sees identical

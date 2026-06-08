@@ -58,6 +58,12 @@ pub mod mmu;
 // maps a U/S=1 code+stack page and drops to ring3.
 pub mod user;
 
+// M14.1 cross-address-space user-buffer copy: the software 4-level page-table
+// walk against an EXPLICIT root + the byte copy through the kernel SUPERVISOR
+// identity alias (`copy_to_user` / `copy_from_user`). The ONLY new x86_64 unsafe
+// this milestone adds; the kernel reaches it only through the safe tb-hal facade.
+pub mod uaccess;
+
 // M6 physical frame allocator: the x86_64 boot memory-map reader (PVH
 // `hvm_start_info.memmap` + tb-boot `TbBootInfo` regions) that feeds the shared
 // intrusive free-frame stack in `crate::pmm`. The only x86_64 place the
@@ -112,7 +118,7 @@ pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 // (Same names + signatures as the aarch64 arm, one uniform contract.)
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
-    mmu_init, mmu_selftest, switch_root,
+    map_user_in_root, mmu_init, mmu_selftest, switch_root,
 };
 
 // M4: the safe user/ring surface, re-exported through `arch/mod.rs` so `lib.rs`
@@ -120,6 +126,12 @@ pub use mmu::{
 // handles it in ring0 and returns whether the syscall was observed from user
 // mode with the expected arg. (Same name + signature as the aarch64 arm.)
 pub use user::{agent_map_space, agent_traps_init, caps_user_probe, user_demo};
+
+// M14.1: the safe cross-address-space user-buffer copy surface, re-exported
+// through `arch/mod.rs` so `lib.rs`'s `agent_chan_send_bytes` /
+// `agent_chan_recv_bytes` facades (and `caps.rs`'s send/recv bodies) can drive
+// the bounce-buffer fill/drain. (Same names + signatures as the aarch64 arm.)
+pub use uaccess::{copy_from_user, copy_to_user};
 
 /// M12: program the CPU's ring3->ring0 privilege-change stack pointer
 /// (`TSS.rsp0`) to `top` -- the running agent's own kernel stack. Called from

@@ -577,6 +577,197 @@ impl HandleTable {
         }
         self.chan_recv_body(ep)
     }
+
+    /// M14.1 -- the BYTE-PAYLOAD send body the kernel facade
+    /// [`crate::agent_chan_send_bytes`] calls. Mirrors the scalar `M_CHAN_SEND`
+    /// dispatch arm exactly, plus a kernel-heap bounce buffer filled from the
+    /// sender's address space (`src_root` = the sender agent's top-level table
+    /// PA) via `copy_from_user`. ATOMICITY (the M11 all-or-nothing invariant):
+    /// peer-open + outbox-space + size are checked, then `copy_from_user` runs
+    /// BEFORE any carried-cap `detach`, so a copy fault or oversize send can
+    /// never strand a detached-and-lost capability or enqueue a partial message.
+    /// Applies the same WRITE gate `required_right(M_CHAN_SEND)` does (the facade
+    /// path does not pass through `dispatch`'s top-level gate). Returns the
+    /// CLOSED [`SysStatus`]: `Denied` (WRITE-less endpoint / oversize / TRANSFER-
+    /// less or self-channel carried cap), `WouldBlock` (full outbox), `PeerClosed`
+    /// (peer gone), `Fault` (`copy_from_user` failed -- NOTHING enqueued),
+    /// `BadCap`/`Stale` (resolve).
+    pub(crate) fn chan_send_bytes(
+        &mut self,
+        ep: Handle,
+        payload: u64,
+        cap_raw: u64,
+        src_root: u64,
+        src_uva: u64,
+        len: usize,
+    ) -> SysStatus {
+        // Resolve + WRITE gate (single-sourced `required_right(M_CHAN_SEND)`).
+        let i = match self.live(ep) {
+            Ok(i) => i,
+            Err(e) => return e,
+        };
+        if !self.core.rights_at(i).contains(Rights::WRITE) {
+            return SysStatus::Denied;
+        }
+        // Clone the endpoint object OUT and read `(chan, side)` BEFORE touching
+        // the ring / detaching (the dispatch M_CHAN_SEND discipline -- the table
+        // `&mut` never aliases the in-flight RefCell borrow).
+        let ep_obj = match self.core.object_at(i).clone() {
+            Some(o) => o,
+            None => return SysStatus::Stale,
+        };
+        let (chan, side) = match &ep_obj.chan {
+            Some((c, s)) => (c.clone(), *s),
+            None => return SysStatus::BadCap,
+        };
+        if !chan.peer_open(side) {
+            return SysStatus::PeerClosed;
+        }
+        // Backpressure FIRST (atomic): confirm space BEFORE any copy / detach.
+        {
+            let ring = chan.outbox(side).borrow();
+            if ring.q.len() >= ring.cap {
+                return SysStatus::WouldBlock;
+            }
+        }
+        // Size bound (one page); an oversize send is Denied (the M15 path).
+        if len > crate::ipc::MAX_PAYLOAD {
+            return SysStatus::Denied;
+        }
+        // Copy the sender's bytes into a kernel bounce buffer BEFORE detaching
+        // any carried cap, so a copy fault leaves the sender's table + the ring
+        // untouched. A `Box<[u8]>` is safe heap (this module stays
+        // `#![forbid(unsafe_code)]`); the ONLY unsafe is inside the arch facade.
+        let mut buf = {
+            let mut v = alloc::vec::Vec::with_capacity(len);
+            v.resize(len, 0u8);
+            v.into_boxed_slice()
+        };
+        if len > 0 && crate::arch::copy_from_user(src_root, src_uva, &mut buf).is_err() {
+            return SysStatus::Fault;
+        }
+        // ONLY now detach the optional carried cap (TRANSFER-gated, self-channel-
+        // rejected -- exactly as the scalar M_CHAN_SEND arm).
+        let parked = if cap_raw != 0 {
+            let cap_h = Handle::from_raw(cap_raw);
+            let ci = match self.live(cap_h) {
+                Ok(ci) => ci,
+                Err(e) => return e,
+            };
+            if !self.core.rights_at(ci).contains(Rights::TRANSFER) {
+                return SysStatus::Denied;
+            }
+            if let Some(carried) = self.core.object_at(ci).clone() {
+                if let Some((carried_chan, _)) = &carried.chan {
+                    if Rc::ptr_eq(carried_chan, &chan) {
+                        return SysStatus::Denied;
+                    }
+                }
+            }
+            match self.detach(cap_h) {
+                Ok(p) => Some(p),
+                Err(e) => return e,
+            }
+        } else {
+            None
+        };
+        chan.outbox(side).borrow_mut().q.push_back(crate::ipc::Message {
+            payload,
+            bytes: Some(buf),
+            cap: parked,
+        });
+        SysStatus::Ok
+    }
+
+    /// M14.1 -- the BYTE-PAYLOAD recv body the kernel facade
+    /// [`crate::agent_chan_recv_bytes`] calls. Applies the same READ gate as
+    /// [`HandleTable::chan_recv`], then drains any carried byte payload into the
+    /// receiver's address space (`dst_root` = the receiver agent's top-level
+    /// table PA) via `copy_to_user`. Returns `(status, inline payload,
+    /// moved-handle-raw, byte-len)`.
+    ///
+    /// FAIL-CLOSED, NO-LOSS ordering (Zircon `zx_channel_read` semantics): PEEK
+    /// the head's `byte_len` FIRST; a `dst_cap` smaller than it returns `Fault`
+    /// WITHOUT popping (the message survives for a retry with a bigger buffer).
+    /// Otherwise pop; if it carries bytes, attempt `copy_to_user`; on a copy
+    /// fault `push_front` the WHOLE message back (restoring FIFO order + the
+    /// parked cap + the bytes) and return `Fault` -- an in-flight message is
+    /// never silently dropped. On success, attach any carried cap (as `chan_recv`
+    /// does). `WouldBlock` (empty-but-open) / `PeerClosed` (empty-and-closed) as
+    /// usual.
+    pub(crate) fn chan_recv_bytes(
+        &mut self,
+        ep: Handle,
+        dst_root: u64,
+        dst_uva: u64,
+        dst_cap: usize,
+    ) -> (SysStatus, u64, u64, usize) {
+        let i = match self.live(ep) {
+            Ok(i) => i,
+            Err(e) => return (e, 0, 0, 0),
+        };
+        if !self.core.rights_at(i).contains(Rights::READ) {
+            return (SysStatus::Denied, 0, 0, 0);
+        }
+        let ep_obj = match self.core.object_at(i).clone() {
+            Some(o) => o,
+            None => return (SysStatus::Stale, 0, 0, 0),
+        };
+        let (chan, side) = match &ep_obj.chan {
+            Some((c, s)) => (c.clone(), *s),
+            None => return (SysStatus::BadCap, 0, 0, 0),
+        };
+        // PEEK the head's byte length WITHOUT popping: a too-small dst buffer
+        // fails closed and leaves the message in place (no discard). Drop the
+        // ring borrow before any pop (single-core, interrupts masked).
+        {
+            let inbox = chan.inbox(side).borrow();
+            match inbox.q.front() {
+                None => {
+                    return if chan.peer_open(side) {
+                        (SysStatus::WouldBlock, 0, 0, 0)
+                    } else {
+                        (SysStatus::PeerClosed, 0, 0, 0)
+                    };
+                }
+                Some(head) => {
+                    if head.byte_len() > dst_cap {
+                        return (SysStatus::Fault, 0, 0, 0);
+                    }
+                }
+            }
+        }
+        // Big enough: pop it (the borrow above is dropped).
+        let msg = match chan.inbox(side).borrow_mut().q.pop_front() {
+            Some(m) => m,
+            // Single-core + interrupts masked: nothing could have drained the
+            // head between the peek and here, but stay fail-closed regardless.
+            None => return (SysStatus::WouldBlock, 0, 0, 0),
+        };
+        let blen = msg.byte_len();
+        // Drain any byte payload into the receiver's space. The `copy_to_user`
+        // body's unsafe is confined to the arch facade; on a fault, restore the
+        // WHOLE message (FIFO + parked cap + bytes) and report Fault.
+        let copy_ok = match msg.bytes.as_ref() {
+            Some(bytes) if !bytes.is_empty() => {
+                crate::arch::copy_to_user(dst_root, dst_uva, bytes).is_ok()
+            }
+            _ => true,
+        };
+        if !copy_ok {
+            chan.inbox(side).borrow_mut().q.push_front(msg);
+            return (SysStatus::Fault, 0, 0, 0);
+        }
+        let payload = msg.payload;
+        match msg.cap {
+            None => (SysStatus::Ok, payload, 0, blen),
+            Some(parked) => match self.attach(parked) {
+                Some(h) => (SysStatus::Ok, payload, h.raw(), blen),
+                // Receiver table full: the cap cannot be re-slotted.
+                None => (SysStatus::ObjFull, payload, 0, blen),
+            },
+        }
+    }
 }
 
 /// M18 -- the FROZEN-evaluator harness surface (kernel-side, NOT method-numbered).
@@ -895,6 +1086,11 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
             };
             chan.outbox(side).borrow_mut().q.push_back(crate::ipc::Message {
                 payload: args.args[0],
+                // The scalar dispatch path carries no byte payload; the M14.1
+                // byte-payload send rides the kernel facade `chan_send_bytes`
+                // (it needs the sender's address-space root, which `dispatch`
+                // cannot resolve holding only `&mut HandleTable`).
+                bytes: None,
                 cap: parked,
             });
             SysReturn::status(SysStatus::Ok)
