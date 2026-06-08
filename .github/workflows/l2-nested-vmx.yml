@@ -1,0 +1,111 @@
+# l2-nested-vmx — exercise the REAL L2.0 VMX-root proof under nested virtualization.
+#
+# L2.0 (crates/tb-hal/src/arch/x86_64/vmx/) does VMXON -> VMCS -> EPT -> VMLAUNCH
+# of a 1-instruction nested guest -> catches its VM-exit. The kernel's vmx self-
+# test gracefully SKIPS when the CPU does not expose VMX (the TCG / non-nested
+# case), printing "L2.0: vmxroot OK (vmx unavailable, skipped)". To actually run
+# the world switch we need a CPU that exposes VMX to the guest, i.e. QEMU under
+# KVM with `-cpu host` on a runner whose L0 enables nested VMX (kvm_intel
+# nested=1). This job probes exactly that and reports the verdict.
+#
+# It is INFORMATIONAL ONLY: the boot step is `continue-on-error`, so this job can
+# never break the green chain (ci / vmm-boot remain the required gates). If the
+# runner does not expose nested VMX, the job records that fact and stays green.
+
+name: l2-nested-vmx
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  l2-vmx:
+    name: L2.0 nested-VMX proof (x86_64, KVM -cpu host)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Enable /dev/kvm for the runner user
+        run: |
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::warning::/dev/kvm absent; the VMX proof step will skip"
+            echo "KVM_OK=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm
+          echo "KVM_OK=1" >> "$GITHUB_ENV"
+
+      - name: Probe nested-VMX exposure on this runner
+        run: |
+          echo "kvm_intel nested = $(cat /sys/module/kvm_intel/parameters/nested 2>/dev/null || echo '(kvm_intel not loaded)')"
+          if grep -qm1 vmx /proc/cpuinfo; then echo "runner vCPU exposes vmx in /proc/cpuinfo: YES"; else echo "runner vCPU exposes vmx in /proc/cpuinfo: NO (nested VMX not available -> L2.0 will skip)"; fi
+
+      - name: Cache cargo + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-l2vmx-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (custom target)
+        run: cargo kbuild --target targets/x86_64-tabos-none.json
+
+      - name: Install QEMU
+        if: env.KVM_OK == '1'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Boot under KVM -cpu host and read the L2.0 verdict
+        if: env.KVM_OK == '1'
+        continue-on-error: true
+        run: |
+          K=target/x86_64-tabos-none/debug/tabos-kernel
+          # -cpu host passes through the runner vCPU's features; if the L0 host
+          # enabled nested VMX, the guest sees VMX and L2.0 takes the real path.
+          timeout 30 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
+            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none -serial stdio -display none \
+            > serial.log 2>&1 || true
+          echo "=== serial tail (last 40 lines) ==="; tail -40 serial.log || true
+          echo "=== L2.0 verdict ==="
+          verdict="UNKNOWN"
+          if grep -q "M18: evolve OK" serial.log; then reached_m18=yes; else reached_m18=no; fi
+          if grep -qE "^L2\.0: vmxroot OK$" serial.log; then
+            verdict="PROVEN — real VMXON+VMLAUNCH+VM-exit round-trip (this runner exposes nested VMX)"
+          elif grep -q "L2.0: vmxroot OK (vmx unavailable" serial.log; then
+            verdict="SKIPPED — runner did not expose nested VMX to the guest (graceful skip; code unexercised)"
+          elif grep -qE "L2\.0: vmx(on)?[- ]?(root)? (FAIL|failed|entry)" serial.log || grep -qi "vmxroot.*fail" serial.log; then
+            verdict="RED — a real VMX/VMCS error fired (a genuine bug to fix)"
+          elif [[ "$reached_m18" == no ]]; then
+            verdict="DID-NOT-REACH — boot stopped before M18 under QEMU-microvm+KVM (a boot-gap on this untested config, not a VMX result)"
+          fi
+          echo "reached M18: $reached_m18"
+          echo "VERDICT: $verdict"
+          {
+            echo "### L2.0 nested-VMX probe — x86_64, QEMU microvm + KVM -cpu host"
+            echo ""
+            echo "- reached \`M18: evolve OK\`: **$reached_m18**"
+            echo "- **VERDICT: $verdict**"
+            echo ""
+            echo '<details><summary>serial tail</summary>'
+            echo ''; echo '```'; tail -40 serial.log; echo '```'; echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Note when KVM was unavailable
+        if: env.KVM_OK != '1'
+        run: echo "::notice::No /dev/kvm on this runner — nested-VMX proof skipped."
