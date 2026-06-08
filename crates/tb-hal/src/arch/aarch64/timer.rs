@@ -158,6 +158,41 @@ pub fn read_cycle_counter() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// M14.2: interrupt-mask save/restore -- the lost-wakeup-free critical-section
+// tool the blocking-recv path wraps around {empty-recheck -> register waiter ->
+// mark BLOCKED -> yield}. On a single core a sender can only run after the
+// receiver yields, so masking IRQs across that sequence makes it one indivisible
+// critical section (the seL4 "kernel runs with interrupts disabled" guarantee).
+// ---------------------------------------------------------------------------
+
+/// M14.2: save PSTATE.DAIF and mask IRQs (`mrs daif; msr daifset, #2`),
+/// returning DAIF BEFORE the mask. The I bit is bit 7; the companion
+/// [`local_irq_restore`] writes the whole saved DAIF back, so interrupts return
+/// to EXACTLY their prior state -- a nested save/restore never wrongly unmasks.
+pub fn local_irq_save() -> u64 {
+    let daif: u64;
+    // SAFETY: `mrs {d}, daif` reads PSTATE.DAIF, `msr daifset, #2` sets PSTATE.I
+    // (mask IRQ). EL1-legal system-register access; no memory/stack effect, NZCV
+    // (the condition flags `preserves_flags` covers) untouched.
+    unsafe {
+        asm!("mrs {d}, daif", "msr daifset, #2", d = out(reg) daif,
+            options(nomem, nostack, preserves_flags));
+    }
+    daif
+}
+
+/// M14.2: restore PSTATE.DAIF saved by [`local_irq_save`] (`msr daif, {d}`),
+/// returning I (and the rest of DAIF) to its prior state -- re-enabling IRQs iff
+/// they were unmasked before.
+pub fn local_irq_restore(daif: u64) {
+    // SAFETY: writes the previously-saved DAIF back; EL1-legal, no memory/stack
+    // effect, NZCV preserved.
+    unsafe {
+        asm!("msr daif, {d}", d = in(reg) daif, options(nomem, nostack, preserves_flags));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GIC + timer bring-up / teardown.
 // ---------------------------------------------------------------------------
 

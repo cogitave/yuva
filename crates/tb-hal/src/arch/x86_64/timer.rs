@@ -179,6 +179,42 @@ pub fn read_cycle_counter() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// M14.2: interrupt-mask save/restore -- the lost-wakeup-free critical-section
+// tool the blocking-recv path wraps around {empty-recheck -> register waiter ->
+// mark BLOCKED -> yield}. On a single core a sender can only run after the
+// receiver yields, so masking interrupts across that sequence makes it one
+// indivisible critical section: no send can interleave between the empty-check
+// and the block (the seL4 "kernel runs with interrupts disabled" guarantee).
+// ---------------------------------------------------------------------------
+
+/// M14.2: save RFLAGS and mask interrupts (`pushfq; pop; cli`), returning the
+/// RFLAGS value BEFORE the `cli`. `RFLAGS.IF` is bit 9, so the companion
+/// [`local_irq_restore`] re-enables interrupts iff they were enabled before --
+/// nested save/restore pairs therefore never wrongly unmask an outer section.
+pub fn local_irq_save() -> u64 {
+    let flags: u64;
+    // SAFETY: `pushfq` reads RFLAGS onto the stack, `pop {f}` lifts it into a
+    // GPR, `cli` clears IF. Ring-0 legal; it DOES use the stack (balanced
+    // push/pop), so NOT `nostack`. `preserves_flags` refers to the arithmetic
+    // condition flags, which neither the read nor `cli` (a system flag) disturbs.
+    unsafe {
+        asm!("pushfq", "pop {f}", "cli", f = out(reg) flags, options(preserves_flags));
+    }
+    flags
+}
+
+/// M14.2: restore the interrupt-enable state saved by [`local_irq_save`]:
+/// `sti` IFF `flags & (1 << 9)` (the saved `RFLAGS.IF`) was set, else leave
+/// interrupts masked. Never an unconditional `sti`.
+pub fn local_irq_restore(flags: u64) {
+    if flags & (1 << 9) != 0 {
+        // SAFETY: `sti` only sets IF; no memory/stack effect, condition flags
+        // preserved. Re-enables interrupts the caller had enabled before masking.
+        unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IRQ recognition (called from `trap.rs::x86_trap_handler`).
 // ---------------------------------------------------------------------------
 

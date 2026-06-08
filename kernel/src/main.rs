@@ -183,6 +183,30 @@ static STACK_AGENT_C: TaskStack<4096> = TaskStack::new();
 /// M13 agent D's KERNEL stack (per-agent isolation witness).
 static STACK_AGENT_D: TaskStack<4096> = TaskStack::new();
 
+// --- M14.2 blocking-recv bookkeeping (all in THIS forbid-class crate, all safe) -
+
+/// M14.2: the SENDER kernel task's stack (slot 11, the ONLY free MAX_TASKS slot).
+/// It delivers the sentinel that wakes the boot receiver parked off the run queue.
+static STACK_BLK_SENDER: TaskStack<4096> = TaskStack::new();
+
+/// M14.2: the agent slot the sender sends FROM (agent_c), stashed for `blk_sender`.
+static SEND_AGENT_SLOT: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// M14.2: the raw endpoint handle the sender sends ON (agent_c's `ep_a`).
+static SEND_EP_RAW: AtomicU64 = AtomicU64::new(0);
+/// M14.2: the boot task's slot, so the sender can poll `task_is_blocked(boot)`.
+static BLK_BOOT_SLOT: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// M14.2: set by the sender ONLY after it observed the receiver parked OFF the
+/// run queue (`task_is_blocked(boot)==true`) -- the direct "off the run queue"
+/// witness, established BEFORE the wake-causing send.
+static RECV_BLOCKED_OBSERVED: AtomicBool = AtomicBool::new(false);
+/// M14.2: set by the sender right after its wake-causing send completes.
+static BLK_SENT_DONE: AtomicBool = AtomicBool::new(false);
+
+/// M14.2: the distinctive sentinel the sender delivers and the woken receiver
+/// must observe. A directional C->D value, so an echo/wrong-ring bug surfaces as
+/// a wrong payload or a hang -- a loud failure, never a silent pass.
+const M14B_SENTINEL: u64 = 0xB10C_CED5;
+
 /// Agent A's manifest grants: a read/write/recall memory home + a readable
 /// budget. NO `EMIT_EXTERNAL` / `INVOKE_MODEL`, so its emit-external syscall is
 /// `Denied` (least privilege is the manifest's OMISSION, not a runtime check).
@@ -1921,6 +1945,79 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M14.1: payload OK\n"); // <-- the M14.1 DoD sub-marker
 
+    // --- M14.2: blocking-recv wired to the M9 preemptive scheduler -----------
+    // The deferred M14 Step-2: a receiver on an EMPTY channel BLOCKS (deschedules
+    // OFF the M9 run queue) and is made RUNNABLE again by a sender's delivery
+    // (runnable-on-send), LOST-WAKEUP-FREE. Demonstrated with the timer ARMED (the
+    // real M9 preemptive path, NOT a synchronous disarmed self-test): the BOOT
+    // task is the RECEIVER (it parks off the run queue), and ONE new kernel task
+    // in the free slot 11 is the SENDER, over a FRESH agent_c<->agent_d channel.
+    // Reuses M12's scheduler_init -> spawn -> timer_rearm -> round-trip ->
+    // timer_disarm template. The whole {empty-recheck -> register waiter -> mark
+    // BLOCKED -> yield} sequence runs under masked interrupts in tb-hal, so on a
+    // single core no send can interleave between the empty-check and the block ->
+    // no lost wakeup; a lost wakeup would instead hang -> QEMU/CI timeout (the
+    // fail-closed catch). ZERO new unsafe in this crate. DoD sub-marker:
+    // "M14.2: blocking-recv OK".
+    {
+        use tb_hal::caps::SysStatus;
+
+        // PHASE 0 -- reset the run queue to {boot} (so arming the timer does NOT
+        // resurrect M2/M9/M10/M12/M13's suspended tasks -- the M12 precedent) and
+        // open a FRESH bounded channel between the already-born agent_c (side 0,
+        // the SENDER's table) and agent_d (side 1, the RECEIVER's table).
+        tb_hal::scheduler_init();
+        tb_hal::set_irq_hook(tb_hal::schedule);
+        let (ep_a, ep_b) = match tb_hal::agent_channel_connect(agent_c, agent_d, 1) {
+            Some(x) => x,
+            None => m14b_fail("could not open the blocking-recv channel"),
+        };
+        // Stash what the sender task needs + the boot slot it polls; reset the
+        // observation flags (this region re-runs every boot).
+        SEND_AGENT_SLOT.store(agent_c.raw(), Ordering::Release);
+        SEND_EP_RAW.store(ep_a.raw(), Ordering::Release);
+        BLK_BOOT_SLOT.store(tb_hal::current_task().raw(), Ordering::Release);
+        RECV_BLOCKED_OBSERVED.store(false, Ordering::Release);
+        BLK_SENT_DONE.store(false, Ordering::Release);
+
+        // PHASE 1 -- spawn the SENDER into the free slot 11, then go preemptible.
+        let _sender = tb_hal::scheduler_spawn(STACK_BLK_SENDER.take(), blk_sender);
+        let switches_before = tb_hal::involuntary_switch_count();
+        tb_hal::timer_rearm();
+
+        // BLOCK: the boot RECEIVER recvs on an EMPTY channel -> it parks OFF the
+        // run queue HERE. The sender (slot 11) observes it blocked, delivers
+        // M14B_SENTINEL, and the runnable-on-send wake + the armed M9 timer's next
+        // schedule() switch this task back in to receive it. A lost wakeup -> this
+        // never returns -> QEMU/CI timeout (the intended fail-closed outcome).
+        let (st, payload, _moved) = tb_hal::agent_chan_recv_blocking(agent_d, ep_b)
+            .unwrap_or((SysStatus::BadCap as u32, 0, 0));
+
+        // STOP before the verdict (the M9/M12 discipline) so no further
+        // involuntary switch races the marker output.
+        tb_hal::timer_disarm();
+        let switches = tb_hal::involuntary_switch_count().wrapping_sub(switches_before);
+
+        if st != SysStatus::Ok as u32 {
+            m14b_fail("blocking recv did not return Ok after the wake");
+        }
+        if payload != M14B_SENTINEL {
+            m14b_fail("woken receiver observed the wrong payload (not the sentinel)");
+        }
+        if !RECV_BLOCKED_OBSERVED.load(Ordering::Acquire) {
+            m14b_fail("sender never observed the receiver parked off the run queue");
+        }
+        if !BLK_SENT_DONE.load(Ordering::Acquire) {
+            m14b_fail("sender's delivery did not complete");
+        }
+        if switches < 1 {
+            m14b_fail("no involuntary switch during the block (scheduler did not run other work)");
+        }
+        tb_hal::serial_write_str("ipc: receiver parked off the run queue, woken by send\n");
+    }
+
+    tb_hal::serial_write_str("M14.2: blocking-recv OK\n"); // <-- the M14.2 DoD sub-marker
+
     // --- M15: shared memory blocks + session blackboard ----------------------
     // A shared-memory BLOCK = one or more pinned M6 frames owned by an
     // ObjKind::Block capability, MAPPED into MULTIPLE agents' address spaces at
@@ -2792,6 +2889,68 @@ fn spin_d() {
         SPIN_D_COUNT.fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
     }
+}
+
+/// M14.2: the SENDER kernel task (slot 11). It (1) becomes preemptible, (2)
+/// waits until the boot RECEIVER is demonstrably parked OFF the run queue, then
+/// (3) delivers `M14B_SENTINEL` over agent_c's endpoint -- whose runnable-on-send
+/// wake makes the receiver RUNNABLE, after which the armed M9 timer's next
+/// `schedule()` switches back to it. The send (and its AGENTS borrow) runs UNDER
+/// MASKED INTERRUPTS so a timer tick cannot switch to the just-woken receiver
+/// while the borrow is live (the registry's single-`&mut`-at-a-time discipline).
+/// Then it parks forever (the boot task never yields back -- the M9/M12 spin-task
+/// precedent). Never returns.
+fn blk_sender() {
+    // Become preemptible: a freshly-activated task is entered through ctx_switch's
+    // plain return with interrupts masked, so it unmasks itself once so the armed
+    // timer can later drive schedule() back to the woken receiver.
+    tb_hal::irq_unmask();
+
+    let boot = Task::from_raw(BLK_BOOT_SLOT.load(Ordering::Acquire));
+    // Wait until the receiver has parked OFF the run queue. Bounded so a
+    // never-blocking receiver (a bug) is a loud failure, not an infinite spin;
+    // blk_sender stays preemptible here, so the receiver can run AND block.
+    let mut stall: u64 = 0;
+    const STALL_LIMIT: u64 = 2_000_000_000;
+    while !tb_hal::task_is_blocked(boot) {
+        stall += 1;
+        if stall > STALL_LIMIT {
+            m14b_fail("sender never observed the receiver block off the run queue");
+        }
+        core::hint::spin_loop();
+    }
+    // The receiver is demonstrably descheduled BEFORE we deliver -> the direct
+    // "off the run queue" witness.
+    RECV_BLOCKED_OBSERVED.store(true, Ordering::Release);
+
+    // Deliver the sentinel UNDER MASKED INTERRUPTS: the send's runnable-on-send
+    // wake makes the receiver RUNNABLE; masking guarantees no timer tick switches
+    // to it while this send still holds the AGENTS `&mut`. After we unmask, the
+    // next tick's schedule() performs the actual switch to the woken receiver.
+    let agent_c = Task::from_raw(SEND_AGENT_SLOT.load(Ordering::Acquire));
+    let ep_a = tb_hal::caps::Handle::from_raw(SEND_EP_RAW.load(Ordering::Acquire));
+    let guard = tb_hal::local_irq_save();
+    let (st, _) =
+        tb_hal::agent_chan_send(agent_c, ep_a, M14B_SENTINEL, 0).unwrap_or((u32::MAX, 0));
+    BLK_SENT_DONE.store(true, Ordering::Release);
+    tb_hal::local_irq_restore(guard);
+    if st != tb_hal::caps::SysStatus::Ok as u32 {
+        m14b_fail("sender's wake-causing send did not return Ok");
+    }
+
+    // Park forever: once woken, the boot receiver runs to the marker and disarms
+    // the timer; it never yields back here, so this task is simply abandoned.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// M14.2: fail-closed verdict for the blocking-recv self-test (report + halt).
+fn m14b_fail(why: &str) -> ! {
+    tb_hal::serial_write_str("M14.2: FAIL ");
+    tb_hal::serial_write_str(why);
+    tb_hal::serial_write_byte(b'\n');
+    tb_hal::halt()
 }
 
 /// M10 task G: runs in address space E (the `yield_to` fold-in flips the live

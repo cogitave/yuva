@@ -55,7 +55,13 @@ set -e
 printf '%s\n' "${OUTPUT}"
 
 if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}'"
+    # M14.2: explicit second assertion for the blocking-recv sub-marker (the
+    # final marker already transitively gates it; this is direct traceability).
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
+        exit 1
+    fi
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

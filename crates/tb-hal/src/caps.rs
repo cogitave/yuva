@@ -578,6 +578,24 @@ impl HandleTable {
         self.chan_recv_body(ep)
     }
 
+    /// M14.2: resolve `ep` to its shared channel core + this endpoint's `side`,
+    /// for the scheduler-aware blocking-recv facade
+    /// ([`crate::agent_chan_recv_blocking`]) -- which needs `(chan, side)` to
+    /// register its waiter on the inbox ring `1 - side` before it deschedules.
+    /// `None` if `ep` does not resolve or is not a channel endpoint (the facade
+    /// then surfaces `BadCap`). No rights gate: the recv READ gate already ran in
+    /// [`HandleTable::chan_recv`], and this only reads the same `(chan, side)` the
+    /// recv path itself uses. An `Rc` clone (no borrow is held), so it never
+    /// aliases the ring `RefCell` across the subsequent yield.
+    pub(crate) fn chan_of(&self, ep: Handle) -> Option<(Rc<crate::ipc::Channel>, u8)> {
+        let i = self.live(ep).ok()?;
+        let o = self.core.object_at(i).clone()?;
+        match &o.chan {
+            Some((c, s)) => Some((c.clone(), *s)),
+            None => None,
+        }
+    }
+
     /// M14.1 -- the BYTE-PAYLOAD send body the kernel facade
     /// [`crate::agent_chan_send_bytes`] calls. Mirrors the scalar `M_CHAN_SEND`
     /// dispatch arm exactly, plus a kernel-heap bounce buffer filled from the
@@ -676,6 +694,12 @@ impl HandleTable {
             bytes: Some(buf),
             cap: parked,
         });
+        // M14.2 runnable-on-send: wake any receiver parked on this outbox ring,
+        // AFTER the borrow is dropped (the scalar `M_CHAN_SEND` arm's discipline),
+        // so a blocking byte-payload receiver is woken too.
+        if let Some(t) = chan.take_waiter(side as usize) {
+            crate::sched_wake_task(t);
+        }
         SysStatus::Ok
     }
 
@@ -1093,6 +1117,17 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                 bytes: None,
                 cap: parked,
             });
+            // M14.2 runnable-on-send: now that a message is enqueued, wake any
+            // receiver parked OFF the run queue on THIS outbox ring (its inbox).
+            // `take_waiter` reads + clears AFTER the `push_back` borrow is dropped,
+            // and `sched_wake_task` is a pure atomic store (no table/ring
+            // re-borrow), so no reentrant `RefCell` borrow. Single-core, interrupts
+            // masked, and the receiver registered its waiter BEFORE it yielded ->
+            // this wake cannot be lost. Doing it HERE (not only in the lib.rs send
+            // facade) covers EVERY send path -- the real user-mode send syscall too.
+            if let Some(t) = chan.take_waiter(side as usize) {
+                crate::sched_wake_task(t);
+            }
             SysReturn::status(SysStatus::Ok)
         }
         // M14: RECV a message (READ gated above). The single-scalar SysReturn

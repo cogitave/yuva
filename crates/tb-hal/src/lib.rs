@@ -28,7 +28,7 @@
 #![deny(missing_docs)]
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 // M11: the capability subsystem (`caps`) needs heap-backed collections
 // (`Vec`/`Rc`). `alloc` is brought online crate-wide by the kernel's
@@ -806,6 +806,92 @@ static RUNQUEUE_LEN: AtomicUsize = AtomicUsize::new(0);
 /// asserts it crosses a threshold (proving a no-yield task really lost the CPU).
 static INVOLUNTARY_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// M14.2: blocking-recv run-state -- a receiver on an EMPTY channel parks OFF the
+// run queue (RUNNABLE -> BLOCKED) and a sender's delivery makes it RUNNABLE
+// again (runnable-on-send). A PARALLEL `TASK_STATE[]` array that `schedule()`
+// SKIPS when BLOCKED -- NOT run-queue compaction: skipping is O(1) per entry,
+// keeps slot indices stable, and is byte-identical M9 round-robin when nothing
+// is blocked (so M2/M9/M10/M12 stay green). The block/wake POLICY lives HERE
+// (the scheduler-owning layer); caps.rs/ipc.rs stay mechanism-only + forbid(unsafe).
+// ---------------------------------------------------------------------------
+
+/// M14.2: a task that is on the scheduler's round-robin (the default).
+const TASK_RUNNABLE: u8 = 0;
+/// M14.2: a task parked OFF the run queue (descheduled by
+/// [`block_current_and_yield`], re-made RUNNABLE by [`sched_wake_task`]).
+const TASK_BLOCKED: u8 = 1;
+
+/// M14.2: per-task run state (RUNNABLE/BLOCKED), indexed by task slot. Safe
+/// atomics: written from the foreground (a blocking receiver) AND from the send
+/// path (the wake), read by [`schedule`] from interrupt context, all single-core.
+static TASK_STATE: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(TASK_RUNNABLE) }; MAX_TASKS];
+
+/// M14.2: `true` iff task `t` is parked BLOCKED off the run queue (descheduled on
+/// an empty-channel receive, awaiting a sender's wake). The self-test's SENDER
+/// polls this to prove the receiver is demonstrably OFF the run queue BEFORE it
+/// delivers -- the direct "parked off the run queue" witness.
+pub fn task_is_blocked(t: Task) -> bool {
+    let slot = t.raw();
+    slot < MAX_TASKS && TASK_STATE[slot].load(Ordering::Acquire) == TASK_BLOCKED
+}
+
+/// M14.2: mark task `slot` RUNNABLE -- the runnable-on-send wake. Called from the
+/// `M_CHAN_SEND` dispatch arm (crate-internal) AFTER a message is enqueued and
+/// the ring borrow is dropped, so EVERY send path wakes a blocked receiver. A
+/// pure atomic store touching no table/ring, so it never re-borrows the `RefCell`
+/// the send just released (the caps.rs `forbid(unsafe)` discipline is preserved).
+pub(crate) fn sched_wake_task(slot: u32) {
+    let s = slot as usize;
+    if s < MAX_TASKS {
+        TASK_STATE[s].store(TASK_RUNNABLE, Ordering::Release);
+    }
+}
+
+/// M14.2: deschedule the CURRENT task (mark it BLOCKED) and hand the CPU to a
+/// RUNNABLE peer. Round-robins the run queue from this task's position for a
+/// RUNNABLE task != self and [`yield_to`]s it. If NONE exists it is a genuine
+/// single-core deadlock (TABOS has no idle task yet), reported fail-closed --
+/// the minimal idle-task/WFI path is the documented forward item.
+///
+/// Called ONLY from [`agent_chan_recv_blocking`] with interrupts MASKED, so the
+/// whole {empty-recheck -> register waiter -> mark BLOCKED -> yield} sequence is
+/// one indivisible critical section: on a single core a sender cannot run until
+/// this task yields, and the waiter was registered BEFORE the yield, so no send
+/// can be lost (the seL4 "kernel runs with interrupts disabled" guarantee).
+pub(crate) fn block_current_and_yield() {
+    let current = CURRENT_TASK.load(Ordering::Relaxed);
+    if current < MAX_TASKS {
+        TASK_STATE[current].store(TASK_BLOCKED, Ordering::Release);
+    }
+    let len = RUNQUEUE_LEN.load(Ordering::Acquire);
+    // Find this task's position in the queue (head fallback, as M9 schedule()).
+    let mut pos = 0;
+    let mut i = 0;
+    while i < len {
+        if RUNQUEUE[i].load(Ordering::Relaxed) == current {
+            pos = i;
+            break;
+        }
+        i += 1;
+    }
+    // Scan the successors for the first RUNNABLE peer and switch to it.
+    let mut step = 1;
+    while step <= len {
+        let cand = RUNQUEUE[(pos + step) % len].load(Ordering::Relaxed);
+        if cand != usize::MAX
+            && cand != current
+            && cand < MAX_TASKS
+            && TASK_STATE[cand].load(Ordering::Acquire) == TASK_RUNNABLE
+        {
+            yield_to(Task(cand));
+            return;
+        }
+        step += 1;
+    }
+    task_api_fatal("deadlock: all tasks blocked on IPC");
+}
+
 /// Initialise the M9 round-robin scheduler: register the CURRENT context (the
 /// bootstrap task `rust_main` runs on) as the first runnable entry. Call ONCE,
 /// before [`scheduler_spawn`] and before re-arming the timer; pair with
@@ -850,20 +936,36 @@ pub fn schedule(_irq_id: u64) {
         return; // nothing else runnable -> resume the interrupted task
     }
     let current = CURRENT_TASK.load(Ordering::Relaxed);
-    // Round-robin: the successor (mod len) of `current`'s position in the queue.
-    // `next` defaults to the head, which is also the correct fallback if the
-    // current task is somehow not enqueued (it never is in M9).
-    let mut next = RUNQUEUE[0].load(Ordering::Relaxed);
+    // Find `current`'s position in the queue (the head is the fallback if it is
+    // somehow not enqueued, which it never is in M9/M12).
+    let mut pos = 0;
     let mut i = 0;
     while i < len {
         if RUNQUEUE[i].load(Ordering::Relaxed) == current {
-            next = RUNQUEUE[(i + 1) % len].load(Ordering::Relaxed);
+            pos = i;
             break;
         }
         i += 1;
     }
+    // M14.2: pick the next RUNNABLE successor (mod len), SKIPPING any BLOCKED
+    // entry (a receiver parked off the run queue). With nothing blocked this is
+    // byte-identical M9 round-robin -- the immediate successor -- so M2/M9/M10/M12
+    // stay green; the skip only ever fires once a blocking receiver exists.
+    let mut next = current;
+    let mut step = 1;
+    while step <= len {
+        let cand = RUNQUEUE[(pos + step) % len].load(Ordering::Relaxed);
+        if cand != usize::MAX
+            && cand < MAX_TASKS
+            && TASK_STATE[cand].load(Ordering::Acquire) == TASK_RUNNABLE
+        {
+            next = cand;
+            break;
+        }
+        step += 1;
+    }
     if next == current {
-        return; // only one distinct runnable task -> no switch
+        return; // only one runnable task (others blocked/absent) -> no switch
     }
     INVOLUNTARY_SWITCHES.fetch_add(1, Ordering::Relaxed);
     // Reuse the M2 cooperative switch: it saves the callee-saved continuation
@@ -903,6 +1005,23 @@ pub fn timer_disarm() {
 /// preemption).
 pub fn irq_unmask() {
     arch::sched_irq_unmask();
+}
+
+/// M14.2: save the interrupt-enable state and MASK interrupts, returning an
+/// opaque guard for [`local_irq_restore`]. The lost-wakeup-free critical-section
+/// primitive: the unsafe arch asm (x86_64 `pushfq;cli` / aarch64 `mrs daif; msr
+/// daifset,#2`) is confined to `arch::*::timer`; this is the SAFE facade the
+/// kernel calls (e.g. to wrap an `AGENTS`-touching send a timer must not preempt
+/// while a blocked receiver it just woke could be scheduled in). Nestable:
+/// [`local_irq_restore`] re-enables interrupts ONLY if they were enabled before.
+pub fn local_irq_save() -> u64 {
+    arch::local_irq_save()
+}
+
+/// M14.2: restore the interrupt-enable state saved by [`local_irq_save`] --
+/// re-enabling interrupts iff they were enabled before the matching save.
+pub fn local_irq_restore(guard: u64) {
+    arch::local_irq_restore(guard);
 }
 
 // ===========================================================================
@@ -1507,6 +1626,64 @@ pub fn agent_chan_recv_full(t: Task, ep: caps::Handle) -> Option<(u32, u64, u64)
     let ap = AGENTS.slot(slot).as_mut()?;
     let (st, payload, moved) = ap.table.chan_recv(ep);
     Some((st as u32, payload, moved))
+}
+
+/// M14.2: the SCHEDULER-AWARE blocking receive -- the deferred M14 Step-2. Runs
+/// the READ-gated non-blocking recv against `t`'s table; on an EMPTY-but-open
+/// inbox (`WouldBlock`) it registers the CURRENT task as the channel's waiter and
+/// DESCHEDULES it OFF the M9 run queue ([`block_current_and_yield`]), to be made
+/// RUNNABLE again by a sender's [`sched_wake_task`] (fired from the `M_CHAN_SEND`
+/// arm). Returns `(status, inline payload, moved-handle)` once a message arrives
+/// (or a non-`WouldBlock` terminal status like `PeerClosed`/`BadCap`); `None` if
+/// `t` is not an agent or `ep` is not a channel endpoint.
+///
+/// LOST-WAKEUP-FREE protocol (the seL4 single-core argument): the ENTIRE wait
+/// loop runs under [`arch::local_irq_save`]-masked interrupts, so {empty-recheck
+/// -> register waiter -> mark BLOCKED -> yield} is ONE indivisible critical
+/// section. On a single core a sender cannot run until THIS task yields, and the
+/// waiter is registered BEFORE the yield, so no send can interleave between the
+/// empty-check and the block -> no wakeup is ever lost. The `while`-loop
+/// re-checks the inbox after every wake, so a spurious wakeup just re-parks.
+/// Preserves M14 semantics for non-blocking callers: this is an ADDITIVE mode,
+/// not a replacement for [`agent_chan_recv_full`]'s synchronous `WouldBlock`.
+pub fn agent_chan_recv_blocking(t: Task, ep: caps::Handle) -> Option<(u32, u64, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    // Resolve the channel ONCE up front (the endpoint identity is stable for the
+    // whole session). `None` if `ep` is not a live channel endpoint -> BadCap to
+    // the caller WITHOUT ever masking interrupts.
+    let (chan, side) = {
+        let ap = AGENTS.slot(slot).as_mut()?;
+        ap.table.chan_of(ep)?
+    };
+    // The wait loop is one masked critical section (lost-wakeup-free).
+    let guard = arch::local_irq_save();
+    let result = loop {
+        // Non-blocking recv against `t`'s OWN table. The AGENTS borrow is dropped
+        // at the end of THIS block, so no table/ring borrow is held across the
+        // yield below (the registry's single-`&mut`-at-a-time discipline).
+        let r = {
+            match AGENTS.slot(slot).as_mut() {
+                Some(ap) => ap.table.chan_recv(ep),
+                None => break (caps::SysStatus::BadCap, 0u64, 0u64),
+            }
+        };
+        if r.0 != caps::SysStatus::WouldBlock {
+            break r;
+        }
+        // EMPTY inbox: register THIS task as the waiter on its inbox ring
+        // (`1 - side`) and deschedule. The sender on the peer side pushes that
+        // SAME physical ring and wakes `waiter[1 - side]`, so they rendezvous.
+        // Both steps run under the same interrupt mask (no send can interleave).
+        chan.set_waiter((1 - side) as usize, current_task().raw() as u32);
+        block_current_and_yield();
+        // ... resumes HERE once a sender has made us RUNNABLE and the armed M9
+        // timer switched back to us; the loop re-checks the inbox under the mask.
+    };
+    arch::local_irq_restore(guard);
+    Some((result.0 as u32, result.1, result.2))
 }
 
 /// M14: run an arbitrary numbered, capability-checked [`caps::dispatch`] against

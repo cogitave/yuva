@@ -69,7 +69,14 @@ set -e
 printf '%s\n' "${OUTPUT}"
 
 if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
-  echo ">> PASS: observed marker '${MARKER}'" >&2
+  # M14.2: an explicit second assertion for the blocking-recv sub-marker (the
+  # final marker already transitively gates it -- a failed self-test halts before
+  # L2.0 -- but this makes the traceability direct and fail-closed.)
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
+    echo ">> FAIL: final marker present but 'M14.2: blocking-recv OK' missing" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

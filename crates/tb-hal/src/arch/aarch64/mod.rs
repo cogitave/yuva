@@ -45,7 +45,10 @@ pub use mmu::{
 pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 pub use serial::{serial_init, serial_write_byte};
-pub use timer::{read_cycle_counter, sched_irq_unmask, timer_demo, timer_disarm, timer_rearm};
+pub use timer::{
+    local_irq_restore, local_irq_save, read_cycle_counter, sched_irq_unmask, timer_demo,
+    timer_disarm, timer_rearm,
+};
 pub use trap::breakpoint;
 // M14.1: the safe cross-address-space user-buffer copy surface (the walk + the
 // byte copy via the EL1 identity alias), re-exported through `arch/mod.rs` so

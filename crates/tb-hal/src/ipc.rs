@@ -43,6 +43,11 @@ use crate::caps::{Object, Rights};
 /// pressure at `MAX_PAYLOAD * ring_depth` and matches seL4's one-page IPC buffer.
 pub const MAX_PAYLOAD: usize = 4096;
 
+/// M14.2: the `waiter[]` sentinel meaning "no receiver is parked on this ring".
+/// A real entry is a task-slot id (`< MAX_TASKS`), so `u32::MAX` can never
+/// collide with one.
+pub const NO_WAITER: u32 = u32::MAX;
+
 /// One in-transit message: an inline scalar `payload` (the "bytes" at the M14
 /// inline-ABI), an OPTIONAL variable-length BYTE payload (M14.1, the kernel-heap
 /// bounce buffer), plus an OPTIONAL parked capability -- the moved cap's object
@@ -89,6 +94,16 @@ pub struct Ring {
 pub struct Channel {
     dir: [RefCell<Ring>; 2],
     open: [Cell<bool>; 2],
+    /// M14.2: the per-direction blocking-receiver slot. `waiter[r]` holds the
+    /// task-slot id of the (single) receiver parked OFF the run queue waiting on
+    /// ring `r`'s data, or [`NO_WAITER`] when none is parked. Keyed by the shared
+    /// `dir[]`/ring index so a receiver on side `s` (which waits on its inbox ring
+    /// `1 - s`) and a sender on side `1 - s` (whose OUTBOX is that same ring)
+    /// rendezvous on ONE index. A two-endpoint, point-to-point channel has exactly
+    /// one reader per direction, so a single slot -- not a FIFO -- suffices; the
+    /// intrusive N-waiter queue is the forward path for shared server endpoints.
+    /// `Cell` only, so the module stays `#![forbid(unsafe_code)]`.
+    waiter: [Cell<u32>; 2],
 }
 
 /// Create a fresh channel core with two empty rings, each bounded at `bound`.
@@ -107,6 +122,7 @@ pub fn create(bound: usize) -> Rc<Channel> {
             }),
         ],
         open: [Cell::new(true), Cell::new(true)],
+        waiter: [Cell::new(NO_WAITER), Cell::new(NO_WAITER)],
     })
 }
 
@@ -130,5 +146,28 @@ impl Channel {
     /// backlog is left intact for it to drain before it observes `PeerClosed`).
     pub fn close_side(&self, side: u8) {
         self.open[side as usize].set(false);
+    }
+
+    /// M14.2: register `task` as the (single) receiver parked on ring `ring` (its
+    /// inbox). Overwrites any prior occupant -- a point-to-point direction has
+    /// exactly one reader, so two concurrent waiters on one ring cannot arise. The
+    /// receiver calls this UNDER MASKED INTERRUPTS, right before it deschedules, so
+    /// the registration is visible to any later sender (the lost-wakeup-free seam).
+    pub fn set_waiter(&self, ring: usize, task: u32) {
+        self.waiter[ring & 1].set(task);
+    }
+
+    /// M14.2: read-AND-CLEAR the receiver parked on ring `ring`: returns `Some(t)`
+    /// (resetting the slot to [`NO_WAITER`]) iff one was parked, else `None`. The
+    /// SENDER calls this on its OUTBOX ring AFTER it has enqueued the message (and
+    /// dropped the ring borrow), so the woken receiver is taken exactly once and
+    /// will observe the just-pushed message on its post-wake re-check.
+    pub fn take_waiter(&self, ring: usize) -> Option<u32> {
+        let t = self.waiter[ring & 1].replace(NO_WAITER);
+        if t == NO_WAITER {
+            None
+        } else {
+            Some(t)
+        }
     }
 }
