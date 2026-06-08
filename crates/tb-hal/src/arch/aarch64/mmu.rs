@@ -680,3 +680,131 @@ pub fn map_heap_frames(start_va: u64, n: usize) -> usize {
     }
     mapped
 }
+
+// ===========================================================================
+// M10: per-entity address spaces (memory isolation).
+//
+// Symmetric with the x86_64 backend (NO TTBR1/TTBR0 split): `address_space_new`
+// frame-allocs a fresh L1 table and COPIES all 512 entries of the live
+// TTBR0_EL1 L1 into it, so the kernel half (Device/RAM identity blocks + the
+// M3/M4/M7 subtrees) is shared BY REFERENCE. `map_in_root` splices a private L3
+// leaf into an EXPLICIT (not-live) root through the same `ensure_table` walk the
+// heap mapper uses; the test VA lives in a vacant root slot (`L1[6]`).
+// `switch_root` installs TTBR0_EL1 then `isb; tlbi vmalle1is; dsb ish; isb` --
+// with no ASID a global EL1&0 flush is required so a prior space's translation
+// of the same VA is not reused. All the unsafe + barriers live here.
+// ===========================================================================
+
+/// M10: create a fresh address space. Frame-allocate a new L1 table (one M6
+/// frame) and COPY all 512 entries of the LIVE L1 (from TTBR0_EL1) into it, so
+/// the whole kernel half is shared by reference. Returns the new L1 PA, or
+/// `None` on physical-frame OOM.
+pub fn address_space_new() -> Option<u64> {
+    let root = crate::frame_alloc()?;
+    // SAFETY: `root` is a 4 KiB-aligned M6 frame in the identity-mapped RAM
+    // gigabyte (PA == VA), exclusively owned here; TTBR0_EL1 holds the live L1
+    // base (also identity-mapped). Copy all 512 entries of the live L1 into the
+    // new table -- the kernel half is then shared by reference. Volatile writes.
+    unsafe {
+        let src = (read_ttbr0_el1() & TTBR_BADDR_MASK) as *const u64;
+        let dst = root as *mut u64;
+        let mut i = 0;
+        while i < ENTRIES {
+            write_volatile(dst.add(i), read_volatile(src.add(i)));
+            i += 1;
+        }
+    }
+    // Publish the copied table to the walker before it can be installed.
+    dsb_ishst();
+    Some(root)
+}
+
+/// M10: map one private 4 KiB page `va` -> `pa` into the EXPLICIT root at
+/// `root_pa` (NOT the live TTBR0_EL1), building any missing L2/L3 from M6
+/// frames. `va` must sit in a vacant root slot (`L1[6]`), so the new entry lands
+/// only in THIS root. Leaf = Normal-WB, EL1 RW (read-only if `!writable`),
+/// no-execute. `false` on physical-frame OOM.
+pub fn map_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> bool {
+    // SAFETY: `root_pa` is a 4 KiB-aligned L1 frame from `address_space_new` in
+    // the identity-mapped RAM gigabyte (PA == VA); every intermediate table
+    // `ensure_table` pulls is likewise an identity-mapped M6 frame. The root is
+    // NOT live, so no live translation is disturbed.
+    let ok = unsafe { map_one_in_root(root_pa, va, pa, writable) };
+    if ok {
+        // Publish the new descriptors to the table walker.
+        dsb_ishst();
+        isb();
+    }
+    ok
+}
+
+/// Splice a single private leaf into the explicit root `root_pa`. Returns
+/// `false` on physical-frame OOM (intermediate tables retained, never a
+/// half-mapped page).
+///
+/// # Safety
+/// `root_pa` is a 4 KiB-aligned L1 frame in identity-mapped RAM owned by the
+/// caller (not the live root); `va`/`pa` are 4 KiB-aligned. Writes are volatile;
+/// the caller publishes them with `dsb ishst; isb`.
+unsafe fn map_one_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> bool {
+    let l1 = root_pa as *mut u64;
+    let l2 = match ensure_table(l1, level_index(va, SHIFT_1G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let l3 = match ensure_table(l2, level_index(va, SHIFT_2M)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let mut leaf = PAGE_KERNEL_RW_NX;
+    if !writable {
+        leaf |= 1 << 7; // AP[2] = 1 -> EL1 read-only
+    }
+    write_volatile(l3.add(level_index(va, SHIFT_4K)), make_entry(pa, leaf));
+    true
+}
+
+/// M10: make the address space whose L1 PA is `root_pa` live: install it in
+/// TTBR0_EL1, then `isb; tlbi vmalle1is; dsb ish; isb`. With no ASID a global
+/// EL1&0 TLB flush is required so a previous space's translation of the same VA
+/// is dropped; every entity root shares an identical kernel half, so this code,
+/// the stack and serial stay valid across the switch.
+pub fn switch_root(root_pa: u64) {
+    // SAFETY: `root_pa` is a 4 KiB-aligned L1 table from `address_space_new` (a
+    // copy of the live kernel root + optional private leaves), valid as a
+    // TTBR0_EL1 BADDR. The `isb` after the `msr` makes the new root active, the
+    // `tlbi vmalle1is` drops every stale stage-1 EL1&0 entry (inner shareable),
+    // and the trailing `dsb ish; isb` complete + synchronize it.
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {root}",
+            "isb",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            root = in(reg) (root_pa & TTBR_BADDR_MASK),
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// M10: the PA of the LIVE top-level page table (TTBR0_EL1's L1 base, ASID/CnP
+/// bits masked off). Used to capture the default boot root at first space
+/// creation.
+pub fn current_root() -> u64 {
+    read_ttbr0_el1() & TTBR_BADDR_MASK
+}
+
+/// M10: re-assert M3. `true` iff the M3 self-test VA (`TEST_VA` = 0x8000_0000)
+/// still reads its post-remap magic under the LIVE root. The M3 mapping hangs
+/// off `L1[2]`, copied by reference into every space, so this reads true under
+/// the boot root AND any entity root -- proving the M3 kernel-half mapping
+/// survives every address-space switch.
+pub fn m3_test_va_intact() -> bool {
+    // The M3 self-test left TEST_VA mapped to FRAME_B carrying this magic
+    // (mirrors the MAGIC_B local in `mmu_selftest`).
+    const M3_MAGIC_B: u64 = 0xB22B_B22B_CAFE_F00D;
+    // SAFETY: TEST_VA is mapped Normal-WB in the shared kernel half present in
+    // every root; an aligned volatile u64 load.
+    unsafe { read_volatile(TEST_VA as *const u64) == M3_MAGIC_B }
+}

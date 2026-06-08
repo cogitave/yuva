@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M9: preemptive scheduler).
+# scripts/run-aarch64.sh -- QEMU `virt` runner (milestone M10: per-agent address spaces).
 #
 # Boots the aarch64 tb-os image under QEMU, captures the PL011 serial stream,
-# and asserts the executable Definition-of-Done marker "M9: preempt OK" (on a
-# timer tick the kernel involuntarily round-robin switches kernel tasks from the
-# EL1 IRQ vector). M0's hello, M1's trap round-trip, M2's ping-pong, "M3: mmu OK",
-# "M4: user/ring OK", "M5: alloc OK", "M6: frame alloc OK", "M7: heap OK" and
-# "M8: timer OK" all print earlier in the same boot.
+# and asserts the executable Definition-of-Done marker "M10: addrspace OK" (each
+# schedulable entity runs in its own top-level page table -- memory isolation --
+# while the kernel half stays mapped and the switch folds into the M9 context
+# switch). M0's hello, M1's trap round-trip, M2's ping-pong, "M3: mmu OK",
+# "M4: user/ring OK", "M5: alloc OK", "M6: frame alloc OK", "M7: heap OK",
+# "M8: timer OK" and "M9: preempt OK" all print earlier in the same boot.
 # Doubles as the cargo runner for target aarch64-tabos-none (cargo passes the
 # freshly built ELF as $1) and is runnable by hand on WSL2.
 #
@@ -23,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M9: preempt OK"
+MARKER="M10: addrspace OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

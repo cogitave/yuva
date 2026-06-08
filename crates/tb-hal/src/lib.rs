@@ -297,6 +297,16 @@ pub fn yield_to(next: Task) {
         task_api_fatal("yield_to: target has no saved context");
     }
     CURRENT_TASK.store(next.0, Ordering::Relaxed);
+    // M10: fold the address-space switch into the cooperative/preemptive switch.
+    // BEFORE the register switch, flip the top-level page-table root to `next`'s
+    // space (when it differs from `prev`'s), so `ctx_switch` reads/writes the
+    // next task's stack under the correct translation. Every entity root shares
+    // the kernel half, so this code, the stacks and serial stay mapped across
+    // the flip. A no-op when both tasks use the same root -- the M2/M9 case,
+    // where every task is the default boot space -- so pre-M10 boots are
+    // byte-for-byte unchanged (no control-register touch, even while the
+    // aarch64 MMU is still OFF during M2).
+    switch_address_space(prev, next.0);
     // SAFETY: `next_sp` was produced by `arch::task_stack_init` (fabricated
     // frame) or a previous `ctx_switch` save; both leave a well-formed
     // callee-saved frame at that SP. `TASK_SP[prev].as_ptr()` is a valid
@@ -872,4 +882,189 @@ pub fn timer_disarm() {
 /// preemption).
 pub fn irq_unmask() {
     arch::sched_irq_unmask();
+}
+
+// ===========================================================================
+// M10: per-entity address spaces (memory isolation)
+// ===========================================================================
+//
+// Each schedulable entity runs in its OWN top-level page table, so one entity
+// cannot read/write another's private memory, while the KERNEL half stays
+// mapped across every switch. The mechanism is deliberately SYMMETRIC across
+// both arches (no TTBR1/TTBR0 split -- that textbook refinement, with ASIDs and
+// PCID, is deferred to M11/M12): `arch::address_space_new` frame-allocates a
+// fresh top-level table and COPIES the entire live kernel root into it, so every
+// existing kernel mapping (identity RAM, serial, the M7 heap window, the M8
+// device window, the M3 test mapping) is shared BY REFERENCE -- the kernel half
+// is byte-identical in every entity root, which is why the kernel stack, code
+// and serial keep working through any switch. Private pages go into a top-level
+// slot the kernel root leaves vacant (x86_64 `PML4[4]`, aarch64 `L1[6]`) via the
+// new `arch::map_in_root` primitive, so writing one never affects the kernel
+// root or another entity. The switch FOLDS INTO `yield_to` through a parallel
+// `TASK_AS[]` of per-task roots, flipping the live root only when the next
+// task's root differs from the previous task's.
+//
+// CAVEAT (defended against): because each entity root is a COPY taken at create
+// time, a NEW top-level KERNEL entry created AFTER an `AddressSpace` exists would
+// NOT propagate into already-created spaces. None happens during M10's self-test
+// (every kernel top-level slot the test relies on -- identity, heap, device,
+// LAPIC, the M3 subtree -- predates the first `address_space_new`), and the
+// private test VA is the only top-level entry M10 adds, into entity roots only.
+// M11/M12 will either pre-reserve the kernel top-level slots or move to the
+// TTBR1/higher-half split so kernel growth propagates automatically.
+
+/// Per-task top-level page-table root PA (installed in CR3 / TTBR0_EL1), indexed
+/// by task slot. `0` is the sentinel "the default boot space" (every task before
+/// M10 keeps it). Written by [`task_set_address_space`], read by the [`yield_to`]
+/// address-space fold-in.
+static TASK_AS: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+
+/// The default boot top-level root PA, captured the first time an
+/// [`AddressSpace`] is created (when the live root still IS the boot root every
+/// space is copied from). `0` until captured. [`yield_to`] resolves the sentinel
+/// `0` in [`TASK_AS`] to this when switching back to a default-space task.
+static BOOT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// An opaque handle to one address space: the physical address of its private
+/// top-level page table (x86_64 PML4 / aarch64 L1). Created by
+/// [`address_space_new`] as a COPY of the live kernel root, so the kernel half
+/// is shared by reference; private pages added with [`map_in_space`] are visible
+/// ONLY through this root. `Copy`, with a raw-PA accessor, so the
+/// `#![forbid(unsafe_code)]` kernel can stash it (e.g. for the cross-space
+/// fault-recovery hook) and the M11/M12 agent runtime can extend it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddressSpace {
+    root: u64,
+}
+
+impl AddressSpace {
+    /// The physical address of this space's top-level page table -- the value
+    /// installed in CR3 / TTBR0_EL1 to make it the live address space.
+    pub fn root_pa(self) -> u64 {
+        self.root
+    }
+}
+
+/// Create a fresh address space: allocate a top-level page table (one M6 frame)
+/// and copy the ENTIRE live kernel root into it, so the kernel half is shared by
+/// reference and every entity sees identical kernel mappings. Returns `None` on
+/// physical-frame OOM (fail-closed). Captures the default boot root on first use.
+pub fn address_space_new() -> Option<AddressSpace> {
+    let root = arch::address_space_new()?;
+    // Capture the boot root once: at first-create the live root the copy was
+    // taken from IS the boot root (no space has been switched to yet).
+    let _ = BOOT_ROOT.compare_exchange(
+        0,
+        arch::current_root(),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    Some(AddressSpace { root })
+}
+
+/// Map one private 4 KiB page `va` -> physical `pa` into `space`'s OWN root (NOT
+/// the live root), building intermediate tables from M6 frames as needed. `va`
+/// MUST sit in a top-level slot the kernel does not use, so writing it never
+/// touches the shared kernel half or another space. `true` on success, `false`
+/// on physical-frame OOM.
+pub fn map_in_space(space: AddressSpace, va: u64, pa: u64, writable: bool) -> bool {
+    arch::map_in_root(space.root, va, pa, writable)
+}
+
+/// Make `space` the live address space (install its root in CR3 / TTBR0_EL1 with
+/// the arch TLB + barrier ceremony). The shared kernel half keeps the caller's
+/// stack, code and serial valid across the flip.
+pub fn address_space_switch(space: AddressSpace) {
+    arch::switch_root(space.root);
+}
+
+/// Re-install the default boot root as the live address space (a no-op if no
+/// space has been created yet, i.e. the boot root was never captured).
+pub fn address_space_switch_default() {
+    let r = BOOT_ROOT.load(Ordering::Acquire);
+    if r != 0 {
+        arch::switch_root(r);
+    }
+}
+
+/// Make the space whose top-level root PA is `root_pa` the live address space --
+/// the raw-PA twin of [`address_space_switch`], used by the M10 cross-space
+/// fault-recovery trap hook (which stashes the home root in an `AtomicU64`).
+/// Every root shares the kernel half, so the faulting handler's own stack, code
+/// and serial survive the flip.
+pub fn address_space_switch_root(root_pa: u64) {
+    arch::switch_root(root_pa);
+}
+
+/// Assign `space` to `task`, so the next [`yield_to`] into `task` folds in a
+/// switch to `space`'s root (and back to the default root when yielding to a
+/// task with no space). Fatal on an invalid handle.
+pub fn task_set_address_space(task: Task, space: AddressSpace) {
+    if task.raw() >= MAX_TASKS {
+        task_api_fatal("task_set_address_space: invalid task handle");
+    }
+    TASK_AS[task.raw()].store(space.root, Ordering::Release);
+}
+
+/// The [`yield_to`] address-space fold-in: flip the live top-level page-table
+/// root from `prev`'s space to `next`'s space when they differ, resolving the
+/// sentinel `0` (no space assigned) to the captured default boot root. A
+/// complete no-op -- touching NO control register -- when both tasks share a
+/// root (the M2/M9 case, where every task is the default space), so cooperative
+/// and preemptive switches are byte-for-byte unchanged for pre-M10 milestones
+/// (including while the aarch64 MMU is still OFF during M2).
+fn switch_address_space(prev: usize, next: usize) {
+    let prev_as = TASK_AS[prev].load(Ordering::Relaxed);
+    let next_as = TASK_AS[next].load(Ordering::Relaxed);
+    if prev_as == next_as {
+        return; // same root (incl. both == 0, the default): nothing to flip
+    }
+    // Resolve the sentinel 0 (default space) to the real boot-root PA.
+    let target = if next_as == 0 {
+        BOOT_ROOT.load(Ordering::Acquire)
+    } else {
+        next_as
+    };
+    if target == 0 {
+        return; // boot root not captured yet (no AddressSpace created): no-op
+    }
+    arch::switch_root(target);
+}
+
+/// M10 self-test primitive: write `val` THROUGH virtual address `va`, then read
+/// it back and return what was observed. Confined to tb-hal because the
+/// `#![forbid(unsafe_code)]` kernel cannot deref a raw VA; a task uses it under
+/// its OWN space's root to write+verify its private magic at the shared test VA.
+pub fn addr_store_load(va: u64, val: u64) -> u64 {
+    // SAFETY: `va` is a self-test address the caller has mapped RW into the LIVE
+    // address space (its own space's private page). A single aligned volatile
+    // u64 store + load; `read_volatile` stops the optimiser eliding the
+    // round-trip. The kernel half (this code/stack) is mapped in every space.
+    unsafe {
+        let p = va as *mut u64;
+        core::ptr::write_volatile(p, val);
+        core::ptr::read_volatile(p)
+    }
+}
+
+/// M10 self-test primitive: read the u64 at virtual address `va`. Confined to
+/// tb-hal (raw deref). The kernel uses it to read a space's private magic under
+/// that space's root (isolation cross-check) and to PROVOKE the cross-space
+/// fault -- reading a VA mapped only in another space, under a root where it is
+/// vacant, takes a page fault into the registered trap hook, which records it
+/// and (guarded resume) flips to a space where the VA IS mapped before the
+/// faulting instruction is re-executed.
+pub fn addr_load(va: u64) -> u64 {
+    // SAFETY: a single aligned volatile u64 load. When `va` is unmapped in the
+    // live space this is the access that intentionally faults; the trap hook
+    // recovers the translation before the instruction is restarted.
+    unsafe { core::ptr::read_volatile(va as *const u64) }
+}
+
+/// M10: re-assert M3 across address-space switches. `true` iff the M3 self-test
+/// VA still reads its post-remap magic under the LIVE root -- proving the M3
+/// mapping (part of the shared kernel half copied into every space) survives
+/// every address-space switch. tb-hal owns the raw read + the expected magic.
+pub fn m3_test_va_intact() -> bool {
+    arch::m3_test_va_intact()
 }

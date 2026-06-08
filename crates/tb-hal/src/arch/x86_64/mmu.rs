@@ -613,3 +613,106 @@ pub(super) fn map_device_page(va: u64, pa: u64) -> bool {
     let pml4 = unsafe { (read_cr3() & PTE_ADDR_MASK) as *mut u64 };
     unsafe { map_one_device_page(pml4, va, pa) }
 }
+
+// ===========================================================================
+// M10: per-entity address spaces (memory isolation).
+//
+// A symmetric, low-risk design (NO TTBR1/TTBR0 split, mirrored on aarch64):
+// `address_space_new` frame-allocs a fresh PML4 and COPIES all 512 entries of
+// the live CR3 PML4 into it, so every kernel mapping (identity RAM, the M4 user
+// window, the M7 heap window, the M8 LAPIC window, the M3 test mapping) is
+// shared BY REFERENCE and the kernel half is identical in every entity root.
+// `map_in_root` splices a private leaf into an EXPLICIT (not-live) root using
+// the same `ensure_table` walk the heap/device mappers use; the test VA lives in
+// a vacant top-level slot (`PML4[4]`), so a private entry there never touches
+// the kernel half or another entity. `switch_root` is a single `mov CR3` (it
+// flushes non-global TLB entries; the kernel-half pages keep this code/stack/
+// serial valid). All the unsafe lives here; `lib.rs` exposes the safe facade.
+// ===========================================================================
+
+/// M10: create a fresh address space. Frame-allocate a new top-level table (one
+/// M6 frame) and COPY all 512 entries of the LIVE PML4 (read from CR3) into it,
+/// so the whole kernel half is shared by reference. Returns the new PML4 PA, or
+/// `None` on physical-frame OOM.
+pub fn address_space_new() -> Option<u64> {
+    let root = crate::frame_alloc()?;
+    // SAFETY: `root` is a 4 KiB-aligned M6 frame in identity-mapped low RAM
+    // (PA == VA), exclusively owned here; CR3 holds the live PML4 base, also
+    // identity-mapped. Copy all 512 8-byte entries from the live PML4 into the
+    // new table; the kernel half is then shared by reference. Volatile so the
+    // walker-visible writes are neither elided nor reordered.
+    unsafe {
+        let src = (read_cr3() & PTE_ADDR_MASK) as *const u64;
+        let dst = root as *mut u64;
+        let mut i = 0;
+        while i < ENTRIES {
+            write_volatile(dst.add(i), read_volatile(src.add(i)));
+            i += 1;
+        }
+    }
+    Some(root)
+}
+
+/// M10: map one private 4 KiB page `va` -> `pa` into the EXPLICIT top-level
+/// table at `root_pa` (NOT the live CR3), building any missing PDPT/PD/PT from
+/// M6 frames. `va` must sit in a top-level slot the kernel root leaves vacant
+/// (`PML4[4]`), so the new top-level entry lands only in THIS root. Leaf =
+/// Present | (RW if `writable`) | NX (a data page, never executed). `false` on
+/// physical-frame OOM (no half-mapped page).
+pub fn map_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> bool {
+    // SAFETY: `root_pa` is a 4 KiB-aligned PML4 frame from `address_space_new`
+    // in identity-mapped low RAM (PA == VA); every intermediate table
+    // `ensure_table` pulls is likewise an identity-mapped M6 frame. The root is
+    // NOT live, so no live translation is disturbed and no `invlpg` is needed.
+    unsafe {
+        let pml4 = root_pa as *mut u64;
+        let pdpt = match ensure_table(pml4, level_index(va, SHIFT_512G)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let pd = match ensure_table(pdpt, level_index(va, SHIFT_1G)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let pt = match ensure_table(pd, level_index(va, SHIFT_2M)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut attrs = PTE_P | PTE_NX;
+        if writable {
+            attrs |= PTE_RW;
+        }
+        write_volatile(pt.add(level_index(va, SHIFT_4K)), make_entry(pa, attrs));
+    }
+    true
+}
+
+/// M10: make the address space whose PML4 PA is `root_pa` live (`mov CR3`).
+/// Writing CR3 flushes all non-global TLB entries; because every entity root
+/// shares an identical kernel half, this code, the current stack and serial stay
+/// valid across the load.
+pub fn switch_root(root_pa: u64) {
+    // SAFETY: `root_pa` is a 4 KiB-aligned PML4 from `address_space_new` (a copy
+    // of the live kernel root + optional private leaves), a valid paging root
+    // for the current mode; every kernel mapping the executing code and stack
+    // depend on is present in it.
+    unsafe { write_cr3(root_pa & PTE_ADDR_MASK) }
+}
+
+/// M10: the PA of the LIVE top-level page table (CR3's PML4 base, control bits
+/// masked off). Used to capture the default boot root at first space creation.
+pub fn current_root() -> u64 {
+    // SAFETY: reading CR3 is a side-effect-free ring-0 control-register read.
+    unsafe { read_cr3() & PTE_ADDR_MASK }
+}
+
+/// M10: re-assert M3. `true` iff the M3 self-test VA (`TEST_VA`) still reads its
+/// post-remap magic (`MAGIC_B`) under the LIVE root. The M3 mapping hangs off
+/// `PML4[0]`, copied by reference into every space, so this reads true under the
+/// boot root AND any entity root -- proving the M3 kernel-half mapping survives
+/// every address-space switch.
+pub fn m3_test_va_intact() -> bool {
+    // SAFETY: `TEST_VA` is mapped (by `mmu_selftest`) to FRAME_B in the shared
+    // kernel half present in every root; an aligned volatile u64 load.
+    unsafe { read_volatile(TEST_VA as *const u64) == MAGIC_B }
+}

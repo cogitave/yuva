@@ -140,15 +140,25 @@ is first exercised at M12.
 ### M10 — Per-agent address spaces (memory isolation) · `M10: addrspace OK`
 Each schedulable entity runs in its own top-level page table — one cannot read or
 write another's memory — while the kernel half stays mapped across every switch.
-An `AddressSpace` object = a fresh top-level table (M6 frames, M3 typed layer, M7
-heap-tracked). x86_64: per-entity PML4 sharing the kernel higher-half; switch =
-`mov CR3` + update `TSS.rsp0` (PCID deferred). aarch64: kernel to `TTBR1_EL1`,
-each entity its own `TTBR0_EL1`; switch = write `TTBR0` + ASID + `tlbi`/`isb`.
-The swap folds into the M9 switch. *Risk:* aarch64 **requires refactoring M3's
-identity-only TTBR0 into a TTBR1/TTBR0 split** — touches an already-green
-milestone, so the DoD must **re-assert M3**. Self-test: two tasks in two address
-spaces map the same VA to different private frames, each writes/reads its own
-magic, a switch flips the root, kernel/serial survive, a cross-space access faults.
+An `AddressSpace` object = a fresh top-level table (one M6 frame, M3 typed layer)
+that COPIES the entire live kernel root into itself, so every existing kernel
+mapping (identity RAM, serial, the M7 heap window, the M8 device window, the M3
+test mapping) is shared by reference and the kernel half is identical in every
+entity. Private pages (`map_in_space` → the new `tb-hal` `map_in_root` primitive)
+land in a top-level slot the kernel root leaves vacant (x86_64 `PML4[4]`, aarch64
+`L1[6]`), so they are visible only through that root. **Both arches are
+symmetric** (no TTBR1/TTBR0 split): switch = `mov CR3` (x86_64, flushes
+non-global TLB) / `msr TTBR0_EL1` + `isb; tlbi vmalle1is; dsb ish; isb` (aarch64,
+no ASID yet). The swap folds into the M9 `yield_to` (a parallel `TASK_AS[]` of
+per-task roots; it flips only when the next task's root differs). The textbook
+`TTBR1`(kernel)/`TTBR0`(entity) split + ASIDs + PCID are a **deferred
+refinement** (M11/M12); M10 ships the lower-risk copy-the-root design and so does
+NOT touch `mmu_init` — `mmu_selftest` + `M3: mmu OK` print unchanged, and M10
+actively **re-asserts M3** by reading the M3 test VA under each entity root.
+Self-test: two tasks in two address spaces map the same VA to different private
+frames, each writes/reads its own magic and sees only its own, a switch flips the
+root, kernel/serial survive, and a cross-space access faults (observed by the
+trap hook + a guarded resume).
 
 ### M11 — Capability handle table + kernel object model + agent-native syscall ABI · `M11: caps OK`
 The non-POSIX ABI core: each kernel object is reached only through an unforgeable,
@@ -287,9 +297,11 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 4. **Timer split (M8 vs M9).** Separate "take an async interrupt and resume
    cleanly" from "switch context inside one" so controller-bring-up bugs
    (LAPIC-vs-PIT, GICv2-vs-v3) are isolated from context-switch-asm bugs.
-5. **Address spaces (M10) kept separate** from the agent milestone because
-   aarch64 must refactor M3's identity-only TTBR0 into a TTBR1/TTBR0 split — a
-   regression risk that earns its own marker and an M3 re-assertion.
+5. **Address spaces (M10) kept separate** from the agent milestone because it
+   touches the already-green M3 paging — a regression risk that earns its own
+   marker and an M3 re-assertion. (As shipped, M10 is **symmetric** across both
+   arches via the copy-the-live-root design — no TTBR1/TTBR0 split — leaving
+   `mmu_init` untouched; the textbook split + ASIDs are a deferred M11/M12 refinement.)
 6. **Memory substrate after agents (M13)** so it is genuinely the per-agent
    **default** (spawn creates `memory:private/<agent>` + a memory-home handle at
    birth; M13 implements the tiers behind that handle).
@@ -309,8 +321,11 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
   cumulative boot. The M8/M9 split is the baked-in mitigation; the likeliest
   re-plan beyond it is unifying M2's cooperative switch with the from-interrupt
   save path.
-- **M10 on aarch64** touches the already-green M3 (TTBR split) → the DoD re-asserts
-  M3. x86_64 stays a single CR3 swap.
+- **M10 on aarch64** touches the already-green M3 → the DoD re-asserts M3. As
+  shipped it AVOIDS the TTBR1/TTBR0 split: both arches copy the live kernel root
+  into each entity table (kernel half shared by reference) and swap a single root
+  register (CR3 / TTBR0_EL1 + `tlbi vmalle1is`); `mmu_init` is untouched. The
+  textbook TTBR1(kernel)/TTBR0(entity) split + ASIDs are a deferred M11/M12 refinement.
 - **M6 boot-map divergence:** x86_64 must yield the *same* allocator from both PVH
   and TbBootInfo (may force a tb-boot v0→v1 bump); aarch64 hangs on a from-scratch
   FDT parser that must exclude device/reserved memory (fallback: hard-code the
@@ -342,8 +357,9 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 | **M7** (frame-backed growable heap) | ✅ **complete**, CI-green (kernel-heap window in PML4[2]/L1[4], M6 frames mapped via M3 tables; M5 algebra unchanged) |
 | **M8** (async interrupt + timer tick) | ✅ **complete**, CI-green (x86_64 LAPIC + LAPIC timer on IDT vec 0x20 via a UC device window in PML4[3]; aarch64 GICv2 + EL1 physical timer PPI 30 through the `__vec_irq` slot; first `sti`/`daifclr`, register-integrity canary across many ticks, timer re-masked; in-guest `rdtsc`/`CNTPCT_EL0` cycle counter) |
 | **M9** (preemptive scheduler) | ✅ **complete**, CI-green (timer-tick round-robin `schedule()` from IRQ context via the M8 `set_irq_hook` seam; M2 `ctx_switch` reused UNCHANGED — the IRQ entry already saved the full frame, so the cooperative switch swaps only the callee-saved continuation that returns into the IRQ epilogue's `iretq`/`eret`; EOI/EOIR moved BEFORE dispatch on both arches so the switched-in task is not starved of ticks; boot+C+D round-robin run queue in `lib.rs`, two no-yield spin tasks both advance under ≥100 involuntary switches; M2 cooperative ping-pong re-runs UNCHANGED → no regression) |
-| **M10** (per-agent address spaces) | ⏳ **in progress** (next increment) |
-| M11 – M18 | ⬜ planned (this document) |
+| **M10** (per-agent address spaces) | ✅ **complete**, CI-green (x86_64 + aarch64 QEMU + tb-vmm/`/dev/kvm`) — symmetric copy-the-live-root `AddressSpace` (no TTBR1/TTBR0 split): each entity gets a fresh top-level table copying the whole kernel root (kernel half shared by reference), private pages in a vacant slot (`PML4[4]` / `L1[6]`) via the new `map_in_root` primitive, the switch folds into `yield_to` (`TASK_AS[]`), two tasks in two spaces map the same VA to different private frames and see only their own, a cross-space access faults (trap hook + guarded resume), serial/kernel survive every switch, and `M3: mmu OK` re-asserts unchanged |
+| **M11** (capability handle table + object model + syscall ABI) | ⏳ **in progress** (next increment) |
+| M12 – M18 | ⬜ planned (this document) |
 | L2 (own Type-1 microhypervisor) | ⬜ parallel north-star track ([SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)) |
 
 Every milestone increment is shipped by the same pipeline — codified as the

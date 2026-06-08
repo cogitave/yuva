@@ -124,6 +124,53 @@ static SPIN_C_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Spin task D's advance counter (as C).
 static SPIN_D_COUNT: AtomicU64 = AtomicU64::new(0);
 
+// --- M10 per-entity-address-space bookkeeping (all in THIS crate, all safe) --
+
+/// Task G's stack (runs in address space E): 4096 usize words, 16-aligned.
+static STACK_G: TaskStack<4096> = TaskStack::new();
+/// Task H's stack (runs in address space F): 4096 usize words, 16-aligned.
+static STACK_H: TaskStack<4096> = TaskStack::new();
+
+/// Task G's handle as `Task::raw()`, stashed so the boot task enters it through
+/// its handle (symmetric with H/boot) and task H can target it in turn.
+static TASK_G_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Task H's handle as `Task::raw()`.
+static TASK_H_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// The boot context's handle, stashed so task H hands the CPU back to it.
+static BOOT10_RAW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Set by task G iff it read back its OWN magic at the shared test VA under
+/// address space E (proving the yield_to fold-in put it in its own root).
+static G_SEES_OWN: AtomicBool = AtomicBool::new(false);
+/// Set by task H iff it read back its OWN magic under address space F.
+static H_SEES_OWN: AtomicBool = AtomicBool::new(false);
+
+/// Armed by the boot task immediately before it provokes the cross-space fault;
+/// the trap hook treats a page fault as the expected cross-space access ONLY
+/// while this is set (every other fault stays fatal).
+static M10_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
+/// The VA whose cross-space fault the trap hook expects (the M10 test VA).
+static M10_FAULT_VA: AtomicU64 = AtomicU64::new(0);
+/// Set by the trap hook when it observes the armed cross-space page fault.
+static M10_FAULT_SEEN: AtomicBool = AtomicBool::new(false);
+/// The home-space root PA the trap hook flips to (guarded resume), so the
+/// faulting access re-executes where the VA is mapped instead of livelocking.
+static M10_FAULT_HOME_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// x86_64 M10 test VA: `PML4[4]` (= 4 * 2^39), a top-level slot the kernel root
+/// never uses (identity `PML4[0]`, M4 user `[1]`, M7 heap `[2]`, M8 LAPIC `[3]`).
+#[cfg(target_arch = "x86_64")]
+const M10_TEST_VA: u64 = 0x0000_0200_0000_0000;
+/// aarch64 M10 test VA: `L1[6]` (= 6 GiB), a top-level slot the kernel root
+/// never uses (identity `L1[0..1]`, M3 self-test `[2]`, M4 user `[3]`, M7 heap `[4]`).
+#[cfg(target_arch = "aarch64")]
+const M10_TEST_VA: u64 = 0x0000_0001_8000_0000;
+
+/// Task G's private magic, written THROUGH the shared test VA under space E.
+const MAGIC_E: u64 = 0x1010_1010_1010_100E;
+/// Task H's private magic, written THROUGH the shared test VA under space F.
+const MAGIC_F: u64 = 0x2020_2020_2020_200F;
+
 /// Boot entry. Reached by EITHER of tb-hal's two x86_64 entries (or the
 /// aarch64 `_start`); each sets up a stack and places the boot-info pointer in
 /// SysV arg0 before calling here:
@@ -810,6 +857,151 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M9: preempt OK\n"); // <-- the M9 DoD marker
 
+    // --- M10: per-entity address spaces (memory isolation) -----------------
+    // Each schedulable entity runs in its OWN top-level page table, so one
+    // entity cannot read/write another's private memory, while the KERNEL half
+    // (code, these stacks, the heap, serial) stays mapped across every switch:
+    // tb-hal's `address_space_new` COPIES the whole live kernel root into each
+    // space, so the kernel half is shared by reference and survives any flip.
+    // The address-space switch FOLDS INTO `yield_to` via each task's assigned
+    // space (TASK_AS). tb-hal owns ALL the unsafe -- the table copy/walk, the
+    // CR3/TTBR0 writes, the raw VA derefs, the cross-space fault recovery; this
+    // forbid(unsafe_code)-class crate only drives the safe facade + branches.
+    // The design is SYMMETRIC across arches (no TTBR1/TTBR0 split) and does NOT
+    // touch `mmu_init`, so "M3: mmu OK" above is unchanged. DoD: "M10: addrspace OK".
+    //
+    // PRECONDITION (load-bearing): the timer is DISARMED here -- M9's
+    // `timer_disarm()` ran before the "M9: preempt OK" marker above -- so this
+    // whole block runs single-threaded with interrupts masked. The manual
+    // `address_space_switch` calls below, and the boot task's deliberately
+    // unmaintained `TASK_AS[0]` (it stays the sentinel 0 while it switches roots
+    // by hand), are only safe single-threaded: a stray tick-driven `schedule()`
+    // would flip the root under the boot task mid-probe. Do NOT re-arm the timer
+    // before this block.
+    tb_hal::serial_write_str("addrspace-test: building two private address spaces\n");
+
+    let m10_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M10: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    // (1) Two fresh address spaces, each a COPY of the live kernel root.
+    let space_e = match tb_hal::address_space_new() {
+        Some(s) => s,
+        None => m10_fail("address_space_new (E) out of frames"),
+    };
+    let space_f = match tb_hal::address_space_new() {
+        Some(s) => s,
+        None => m10_fail("address_space_new (F) out of frames"),
+    };
+    if space_e.root_pa() == space_f.root_pa() {
+        m10_fail("the two spaces share a root table");
+    }
+
+    // (2) Two DISTINCT private frames, mapped at the SAME test VA in each space.
+    //     The VA lives in a top-level slot the kernel root never uses, so the
+    //     private leaf lands ONLY in that space (the copied kernel half and the
+    //     other space are untouched).
+    let frame_e = match tb_hal::frame_alloc() {
+        Some(p) => p,
+        None => m10_fail("no frame for space E's private page"),
+    };
+    let frame_f = match tb_hal::frame_alloc() {
+        Some(p) => p,
+        None => m10_fail("no frame for space F's private page"),
+    };
+    if frame_e == frame_f {
+        m10_fail("private frames are not distinct");
+    }
+    if !tb_hal::map_in_space(space_e, M10_TEST_VA, frame_e, true) {
+        m10_fail("map_in_space (E) failed");
+    }
+    if !tb_hal::map_in_space(space_f, M10_TEST_VA, frame_f, true) {
+        m10_fail("map_in_space (F) failed");
+    }
+
+    // (3) Two tasks, one per space, exercise the yield_to address-space fold-in:
+    //     boot -> G(space E) -> H(space F) -> boot. Each task runs under ITS OWN
+    //     root (the fold-in flips it before ctx_switch), writes its private
+    //     magic THROUGH the shared test VA and reads back ONLY its own. Serial
+    //     working in each task proves the kernel half survived the flip.
+    //     Slot budget: boot=0, M2 A=1/B=2, M9 C=3/D=4, M10 G=5/H=6 -> only slot 7
+    //     is free under tb-hal's MAX_TASKS=8. Fine for M10 (the terminal
+    //     milestone before halt); raise MAX_TASKS before any later milestone
+    //     spawns more cumulative kernel tasks, else `task_create` fatals.
+    BOOT10_RAW.store(tb_hal::current_task().raw(), Ordering::Release);
+    let task_g = tb_hal::task_create(STACK_G.take(), task_g_main);
+    let task_h = tb_hal::task_create(STACK_H.take(), task_h_main);
+    TASK_G_RAW.store(task_g.raw(), Ordering::Release);
+    TASK_H_RAW.store(task_h.raw(), Ordering::Release);
+    tb_hal::task_set_address_space(task_g, space_e);
+    tb_hal::task_set_address_space(task_h, space_f);
+    // Enter G through its stashed handle (symmetric with the H/boot hand-off);
+    // the fold-in flips the root boot -> E before ctx_switch, and the
+    // G -> H -> boot chain returns control here.
+    tb_hal::yield_to(Task::from_raw(TASK_G_RAW.load(Ordering::Acquire)));
+
+    if !G_SEES_OWN.load(Ordering::Acquire) {
+        m10_fail("task G did not read its own magic under space E");
+    }
+    if !H_SEES_OWN.load(Ordering::Acquire) {
+        m10_fail("task H did not read its own magic under space F");
+    }
+    tb_hal::serial_write_str("addrspace: both tasks saw only their own magic\n");
+
+    // (4) Isolation cross-check from the boot task: the SAME VA reads a
+    //     DIFFERENT private magic under each root, so neither write leaked into
+    //     the other frame. Serial keeps working across each manual switch.
+    tb_hal::address_space_switch(space_e);
+    if tb_hal::addr_load(M10_TEST_VA) != MAGIC_E {
+        m10_fail("space E lost its private magic across switches");
+    }
+    tb_hal::address_space_switch(space_f);
+    if tb_hal::addr_load(M10_TEST_VA) != MAGIC_F {
+        m10_fail("space F sees the wrong magic (isolation breach)");
+    }
+    tb_hal::address_space_switch_default();
+    tb_hal::serial_write_str("addrspace: same VA -> different private frame per root\n");
+
+    // (5) Re-assert M3: the M3 self-test VA still reads its post-remap magic
+    //     under the default root AND under an entity root, proving the M3
+    //     mapping (part of the shared kernel half) survives every switch.
+    if !tb_hal::m3_test_va_intact() {
+        m10_fail("M3 mapping lost under the default root");
+    }
+    tb_hal::address_space_switch(space_e);
+    let m3_ok_under_e = tb_hal::m3_test_va_intact();
+    tb_hal::address_space_switch_default();
+    if !m3_ok_under_e {
+        m10_fail("M3 mapping not shared into an entity root");
+    }
+
+    // (6) Cross-space fault: under the DEFAULT root the test VA is VACANT (its
+    //     top-level slot is only ever filled in the entity roots), so reading it
+    //     MUST page-fault. The trap hook records the fault and, as a GUARDED
+    //     resume, flips the live root to space E (where the VA IS mapped) so the
+    //     re-executed read completes and returns space E's magic -- no
+    //     livelock, no halt. (Interrupts are masked here: M9 disarmed the timer,
+    //     so this whole block is single-threaded.)
+    M10_FAULT_HOME_ROOT.store(space_e.root_pa(), Ordering::Release);
+    M10_FAULT_VA.store(M10_TEST_VA, Ordering::Release);
+    M10_FAULT_SEEN.store(false, Ordering::Release);
+    M10_FAULT_ARMED.store(true, Ordering::Release);
+    let recovered = tb_hal::addr_load(M10_TEST_VA); // faults -> hook -> resume
+    M10_FAULT_ARMED.store(false, Ordering::Release);
+    tb_hal::address_space_switch_default(); // undo the hook's recovery switch
+    if !M10_FAULT_SEEN.load(Ordering::Acquire) {
+        m10_fail("cross-space access did not fault");
+    }
+    if recovered != MAGIC_E {
+        m10_fail("guarded resume read the wrong frame");
+    }
+    tb_hal::serial_write_str("addrspace: cross-space access faulted and recovered\n");
+
+    tb_hal::serial_write_str("M10: addrspace OK\n"); // <-- the M10 DoD marker
+
     tb_hal::halt()
 }
 
@@ -972,12 +1164,61 @@ fn spin_d() {
     }
 }
 
+/// M10 task G: runs in address space E (the `yield_to` fold-in flips the live
+/// root to E before this task is entered). Writes its private magic THROUGH the
+/// shared test VA and reads back ONLY its own, publishes the verdict, then hands
+/// the CPU to task H (which yields on to the boot task). Never returns.
+fn task_g_main() {
+    let seen = tb_hal::addr_store_load(M10_TEST_VA, MAGIC_E);
+    if seen == MAGIC_E {
+        G_SEES_OWN.store(true, Ordering::Release);
+    }
+    tb_hal::serial_write_str("addrspace: task G wrote+read its magic under space E\n");
+    tb_hal::yield_to(Task::from_raw(TASK_H_RAW.load(Ordering::Acquire)));
+    // Normal flow never resumes G; if it somehow does, fail loudly.
+    tb_hal::serial_write_str("M10: FAIL task G resumed after hand-off\n");
+    tb_hal::halt()
+}
+
+/// M10 task H: as task G but in address space F; after writing+verifying its own
+/// magic it yields back to the boot task, which renders the isolation checks and
+/// the M10 verdict. Never returns.
+fn task_h_main() {
+    let seen = tb_hal::addr_store_load(M10_TEST_VA, MAGIC_F);
+    if seen == MAGIC_F {
+        H_SEES_OWN.store(true, Ordering::Release);
+    }
+    tb_hal::serial_write_str("addrspace: task H wrote+read its magic under space F\n");
+    tb_hal::yield_to(Task::from_raw(BOOT10_RAW.load(Ordering::Acquire)));
+    // Normal flow never resumes H; if it somehow does, fail loudly.
+    tb_hal::serial_write_str("M10: FAIL task H resumed after hand-off\n");
+    tb_hal::halt()
+}
+
 /// Safe trap-dispatch policy hook (kept from M1: policy lives in this
 /// `forbid(unsafe_code)`-class crate, not in tb-hal's raw entry asm).
 fn trap_hook(info: &TrapInfo) -> TrapAction {
     match info.kind {
         TrapKind::Breakpoint => {
             tb_hal::serial_write_str("trap: breakpoint, resuming\n");
+            TrapAction::Resume
+        }
+        // M10: the armed cross-space page fault. Under the default root the test
+        // VA is vacant; reading it faults here. Record it and, as a GUARDED
+        // resume, flip the live root to the home space (where the VA IS mapped)
+        // so the re-executed access completes instead of livelocking. Disarm
+        // first so any later stray fault still takes the fatal path below. Every
+        // root shares the kernel half, so this handler's stack/code/serial
+        // survive the flip. The compare is page-aligned (low 12 bits masked) so
+        // any sub-page-offset probe access still matches the armed page.
+        TrapKind::PageFault
+            if M10_FAULT_ARMED.load(Ordering::Acquire)
+                && (info.fault_addr & !0xFFF)
+                    == (M10_FAULT_VA.load(Ordering::Acquire) & !0xFFF) =>
+        {
+            M10_FAULT_ARMED.store(false, Ordering::Release);
+            M10_FAULT_SEEN.store(true, Ordering::Release);
+            tb_hal::address_space_switch_root(M10_FAULT_HOME_ROOT.load(Ordering::Acquire));
             TrapAction::Resume
         }
         _ => {
