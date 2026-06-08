@@ -31,6 +31,10 @@ jobs:
   prove-caps:
     name: prove M11 rights-subset (Kani)
     runs-on: ubuntu-latest
+    # Fail fast + clearly if a harness ever regresses into a state explosion,
+    # instead of hanging until an ambiguous external cancel. The full 12-harness
+    # suite verifies in well under this once the Tier-3 harnesses are bounded.
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
