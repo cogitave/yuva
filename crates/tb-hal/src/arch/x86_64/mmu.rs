@@ -80,6 +80,11 @@ const PTE_RW: u64 = 1 << 1;
 /// kernel-heap leaves set it — the heap holds data, never executable code.
 const PTE_NX: u64 = 1 << 63;
 
+/// M12 paging-entry bit 2: User/Supervisor — MUST be 1 at EVERY level of the
+/// walk for ring3 access (SDM Vol.3A §4.6; Linux `_PAGE_BIT_USER 2`). Set on the
+/// agent's user code/stack leaves AND every intermediate table reaching them.
+const PTE_US: u64 = 1 << 2;
+
 /// Paging-entry bit 3: Page-Write-Through (PWT). With PCD it selects the PAT
 /// index; M8 maps the LAPIC MMIO page with `PWT|PCD` = PAT entry 3 = strong-UC
 /// (the power-up IA32_PAT default `mmu_init` kept) so device reads/writes are
@@ -681,6 +686,71 @@ pub fn map_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> bool {
         let mut attrs = PTE_P | PTE_NX;
         if writable {
             attrs |= PTE_RW;
+        }
+        write_volatile(pt.add(level_index(va, SHIFT_4K)), make_entry(pa, attrs));
+    }
+    true
+}
+
+/// M12: like [`ensure_table`] but builds the intermediate table as a USER entry
+/// (`P|RW|U/S`), because ring3 access requires `U/S = 1` at EVERY level of the
+/// walk (SDM Vol.3A §4.6). `None` on physical-frame OOM.
+///
+/// # Safety
+/// As [`ensure_table`]: `parent` is a live/owned identity-mapped 512-entry table
+/// and `idx < 512`.
+unsafe fn ensure_table_user(parent: *mut u64, idx: usize) -> Option<*mut u64> {
+    let slot = parent.add(idx);
+    let entry = read_volatile(slot);
+    if entry_is_valid(entry) {
+        // An existing interior table: ensure it is USER-reachable (the agent
+        // window owns its slot, so OR-ing U/S here only ever opens our own path).
+        if entry & PTE_US == 0 {
+            write_volatile(slot, entry | PTE_US);
+        }
+        return Some(entry_addr(entry) as *mut u64);
+    }
+    let frame = crate::frame_alloc()?;
+    zero_table(frame as *mut u64);
+    write_volatile(slot, make_entry(frame, PTE_P | PTE_RW | PTE_US));
+    Some(frame as *mut u64)
+}
+
+/// M12: map one private 4 KiB USER page `va` -> `pa` into the EXPLICIT root at
+/// `root_pa` (NOT the live CR3), with `U/S = 1` at every level so ring3 may
+/// reach it. Leaf = `P | U/S | (RW if writable) | (NX if !exec)`. `va` must sit
+/// in a top-level slot the kernel root leaves vacant (`PML4[4]`). `false` on
+/// physical-frame OOM. The root is not live, so no `invlpg` is needed.
+pub(super) fn map_user_in_root(
+    root_pa: u64,
+    va: u64,
+    pa: u64,
+    writable: bool,
+    exec: bool,
+) -> bool {
+    // SAFETY: `root_pa` is a 4 KiB-aligned PML4 from `address_space_new` in
+    // identity-mapped low RAM (PA == VA); every table `ensure_table_user` pulls
+    // is likewise an identity-mapped M6 frame; the root is not live.
+    unsafe {
+        let pml4 = root_pa as *mut u64;
+        let pdpt = match ensure_table_user(pml4, level_index(va, SHIFT_512G)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let pd = match ensure_table_user(pdpt, level_index(va, SHIFT_1G)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let pt = match ensure_table_user(pd, level_index(va, SHIFT_2M)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let mut attrs = PTE_P | PTE_US;
+        if writable {
+            attrs |= PTE_RW;
+        }
+        if !exec {
+            attrs |= PTE_NX;
         }
         write_volatile(pt.add(level_index(va, SHIFT_4K)), make_entry(pa, attrs));
     }

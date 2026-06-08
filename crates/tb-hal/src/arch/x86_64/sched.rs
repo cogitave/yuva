@@ -181,6 +181,52 @@ pub fn task_stack_init(stack: &mut [usize], entry: fn()) -> usize {
     top - INITIAL_FRAME_SLOTS * WORD // the initial saved-SP handle
 }
 
+/// M12: fabricate the initial saved context for a NEW *user* agent task on its
+/// KERNEL `stack`, so the FIRST [`ctx_switch`] into it pops six fabricated
+/// callee-saved registers and `ret`s into `super::user::agent_launch`, which
+/// then `iretq`s to ring3 at `entry_va` with `RSP = user_sp`, the birth
+/// registers `rdi = arg0` / `rsi = arg1`, and `RFLAGS.IF = 1` (preemptible).
+///
+/// The six callee-saved slots carry the launch arguments, since the trampoline
+/// runs immediately after `ctx_switch`'s `pop`s: `rbx = entry_va`,
+/// `rbp = user_sp`, `r12 = user_cs|3`, `r13 = user_ss|3`, `r14 = arg0`,
+/// `r15 = arg1`. `ctx_switch` pops r15 FIRST (lowest address), so the returned
+/// SP names the r15 slot. Pure safe Rust (slice writes + the trampoline
+/// address). Panics if `stack` is smaller than [`MIN_STACK_SLOTS`].
+pub fn task_stack_init_user(
+    stack: &mut [usize],
+    entry_va: u64,
+    user_sp: u64,
+    arg0: u64,
+    arg1: u64,
+) -> usize {
+    assert!(
+        stack.len() >= MIN_STACK_SLOTS,
+        "agent kernel stack too small to fabricate a user-launch context"
+    );
+
+    let base = stack.as_mut_ptr() as usize;
+    let limit = base + stack.len() * WORD;
+    let top = limit & !0xF;
+    let slot = |addr: usize| (addr - base) / WORD;
+
+    let user_cs = (super::gdt::USER_CODE_SEL | 3) as usize;
+    let user_ss = (super::gdt::USER_DATA_SEL | 3) as usize;
+
+    // Top-down: the `ret` target, then rbx,rbp,r12,r13,r14,r15 below it. The pop
+    // order in `ctx_switch` is r15,r14,r13,r12,rbp,rbx, so r15 sits LOWEST and
+    // the returned SP names it.
+    stack[slot(top - WORD)] = super::user::agent_launch as *const () as usize; // ret -> launch
+    stack[slot(top - 2 * WORD)] = entry_va as usize; // rbx -> user RIP
+    stack[slot(top - 3 * WORD)] = user_sp as usize; // rbp -> user RSP
+    stack[slot(top - 4 * WORD)] = user_cs; // r12 -> user CS|3
+    stack[slot(top - 5 * WORD)] = user_ss; // r13 -> user SS|3
+    stack[slot(top - 6 * WORD)] = arg0 as usize; // r14 -> birth rdi
+    stack[slot(top - 7 * WORD)] = arg1 as usize; // r15 -> birth rsi
+
+    top - 7 * WORD // the initial saved-SP handle (the r15 slot)
+}
+
 // ===========================================================================
 // task_exit_guard: landing pad if a task's entry fn ever returns.
 // (a) PRE: a task's entry fn executed `ret` with rsp back at its fabricated

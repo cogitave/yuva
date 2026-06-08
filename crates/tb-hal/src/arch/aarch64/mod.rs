@@ -42,11 +42,19 @@ pub use mmu::{
     mmu_init, mmu_selftest, switch_root,
 };
 pub use pmm::pmm_collect_regions;
-pub use sched::{ctx_switch, task_stack_init};
+pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 pub use serial::{serial_init, serial_write_byte};
 pub use timer::{read_cycle_counter, sched_irq_unmask, timer_demo, timer_disarm, timer_rearm};
 pub use trap::breakpoint;
-pub use user::{caps_user_probe, user_demo};
+pub use user::{agent_map_space, agent_traps_init, caps_user_probe, user_demo};
+
+/// M12: program the running agent's kernel stack for the privilege-change frame.
+/// A NO-OP on aarch64: there is no `TSS.rsp0` analogue -- `SP_EL1` already tracks
+/// the current task's kernel stack (the M2 `ctx_switch` swaps SP at EL1h, and the
+/// launch/resume `eret` leaves SP_EL1 at the agent's stack top), so an EL0 IRQ
+/// pushes onto the agent's own kernel stack with no per-switch poke. Mirrors the
+/// x86_64 `set_kernel_stack` so `lib.rs`'s `yield_to` fold-in is cross-arch.
+pub fn set_kernel_stack(_top: u64) {}
 
 // -- install_traps() --------------------------------------------------------
 // (a) PRE : called once from rust_main, after serial_init, at EL1h. POST:

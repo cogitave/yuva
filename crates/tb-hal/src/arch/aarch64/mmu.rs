@@ -138,6 +138,12 @@ const TTBR_BADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 const PAGE_KERNEL_RW_NX: u64 =
     DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_NORMAL | DESC_PXN | DESC_UXN;
 
+/// M12 AP[1] = PTE_USER, bit[6]: set => EL0 may access (Linux `PTE_USER`). With
+/// AP[2] clear this gives EL1 RW + EL0 RW; the M4/M11 user windows use the same.
+const AP_EL0_RW: u64 = 1 << 6;
+/// M12 AP[2], bit[7]: set => read-only at the granted EL(s) (Linux `PTE_RDONLY`).
+const AP_RDONLY: u64 = 1 << 7;
+
 // ===========================================================================
 // MAIR_EL1 / TCR_EL1 / SCTLR_EL1 values (verified -- module doc)
 // ===========================================================================
@@ -759,6 +765,66 @@ unsafe fn map_one_in_root(root_pa: u64, va: u64, pa: u64, writable: bool) -> boo
     let mut leaf = PAGE_KERNEL_RW_NX;
     if !writable {
         leaf |= 1 << 7; // AP[2] = 1 -> EL1 read-only
+    }
+    write_volatile(l3.add(level_index(va, SHIFT_4K)), make_entry(pa, leaf));
+    true
+}
+
+/// M12: map one private 4 KiB USER page `va` -> `pa` into the EXPLICIT root at
+/// `root_pa` (NOT the live TTBR0_EL1), reachable from EL0. Leaf = Normal-WB,
+/// `AP[1]` set (EL0+EL1 access), `PXN` set (EL1 never executes the agent's
+/// code), plus `AP[2]` (read-only) when `!writable` and `UXN` when `!exec`.
+/// Intermediate L2/L3 are plain table descriptors (no APTable restriction), so
+/// the leaf governs EL0 access. `va` must sit in a vacant root slot (`L1[6]`).
+/// `false` on physical-frame OOM.
+pub(super) fn map_user_in_root(
+    root_pa: u64,
+    va: u64,
+    pa: u64,
+    writable: bool,
+    exec: bool,
+) -> bool {
+    // SAFETY: `root_pa` is a 4 KiB-aligned L1 frame from `address_space_new` in
+    // identity-mapped RAM (PA == VA); the root is not live, so no live
+    // translation is disturbed. Mirrors `map_in_root`'s ensure_table walk.
+    let ok = unsafe { map_one_user_in_root(root_pa, va, pa, writable, exec) };
+    if ok {
+        dsb_ishst();
+        isb();
+    }
+    ok
+}
+
+/// Splice a single private EL0-accessible leaf into the explicit root `root_pa`.
+/// `false` on physical-frame OOM (intermediate tables retained, never a
+/// half-mapped page).
+///
+/// # Safety
+/// As [`map_one_in_root`]: `root_pa` is a 4 KiB-aligned, owned, not-live L1
+/// frame; `va`/`pa` are 4 KiB-aligned. Writes are volatile; the caller publishes
+/// them with `dsb ishst; isb`.
+unsafe fn map_one_user_in_root(
+    root_pa: u64,
+    va: u64,
+    pa: u64,
+    writable: bool,
+    exec: bool,
+) -> bool {
+    let l1 = root_pa as *mut u64;
+    let l2 = match ensure_table(l1, level_index(va, SHIFT_1G)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let l3 = match ensure_table(l2, level_index(va, SHIFT_2M)) {
+        Some(t) => t,
+        None => return false,
+    };
+    let mut leaf = DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTRIDX_NORMAL | AP_EL0_RW | DESC_PXN;
+    if !exec {
+        leaf |= DESC_UXN; // EL0 no-execute (data page)
+    }
+    if !writable {
+        leaf |= AP_RDONLY; // AP[2] = 1 -> read-only
     }
     write_volatile(l3.add(level_index(va, SHIFT_4K)), make_entry(pa, leaf));
     true

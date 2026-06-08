@@ -704,3 +704,179 @@ pub fn caps_user_probe(root_handle: u64) -> Option<crate::caps::SyscallArgs> {
         ],
     })
 }
+
+// ===========================================================================
+// M12: the agent runtime -- a REAL preemptible ring3 task (vs M4/M11's one-shot
+// longjmp probes). The user-mode preemption path reuses the EXISTING IRQ entry
+// (`int 0x20` -> `__trap_thunk_32` -> `__alltraps`) UNCHANGED: a timer IRQ taken
+// while an agent runs in ring3 loads `TSS.rsp0` (programmed by `gdt::set_rsp0`
+// from `yield_to`'s kernel-stack fold-in), pushes the inter-privilege frame on
+// the agent's own kernel stack, and the M9 `ctx_switch` switches it out. The
+// THREE new pieces here are: (a) `agent_launch` -- the first-activation
+// trampoline that `iretq`s to ring3 with IF=1 (preemptible, vs M4's IF=0); (b)
+// `agent_caps_entry` -- the `int 0x82` cap-syscall door that DISPATCHES against
+// the current agent's table and `iretq`s BACK to ring3 (vs M4/M11's longjmp);
+// (c) `agent_map_space`/`agent_traps_init` -- map the agent's user code+stack
+// into its OWN root and open the cap-syscall gate. All policy stays in the safe
+// `crate::agent_syscall_current` bridge.
+
+/// The IDT vector the M12 agent cap stub traps through (M4 owns 0x80, M11 0x81).
+const AGENT_SYSCALL_VECTOR: usize = 0x82;
+
+/// Ring3 `RFLAGS` for a SCHEDULED agent: reserved bit 1 + IF (bit 9) SET, so the
+/// agent is preemptible the instant it reaches ring3 (vs M4's `0x2` with IF=0).
+const AGENT_USER_RFLAGS: u64 = 0x202;
+
+/// The agent user-code VA: `PML4[4]` base (the vacant top-level slot M10 also
+/// uses for its private test pages). The shared agent stub is mapped here in
+/// EVERY agent's own root; the per-agent stack is the next page.
+const AGENT_CODE_VA: u64 = 0x0000_0200_0000_0000;
+/// The agent user-stack VA: the page after the code page (private per agent).
+const AGENT_STACK_VA: u64 = AGENT_CODE_VA + 0x1000;
+
+/// The shared agent code frame (the stub is copied here ONCE, then mapped into
+/// each agent's root at [`AGENT_CODE_VA`], executable + read-only).
+static AGENT_CODE: Cell4K = Cell4K::new();
+/// One-shot guard so the stub is staged into [`AGENT_CODE`] exactly once.
+static AGENT_CODE_STAGED: AtomicBool = AtomicBool::new(false);
+/// One-shot guard so the `int 0x82` agent cap gate is installed exactly once.
+static AGENT_TRAPS_DONE: AtomicBool = AtomicBool::new(false);
+
+// The position-independent ring3 AGENT stub: it reads its born-with handles out
+// of the birth registers (rdi = memory_home, rsi = bootstrap), then issues two
+// numbered cap syscalls -- a PERMITTED inspect of its memory home (-> Ok) and a
+// NON-MANIFEST emit-external on the same handle (-> Denied) -- and spins so ONLY
+// the timer can take the CPU (proving involuntary user-mode preemption). The
+// memory-home handle is parked in callee-saved r14 (preserved across `int` by
+// the SysV-preserving bridge AND restored on any preemption). Distinct numeric
+// label `5:` avoids clashing with the M4 `2:` / M11 `3:` stubs in `.text.user`.
+global_asm!(
+    r#"
+.section .text.user, "ax", @progbits
+.balign 16
+.global agent_user_stub_start
+.global agent_user_stub_end
+agent_user_stub_start:
+    mov r14, rdi           // save memory_home (birth reg) in callee-saved r14
+    // syscall 1: M_OBJECT_INSPECT (0) on memory_home -> Ok (permitted)
+    xor eax, eax
+    mov rdi, r14
+    xor esi, esi
+    xor edx, edx
+    int 0x82
+    // syscall 2: M_EMIT_EXTERNAL (21) on memory_home -> Denied (non-manifest)
+    mov eax, 21
+    mov rdi, r14
+    xor esi, esi
+    xor edx, edx
+    int 0x82
+5:
+    jmp 5b                 // spin: only the timer can preempt this ring3 task
+agent_user_stub_end:
+"#
+);
+
+extern "C" {
+    /// First byte of the ring3 agent stub (identity-mapped == phys).
+    static agent_user_stub_start: u8;
+    /// One-past-the-last byte of the ring3 agent stub.
+    static agent_user_stub_end: u8;
+}
+
+// agent_launch: the first-activation trampoline. The fabricated kernel-stack
+// frame (sched.rs `task_stack_init_user`) makes `ctx_switch`'s `ret` land here
+// with the launch arguments in callee-saved registers; it builds the
+// inter-privilege iret frame and drops to ring3 with IF=1 so the agent is
+// immediately preemptible.
+// (a) PRE: reached by `ctx_switch`'s `ret` on an agent's FIRST activation, at
+//     ring0 on the agent's kernel stack with IF=0; rbx=entry_va, rbp=user_sp,
+//     r12=user_cs|3, r13=user_ss|3, r14=birth_arg0, r15=birth_arg1.
+//     POST: `iretq` -> ring3 at entry_va with rdi/rsi = the birth handles.
+// (b) ABI: naked. The kernel stack is abandoned by the iretq (rsp loads the
+//     user RSP); rsp0 already names this same stack (set by yield_to), so the
+//     next ring3 timer IRQ lands at its top.
+#[unsafe(naked)]
+pub(super) unsafe extern "C" fn agent_launch() {
+    naked_asm!(
+        "mov rdi, r14",   // birth arg0 -> rdi (memory_home handle)
+        "mov rsi, r15",   // birth arg1 -> rsi (bootstrap handle)
+        "push r13",       // SS     = user_ss|3
+        "push rbp",       // RSP    = user_sp
+        "push {rflags}",  // RFLAGS = 0x202 (IF=1, preemptible)
+        "push r12",       // CS     = user_cs|3
+        "push rbx",       // RIP    = entry_va
+        "iretq",
+        rflags = const AGENT_USER_RFLAGS,
+    )
+}
+
+// agent_caps_entry: the `int 0x82` agent cap-syscall door. ring3 `int 0x82`
+// lands here in ring0 on the agent's TSS.rsp0 stack with rax=method, rdi=handle,
+// rsi=a0, rdx=a1. It lifts them into SysV order, calls the SAFE bridge (which
+// runs `caps::dispatch` against the CURRENT agent's table), then `iretq`s BACK
+// to ring3 with the status in rax (vs M4/M11's longjmp out of ring3).
+#[unsafe(naked)]
+unsafe extern "C" fn agent_caps_entry() {
+    naked_asm!(
+        // Lift (method, handle, a0, a1) into SysV (rdi, rsi, rdx, rcx).
+        "mov rcx, rdx",   // a1     -> SysV arg4
+        "mov rdx, rsi",   // a0     -> SysV arg3
+        "mov rsi, rdi",   // handle -> SysV arg2
+        "mov rdi, rax",   // method -> SysV arg1
+        "sub rsp, 8",     // re-establish 16-alignment (CPU pushed 5 qwords)
+        "call {bridge}",  // -> status in rax
+        "add rsp, 8",     // restore rsp to the iret frame
+        "iretq",          // back to ring3; rax = SysStatus, IF restored to 1
+        bridge = sym agent_x86_caps_bridge,
+    )
+}
+
+/// The SAFE-ish recorder shim for the agent cap syscall: forward the lifted
+/// scalars to the pure-safe `crate::agent_syscall_current` (which resolves the
+/// CURRENT agent, runs `caps::dispatch`, records observations) and return the
+/// status to place in the agent's `rax`. `None` (not an agent) maps to `BadCap`.
+extern "C" fn agent_x86_caps_bridge(method: u64, handle: u64, a0: u64, a1: u64) -> u64 {
+    match crate::agent_syscall_current(method, handle, a0, a1) {
+        Some((status, _value)) => status as u64,
+        None => crate::caps::SysStatus::BadCap as u64,
+    }
+}
+
+/// M12: map the agent user code (the shared stub) + a fresh private stack page
+/// into the agent's OWN root `root_pa` (`PML4[4]`, vacant in the kernel half),
+/// with `U/S = 1` at every level. Returns `(entry_va, user_stack_top)`, or
+/// `None` on physical-frame OOM. The stub is staged into [`AGENT_CODE`] once.
+pub fn agent_map_space(root_pa: u64) -> Option<(u64, u64)> {
+    if !AGENT_CODE_STAGED.swap(true, Ordering::AcqRel) {
+        let src = addr_of!(agent_user_stub_start) as *const u8;
+        let len = (addr_of!(agent_user_stub_end) as usize) - (src as usize);
+        debug_assert!(len <= 4096, "agent stub must fit in one page");
+        // SAFETY: `src` spans the PIC stub in identity-mapped, ring0-readable
+        // `.text`; `len <= 4096` keeps the copy inside the one AGENT_CODE frame;
+        // the regions are disjoint.
+        unsafe {
+            copy_nonoverlapping(src, AGENT_CODE.byte_ptr(), len);
+        }
+    }
+    // Code page: shared, executable, read-only to ring3. The stub is copied at
+    // offset 0, so the entry VA is exactly AGENT_CODE_VA.
+    if !super::mmu::map_user_in_root(root_pa, AGENT_CODE_VA, AGENT_CODE.phys_base(), false, true) {
+        return None;
+    }
+    // Stack page: a fresh, private, writable, non-exec frame.
+    let stack_pa = crate::frame_alloc()?;
+    if !super::mmu::map_user_in_root(root_pa, AGENT_STACK_VA, stack_pa, true, false) {
+        return None;
+    }
+    Some((AGENT_CODE_VA, AGENT_STACK_VA + 0x1000))
+}
+
+/// M12: open the agent cap-syscall door -- install the DPL=3 `int 0x82` IDT gate
+/// targeting [`agent_caps_entry`]. Idempotent (one-shot); call once before the
+/// agents run. (M4's 0x80 and M11's 0x81 gates are left untouched.)
+pub fn agent_traps_init() {
+    if AGENT_TRAPS_DONE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    idt::set_user_gate(AGENT_SYSCALL_VECTOR, agent_caps_entry as *const () as u64);
+}

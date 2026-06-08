@@ -209,8 +209,10 @@ pub(crate) fn dispatch_trap(info: &TrapInfo) -> TrapAction {
 // state is switched (both targets are soft-float).
 
 /// Number of task slots tb-hal tracks, INCLUDING slot 0 (the bootstrap context
-/// `rust_main` runs on). Eight leaves headroom without a heap.
-const MAX_TASKS: usize = 8;
+/// `rust_main` runs on). Raised to 12 at M12: the cumulative boot now creates
+/// boot(0) + M2 A/B(1,2) + M9 C/D(3,4) + M10 G/H(5,6) + M12 two agents(7,8),
+/// so the prior `8` would fatal on the second agent. 12 leaves headroom.
+const MAX_TASKS: usize = 12;
 
 /// Per-slot saved stack pointer — the WHOLE saved context of a suspended task.
 /// `0` means \"no saved context\". `AtomicUsize` for safe interior mutability
@@ -315,6 +317,13 @@ pub fn yield_to(next: Task) {
     // byte-for-byte unchanged (no control-register touch, even while the
     // aarch64 MMU is still OFF during M2).
     switch_address_space(prev, next.0);
+    // M12: fold the per-task KERNEL-stack switch in beside the address-space
+    // switch. When the incoming task is a USER (ring3/EL0) agent, program the
+    // CPU's privilege-change stack pointer (x86 TSS.rsp0; aarch64 SP_EL1 is
+    // tracked automatically, so a no-op) to THAT agent's own kernel stack, so a
+    // timer IRQ taken while the agent runs unprivileged pushes its frame on the
+    // agent's stack. Kernel tasks keep `0` and leave the register untouched.
+    switch_kernel_stack(next.0);
     // SAFETY: `next_sp` was produced by `arch::task_stack_init` (fabricated
     // frame) or a previous `ctx_switch` save; both leave a well-formed
     // callee-saved frame at that SP. `TASK_SP[prev].as_ptr()` is a valid
@@ -927,6 +936,16 @@ pub fn irq_unmask() {
 /// address-space fold-in.
 static TASK_AS: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
 
+/// M12: per-task KERNEL-stack TOP (the privilege-change landing stack), indexed
+/// by task slot. `0` = a kernel (ring0/EL1) task -- never takes a privilege
+/// change on a timer IRQ, so its stale value is never consulted. A USER agent
+/// stores its own kernel-stack top here at [`agent_spawn`]; [`switch_kernel_stack`]
+/// (folded into [`yield_to`]) programs the CPU's privilege-change stack pointer
+/// (x86 `TSS.rsp0`) to it on every switch INTO that agent. On aarch64 `SP_EL1`
+/// tracks the running task's kernel stack via `ctx_switch` automatically, so the
+/// arch hook is a documented no-op there.
+static TASK_KSTACK_TOP: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+
 /// The default boot top-level root PA, captured the first time an
 /// [`AddressSpace`] is created (when the live root still IS the boot root every
 /// space is copied from). `0` until captured. [`yield_to`] resolves the sentinel
@@ -1039,6 +1058,19 @@ fn switch_address_space(prev: usize, next: usize) {
     arch::switch_root(target);
 }
 
+/// M12 [`yield_to`] kernel-stack fold-in: when the incoming task is a USER
+/// agent (`TASK_KSTACK_TOP[next] != 0`), program the CPU's privilege-change
+/// stack pointer to that agent's own kernel stack so a timer IRQ taken while the
+/// agent runs ring3/EL0 builds its frame there. A no-op for kernel tasks
+/// (top `0`), so M2/M9/M10 switches touch no extra state. On aarch64
+/// `arch::set_kernel_stack` is itself a no-op (SP_EL1 already tracks it).
+fn switch_kernel_stack(next: usize) {
+    let top = TASK_KSTACK_TOP[next].load(Ordering::Acquire);
+    if top != 0 {
+        arch::set_kernel_stack(top);
+    }
+}
+
 /// M10 self-test primitive: write `val` THROUGH virtual address `va`, then read
 /// it back and return what was observed. Confined to tb-hal because the
 /// `#![forbid(unsafe_code)]` kernel cannot deref a raw VA; a task uses it under
@@ -1105,4 +1137,294 @@ pub fn m3_test_va_intact() -> bool {
 /// all the new unsafe/asm is confined to tb-hal.
 pub fn caps_user_probe(root_handle: u64) -> Option<caps::SyscallArgs> {
     arch::caps_user_probe(root_handle)
+}
+
+// ===========================================================================
+// M12: the agent runtime -- AgentProcess as a first-class OS entity
+// ===========================================================================
+//
+// `agent_spawn(manifest)` COMPOSES the four already-green substrates into one
+// owned Rust value: M10 [`AddressSpace`] (its own root) + M11 [`caps::HandleTable`]
+// (its only authority) + an M9 [`Task`] (its run-queue slot) + the manifest
+// (its declared, least-privilege authority). The agent is born already holding
+// its memory-home + bootstrap + budget handles (minted by spawn, delivered in
+// the user-entry register file -- ZERO setup syscalls) and is scheduled
+// PREEMPTIVELY in ring3/EL0. The user-mode preemption mechanism (per-task kernel
+// stack + TSS.rsp0 / SP_EL1, the fabricated user-launch frame, the EL0-IRQ
+// vector) lives in `arch::*`; the cap-syscall bridge [`agent_syscall_current`]
+// stays SAFE (it runs `caps::dispatch` on the CURRENT agent's table). All spawn
+// LOGIC is safe; the only `unsafe` here is the blessed `UnsafeCell` +
+// `unsafe impl Sync` registry cell (the exact `TaskStack` precedent).
+
+/// One declared capability grant in an [`AgentManifest`]: an object KIND the
+/// agent is born holding, with the exact RIGHTS minted into its handle. Authority
+/// the manifest omits simply never exists for the agent (least privilege by
+/// construction).
+#[derive(Clone, Copy)]
+pub struct CapGrant {
+    /// The kind of object minted into the agent's table.
+    pub kind: caps::ObjKind,
+    /// The rights attached to the minted handle (only ever narrowed thereafter).
+    pub rights: caps::Rights,
+}
+
+/// The MINIMAL static declaration [`agent_spawn`] consumes -- the TABOS analogue
+/// of seL4's initial-thread CNode contents / Zircon's processargs: the exhaustive
+/// list of authority an agent is born holding, nothing ambient. `const`-
+/// constructible, so the kernel declares `static MANIFEST: AgentManifest = ...`
+/// with zero heap/unsafe.
+pub struct AgentManifest {
+    /// Identity label for audit / serial.
+    pub name: &'static str,
+    /// The EXACT declared authority: one object minted per grant (least privilege).
+    pub caps: &'static [CapGrant],
+    /// Request the born-with memory home (true at M12).
+    pub wants_memory_home: bool,
+}
+
+/// An [`AgentProcess`] -- the first-class OS entity composing the four substrates.
+/// One owned Rust value (the M18 checkpoint/fork/migrate unit), held in [`AGENTS`].
+#[allow(dead_code)] // several fields are identity/forward-compat (M13/M14/M18)
+struct AgentProcess {
+    /// The signed-in-spirit authority declaration this agent was minted from.
+    manifest: &'static AgentManifest,
+    /// M10: the agent's OWN top-level root (own CR3 / TTBR0).
+    space: AddressSpace,
+    /// M11: the per-principal authority -- THE table `caps::dispatch` resolves against.
+    table: caps::HandleTable,
+    /// M9: the scheduler / run-queue slot handle.
+    task: Task,
+    /// The per-agent ring0/EL1 stack top (TSS.rsp0 / SP_EL1 landing on preemption).
+    kstack_top: u64,
+    /// Born-with `ObjKind::MemoryHome` (M13 fills the body).
+    memory_home: caps::Handle,
+    /// Born-with `ObjKind::Channel` bootstrap (M14 fills the body).
+    bootstrap: caps::Handle,
+    /// Born-with `ObjKind::Budget` (split from the caller at M12+).
+    budget: caps::Handle,
+    /// Identity = the task slot / agent id.
+    principal: u32,
+}
+
+/// The agent registry: `[Option<AgentProcess>; MAX_TASKS]` indexed by task slot,
+/// behind the `TaskStack`-style `UnsafeCell` + `unsafe impl Sync` cell. Mutated
+/// only single-core with interrupts masked (spawn in the disarmed boot window;
+/// the cap-syscall bridge inside the syscall gate), so the transient `&mut` it
+/// hands out never aliases -- the same soundness argument `ctx_switch` relies on.
+struct AgentTable {
+    agents: UnsafeCell<[Option<AgentProcess>; MAX_TASKS]>,
+}
+
+// SAFETY: single-core; the only mutation paths are `agent_spawn` (boot window,
+// timer disarmed) and `agent_syscall_current` (inside the ring3/EL0 syscall gate
+// with IF / PSTATE.I clear), so no two accesses to a slot's `&mut` overlap.
+unsafe impl Sync for AgentTable {}
+
+impl AgentTable {
+    /// A transient `&mut` to slot `i`. Caller must be single-core with interrupts
+    /// masked (the registry's discipline), so the borrow never aliases.
+    #[allow(clippy::mut_from_ref)]
+    fn slot(&self, i: usize) -> &mut Option<AgentProcess> {
+        // SAFETY: see the type-level `unsafe impl Sync` note; `i < MAX_TASKS` is
+        // checked by every caller, keeping the index in bounds.
+        unsafe { &mut (*self.agents.get())[i] }
+    }
+}
+
+static AGENTS: AgentTable = AgentTable {
+    agents: UnsafeCell::new([const { None }; MAX_TASKS]),
+};
+
+/// Per-agent observation: set when the agent's PERMITTED capability-checked
+/// syscall (`M_OBJECT_INSPECT` on its born-with memory home) returned `Ok` from
+/// the cap bridge -- witness #2 of the born-with-memory guarantee, observed from
+/// the user side.
+static AGENT_PERMITTED_OK: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
+
+/// Per-agent observation: set when the agent's NON-MANIFEST capability syscall
+/// (`M_EMIT_EXTERNAL`, a right its manifest never granted) returned `Denied` --
+/// least privilege holding end-to-end through the user boundary.
+static AGENT_DENIED_OK: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
+
+/// Mint one capability per [`CapGrant`] into `table` (after the born-with set).
+fn mint_manifest_caps(table: &mut caps::HandleTable, manifest: &AgentManifest) {
+    let mut i = 0;
+    while i < manifest.caps.len() {
+        let g = manifest.caps[i];
+        if table.mint(g.kind, g.rights).is_none() {
+            task_api_fatal("agent_spawn: handle table full minting manifest caps");
+        }
+        i += 1;
+    }
+}
+
+/// M12: spawn an [`AgentProcess`] from a static `manifest` on a caller-provided
+/// `kstack`, scheduled preemptively in ring3/EL0. Mints the agent's OWN address
+/// space, its per-principal handle table (born-with memory-home + bootstrap +
+/// budget, then one handle per manifest grant), fabricates the user-launch frame
+/// on `kstack`, maps the agent's user code + stack into its private root, and
+/// enqueues it for the round-robin timer. Returns the agent's [`Task`] handle.
+/// Fatal (report + halt) on frame OOM or slot exhaustion. Call in the disarmed
+/// boot window (timer off), AFTER [`scheduler_init`].
+pub fn agent_spawn(manifest: &'static AgentManifest, kstack: &'static mut [usize]) -> Task {
+    // 1. The agent's own address space (a copy of the live kernel half).
+    let space = match address_space_new() {
+        Some(s) => s,
+        None => task_api_fatal("agent_spawn: out of frames for the address space"),
+    };
+
+    // 2. The per-principal table + the born-with handle set, minted DETERMINISTICALLY
+    //    (memory_home FIRST -> generation 1, slot 0) so the agent can name them.
+    let mut table = caps::HandleTable::with_capacity(16);
+    let mh_rights = caps::Rights::READ
+        .union(caps::Rights::WRITE)
+        .union(caps::Rights::RECALL);
+    let bs_rights = caps::Rights::READ
+        .union(caps::Rights::WRITE)
+        .union(caps::Rights::TRANSFER);
+    let memory_home = match table.mint(caps::ObjKind::MemoryHome, mh_rights) {
+        Some(h) => h,
+        None => task_api_fatal("agent_spawn: could not mint the memory home"),
+    };
+    let bootstrap = match table.mint(caps::ObjKind::Channel, bs_rights) {
+        Some(h) => h,
+        None => task_api_fatal("agent_spawn: could not mint the bootstrap channel"),
+    };
+    let budget = match table.mint(caps::ObjKind::Budget, caps::Rights::READ) {
+        Some(h) => h,
+        None => task_api_fatal("agent_spawn: could not mint the budget"),
+    };
+    mint_manifest_caps(&mut table, manifest);
+
+    // 3. Map the agent's user code (shared stub) + private stack into its OWN root.
+    let (entry_va, user_sp) = match arch::agent_map_space(space.root_pa()) {
+        Some(x) => x,
+        None => task_api_fatal("agent_spawn: out of frames mapping the user window"),
+    };
+
+    // 4. Fabricate the resume-symmetric user-launch frame on the kernel stack;
+    //    the birth registers carry the memory-home + bootstrap handles.
+    let top = ((kstack.as_ptr() as usize + kstack.len() * core::mem::size_of::<usize>()) & !0xF)
+        as u64;
+    let sp = arch::task_stack_init_user(kstack, entry_va, user_sp, memory_home.raw(), bootstrap.raw());
+
+    // 5. Allocate a scheduler slot and wire the per-task state.
+    let slot = NEXT_TASK_SLOT.fetch_add(1, Ordering::Relaxed);
+    if slot >= MAX_TASKS {
+        task_api_fatal("agent_spawn: too many tasks");
+    }
+    TASK_SP[slot].store(sp, Ordering::Release);
+    TASK_KSTACK_TOP[slot].store(top, Ordering::Release);
+    TASK_AS[slot].store(space.root_pa(), Ordering::Release);
+    AGENT_PERMITTED_OK[slot].store(false, Ordering::Release);
+    AGENT_DENIED_OK[slot].store(false, Ordering::Release);
+
+    let task = Task(slot);
+    *AGENTS.slot(slot) = Some(AgentProcess {
+        manifest,
+        space,
+        table,
+        task,
+        kstack_top: top,
+        memory_home,
+        bootstrap,
+        budget,
+        principal: slot as u32,
+    });
+
+    // 6. Enqueue for the round-robin timer (append after the current queue).
+    let len = RUNQUEUE_LEN.load(Ordering::Relaxed);
+    if len >= MAX_TASKS {
+        task_api_fatal("agent_spawn: run queue full");
+    }
+    RUNQUEUE[len].store(slot, Ordering::Relaxed);
+    RUNQUEUE_LEN.store(len + 1, Ordering::Release);
+
+    task
+}
+
+/// M12: install the per-arch agent cap-syscall door (x86 the `int 0x82` DPL3
+/// gate; a no-op on aarch64, whose EL0 `svc` slot is already wired). Idempotent;
+/// call once before arming the timer for the agents.
+pub fn agent_traps_init() {
+    arch::agent_traps_init();
+}
+
+/// M12: the SAFE cap-syscall bridge the per-arch ring3/EL0 register-lift shim
+/// calls. Resolves the CURRENT task to its [`AgentProcess`], runs the numbered,
+/// capability-checked [`caps::dispatch`] against ITS table, records the
+/// permitted/denied observations, and returns `(status, value)` for the shim to
+/// place in the agent's result registers. `None` when the current task is not an
+/// agent (so the legacy M4/M11 EL0 paths fall through unchanged).
+pub fn agent_syscall_current(method: u64, handle: u64, a0: u64, a1: u64) -> Option<(u32, u64)> {
+    let slot = CURRENT_TASK.load(Ordering::Relaxed);
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method: method as u32,
+        handle: caps::Handle::from_raw(handle),
+        args: [a0, a1, 0, 0],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    if args.method == caps::M_OBJECT_INSPECT && ret.status == caps::SysStatus::Ok {
+        AGENT_PERMITTED_OK[slot].store(true, Ordering::Release);
+    }
+    if args.method == caps::M_EMIT_EXTERNAL && ret.status == caps::SysStatus::Denied {
+        AGENT_DENIED_OK[slot].store(true, Ordering::Release);
+    }
+    Some((ret.status as u32, ret.value))
+}
+
+/// M12 witness #1 (kernel-side, BEFORE the agent has run): `true` iff `task`'s
+/// table resolves its born-with memory home (`Ok`, `ObjKind::MemoryHome`) AND
+/// bootstrap channel (`Ok`, `ObjKind::Channel`) -- proving the agent is born
+/// already holding them with ZERO setup syscalls.
+pub fn agent_born_ok(task: Task) -> bool {
+    let slot = task.raw();
+    if slot >= MAX_TASKS {
+        return false;
+    }
+    let ap = match AGENTS.slot(slot).as_mut() {
+        Some(a) => a,
+        None => return false,
+    };
+    let mh_h = ap.memory_home;
+    let bs_h = ap.bootstrap;
+    let mh = caps::dispatch(&mut ap.table, &caps::SyscallArgs::call(caps::M_OBJECT_INSPECT, mh_h));
+    let bs = caps::dispatch(&mut ap.table, &caps::SyscallArgs::call(caps::M_OBJECT_INSPECT, bs_h));
+    mh.status == caps::SysStatus::Ok
+        && mh.value == caps::ObjKind::MemoryHome as u64
+        && bs.status == caps::SysStatus::Ok
+        && bs.value == caps::ObjKind::Channel as u64
+}
+
+/// M12 witness #2 (user-side): `true` iff `task`'s PERMITTED cap-checked syscall
+/// returned `Ok` through the user boundary.
+pub fn agent_permitted_ok(task: Task) -> bool {
+    let slot = task.raw();
+    slot < MAX_TASKS && AGENT_PERMITTED_OK[slot].load(Ordering::Acquire)
+}
+
+/// M12: `true` iff `task`'s NON-MANIFEST capability syscall returned `Denied`
+/// (least privilege held through the user boundary).
+pub fn agent_denied_ok(task: Task) -> bool {
+    let slot = task.raw();
+    slot < MAX_TASKS && AGENT_DENIED_OK[slot].load(Ordering::Acquire)
+}
+
+/// M12: the top-level page-table root PA of `task`'s address space (`0` if it is
+/// not an agent). The kernel uses it to drive the parent-only-VA fault probe
+/// under the agent's own root.
+pub fn agent_root_pa(task: Task) -> u64 {
+    let slot = task.raw();
+    if slot >= MAX_TASKS {
+        return 0;
+    }
+    AGENTS
+        .slot(slot)
+        .as_ref()
+        .map(|a| a.space.root_pa())
+        .unwrap_or(0)
 }

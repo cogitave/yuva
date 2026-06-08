@@ -171,6 +171,76 @@ const MAGIC_E: u64 = 0x1010_1010_1010_100E;
 /// Task H's private magic, written THROUGH the shared test VA under space F.
 const MAGIC_F: u64 = 0x2020_2020_2020_200F;
 
+// --- M12 agent-runtime bookkeeping (all in THIS forbid-class crate, all safe) -
+
+/// Agent A's KERNEL stack: 4096 usize words (32 KiB), 16-aligned -- the
+/// ring0/EL1 stack a timer IRQ taken at ring3/EL0 lands on (TSS.rsp0 / SP_EL1).
+static STACK_AGENT_A: TaskStack<4096> = TaskStack::new();
+/// Agent B's KERNEL stack.
+static STACK_AGENT_B: TaskStack<4096> = TaskStack::new();
+
+/// Agent A's manifest grants: a read/write/recall memory home + a readable
+/// budget. NO `EMIT_EXTERNAL` / `INVOKE_MODEL`, so its emit-external syscall is
+/// `Denied` (least privilege is the manifest's OMISSION, not a runtime check).
+static MANIFEST_A_CAPS: [tb_hal::CapGrant; 2] = [
+    tb_hal::CapGrant {
+        kind: tb_hal::caps::ObjKind::MemoryHome,
+        rights: tb_hal::caps::Rights::READ
+            .union(tb_hal::caps::Rights::WRITE)
+            .union(tb_hal::caps::Rights::RECALL),
+    },
+    tb_hal::CapGrant {
+        kind: tb_hal::caps::ObjKind::Budget,
+        rights: tb_hal::caps::Rights::READ,
+    },
+];
+/// Agent A's static manifest -- the ONLY input to its spawn (capability confinement).
+static MANIFEST_A: tb_hal::AgentManifest = tb_hal::AgentManifest {
+    name: "agent-a",
+    caps: &MANIFEST_A_CAPS,
+    wants_memory_home: true,
+};
+
+/// Agent B's manifest grants: a read/recall memory home + a readable budget.
+/// Also omits `EMIT_EXTERNAL` / `INVOKE_MODEL`.
+static MANIFEST_B_CAPS: [tb_hal::CapGrant; 2] = [
+    tb_hal::CapGrant {
+        kind: tb_hal::caps::ObjKind::MemoryHome,
+        rights: tb_hal::caps::Rights::READ.union(tb_hal::caps::Rights::RECALL),
+    },
+    tb_hal::CapGrant {
+        kind: tb_hal::caps::ObjKind::Budget,
+        rights: tb_hal::caps::Rights::READ,
+    },
+];
+/// Agent B's static manifest.
+static MANIFEST_B: tb_hal::AgentManifest = tb_hal::AgentManifest {
+    name: "agent-b",
+    caps: &MANIFEST_B_CAPS,
+    wants_memory_home: true,
+};
+
+/// Set by the trap hook when the child agent's root faults on the parent-only
+/// VA (cross-space isolation proof, reusing the M10 armed-fault mechanism).
+static M12_CHILD_FAULTED: AtomicBool = AtomicBool::new(false);
+
+/// x86_64 parent-only VA: `PML4[5]`, vacant in the kernel half AND in every
+/// agent root (an agent only ever adds a private `PML4[4]` leaf), so an agent
+/// read of it faults.
+#[cfg(target_arch = "x86_64")]
+const M12_PARENT_VA: u64 = 0x0000_0280_0000_0000;
+/// aarch64 parent-only VA: `L1[7]` (= 7 GiB), likewise vacant in every agent root.
+#[cfg(target_arch = "aarch64")]
+const M12_PARENT_VA: u64 = 0x0000_0001_C000_0000;
+
+/// The parent's private magic at `M12_PARENT_VA`, read back after the guarded
+/// resume to prove the child saw the parent's frame only via the hook's flip.
+const MAGIC_PARENT: u64 = 0x9090_9090_9090_9012;
+
+/// Involuntary switches required before the M12 verdict -- proves both ring3/EL0
+/// agents genuinely lost the CPU to the timer (the first user-mode preemption).
+const M12_REQUIRED_SWITCHES: u64 = 60;
+
 /// Boot entry. Reached by EITHER of tb-hal's two x86_64 entries (or the
 /// aarch64 `_start`); each sets up a stack and places the boot-info pointer in
 /// SysV arg0 before calling here:
@@ -1143,6 +1213,148 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M11: caps OK\n"); // <-- the M11 DoD marker
+
+    // --- M12: the agent runtime -- AgentProcess as a first-class OS entity ----
+    // Root spawns TWO agents, each in its OWN address space (M10) holding ONLY
+    // its manifest-declared handles (M11), scheduled PREEMPTIVELY in ring3/EL0
+    // (M9 + the user-mode preemption plumbing) and born with a memory-home handle
+    // (M13 substrate later). The self-test proves, end to end: born-with memory
+    // (witness #1 kernel-side + witness #2 user-side), involuntary USER-mode
+    // preemption (the timer round-robins both ring3/EL0 agents), a permitted
+    // capability-checked syscall (Ok) and a non-manifest one (Denied), and a
+    // child fault on a parent-only VA recovered in the trap hook. The kernel
+    // stays unsafe-free: every privileged step is a safe tb-hal facade call.
+    // DoD marker: "M12: agent OK".
+    {
+        fn m12_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M12: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        // PHASE 0 -- spawn (timer still disarmed). Reset the run queue to {boot};
+        // each `agent_spawn` mints its address space + handle table (born-with
+        // memory_home/bootstrap/budget + the manifest grants), fabricates the
+        // user-launch frame, maps its user code/stack and ENQUEUES it.
+        tb_hal::scheduler_init();
+        tb_hal::set_irq_hook(tb_hal::schedule);
+        tb_hal::agent_traps_init();
+        let agent_a = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_A.take());
+        let agent_b = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_B.take());
+
+        // Witness #1 (kernel-side, BEFORE either agent has run a single
+        // instruction): each agent's table already resolves its memory-home and
+        // bootstrap handles -> born-with memory with ZERO setup syscalls.
+        if !tb_hal::agent_born_ok(agent_a) || !tb_hal::agent_born_ok(agent_b) {
+            m12_fail("an agent was not born holding its memory-home/bootstrap handles");
+        }
+        tb_hal::serial_write_str("agent: both agents born with memory-home + bootstrap (zero setup)\n");
+
+        // PHASE 1 -- preemptive round-robin in ring3/EL0 (the user-preemption
+        // proof). Re-arm the timer: for the FIRST time, USER tasks are
+        // involuntarily preempted. Each agent's stub makes a PERMITTED
+        // capability-checked syscall (inspect its memory home -> Ok) and a
+        // NON-MANIFEST one (emit-external -> Denied), then spins so ONLY the
+        // timer can take the CPU.
+        let switches_before = tb_hal::involuntary_switch_count();
+        tb_hal::timer_rearm();
+        let mut stall: u64 = 0;
+        const STALL_LIMIT: u64 = 800_000_000;
+        loop {
+            let sw = tb_hal::involuntary_switch_count().wrapping_sub(switches_before);
+            let done = sw >= M12_REQUIRED_SWITCHES
+                && tb_hal::agent_permitted_ok(agent_a)
+                && tb_hal::agent_permitted_ok(agent_b)
+                && tb_hal::agent_denied_ok(agent_a)
+                && tb_hal::agent_denied_ok(agent_b);
+            if done {
+                break;
+            }
+            stall += 1;
+            if stall > STALL_LIMIT {
+                tb_hal::timer_disarm();
+                m12_fail("agents did not reach the preemption + cap-check goal in time");
+            }
+            core::hint::spin_loop();
+        }
+        tb_hal::timer_disarm(); // STOP before the verdict (like M9)
+        let switches = tb_hal::involuntary_switch_count().wrapping_sub(switches_before);
+
+        if !tb_hal::agent_permitted_ok(agent_a) || !tb_hal::agent_permitted_ok(agent_b) {
+            m12_fail("an agent's permitted capability syscall was not observed Ok");
+        }
+        if !tb_hal::agent_denied_ok(agent_a) || !tb_hal::agent_denied_ok(agent_b) {
+            m12_fail("a non-manifest capability syscall was not Denied (TB_ENOTCAPABLE)");
+        }
+        if switches < M12_REQUIRED_SWITCHES {
+            m12_fail("too few involuntary switches (user-mode preemption did not occur)");
+        }
+        tb_hal::serial_write_str("agent: permitted syscall Ok + non-manifest syscall Denied (both agents)\n");
+        tb_hal::serial_write_str("agent: involuntary user-mode switches=");
+        write_hex_u64(switches);
+        tb_hal::serial_write_byte(b'\n');
+
+        // PHASE 2 -- parent-only-VA fault (timer disarmed, single-threaded; reuse
+        // the M10 armed-fault + guarded-resume mechanism). Map M12_PARENT_VA only
+        // in a parent space and seed its magic; an agent's root leaves that
+        // top-level slot vacant, so a read of it under the child's root faults ->
+        // the trap hook records it and flips to the parent space (the access
+        // re-executes where the VA IS mapped).
+        let parent_space = match tb_hal::address_space_new() {
+            Some(s) => s,
+            None => m12_fail("no frame for the parent-only address space"),
+        };
+        let pframe = match tb_hal::frame_alloc() {
+            Some(p) => p,
+            None => m12_fail("no frame for the parent-only page"),
+        };
+        if !tb_hal::map_in_space(parent_space, M12_PARENT_VA, pframe, true) {
+            m12_fail("could not map the parent-only page");
+        }
+        tb_hal::address_space_switch(parent_space);
+        let seeded = tb_hal::addr_store_load(M12_PARENT_VA, MAGIC_PARENT);
+        tb_hal::address_space_switch_default();
+        if seeded != MAGIC_PARENT {
+            m12_fail("seeding the parent-only page failed");
+        }
+
+        let child_root = tb_hal::agent_root_pa(agent_a);
+        if child_root == 0 {
+            m12_fail("agent A has no address-space root");
+        }
+        M10_FAULT_HOME_ROOT.store(parent_space.root_pa(), Ordering::Release);
+        M10_FAULT_VA.store(M12_PARENT_VA, Ordering::Release);
+        M10_FAULT_SEEN.store(false, Ordering::Release);
+        M10_FAULT_ARMED.store(true, Ordering::Release);
+        tb_hal::address_space_switch_root(child_root); // run under the agent's own root
+        let recovered = tb_hal::addr_load(M12_PARENT_VA); // faults -> hook -> resume
+        M10_FAULT_ARMED.store(false, Ordering::Release);
+        tb_hal::address_space_switch_default(); // undo the hook's recovery switch
+        if !M10_FAULT_SEEN.load(Ordering::Acquire) {
+            m12_fail("child access to a parent-only VA did not fault (isolation breach)");
+        }
+        if recovered != MAGIC_PARENT {
+            m12_fail("guarded resume read the wrong frame");
+        }
+        M12_CHILD_FAULTED.store(true, Ordering::Release);
+        tb_hal::serial_write_str("agent: child fault on a parent-only VA, recovered in the hook\n");
+
+        // VERDICT -- every M12 invariant must hold together.
+        if !(tb_hal::agent_born_ok(agent_a)
+            && tb_hal::agent_born_ok(agent_b)
+            && tb_hal::agent_permitted_ok(agent_a)
+            && tb_hal::agent_permitted_ok(agent_b)
+            && tb_hal::agent_denied_ok(agent_a)
+            && tb_hal::agent_denied_ok(agent_b)
+            && switches >= M12_REQUIRED_SWITCHES
+            && M12_CHILD_FAULTED.load(Ordering::Acquire))
+        {
+            m12_fail("a final M12 invariant did not hold");
+        }
+    }
+
+    tb_hal::serial_write_str("M12: agent OK\n"); // <-- the M12 DoD marker
 
     tb_hal::halt()
 }

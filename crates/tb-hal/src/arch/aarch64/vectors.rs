@@ -129,8 +129,8 @@ __exception_vectors:
     VEC_SLOT __vec_other          // 0x300 FIQ / vFIQ   (masked in M1)
     VEC_SLOT __vec_other          // 0x380 SError / vSError
     // --- Lower EL using AArch64 (EL0) ---------------------------------------
-    VEC_SLOT __vec_el0_sync       // 0x400 Synchronous  <-- real handler (M4 SVC)
-    VEC_SLOT __vec_other          // 0x480 IRQ          (no EL0 IRQ source yet)
+    VEC_SLOT __vec_el0_sync       // 0x400 Synchronous  <-- real handler (M4/M11/M12 SVC)
+    VEC_SLOT __vec_irq            // 0x480 IRQ          <-- M12: preempt an EL0 agent
     VEC_SLOT __vec_other          // 0x500 FIQ
     VEC_SLOT __vec_other          // 0x580 SError
     // --- Lower EL using AArch32 -- no AArch32 guests; fatal ------------------
@@ -153,12 +153,13 @@ __vec_irq:                        // Current-EL-SPx IRQ: the M8 periodic timer
     SAVE_CONTEXT
     mov  x1, #2                   // source = 2: asynchronous IRQ (current EL)
     b    __trap_dispatch
-__vec_el0_sync:                   // Lower-EL-AArch64 synchronous: EL0 SVC (M4)
+__vec_el0_sync:                   // Lower-EL-AArch64 synchronous: EL0 SVC (M4/M11/M12)
     SAVE_CONTEXT
     mov  x0, sp                   // AAPCS64 arg0 = &Frame (x0..x30, ELR, SPSR)
-    bl   aarch64_el0_sync_handler // user.rs: records the syscall + longjmps
-                                  //   back into the kernel; `-> !`, no return
-    b    .                        // defensive park: the handler never returns
+    bl   aarch64_el0_sync_handler // user.rs: M12 agents DISPATCH + return here;
+                                  //   M4/M11 probes longjmp out (never return)
+    RESTORE_CONTEXT               // M12 agent path: restore x0..x30 (x0/x1=result)
+    eret                          // -> back to EL0 at the instruction after svc
 __trap_dispatch:
     mov  x0, sp                   // AAPCS64 arg0 = &TrapFrame
     bl   aarch64_trap_handler     // extern "C" in trap.rs; may halt (Halt path)

@@ -90,7 +90,7 @@ pub use trap::breakpoint;
 //     that `task_create` records for the first `yield_to`.
 // (Same names + signatures as the aarch64 arm, so `arch/mod.rs` re-exports
 // one uniform contract to `lib.rs`.)
-pub use sched::{ctx_switch, task_stack_init};
+pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 
 // M3: the safe MMU surface, re-exported through `arch/mod.rs` so `lib.rs` can
 // expose `tb_hal::mmu_init` / `tb_hal::mmu_selftest`. `mmu_init` programs
@@ -106,7 +106,16 @@ pub use mmu::{
 // can expose `tb_hal::user_demo`. Drops to ring3, runs the stub's `int 0x80`,
 // handles it in ring0 and returns whether the syscall was observed from user
 // mode with the expected arg. (Same name + signature as the aarch64 arm.)
-pub use user::{caps_user_probe, user_demo};
+pub use user::{agent_map_space, agent_traps_init, caps_user_probe, user_demo};
+
+/// M12: program the CPU's ring3->ring0 privilege-change stack pointer
+/// (`TSS.rsp0`) to `top` -- the running agent's own kernel stack. Called from
+/// `lib.rs`'s `yield_to` kernel-stack fold-in when switching INTO a user agent,
+/// so a timer IRQ taken in ring3 pushes its frame on the agent's stack. (The
+/// aarch64 arm is a no-op: SP_EL1 already tracks the running task's stack.)
+pub fn set_kernel_stack(top: u64) {
+    gdt::set_rsp0(top);
+}
 
 // M6: the x86_64 boot memory-map reader, re-exported through `arch/mod.rs` so
 // `crate::pmm` can call `crate::arch::pmm_collect_regions`. Same name +

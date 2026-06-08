@@ -232,6 +232,45 @@ pub fn task_stack_init(stack: &mut [usize], entry: fn()) -> usize {
     frame_sp
 }
 
+/// M12: fabricate the initial saved context for a NEW *user* agent task on its
+/// KERNEL `stack`, so the FIRST [`ctx_switch`] into it pops the fabricated
+/// callee-saved frame and `ret`s (br x30) into `super::user::agent_launch`,
+/// which `eret`s to EL0t at `entry_va` with `SP_EL0 = user_sp`, the birth
+/// registers `x0 = arg0` / `x1 = arg1`, and IRQs UNMASKED (preemptible).
+///
+/// The launch arguments ride in the fabricated callee-saved slots
+/// (x19 = entry_va, x20 = user_sp, x21 = arg0, x22 = arg1), which `ctx_switch`
+/// restores immediately before `br x30`. Pure safe Rust. Panics if `stack` is
+/// smaller than [`MIN_STACK_SLOTS`].
+pub fn task_stack_init_user(
+    stack: &mut [usize],
+    entry_va: u64,
+    user_sp: u64,
+    arg0: u64,
+    arg1: u64,
+) -> usize {
+    assert!(
+        stack.len() >= MIN_STACK_SLOTS,
+        "agent kernel stack too small to fabricate a user-launch context"
+    );
+
+    let base = stack.as_ptr() as usize;
+    let top = (base + stack.len() * size_of::<usize>()) & !0xF;
+    let frame_sp = top - CTX_FRAME_BYTES;
+    let first = (frame_sp - base) / size_of::<usize>();
+
+    for slot in &mut stack[first..first + CTX_FRAME_SLOTS] {
+        *slot = 0;
+    }
+    stack[first] = entry_va as usize; // x19 (sp+0x00) -> ELR_EL1
+    stack[first + 1] = user_sp as usize; // x20 (sp+0x08) -> SP_EL0
+    stack[first + 2] = arg0 as usize; // x21 (sp+0x10) -> birth x0
+    stack[first + 3] = arg1 as usize; // x22 (sp+0x18) -> birth x1
+    stack[first + CTX_SLOT_LR] = super::user::agent_launch as *const () as usize; // x30
+
+    frame_sp
+}
+
 // ===========================================================================
 // task_entry_trampoline / task_exit_guard: first-activation shim + landing
 // pad (mirrors arch/x86_64/sched.rs task_exit_guard).

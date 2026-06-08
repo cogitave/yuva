@@ -93,9 +93,9 @@
 //!  * **AAPCS64 callee-saved set** (the longjmp save area): r19-r29 + SP, with
 //!    r29 = FP and r30 = LR. Source: ARM-software/abi-aa `aapcs64.rst` §6.1.1.
 
-use core::arch::{asm, naked_asm};
+use core::arch::{asm, global_asm, naked_asm};
 use core::cell::UnsafeCell;
-use core::ptr::write_volatile;
+use core::ptr::{addr_of, copy_nonoverlapping, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ===========================================================================
@@ -397,17 +397,30 @@ extern "C" fn enter_el0(entry_va: u64, stack_top: u64) {
 /// EL0 synchronous handler: record the `svc` argument, then longjmp back into
 /// the kernel (the milestone deliberately does NOT resume EL0).
 #[no_mangle]
-pub(super) extern "C" fn aarch64_el0_sync_handler(frame: *const Frame) -> ! {
+pub(super) extern "C" fn aarch64_el0_sync_handler(frame: *mut Frame) {
     // SAFETY: `frame` is `sp` immediately after the trampoline's 0x110-byte
     // SAVE_CONTEXT push -- a fully-initialised, 16-aligned `Frame` on the
     // kernel (SP_EL1) stack, live for this whole call. Single core, with
-    // interrupts masked while we run, so we are the only accessor.
-    let frame = unsafe { &*frame };
+    // interrupts masked while we run, so we are the only accessor. M12 writes
+    // the result registers back through it, so it is `&mut`.
+    let frame = unsafe { &mut *frame };
 
     let esr = read_esr_el1();
     let ec = (esr >> ESR_EC_SHIFT) & ESR_EC_MASK;
 
     if ec == EC_SVC64 {
+        // M12: a SCHEDULED agent's cap syscall (x8=method, x0=handle, x1/x2=args).
+        // Dispatch against ITS table via the SAFE bridge and ERET back to EL0
+        // with the status/value in x0/x1 (vs the M4/M11 longjmp out of EL0). The
+        // bridge returns `None` when the current task is not an agent, so the
+        // legacy M4/M11 probe paths below run byte-for-byte unchanged.
+        if let Some((status, value)) =
+            crate::agent_syscall_current(frame.gpr[8], frame.gpr[0], frame.gpr[1], frame.gpr[2])
+        {
+            frame.gpr[0] = status as u64;
+            frame.gpr[1] = value;
+            return; // -> __vec_el0_sync RESTORE_CONTEXT + eret resumes EL0
+        }
         if CAPS_PROBE.load(Ordering::Acquire) {
             // M11: a numbered capability syscall. Lift the method (x8), the
             // target handle (x0) and the inline args (x1, x2) into the arch-
@@ -645,3 +658,128 @@ pub fn caps_user_probe(root_handle: u64) -> Option<crate::caps::SyscallArgs> {
         ],
     })
 }
+
+// ===========================================================================
+// M12: the agent runtime -- a REAL preemptible EL0 task (vs M4/M11's one-shot
+// longjmp probes). Preemption reuses the EXISTING EL1 IRQ path: vectors.rs now
+// routes the "Lower EL AArch64, IRQ" slot (0x480) to `__vec_irq`, so a timer
+// IRQ taken while an agent runs at EL0 is taken to EL1h on SP_EL1 (= the agent's
+// kernel stack, left there by the launch/resume eret), SAVE_CONTEXT pushes the
+// frame there, and the M9 `ctx_switch` switches the agent out. The cap `svc`
+// dispatches against the agent's table in the shared EL0 sync handler and erets
+// BACK to EL0. The new pieces here: `agent_launch` (the first-activation
+// trampoline that erets to EL0t with IRQs UNMASKED), the agent stub, and
+// `agent_map_space` (map the agent's user code+stack into its OWN root).
+
+/// The agent user-code VA: `L1[6]` (6 GiB), the vacant root slot M10 also uses
+/// for its private test pages. The shared agent stub is mapped here in EVERY
+/// agent's own root; the per-agent stack is the next page.
+const AGENT_CODE_VA: u64 = 0x0000_0001_8000_0000;
+/// The agent user-stack VA: the page after the code page (private per agent).
+const AGENT_STACK_VA: u64 = AGENT_CODE_VA + 0x1000;
+
+// L1[6] layout lock: the code VA must sit in root slot 6, page-aligned.
+const _: () = assert!((AGENT_CODE_VA >> 30) & 0x1FF == 6);
+const _: () = assert!(AGENT_CODE_VA & 0xFFF == 0);
+
+/// The shared agent code frame (the stub is copied here ONCE, then mapped into
+/// each agent's root at [`AGENT_CODE_VA`], EL0-executable + read-only).
+static AGENT_CODE_FRAME: Page = Page::new();
+/// One-shot guard so the stub is staged into [`AGENT_CODE_FRAME`] exactly once.
+static AGENT_CODE_STAGED: AtomicBool = AtomicBool::new(false);
+
+// The position-independent EL0 AGENT stub: read its born-with handles out of the
+// birth registers (x0 = memory_home, x1 = bootstrap), park memory_home in
+// callee-saved x19 (preserved across the `svc` by SAVE/RESTORE_CONTEXT AND across
+// any preemption), then issue a PERMITTED inspect (-> Ok) and a NON-MANIFEST
+// emit-external (-> Denied), and spin so ONLY the timer can take the CPU.
+global_asm!(
+    r#"
+.section .text.user, "ax"
+.balign 16
+.global agent_user_stub_start
+.global agent_user_stub_end
+agent_user_stub_start:
+    mov x19, x0            // save memory_home (birth reg) in callee-saved x19
+    mov x8, #0             // method = M_OBJECT_INSPECT (0)
+    mov x0, x19            // handle = memory_home
+    mov x1, #0             // a0
+    mov x2, #0             // a1
+    svc #0
+    mov x8, #21            // method = M_EMIT_EXTERNAL (21)
+    mov x0, x19            // handle = memory_home
+    mov x1, #0
+    mov x2, #0
+    svc #0
+7:
+    b 7b                   // spin: only the timer can preempt this EL0 task
+agent_user_stub_end:
+"#
+);
+
+extern "C" {
+    /// First byte of the EL0 agent stub (identity-mapped == phys).
+    static agent_user_stub_start: u8;
+    /// One-past-the-last byte of the EL0 agent stub.
+    static agent_user_stub_end: u8;
+}
+
+// agent_launch: the first-activation trampoline. The fabricated kernel-stack
+// frame (sched.rs `task_stack_init_user`) makes `ctx_switch`'s final `ret`
+// (br x30) land here with the launch arguments in callee-saved registers; it
+// programs SP_EL0 / ELR_EL1 / SPSR_EL1 and `eret`s to EL0t with IRQs UNMASKED so
+// the agent is immediately preemptible. SP_EL1 is left at the agent's kernel
+// stack top (unchanged by the eret), so the next EL0 IRQ lands cleanly there.
+// (a) PRE: reached at EL1h on the agent's kernel stack; x19=entry_va,
+//     x20=user_sp, x21=birth_arg0 (memory_home), x22=birth_arg1 (bootstrap).
+// (b) ABI: naked. SPSR_EL1 = 0x340 (EL0t, D/A/F masked, I clear -- vs M4's
+//     0x3C0 with I set), so a timer IRQ at EL0 is taken (involuntary preemption).
+#[unsafe(naked)]
+pub(super) unsafe extern "C" fn agent_launch() {
+    naked_asm!(
+        "msr sp_el0, x20",    // user stack top
+        "msr elr_el1, x19",   // user code entry VA
+        "mov x9, #0x340",     // SPSR_EL1 = EL0t, D/A/F masked, I (IRQ) UNMASKED
+        "msr spsr_el1, x9",
+        "mov x0, x21",        // birth reg: memory_home -> x0
+        "mov x1, x22",        // birth reg: bootstrap  -> x1
+        "isb",                // ensure SP_EL0/ELR/SPSR are visible before eret
+        "eret",               // -> EL0t at the agent stub (preemptible)
+    )
+}
+
+/// M12: map the agent user code (the shared stub) + a fresh private stack page
+/// into the agent's OWN root `root_pa` (`L1[6]`, vacant in the kernel half),
+/// EL0-accessible. Returns `(entry_va, user_stack_top)`, or `None` on
+/// physical-frame OOM. The stub is staged into [`AGENT_CODE_FRAME`] once.
+pub fn agent_map_space(root_pa: u64) -> Option<(u64, u64)> {
+    if !AGENT_CODE_STAGED.swap(true, Ordering::AcqRel) {
+        let src = addr_of!(agent_user_stub_start) as *const u8;
+        let len = (addr_of!(agent_user_stub_end) as usize) - (src as usize);
+        debug_assert!(len <= 4096, "agent stub must fit in one page");
+        // SAFETY: `src` spans the PIC stub in identity-mapped (Normal-WB under
+        // L1[1]) `.text`; `len <= 4096` keeps the copy inside the one
+        // AGENT_CODE_FRAME page; the regions are disjoint.
+        unsafe {
+            copy_nonoverlapping(src, AGENT_CODE_FRAME.0.get() as *mut u8, len);
+        }
+    }
+    // Code page: shared, EL0-executable, read-only. The stub is copied at
+    // offset 0, so the entry VA is exactly AGENT_CODE_VA.
+    if !super::mmu::map_user_in_root(root_pa, AGENT_CODE_VA, AGENT_CODE_FRAME.pa(), false, true) {
+        return None;
+    }
+    // Stack page: a fresh, private, writable, non-exec frame.
+    let stack_pa = crate::frame_alloc()?;
+    if !super::mmu::map_user_in_root(root_pa, AGENT_STACK_VA, stack_pa, true, false) {
+        return None;
+    }
+    Some((AGENT_CODE_VA, AGENT_STACK_VA + 0x1000))
+}
+
+/// M12: open the agent cap-syscall door. On aarch64 this is a NO-OP: the EL0
+/// `svc` slot (0x400) and the M12-wired EL0 IRQ slot (0x480) are part of the
+/// static `VBAR_EL1` table, and the agent vs legacy cap dispatch is selected in
+/// the shared [`aarch64_el0_sync_handler`] by `crate::agent_syscall_current`.
+/// Provided so the cross-arch `lib.rs` facade can call it uniformly.
+pub fn agent_traps_init() {}
