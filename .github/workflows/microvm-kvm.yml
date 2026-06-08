@@ -102,6 +102,34 @@ jobs:
             exit 1
           fi
 
+      # Informational (continue-on-error): the quotable --release boot-ready
+      # figure, measured in-guest (rdtsc, real host TSC under KVM) on a clean
+      # boot -- rust_main entry -> serial-ready, BEFORE the M0+ self-test span.
+      # This is the #53 measurement; the debug M18 gate above is unaffected.
+      - name: Bench - release boot-ready-cycles (microvm + KVM)
+        if: env.KVM_OK == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo kbuild --release --target targets/x86_64-tabos-none.json
+          K=target/x86_64-tabos-none/release/tabos-kernel
+          timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
+            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none -serial stdio -display none \
+            > rel.log 2>&1 || true
+          brc=$(grep -oE "boot-ready-cycles=0x[0-9a-fA-F]+" rel.log | head -1 | grep -oE "0x[0-9a-fA-F]+" || true)
+          dec=$([ -n "$brc" ] && printf "%d" "$brc" || echo "")
+          reached=$(grep -q "M18: evolve OK" rel.log && echo yes || echo no)
+          cpu=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed "s/^ *//")
+          echo "RELEASE-BENCH boot-ready-cycles=$brc ($dec) reachedM18=$reached"
+          {
+            echo "### --release boot-ready-cycles (microvm + KVM) -- the quotable bench figure (#53)"
+            echo ""
+            echo "- **boot-ready-cycles (release, in-guest rdtsc, rust_main -> serial-ready): \`$brc\` = $dec cycles**"
+            echo "- reached \`M18: evolve OK\` on the release build: **$reached**"
+            echo "- runner CPU: $cpu"
+            echo "- NOTE: a shared GitHub-runner KVM measurement (TSC + scheduling noise) -- a real \`--release\`+KVM figure, but the CANONICAL number is a quiet bare-metal / Arda-host bench (BENCHMARKS.md §5)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Skip note (no KVM)
         if: env.KVM_OK != '1'
         run: echo "::notice::microvm+KVM boot lane skipped — no /dev/kvm. TCG-microvm boot remains a required gate in ci."
