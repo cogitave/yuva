@@ -1,0 +1,107 @@
+# microvm-kvm — REQUIRED regression guard: boot the kernel under QEMU `microvm`
+# with KVM acceleration and assert the full cumulative chain reaches `M18`.
+#
+# This is the lane that would have caught issue #36 (the LAPIC LVT-mask bug that
+# faulted the FIRST `sti` only under QEMU-microvm+KVM, because `microvm` has no
+# 8259 PIC and LINT0 defaults to ExtINT). TCG-microvm boot is already covered by
+# `ci`; tb-vmm/KVM by `vmm-boot`; this adds the THIRD config — QEMU-microvm+KVM —
+# as a first-class boot lane so that fix can never silently regress.
+#
+# Unlike `l2-nested-vmx` (informational, continue-on-error, focused on the nested
+# VMX *proof*), this lane is a hard M18 boot gate. It still skips gracefully when
+# a runner has no /dev/kvm (a runner property, not our bug) — the TCG path is
+# already a required gate in `ci`, so skipping here loses no coverage.
+
+name: microvm-kvm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  microvm-kvm-boot:
+    name: boot M0-M18 under QEMU microvm + KVM (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Enable /dev/kvm for the runner user
+        run: |
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::notice::/dev/kvm absent on this runner — the microvm+KVM boot will skip (TCG-microvm is already a required gate in ci)."
+            echo "KVM_OK=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm
+          echo "KVM_OK=1" >> "$GITHUB_ENV"
+
+      - name: Cache cargo + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-microvmkvm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (custom target)
+        run: cargo kbuild --target targets/x86_64-tabos-none.json
+
+      - name: Install QEMU
+        if: env.KVM_OK == '1'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Boot under microvm + KVM and ASSERT M18 (hard gate)
+        if: env.KVM_OK == '1'
+        run: |
+          set -o pipefail
+          K=target/x86_64-tabos-none/debug/tabos-kernel
+          # -M microvm,rtc=off -accel kvm -cpu host = the exact config that
+          # surfaced #36. PVH entry; LAPIC is the only interrupt controller.
+          timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
+            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none -serial stdio -display none \
+            > serial.log 2>&1 || true
+          echo "=== serial tail (last 30 lines) ==="; tail -30 serial.log || true
+          # boot-ready-cycles is an in-guest rdtsc span (DEBUG build here; the
+          # quotable figure is the --release tb-vmm number, see BENCHMARKS.md).
+          brc=$(grep -oE "boot-ready-cycles=0x[0-9a-fA-F]+" serial.log | head -1 || true)
+          echo "=== assert: M18 reached under microvm+KVM ==="
+          if grep -q "M18: evolve OK" serial.log; then
+            echo "PASS: cumulative chain reached 'M18: evolve OK' under QEMU-microvm+KVM. ${brc:+($brc)}"
+            {
+              echo "### microvm + KVM boot lane (x86_64) — the #36 regression guard"
+              echo ""
+              echo "- **PASS**: reached \`M18: evolve OK\` under \`-M microvm -accel kvm -cpu host\`."
+              echo "- ${brc:-boot-ready-cycles: (not captured)} — debug build; the quotable boot figure is the \`--release\` tb-vmm number in BENCHMARKS.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::microvm+KVM boot did NOT reach 'M18: evolve OK' — a boot regression on the QEMU-microvm+KVM config (cf. issue #36 LAPIC/LVT)."
+            {
+              echo "### microvm + KVM boot lane (x86_64) — FAILED"
+              echo ""
+              echo "- **FAIL**: did not reach \`M18: evolve OK\` under \`-M microvm -accel kvm -cpu host\`."
+              echo '<details><summary>serial tail</summary>'
+              echo ''; echo '```'; tail -40 serial.log; echo '```'; echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Skip note (no KVM)
+        if: env.KVM_OK != '1'
+        run: echo "::notice::microvm+KVM boot lane skipped — no /dev/kvm. TCG-microvm boot remains a required gate in ci."
