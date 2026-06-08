@@ -42,6 +42,7 @@ pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
 mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
 mod ipc; // M14: SAFE inter-agent IPC channel core (bounded ordered FIFO + cap move).
 mod blocks; // M15: SAFE shared-memory block core (pinned M6 frames + RECORD CAS).
+pub mod infer; // M16: SAFE LLM-agnostic inference bridge core (model: scheme + backend registry).
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
@@ -1278,7 +1279,12 @@ pub fn agent_spawn(manifest: &'static AgentManifest, kstack: &'static mut [usize
 
     // 2. The per-principal table + the born-with handle set, minted DETERMINISTICALLY
     //    (memory_home FIRST -> generation 1, slot 0) so the agent can name them.
-    let mut table = caps::HandleTable::with_capacity(16);
+    // Capacity 32: a single agent (agent_c) is reused as the principal across the
+    // cumulative M13/M14/M15/M16 self-tests, each minting handles into this SAME
+    // table (never closed), so the born-with set + M14 endpoints + M15 blocks +
+    // M16 sessions must all coexist. (The M11/M12 ObjFull algebra tests use their
+    // OWN explicitly-sized tables, so this bound is independent of them.)
+    let mut table = caps::HandleTable::with_capacity(32);
     let mh_rights = caps::Rights::READ
         .union(caps::Rights::WRITE)
         .union(caps::Rights::RECALL);
@@ -1724,4 +1730,61 @@ pub fn agent_block_member_writable(t: Task, h: caps::Handle, base_va: u64) -> Op
     let root_pa = ap.space.root_pa();
     let (_rights, blk) = ap.table.block_of(h).ok()?;
     blk.member_writable(root_pa, base_va)
+}
+
+/// M16: OPEN a model inference session -- kernel-mediated (NOT a dispatch method:
+/// it needs the [`infer`] router, which `dispatch` can't reach holding only `&mut
+/// HandleTable`; the `agent_channel_connect`/`agent_block_create` precedent).
+/// Resolves the `model:` scheme, then mints an [`caps::ObjKind::ModelSession`]
+/// bound to the registered backend WITH `INVOKE_MODEL | READ` into `t`'s OWN
+/// table. An unknown / non-`model:` scheme resolves to no backend -> a clean
+/// [`caps::SysStatus::BadCap`] (NEVER a panic). Returns `(status, session_raw)`;
+/// `None` only if `t` is not an agent.
+///
+/// Least-privilege NOTE: the manifest does not grant `INVOKE_MODEL`; the right
+/// is granted HERE by the facade (the kernel-mediated grant), so the gate is
+/// proven still to bite by NARROWing the session to drop it (-> `Denied`).
+pub fn agent_model_open(t: Task, scheme: &str) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let (model, backend) = match infer::resolve(scheme) {
+        Some(x) => x,
+        None => return Some((caps::SysStatus::BadCap as u32, 0)),
+    };
+    let rights = caps::Rights::INVOKE_MODEL.union(caps::Rights::READ);
+    let ap = AGENTS.slot(slot).as_mut()?;
+    match ap
+        .table
+        .mint_model_session(rights, infer::ModelSession { backend, model })
+    {
+        Some(h) => Some((caps::SysStatus::Ok as u32, h.raw())),
+        None => Some((caps::SysStatus::ObjFull as u32, 0)),
+    }
+}
+
+/// M16: drive a numbered, capability-checked [`caps::dispatch`] against `t`'s OWN
+/// table (the `agent_block_dispatch` clone) -- the self-test door for
+/// `M_MODEL_INVOKE` plus the session-handle NARROW. Every call routes the M11
+/// chokepoint (the `INVOKE_MODEL` gate, the closed method set). Returns
+/// `(status, value)`; `None` only if `t` is not an agent.
+pub fn agent_model_dispatch(
+    t: Task,
+    method: u32,
+    handle: caps::Handle,
+    a0: u64,
+) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method,
+        handle,
+        args: [a0, 0, 0, 0],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    Some((ret.status as u32, ret.value))
 }

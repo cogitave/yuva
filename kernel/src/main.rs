@@ -1887,6 +1887,116 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M15: blocks OK\n"); // <-- the M15 DoD marker
 
+    // --- M16: LLM-agnostic inference bridge -- the model: scheme + ModelSession -
+    // An agent invokes a model through a capability (INVOKE_MODEL, M_MODEL_INVOKE)
+    // naming the target via a `model:` scheme; a safe in-kernel ROUTER binds a
+    // REGISTERED backend behind ONE uniform contract, the backend identity hidden
+    // from the agent. We reuse the already-born agent_c (MANIFEST_A omits
+    // INVOKE_MODEL, so the success path's right comes from the FACADE grant; the
+    // Denied path narrows it away, proving the gate still bites). Two `model:`
+    // names bind ONE mock contract = the backend-agnostic proof. Timer is
+    // disarmed (single-core, interrupts masked). ZERO new unsafe. Marker:
+    // "M16: infer OK".
+    {
+        use tb_hal::caps::{self, Handle};
+
+        fn m16_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M16: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        let ok = caps::SysStatus::Ok as u32;
+        let den = caps::SysStatus::Denied as u32;
+        let badcap = caps::SysStatus::BadCap as u32;
+        let badmethod = caps::SysStatus::BadMethod as u32;
+        const PROMPT: u64 = 0x1234_5678;
+        let expect = PROMPT ^ 0xA110_C0DE;
+
+        // (1) PARSE: a model: URI parses; a non-model: scheme cleanly rejects.
+        if tb_hal::infer::parse_scheme("model:local/llama3").is_none() {
+            m16_fail("parse model:local/llama3 None");
+        }
+        if tb_hal::infer::parse_scheme("memory:x").is_some() {
+            m16_fail("parse memory:x was Some");
+        }
+
+        // (2) OPEN + INVOKE: model:mock/echo -> session WITH INVOKE_MODEL; the
+        // response is the mock's deterministic transform of the inline prompt.
+        let (s, sraw) = tb_hal::agent_model_open(agent_c, "model:mock/echo").unwrap_or((badcap, 0));
+        if s != ok {
+            m16_fail("open model:mock/echo not Ok");
+        }
+        let sess = Handle::from_raw(sraw);
+        let (s, resp) =
+            tb_hal::agent_model_dispatch(agent_c, caps::M_MODEL_INVOKE, sess, PROMPT)
+                .unwrap_or((badcap, 0));
+        if s != ok || resp != expect {
+            m16_fail("invoke not deterministic Ok");
+        }
+
+        // (3) BACKEND-AGNOSTIC: a 2nd model: name, SAME contract, SAME response --
+        // identical agent code, the registered backend swapped behind the prefix.
+        let (s, s2raw) =
+            tb_hal::agent_model_open(agent_c, "model:local/llama3").unwrap_or((badcap, 0));
+        if s != ok {
+            m16_fail("open model:local/llama3 not Ok");
+        }
+        let sess2 = Handle::from_raw(s2raw);
+        let (s, resp2) =
+            tb_hal::agent_model_dispatch(agent_c, caps::M_MODEL_INVOKE, sess2, PROMPT)
+                .unwrap_or((badcap, 0));
+        if s != ok || resp2 != expect {
+            m16_fail("backend swap changed the contract");
+        }
+
+        // (4) DENIED: NARROW the session to drop INVOKE_MODEL (mask 0), then invoke
+        // (the M14 epa_no_w / M13 home_ro precedent) -> the gate still bites.
+        let (s, nraw) =
+            tb_hal::agent_model_dispatch(agent_c, caps::M_HANDLE_NARROW, sess, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok {
+            m16_fail("narrow session to empty rights failed");
+        }
+        let no_inv = Handle::from_raw(nraw);
+        let (s, _) = tb_hal::agent_model_dispatch(agent_c, caps::M_MODEL_INVOKE, no_inv, PROMPT)
+            .unwrap_or((ok, 0));
+        if s != den {
+            m16_fail("invoke without INVOKE_MODEL not Denied");
+        }
+
+        // (5) UNKNOWN scheme: a clean closed error, never a panic.
+        let (s, _) = tb_hal::agent_model_open(agent_c, "model:vendor/ghost").unwrap_or((ok, 0));
+        if s != badcap {
+            m16_fail("unknown model: scheme not BadCap");
+        }
+
+        // (6) NON-SESSION: M_MODEL_INVOKE on a Generic cap minted WITH INVOKE_MODEL
+        // -> BadCap (the payload-None branch).
+        let gen = tb_hal::agent_mint_generic(agent_c, caps::Rights::INVOKE_MODEL)
+            .unwrap_or_else(|| m16_fail("mint generic INVOKE_MODEL cap failed"));
+        let (s, _) = tb_hal::agent_model_dispatch(agent_c, caps::M_MODEL_INVOKE, gen, PROMPT)
+            .unwrap_or((ok, 0));
+        if s != badcap {
+            m16_fail("M_MODEL_INVOKE on a non-session not BadCap");
+        }
+
+        // (7) closed-set probe: an unknown method stays BadMethod (M_BLOCK_READ=31
+        // is the highest).
+        let (s, _) =
+            tb_hal::agent_model_dispatch(agent_c, 33, sess, 0).unwrap_or((ok, 0));
+        if s != badmethod {
+            m16_fail("unknown method 33 not BadMethod");
+        }
+
+        tb_hal::serial_write_str(
+            "model: parse+route + INVOKE_MODEL gate + backend-agnostic + lifecycle\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M16: infer OK\n"); // <-- the M16 DoD marker
+
     tb_hal::halt()
 }
 

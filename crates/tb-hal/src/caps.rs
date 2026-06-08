@@ -256,6 +256,15 @@ pub struct Object {
     /// table holds an `Rc` clone of the SAME core, so mapping it into N roots
     /// makes the SAME physical bytes appear in N address spaces (true sharing).
     block: Option<Rc<crate::blocks::Block>>,
+    /// M16: the optional bound INFERENCE session body. Present ONLY on an
+    /// [`ObjKind::ModelSession`] minted by [`HandleTable::mint_model_session`]:
+    /// the router-resolved backend + the pinned [`crate::infer::ModelId`];
+    /// `None` for identity-only objects. OWNED INLINE (single-owner, the M13
+    /// `mem` ownership precedent -- a session is not shared across two tables,
+    /// so no `Rc`). `dispatch` reaches it by cloning the shared `Rc<Object>`,
+    /// reading the bound backend, and invoking it -- the backend identity stays
+    /// hidden from the agent (the LLM-agnostic contract).
+    session: Option<crate::infer::ModelSession>,
 }
 
 /// The neutral, fully-owned syscall descriptor the per-arch register-lift shim
@@ -510,6 +519,7 @@ impl HandleTable {
                 scalar: 0,
                 chan: None,
                 block: None,
+                session: None,
             }),
         )
     }
@@ -528,6 +538,7 @@ impl HandleTable {
                 scalar: 0,
                 chan: None,
                 block: None,
+                session: None,
             }),
         )
     }
@@ -544,6 +555,7 @@ impl HandleTable {
                 scalar,
                 chan: None,
                 block: None,
+                session: None,
             }),
         )
     }
@@ -567,6 +579,7 @@ impl HandleTable {
                 scalar: 0,
                 chan: Some((chan, side)),
                 block: None,
+                session: None,
             }),
         )
     }
@@ -590,6 +603,31 @@ impl HandleTable {
                 scalar: 0,
                 chan: None,
                 block: Some(blk),
+                session: None,
+            }),
+        )
+    }
+
+    /// M16: mint an [`ObjKind::ModelSession`] carrying its router-bound inference
+    /// body (single-owner, OWNED inline like the M13 `MemSubstrate` -- no `Rc`).
+    /// The session is minted by the kernel facade `agent_model_open` (the
+    /// `mint_channel_endpoint`/`mint_block` precedent), reached thereafter ONLY
+    /// through its capability at the M11 chokepoint (`M_MODEL_INVOKE`). `None` on
+    /// `ObjFull`.
+    pub(crate) fn mint_model_session(
+        &mut self,
+        rights: Rights,
+        sess: crate::infer::ModelSession,
+    ) -> Option<Handle> {
+        self.alloc(
+            rights,
+            Rc::new(Object {
+                kind: ObjKind::ModelSession,
+                mem: None,
+                scalar: 0,
+                chan: None,
+                block: None,
+                session: Some(sess),
             }),
         )
     }
@@ -1000,6 +1038,24 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         // M_HANDLE_TRANSFER is kernel-mediated (it needs a destination table);
         // its TRANSFER right is verified above. Remaining agent-semantic methods
         // are rights-checked stubs at M11 (bodies land in later milestones).
+        //
+        // M16: INVOKE the model session behind `args.handle` (INVOKE_MODEL gated
+        // above). Clone the `Rc<Object>` OUT and drop the slot borrow BEFORE
+        // calling the backend -- the single-&mut-at-a-time discipline (the
+        // M_MEM_*/M_CHAN_*/M_BLOCK_* precedent). The router was consulted ONCE at
+        // open time, never here, so dispatch keeps holding only `&mut
+        // HandleTable`. A non-session cap presented to a model method -> BadCap
+        // (the M_BLOCK_WRITE wrong-payload branch).
+        M_MODEL_INVOKE => {
+            let obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &obj.session {
+                Some(sess) => SysReturn::ok(sess.invoke(args.args[0]).token),
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
         _ => SysReturn::ok(0),
     }
 }

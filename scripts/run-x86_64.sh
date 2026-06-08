@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M15: blocks OK'
+MARKER='M16: infer OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
