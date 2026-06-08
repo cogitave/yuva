@@ -66,6 +66,17 @@ const LAPIC_LVT_TIMER: u64 = 0x320; // LVT Timer entry
 const LAPIC_TIMER_INITIAL: u64 = 0x380; // Timer Initial Count
 const LAPIC_TIMER_DIVIDE: u64 = 0x3E0; // Timer Divide Configuration
 
+// The other Local Vector Table entries (Intel SDM Vol.3A §11.5.1). M8 uses ONLY
+// the timer LVT; every other source MUST be masked during bring-up — after reset
+// LINT0 defaults to ExtINT delivery, and on QEMU `microvm` (NO 8259 PIC) an
+// asserted ExtINT fetches a garbage vector (-> IDT[0]/#DE) the instant `sti`
+// runs. TCG / tb-vmm leave these inert, so the gap only bites under microvm+KVM.
+const LAPIC_LVT_THERMAL: u64 = 0x330; // LVT Thermal Sensor
+const LAPIC_LVT_PERFMON: u64 = 0x340; // LVT Performance-Monitoring Counters
+const LAPIC_LVT_LINT0: u64 = 0x350; // LVT LINT0 (ExtINT after reset!)
+const LAPIC_LVT_LINT1: u64 = 0x360; // LVT LINT1 (NMI after reset)
+const LAPIC_LVT_ERROR: u64 = 0x370; // LVT Error
+
 const SVR_APIC_ENABLE: u32 = 1 << 8; // SVR bit 8: APIC software enable
 const LVT_TIMER_PERIODIC: u32 = 1 << 17; // LVT Timer bit 17: periodic mode
 const LVT_MASKED: u32 = 1 << 16; // LVT bit 16: mask the interrupt
@@ -216,6 +227,18 @@ fn lapic_enable() {
     wrmsr(IA32_APIC_BASE, base | APIC_BASE_ENABLE); // belt-and-suspenders HW enable
     lapic_write(LAPIC_TPR, 0); // accept every interrupt priority
     lapic_write(LAPIC_SVR, SVR_APIC_ENABLE | SPURIOUS_VECTOR);
+    // Mask EVERY LVT source except the timer BEFORE any `sti`. This is standard
+    // LAPIC bring-up (Linux `apic.c`, xv6 `lapicinit`): after reset LINT0
+    // delivers ExtINT, so on QEMU `microvm` -- which has NO 8259 PIC to source
+    // an interrupt-acknowledge vector -- the first `sti` would take a stray
+    // ExtINT and fetch a garbage vector (-> IDT[0]/#DE, fatal). TCG and tb-vmm's
+    // KVM irqchip leave these LVTs inert, which is why the gap stayed invisible
+    // until the microvm+KVM lane. The timer LVT is (re)armed separately.
+    lapic_write(LAPIC_LVT_LINT0, LVT_MASKED);
+    lapic_write(LAPIC_LVT_LINT1, LVT_MASKED);
+    lapic_write(LAPIC_LVT_ERROR, LVT_MASKED);
+    lapic_write(LAPIC_LVT_PERFMON, LVT_MASKED);
+    lapic_write(LAPIC_LVT_THERMAL, LVT_MASKED);
 }
 
 /// Arm the periodic LAPIC timer onto `TIMER_VECTOR`. The initial-count write
