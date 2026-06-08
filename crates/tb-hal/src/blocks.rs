@@ -26,9 +26,20 @@
 //! frame zeroing reuses the already-audited safe [`crate::addr_store_load`]
 //! identity facade. The VA->PA mapping reuses M10's existing
 //! [`crate::map_in_space`], whose unsafe is untouched -- so M15 adds NO new
-//! unsafe. Frames are PINNED for the kernel-session lifetime (no unmap primitive
-//! exists yet; reclamation is deferred to keep a freed-then-reused frame from
-//! sitting behind a stale PTE = cross-agent use-after-free).
+//! unsafe.
+//!
+//! M15.1 -- UNMAP + frame reclamation. A block is no longer pinned for the whole
+//! kernel session: the OWNER-only [`crate::agent_block_unmap`] facade tears down
+//! every live mapping (clearing the leaf PTEs + a LOCAL TLB invalidate in each
+//! member root), POISONS this shared core ([`Block::kill`] sets [`Block::is_dead`]),
+//! and only THEN returns the backing frames to [`crate::frame_free`]. Because the
+//! core is shared by `Rc` across every member table, the poison flag is the
+//! cross-table revoke: once dead, EVERY outstanding handle's block op fails closed
+//! ([`crate::caps::SysStatus::Stale`]) -- the exact `Rc<Channel>` peer-closed
+//! idiom M14 already uses. A frame is reclaimed ONLY after no live mapping (all
+//! leaves cleared) and no live handle (core poisoned) can still reach it, so a
+//! freed-then-reused frame can never sit behind a stale PTE = no cross-agent
+//! use-after-free.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -64,6 +75,13 @@ pub struct Block {
     seq: Cell<u64>,
     /// RECORD plane: the append-only, bi-temporal versioned slots.
     records: RefCell<Vec<Rec>>,
+    /// M15.1 POISON flag. `false` while live; set ONCE by [`Block::kill`] when the
+    /// owner unmaps + reclaims the backing frames. Because every member table
+    /// holds an `Rc` clone of THIS one core, flipping it makes EVERY outstanding
+    /// handle's block op fail closed (the cross-table revoke), so no stale handle
+    /// can reach a reclaimed frame. Monotonic (never cleared) -- a reclaimed block
+    /// stays dead, so a late access can never resurrect freed frames.
+    dead: Cell<bool>,
 }
 
 impl Block {
@@ -107,6 +125,7 @@ impl Block {
             members: RefCell::new(Vec::new()),
             seq: Cell::new(0),
             records: RefCell::new(Vec::new()),
+            dead: Cell::new(false),
         }))
     }
 
@@ -121,8 +140,36 @@ impl Block {
     }
 
     /// Record a live mapping for refcount/detach bookkeeping (safe `RefCell`).
+    /// A no-op on a dead block (defence-in-depth: the map facade already gates on
+    /// [`Block::is_dead`] via `block_of`, so this is never reached for one).
     pub fn record_member(&self, root_pa: u64, base_va: u64, writable: bool) {
+        if self.dead.get() {
+            return;
+        }
         self.members.borrow_mut().push((root_pa, base_va, writable));
+    }
+
+    /// M15.1: `true` once this block has been unmapped + reclaimed by its owner.
+    /// Every member table holds an `Rc` clone of THIS core, so a `true` here makes
+    /// every outstanding handle's block op fail closed -- the cross-table revoke.
+    pub fn is_dead(&self) -> bool {
+        self.dead.get()
+    }
+
+    /// M15.1: a SNAPSHOT (clone) of the recorded live mappings `(root_pa, base_va,
+    /// writable)`, so the unmap facade can tear down each member root's leaf PTEs
+    /// WITHOUT holding the `members` borrow across the arch page-table walk.
+    pub fn members_snapshot(&self) -> Vec<(u64, u64, bool)> {
+        self.members.borrow().clone()
+    }
+
+    /// M15.1: POISON this shared core (set [`Block::is_dead`]) and drop the member
+    /// list. Called by the owner-unmap facade AFTER every leaf PTE is torn down
+    /// and BEFORE the backing frames are returned to the allocator, so no live
+    /// handle can reach a frame that is about to be reclaimed. Idempotent.
+    pub fn kill(&self) {
+        self.dead.set(true);
+        self.members.borrow_mut().clear();
     }
 
     /// The `writable` flag of the most recent mapping at `(root_pa, base_va)`, or
@@ -163,6 +210,9 @@ impl Block {
     /// otherwise `None` (the CAS lost -> the caller surfaces `WouldBlock`).
     /// Atomic w.r.t. preemption (single-core, interrupts masked).
     pub fn cas_write(&self, off: u64, val: u64, expected: u64) -> Option<u64> {
+        if self.dead.get() {
+            return None; // reclaimed block: fail closed (dispatch maps it to Stale)
+        }
         let cur = self.latest_version(off);
         if cur != expected {
             return None;
@@ -181,6 +231,9 @@ impl Block {
     /// RECORD-plane read: the value of the latest version of slot `off`, or
     /// `None` if the slot has never been written.
     pub fn read_latest(&self, off: u64) -> Option<u64> {
+        if self.dead.get() {
+            return None; // reclaimed block: fail closed (dispatch maps it to Stale)
+        }
         let records = self.records.borrow();
         let mut ver = 0u64;
         let mut out: Option<u64> = None;

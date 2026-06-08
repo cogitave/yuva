@@ -2164,6 +2164,147 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M15: blocks OK\n"); // <-- the M15 DoD marker
 
+    // --- M15.1: UNMAP a shared block + RECLAIM its frames (no stale-PTE UAF) ----
+    // The inverse of M15's block-map: a block's frames are no longer pinned for
+    // the kernel-session lifetime. The OWNER (the cap granted REVOKE at create)
+    // unmaps -- tear down EVERY member's leaf PTE + a LOCAL TLB invalidate, POISON
+    // the shared core so every outstanding handle goes Stale (the cross-table
+    // revoke), then return the frames to the M6 allocator. We PROVE both halves,
+    // fail-closed: (a) RECLAMATION -- the free-frame count rises by exactly n_pages
+    // AND the next frame_alloc hands back the very PA the block owned; (b) NO STALE
+    // ACCESS -- the owner's revoked handle AND the OTHER member's poisoned handle
+    // are now Stale through every door (RECORD dispatch + map), and a SAFE page-
+    // walk probe shows the old VA maps NOWHERE in either root (so no stale PTE
+    // survives). A FRESH 1-page block (clean frame accounting) over the already-
+    // born agent_c (owner) + agent_d (member). ZERO new kernel unsafe. DoD marker:
+    // "M15.1: unmap OK".
+    {
+        use tb_hal::caps::{self, Rights, SysStatus};
+
+        fn m151_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M15.1: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        let ok = SysStatus::Ok as u32;
+        let den = SysStatus::Denied as u32;
+        let badcap = SysStatus::BadCap as u32;
+        let stale = SysStatus::Stale as u32;
+        // A FRESH page in the block window, clear of the session block's maps
+        // above (which used BLOCK_WINDOW_VA + 0 and + 0x1000).
+        let u_va = tb_hal::BLOCK_WINDOW_VA + 0x8000;
+
+        // 1. CREATE a fresh 1-page block: owner handle (carries REVOKE) into
+        //    agent_c, plain member handle (no REVOKE) into agent_d; map into BOTH
+        //    roots at u_va so both translate it to the SAME backing frame.
+        let (ho, hm) = match tb_hal::agent_block_create(agent_c, agent_d, 1) {
+            Some(x) => x,
+            None => m151_fail("fresh block create failed"),
+        };
+        let (s, _) = tb_hal::agent_block_map(agent_c, ho, true, u_va).unwrap_or((badcap, 0));
+        if s != ok {
+            m151_fail("map owner not Ok");
+        }
+        let (s, _) = tb_hal::agent_block_map(agent_d, hm, true, u_va).unwrap_or((badcap, 0));
+        if s != ok {
+            m151_fail("map member not Ok");
+        }
+
+        // 2. Name the backing frame, and confirm BOTH roots translate u_va to it
+        //    via a PURE page-walk probe (no deref -> no fault).
+        let pa = match tb_hal::agent_block_frame_pa(agent_c, ho, 0) {
+            Some(p) => p,
+            None => m151_fail("could not read block frame PA"),
+        };
+        if tb_hal::agent_block_va_maps(agent_c, u_va) != Some(pa)
+            || tb_hal::agent_block_va_maps(agent_d, u_va) != Some(pa)
+        {
+            m151_fail("u_va did not map to the block frame in both roots");
+        }
+
+        // 3. FAIL-CLOSED authorization, BEFORE any teardown:
+        //    (a) a plain member (no REVOKE) cannot unmap -> Denied, and the block
+        //        stays fully mapped (the Denied path tore nothing down).
+        let (s, _) = tb_hal::agent_block_unmap(agent_d, hm).unwrap_or((ok, 0));
+        if s != den {
+            m151_fail("member unmap (no REVOKE) was not Denied");
+        }
+        if tb_hal::agent_block_va_maps(agent_d, u_va) != Some(pa) {
+            m151_fail("Denied member unmap still tore the mapping down");
+        }
+        //    (b) a non-block cap presented to unmap -> BadCap (even WITH REVOKE).
+        let gen = match tb_hal::agent_mint_generic(agent_c, Rights::REVOKE) {
+            Some(h) => h,
+            None => m151_fail("mint generic cap failed"),
+        };
+        let (s, _) = tb_hal::agent_block_unmap(agent_c, gen).unwrap_or((ok, 0));
+        if s != badcap {
+            m151_fail("unmap on a non-block cap was not BadCap");
+        }
+        tb_hal::serial_write_str("unmap: member Denied + non-block BadCap (fail-closed)\n");
+
+        // 4. THE OWNER UNMAP. Snapshot the free-frame count first; the owner
+        //    (REVOKE) tears down BOTH roots, poisons the core, reclaims the frame.
+        let free_before = tb_hal::pmm_free_frames();
+        let (s, n) = tb_hal::agent_block_unmap(agent_c, ho).unwrap_or((badcap, 0));
+        if s != ok || n != 1 {
+            m151_fail("owner unmap was not Ok(1)");
+        }
+
+        // 5a. RECLAMATION: the free count rose by exactly the 1 reclaimed frame,
+        //     AND the next frame_alloc hands back that very PA (the free stack is
+        //     LIFO and the unmap freed it last). Return it so the pool is left
+        //     exactly as the unmap left it (no leak).
+        if tb_hal::pmm_free_frames() != free_before + 1 {
+            m151_fail("free-frame count did not rise by the reclaimed page");
+        }
+        match tb_hal::frame_alloc() {
+            Some(got) if got == pa => {
+                let _ = tb_hal::frame_free(got);
+            }
+            Some(_) => m151_fail("next frame_alloc did not return the reclaimed block PA"),
+            None => m151_fail("frame_alloc returned None after reclamation"),
+        }
+        tb_hal::serial_write_str(
+            "unmap: frame reclaimed -- allocator handed the block PA back out\n",
+        );
+
+        // 5b. NO STALE ACCESS: the owner's revoked handle AND the member's poisoned
+        //     handle are now Stale through every door (RECORD dispatch + map), and a
+        //     SAFE page-walk probe shows u_va maps NOWHERE in either root -- so
+        //     neither a stale handle nor a stale PTE can reach the freed frame.
+        let (s, _) = tb_hal::agent_block_dispatch(agent_c, caps::M_BLOCK_READ, ho, 0, 0, 0)
+            .unwrap_or((ok, 0));
+        if s != stale {
+            m151_fail("owner's revoked handle READ was not Stale");
+        }
+        let (s, _) = tb_hal::agent_block_map(agent_c, ho, true, u_va).unwrap_or((ok, 0));
+        if s != stale {
+            m151_fail("owner's revoked handle re-map was not Stale");
+        }
+        let (s, _) = tb_hal::agent_block_dispatch(agent_d, caps::M_BLOCK_READ, hm, 0, 0, 0)
+            .unwrap_or((ok, 0));
+        if s != stale {
+            m151_fail("member's poisoned handle READ was not Stale");
+        }
+        let (s, _) = tb_hal::agent_block_map(agent_d, hm, true, u_va).unwrap_or((ok, 0));
+        if s != stale {
+            m151_fail("member's poisoned handle re-map was not Stale");
+        }
+        if tb_hal::agent_block_va_maps(agent_c, u_va).is_some()
+            || tb_hal::agent_block_va_maps(agent_d, u_va).is_some()
+        {
+            m151_fail("old VA still maps after unmap (stale PTE)");
+        }
+        tb_hal::serial_write_str(
+            "unmap: stale owner+member handles Stale + old VA maps nowhere\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M15.1: unmap OK\n"); // <-- the M15.1 DoD sub-marker
+
     // --- M16: LLM-agnostic inference bridge -- the model: scheme + ModelSession -
     // An agent invokes a model through a capability (INVOKE_MODEL, M_MODEL_INVOKE)
     // naming the target via a `model:` scheme; a safe in-kernel ROUTER binds a

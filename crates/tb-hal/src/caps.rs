@@ -239,9 +239,14 @@ pub const M_CHAN_CLOSE: u32 = 27;
 /// `&mut HandleTable`, not the `AddressSpace`); the number stays registered for
 /// the future EL0 syscall gate that DOES know the current agent's space.
 pub const M_BLOCK_MAP: u32 = 28;
-/// M15: voluntary member detach (needs no right). DEFERRED -- no unmap primitive
-/// exists yet (blocks are pinned for the kernel-session lifetime); the number is
-/// reserved so the closed method space stays stable.
+/// M15.1: OWNER-only UNMAP + frame reclamation -- tear down EVERY live mapping of
+/// the block (clear the leaf PTEs + a LOCAL TLB invalidate in each member root),
+/// POISON the shared core so every outstanding handle goes `Stale`, and return
+/// the backing frames to the allocator. Needs REVOKE (the destroy authority; a
+/// plain member or RO observer is `Denied`, fail-closed). ADDRESS-SPACE-dependent,
+/// so the BODY rides the kernel facade [`crate::agent_block_unmap`] (dispatch
+/// holds only `&mut HandleTable`, not the `AddressSpace`); the number stays
+/// registered for the future EL0 syscall gate that DOES know the agent's space.
 pub const M_BLOCK_UNMAP: u32 = 29;
 /// M15: RECORD-plane CAS/versioned write on the blackboard (needs WRITE).
 /// `args[0]`=slot off, `args[1]`=value, `args[2]`=expected version.
@@ -270,7 +275,11 @@ fn required_right(method: u32) -> Option<Rights> {
         M_CHAN_RECV => Rights::READ,
         M_CHAN_CLOSE => Rights::NONE,
         M_BLOCK_MAP => Rights::READ,
-        M_BLOCK_UNMAP => Rights::NONE,
+        // M15.1: UNMAP + frame reclamation is an OWNER-only DESTROY of the shared
+        // block -- gated by REVOKE (the capability-algebra "tear it down" right).
+        // The create-time owner alone is granted REVOKE; a plain member or RO
+        // observer lacks it, so their unmap is `Denied` (fail-closed).
+        M_BLOCK_UNMAP => Rights::REVOKE,
         M_BLOCK_WRITE => Rights::WRITE,
         M_BLOCK_READ => Rights::READ,
         M_EMIT_EXTERNAL => Rights::EMIT_EXTERNAL,
@@ -446,6 +455,11 @@ impl HandleTable {
         let i = self.live(h)?;
         let o = self.core.object_at(i).clone().ok_or(SysStatus::Stale)?;
         match &o.block {
+            // M15.1: a POISONED (unmapped + reclaimed) core fails closed -- every
+            // outstanding handle to it now resolves `Stale`, so a stale handle or a
+            // late re-map can never reach a frame that has been returned to the
+            // allocator (the cross-table revoke; see `crate::blocks::Block::kill`).
+            Some(b) if b.is_dead() => Err(SysStatus::Stale),
             Some(b) => Ok((self.core.rights_at(i), b.clone())),
             None => Err(SysStatus::BadCap),
         }
@@ -1227,6 +1241,8 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                 None => return SysReturn::err(SysStatus::Stale),
             };
             match &obj.block {
+                // M15.1: a reclaimed (unmapped) block fails closed -- Stale.
+                Some(b) if b.is_dead() => SysReturn::err(SysStatus::Stale),
                 Some(b) => match b.cas_write(args.args[0], args.args[1], args.args[2]) {
                     Some(v) => SysReturn::ok(v),
                     None => SysReturn::err(SysStatus::WouldBlock),
@@ -1242,6 +1258,8 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                 None => return SysReturn::err(SysStatus::Stale),
             };
             match &obj.block {
+                // M15.1: a reclaimed (unmapped) block fails closed -- Stale.
+                Some(b) if b.is_dead() => SysReturn::err(SysStatus::Stale),
                 Some(b) => match b.read_latest(args.args[0]) {
                     Some(v) => SysReturn::ok(v),
                     None => SysReturn::err(SysStatus::BadCap),

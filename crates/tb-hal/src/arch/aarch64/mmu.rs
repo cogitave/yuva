@@ -878,3 +878,88 @@ pub fn m3_test_va_intact() -> bool {
     // every root; an aligned volatile u64 load.
     unsafe { read_volatile(TEST_VA as *const u64) == M3_MAGIC_B }
 }
+
+// ===========================================================================
+// M15.1: UNMAP + frame reclamation.
+//
+// `unmap_in_root` is the inverse of `map_in_root`: it walks the EXPLICIT root,
+// clears the single L3 leaf for `va` via Break-Before-Make (Arm ARM D8.16 --
+// write the invalid descriptor, `dsb ishst`, `tlbi vaae1is`, `dsb ish`, `isb`),
+// and returns the DATA frame the safe kernel facade returns to the M6 allocator.
+// It does NOT free intermediate L2/L3 tables -- they belong to the address space
+// and may host sibling pages. `tlbi vaae1is` is an inner-shareable flush for `va`
+// across ALL ASIDs, so it drops any stale translation regardless of which root
+// is live (single core: a shootdown is a local invalidate, no IPI). `va_to_pa_in_root`
+// is the read-only twin: a pure software walk the `#![forbid(unsafe_code)]` kernel
+// uses to PROBE that an unmapped VA no longer resolves WITHOUT dereferencing it.
+// ===========================================================================
+
+/// Read interior descriptor `parent[idx]`; return the child table pointer when
+/// it is valid, else `None`. The read-only, no-allocation twin of [`ensure_table`].
+///
+/// # Safety
+/// `parent` is a live/owned identity-mapped 512-entry table; `idx < 512`. The
+/// read is volatile (the table walker reads it behind the compiler).
+unsafe fn walk_next(parent: *mut u64, idx: usize) -> Option<*mut u64> {
+    let entry = read_volatile(parent.add(idx));
+    if entry_is_valid(entry) {
+        Some(entry_addr(entry) as *mut u64)
+    } else {
+        None
+    }
+}
+
+/// M15.1: tear down the single 4 KiB leaf for `va` in the EXPLICIT root at
+/// `root_pa`, returning the physical frame it mapped -- or `None` if `va` was
+/// not mapped (idempotent: a double-unmap of the same page is a clean no-op, so
+/// the owner-unmap facade can never double-free). Full Break-Before-Make so no
+/// stale TLB entry for `va` can outlive the leaf.
+pub fn unmap_in_root(root_pa: u64, va: u64) -> Option<u64> {
+    // SAFETY: `root_pa` is a 4 KiB-aligned L1 frame in identity-mapped RAM
+    // (PA == VA) from `address_space_new`; every interior table `walk_next`
+    // follows is likewise an identity-mapped M6 frame, so each pointer
+    // dereferences directly. We only READ interior descriptors and clear ONE L3
+    // leaf to 0; the BBM ceremony below (`dsb ishst; tlbi vaae1is; dsb ish; isb`)
+    // publishes the invalidation and drops every TLB/walk-cache entry for `va`
+    // (all ASIDs, inner shareable) before the frame can be reused.
+    let pa = unsafe {
+        let l1 = root_pa as *mut u64;
+        let l2 = walk_next(l1, level_index(va, SHIFT_1G))?;
+        let l3 = walk_next(l2, level_index(va, SHIFT_2M))?;
+        let slot = l3.add(level_index(va, SHIFT_4K));
+        let entry = read_volatile(slot);
+        if !entry_is_valid(entry) {
+            return None;
+        }
+        let pa = entry_addr(entry);
+        write_volatile(slot, 0);
+        pa
+    };
+    // Break-Before-Make completion (Arm ARM D8.16): publish the invalid
+    // descriptor, flush the VA from every TLB (all ASIDs, inner shareable),
+    // then synchronize so the next access re-walks the now-empty leaf.
+    dsb_ishst();
+    tlbi_vaae1is(va);
+    dsb_ish();
+    isb();
+    Some(pa)
+}
+
+/// M15.1: the physical frame `va` maps to in the EXPLICIT root at `root_pa`, or
+/// `None` if any level of the walk is invalid. READ-ONLY (writes nothing, never
+/// dereferences `va`), so the kernel can confirm an unmapped VA no longer
+/// resolves without taking a translation fault.
+pub fn va_to_pa_in_root(root_pa: u64, va: u64) -> Option<u64> {
+    // SAFETY: as `unmap_in_root`, but it only READS interior + leaf descriptors;
+    // no store, and `va` itself is never dereferenced.
+    unsafe {
+        let l1 = root_pa as *mut u64;
+        let l2 = walk_next(l1, level_index(va, SHIFT_1G))?;
+        let l3 = walk_next(l2, level_index(va, SHIFT_2M))?;
+        let entry = read_volatile(l3.add(level_index(va, SHIFT_4K)));
+        if !entry_is_valid(entry) {
+            return None;
+        }
+        Some(entry_addr(entry))
+    }
+}

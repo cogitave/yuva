@@ -1903,7 +1903,17 @@ pub fn agent_chan_recv_bytes(
 // rights.contains(WRITE)`. The RECORD-plane CAS/read (the session blackboard's
 // update-once-visible-everywhere) rides the M11 `dispatch` arms via
 // `agent_block_dispatch`. The map path reuses M10 `map_in_space` -> ZERO new
-// unsafe; frames are pinned for the kernel-session lifetime (no unmap yet).
+// unsafe.
+//
+// M15.1 -- UNMAP + frame reclamation (`agent_block_unmap`): the OWNER (the cap
+// granted REVOKE at create) tears down EVERY member's mapping (clear the leaf
+// PTEs + a LOCAL TLB invalidate via the new arch `unmap_in_root`), POISONS the
+// shared `blocks::Block` core (so every outstanding handle, in any agent's table,
+// goes `Stale`), and only THEN returns the backing frames to the M6 allocator --
+// so the frames become re-allocatable WITHOUT a stale PTE / use-after-free. The
+// new arch unsafe (the leaf teardown + TLB invalidate, the read-only walk probe)
+// lives ONLY in `arch::{x86_64,aarch64}::mmu` with a SAFETY comment; this facade
+// and `caps.rs`/`blocks.rs` stay safe.
 
 /// The dedicated, VACANT top-level window each agent maps its shared blocks into,
 /// clear of the agent's own code/stack (`AGENT_CODE_VA`). x86_64 = `PML4[5]`
@@ -1923,10 +1933,11 @@ const _: () = assert!((BLOCK_WINDOW_VA >> 30) & 0x1FF == 7);
 /// M15: create ONE shared block of `n_pages` pinned M6 frames and mint an `Rc`
 /// clone Block handle into EACH of agents `a` and `b` (the `agent_channel_connect`
 /// precedent -- two SEPARATE `AGENTS.slot()` scopes so no two `&mut AgentProcess`
-/// overlap). `a` gets full member rights (READ|WRITE|TRANSFER|DUP), `b` a plain
-/// member (READ|WRITE); observers are produced by NARROWing to drop WRITE. `None`
-/// on frame OOM (the block frees its partial allocation first), a bad task, or a
-/// full table.
+/// overlap). `a` is the OWNER: it gets READ|WRITE|TRANSFER|DUP plus REVOKE (the
+/// M15.1 owner-only UNMAP/destroy authority -- see [`agent_block_unmap`]); `b` a
+/// plain member (READ|WRITE, NO REVOKE, so it cannot unmap). Observers are
+/// produced by NARROWing to drop WRITE. `None` on frame OOM (the block frees its
+/// partial allocation first), a bad task, or a full table.
 pub fn agent_block_create(a: Task, b: Task, n_pages: usize) -> Option<(caps::Handle, caps::Handle)> {
     let sa = a.raw();
     let sb = b.raw();
@@ -1937,7 +1948,8 @@ pub fn agent_block_create(a: Task, b: Task, n_pages: usize) -> Option<(caps::Han
     let full = caps::Rights::READ
         .union(caps::Rights::WRITE)
         .union(caps::Rights::TRANSFER)
-        .union(caps::Rights::DUP);
+        .union(caps::Rights::DUP)
+        .union(caps::Rights::REVOKE);
     let member = caps::Rights::READ.union(caps::Rights::WRITE);
     let ha = {
         let ap_a = AGENTS.slot(sa).as_mut()?;
@@ -2034,6 +2046,95 @@ pub fn agent_block_member_writable(t: Task, h: caps::Handle, base_va: u64) -> Op
     let root_pa = ap.space.root_pa();
     let (_rights, blk) = ap.table.block_of(h).ok()?;
     blk.member_writable(root_pa, base_va)
+}
+
+/// M15.1: OWNER-only UNMAP of block `h` + frame reclamation -- the inverse of
+/// [`agent_block_map`], the proof that block frames are no longer pinned for the
+/// kernel-session lifetime. ADDRESS-SPACE-dependent, so (like map) it rides this
+/// facade, not `dispatch`. Fail-closed and ATOMIC (single-core, interrupts
+/// masked):
+///   1. Resolve `h` (`BadCap`/`Stale`; `Stale` if the block was already unmapped).
+///   2. Authorize: the handle must hold REVOKE (the owner/destroy authority); a
+///      plain member or RO observer is `Denied`.
+///   3. Tear down EVERY recorded member mapping in EVERY member root (clear each
+///      leaf PTE via `arch::unmap_in_root` + a LOCAL TLB invalidate) -- after
+///      this NO live VA translation reaches the frames.
+///   4. POISON the shared core ([`blocks::Block::kill`]) -- after this every
+///      outstanding handle in EVERY table resolves `Stale`, so NO live handle can
+///      re-map or reach the frames (the cross-table revoke).
+///   5. Reclaim the data frames to the M6 allocator (safe NOW: no live mapping or
+///      handle remains).
+///   6. Revoke the caller's OWN handle (per-slot generation bump) so it goes
+///      `Stale` immediately (the M11 idiom; also blocks a double-unmap).
+/// Returns `(status, n_pages_reclaimed)`; `None` only if `t` is not an agent.
+pub fn agent_block_unmap(t: Task, h: caps::Handle) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    // (1) Resolve (fail-closed; a poisoned/dead core resolves `Stale`).
+    let (rights, blk) = match ap.table.block_of(h) {
+        Ok(x) => x,
+        Err(e) => return Some((e as u32, 0)),
+    };
+    // (2) Owner gate: REVOKE is the destroy authority (only the create-time owner
+    //     holds it; a plain member or RO observer -> Denied, fail-closed).
+    if !rights.contains(caps::Rights::REVOKE) {
+        return Some((caps::SysStatus::Denied as u32, 0));
+    }
+    let n = blk.n_pages();
+    let members = blk.members_snapshot();
+    // (3) Tear down every member mapping (all roots) + LOCAL TLB invalidate.
+    let mut m = 0;
+    while m < members.len() {
+        let (root_pa, base_va, _w) = members[m];
+        let mut i = 0;
+        while i < n {
+            let _ = arch::unmap_in_root(root_pa, base_va + (i as u64) * 0x1000);
+            i += 1;
+        }
+        m += 1;
+    }
+    // (4) Poison the shared core: every outstanding handle now fails closed.
+    blk.kill();
+    // (5) Reclaim the data frames (only now -- nothing live can still reach them).
+    let frames_len = blk.frames().len();
+    let mut f = 0;
+    while f < frames_len {
+        let _ = frame_free(blk.frames()[f]);
+        f += 1;
+    }
+    // (6) Revoke the caller's own handle (per-slot generation bump -> Stale).
+    let _ = ap.table.revoke(h);
+    Some((caps::SysStatus::Ok as u32, n as u64))
+}
+
+/// M15.1 test helper: the PHYSICAL address of data-frame `idx` of block `h` in
+/// `t`'s table, or `None` if `h` does not resolve (incl. a reclaimed block) or
+/// `idx` is out of range. Lets the self-test NAME the exact frame it expects the
+/// M6 allocator to hand back out after the block is unmapped.
+pub fn agent_block_frame_pa(t: Task, h: caps::Handle, idx: usize) -> Option<u64> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_ref()?;
+    let (_rights, blk) = ap.table.block_of(h).ok()?;
+    blk.frames().get(idx).copied()
+}
+
+/// M15.1 test helper: the PHYSICAL frame that `va` maps to in `t`'s OWN root, or
+/// `None` if `va` is unmapped there. A PURE software page-table walk (it never
+/// dereferences `va`), so the self-test can PROVE that an unmapped block VA no
+/// longer resolves to the reclaimed frame WITHOUT taking a page fault.
+pub fn agent_block_va_maps(t: Task, va: u64) -> Option<u64> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let root = AGENTS.slot(slot).as_ref()?.space.root_pa();
+    arch::va_to_pa_in_root(root, va)
 }
 
 /// M16: OPEN a model inference session -- kernel-mediated (NOT a dispatch method:

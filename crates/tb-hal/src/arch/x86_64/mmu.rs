@@ -790,3 +790,87 @@ pub fn m3_test_va_intact() -> bool {
     // kernel half present in every root; an aligned volatile u64 load.
     unsafe { read_volatile(TEST_VA as *const u64) == MAGIC_B }
 }
+
+// ===========================================================================
+// M15.1: UNMAP + frame reclamation.
+//
+// `unmap_in_root` is the inverse of `map_in_root`: it walks the EXPLICIT root,
+// clears the single 4 KiB leaf for `va`, and (when that root is the LIVE CR3)
+// `invlpg`s the page so no stale TLB entry can outlive the leaf. It does NOT
+// free intermediate tables -- they belong to the address space and may host
+// sibling pages -- so it returns only the DATA frame, which the safe kernel
+// facade (`agent_block_unmap`) returns to the M6 allocator. Single core: a TLB
+// shootdown is a LOCAL invalidate, no IPI; the block-window leaves are NOT
+// global, so a CR3 switch already flushes them and the `invlpg` covers the
+// live-root case. `va_to_pa_in_root` is the read-only twin: a pure software
+// page walk the `#![forbid(unsafe_code)]` kernel uses to PROBE that an unmapped
+// VA no longer resolves, WITHOUT dereferencing it (which would page-fault).
+// ===========================================================================
+
+/// Read interior entry `parent[idx]`; return the child table pointer when it is
+/// present, else `None`. The read-only, no-allocation twin of [`ensure_table`].
+///
+/// # Safety
+/// `parent` is a live/owned identity-mapped 512-entry table; `idx < 512`. The
+/// entry read is volatile (the page walker reads it behind the compiler).
+unsafe fn walk_next(parent: *mut u64, idx: usize) -> Option<*mut u64> {
+    let entry = read_volatile(parent.add(idx));
+    if entry_is_valid(entry) {
+        Some(entry_addr(entry) as *mut u64)
+    } else {
+        None
+    }
+}
+
+/// M15.1: tear down the single 4 KiB leaf for `va` in the EXPLICIT root at
+/// `root_pa`, returning the physical frame it mapped -- or `None` if `va` was
+/// not mapped (idempotent: a double-unmap of the same page is a clean no-op, so
+/// the owner-unmap facade can never double-free). LOCALLY invalidates the TLB
+/// for `va` when `root_pa` is the live CR3.
+pub fn unmap_in_root(root_pa: u64, va: u64) -> Option<u64> {
+    // SAFETY: `root_pa` is a 4 KiB-aligned PML4 frame in identity-mapped low RAM
+    // (PA == VA) from `address_space_new`; every interior table `walk_next`
+    // follows is likewise an identity-mapped M6 frame, so each pointer
+    // dereferences directly. We only READ interior entries and clear ONE leaf to
+    // 0 (which maps nothing -- a not-present entry is never cached). When this
+    // root is live, `invlpg` drops any stale TLB entry for `va` BEFORE the frame
+    // can be reused; otherwise the non-global leaf was already flushed by the
+    // CR3 switch away from this root.
+    unsafe {
+        let pml4 = root_pa as *mut u64;
+        let pdpt = walk_next(pml4, level_index(va, SHIFT_512G))?;
+        let pd = walk_next(pdpt, level_index(va, SHIFT_1G))?;
+        let pt = walk_next(pd, level_index(va, SHIFT_2M))?;
+        let slot = pt.add(level_index(va, SHIFT_4K));
+        let entry = read_volatile(slot);
+        if entry & PTE_P == 0 {
+            return None;
+        }
+        let pa = entry_addr(entry);
+        write_volatile(slot, 0);
+        if root_pa & PTE_ADDR_MASK == read_cr3() & PTE_ADDR_MASK {
+            invlpg(va as usize);
+        }
+        Some(pa)
+    }
+}
+
+/// M15.1: the physical frame `va` maps to in the EXPLICIT root at `root_pa`, or
+/// `None` if any level of the walk is not present. READ-ONLY (it writes nothing
+/// and never dereferences `va` itself), so the kernel can confirm an unmapped VA
+/// no longer resolves without taking a page fault.
+pub fn va_to_pa_in_root(root_pa: u64, va: u64) -> Option<u64> {
+    // SAFETY: as `unmap_in_root`, but it only READS interior + leaf entries; no
+    // store, and `va` itself is never dereferenced.
+    unsafe {
+        let pml4 = root_pa as *mut u64;
+        let pdpt = walk_next(pml4, level_index(va, SHIFT_512G))?;
+        let pd = walk_next(pdpt, level_index(va, SHIFT_1G))?;
+        let pt = walk_next(pd, level_index(va, SHIFT_2M))?;
+        let entry = read_volatile(pt.add(level_index(va, SHIFT_4K)));
+        if entry & PTE_P == 0 {
+            return None;
+        }
+        Some(entry_addr(entry))
+    }
+}

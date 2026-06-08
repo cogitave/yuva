@@ -43,7 +43,7 @@ mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
 pub use el2::el2_selftest; // L2.0: the safe EL2 world-switch self-test facade.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
-    map_user_in_root, mmu_init, mmu_selftest, switch_root,
+    map_user_in_root, mmu_init, mmu_selftest, switch_root, unmap_in_root, va_to_pa_in_root,
 };
 pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
