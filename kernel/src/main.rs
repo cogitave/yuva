@@ -2679,6 +2679,175 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M18: evolve OK\n"); // <-- the M18 DoD marker
 
+    // --- M18.1: MANDATORY human-approval gate for the HIGH-IMPACT / -----------
+    //     EMIT_EXTERNAL self-improvement class (SELF-IMPROVEMENT-SPEC §8). The
+    //     merge step -- "merge (human-approval hook: mandatory in the high-impact
+    //     class)" -- is STRUCTURALLY BLOCKED for an EMIT_EXTERNAL-tagged skill
+    //     (§5: "EMIT_EXTERNAL-tagged side-effecting steps are conservative")
+    //     unless an explicit human-approval CAPABILITY -- a handle carrying the
+    //     new Rights::APPROVE_HIGH_IMPACT -- is presented. FAIL-CLOSED: a missing
+    //     OR insufficient approval capability -> Denied, and the skill stays
+    //     PROPOSED (the EXCEL-rung admit is never reached). The whole gate reduces
+    //     to the SAME M11 rights-mask invariant: the agent's own tables never
+    //     carry the approval right, and a handle resolves only against the table
+    //     it is presented to, so the gate is unforgeable. An ORDINARY skill merges
+    //     exactly as M18 already proves -- the gate is purely ADDITIVE. ZERO new
+    //     unsafe; NO new ABI method (the high-impact propose rides the existing
+    //     M_MEM_WRITE_PROC op-selector; the merge gate is a kernel-side facade,
+    //     not method-numbered). DoD marker: "M18.1: approval-gate OK".
+    {
+        use tb_hal::caps::{self, Handle};
+
+        fn m181_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M18.1: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        fn disp(
+            tbl: &mut caps::HandleTable,
+            h: Handle,
+            method: u32,
+            a: [u64; 4],
+        ) -> caps::SysReturn {
+            caps::dispatch(
+                tbl,
+                &caps::SyscallArgs {
+                    method,
+                    handle: h,
+                    args: a,
+                },
+            )
+        }
+
+        // write_proc op-selectors (ride M_MEM_WRITE_PROC -- NO new ABI method).
+        const OP_ADD: u64 = 0; // ADD_SKILL (ordinary)
+        const OP_ADD_EXT: u64 = 5; // ADD_SKILL_EMIT_EXTERNAL (HIGH-IMPACT class)
+        const PROPOSED: u8 = 0;
+        const ADMITTED: u8 = 1;
+        // The held-out evaluator's secret target; BODY_GOOD == TARGET generalizes
+        // to a perfect held-out score (the EXCEL rung admits strictly above 0).
+        const TARGET: u64 = 0x0000_5A1E_0000_2222;
+        const BODY_GOOD: u64 = TARGET;
+        const DESC: u64 = 0x0000_0DE5; // NL-description token (inert at M18.1)
+        const IFACE: u64 = 0x0000_1FAC; // WIT-interface token (inert at M18.1)
+        const EVAL_BASE_G: u64 = 0x0000_3000;
+        const EVAL_N_G: u64 = 6;
+
+        // ===== the FROZEN held-out evaluator domain (kernel-owned, unnameable) ==
+        let mut eval_tbl = caps::HandleTable::with_capacity(8);
+        let eval_all = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL);
+        let eval_home = match eval_tbl.mint_memory_home(eval_all) {
+            Some(h) => h,
+            None => m181_fail("could not mint the frozen evaluator home"),
+        };
+        if !eval_tbl.eval_seed_heldout(eval_home, TARGET, EVAL_BASE_G, EVAL_N_G) {
+            m181_fail("could not seed the held-out test set");
+        }
+
+        // ===== the improving agent: TWO WRITE_PROCEDURAL homes (independent T4
+        //       stores, so each starts at best_score 0 and can admit a perfect
+        //       skill on its own merit) -- one for the high-impact witness, one
+        //       for the ordinary-still-works witness.
+        let mut tbl = caps::HandleTable::with_capacity(16);
+        let wp = caps::Rights::READ
+            .union(caps::Rights::WRITE)
+            .union(caps::Rights::RECALL)
+            .union(caps::Rights::WRITE_PROCEDURAL);
+        let home_hi = match tbl.mint_memory_home(wp) {
+            Some(h) => h,
+            None => m181_fail("could not mint the high-impact skill home"),
+        };
+        let home_ord = match tbl.mint_memory_home(wp) {
+            Some(h) => h,
+            None => m181_fail("could not mint the ordinary skill home"),
+        };
+
+        // ===== the HUMAN-APPROVAL authority: a SEPARATE table (approval is NOT
+        //       ambient to the agent). `approval` carries APPROVE_HIGH_IMPACT;
+        //       `not_approval` is a live cap that LACKS it (the insufficient case).
+        let mut human_tbl = caps::HandleTable::with_capacity(4);
+        let approval = match human_tbl.mint(caps::ObjKind::Generic, caps::Rights::APPROVE_HIGH_IMPACT) {
+            Some(h) => h,
+            None => m181_fail("could not mint the human-approval capability"),
+        };
+        let not_approval = match human_tbl.mint(caps::ObjKind::Generic, caps::Rights::READ) {
+            Some(h) => h,
+            None => m181_fail("could not mint the no-approval capability"),
+        };
+
+        // (A) HIGH-IMPACT skill proposed -- lands PROPOSED/inert like any skill.
+        let p = disp(&mut tbl, home_hi, caps::M_MEM_WRITE_PROC, [OP_ADD_EXT, BODY_GOOD, DESC, IFACE]);
+        if p.status != caps::SysStatus::Ok {
+            m181_fail("propose HIGH-IMPACT skill via WRITE_PROCEDURAL was not Ok");
+        }
+        let id_hi = p.value;
+        if tbl.skill_tier_of(home_hi, id_hi) != Some(PROPOSED) {
+            m181_fail("a freshly-proposed high-impact skill was not PROPOSED/inert");
+        }
+
+        // (A1) MERGE WITH NO APPROVAL CAPABILITY (Handle::NULL) -> DENIED, the
+        //      skill stays PROPOSED, admitted-count unchanged (the fail-closed core).
+        let (st, adm) = tbl.harness_merge(home_hi, id_hi, &eval_tbl, eval_home, &human_tbl, Handle::NULL);
+        if st != caps::SysStatus::Denied || adm {
+            m181_fail("high-impact merge WITHOUT an approval capability was not Denied");
+        }
+        if tbl.skill_tier_of(home_hi, id_hi) != Some(PROPOSED) {
+            m181_fail("a gate-denied high-impact skill did not stay PROPOSED/inert");
+        }
+        if tbl.skill_admitted_count(home_hi).unwrap_or(1) != 0 {
+            m181_fail("a gate-denied high-impact skill changed the admitted count");
+        }
+
+        // (A2) MERGE WITH AN INSUFFICIENT CAPABILITY (live, but lacks
+        //      APPROVE_HIGH_IMPACT) -> still DENIED, still PROPOSED. Proves the
+        //      gate checks the RIGHT, not mere presence of any handle.
+        let (st, adm) = tbl.harness_merge(home_hi, id_hi, &eval_tbl, eval_home, &human_tbl, not_approval);
+        if st != caps::SysStatus::Denied || adm {
+            m181_fail("high-impact merge with a cap lacking APPROVE_HIGH_IMPACT was not Denied");
+        }
+        if tbl.skill_tier_of(home_hi, id_hi) != Some(PROPOSED) {
+            m181_fail("an insufficiently-authorised high-impact skill did not stay PROPOSED");
+        }
+
+        // (A3) MERGE WITH THE REAL HUMAN-APPROVAL CAPABILITY -> the gate opens, the
+        //      EXCEL rung scores the perfect body, and it flips PROPOSED->ADMITTED.
+        let (st, adm) = tbl.harness_merge(home_hi, id_hi, &eval_tbl, eval_home, &human_tbl, approval);
+        if st != caps::SysStatus::Ok || !adm {
+            m181_fail("high-impact merge WITH a valid approval capability was not admitted");
+        }
+        if tbl.skill_tier_of(home_hi, id_hi) != Some(ADMITTED) {
+            m181_fail("an approved high-impact skill did not flip PROPOSED->ADMITTED");
+        }
+        if tbl.skill_admitted_count(home_hi).unwrap_or(0) != 1 {
+            m181_fail("an approved high-impact skill did not raise the admitted count");
+        }
+
+        // (B) ORDINARY skill -- the gate is ADDITIVE: it merges with NO approval
+        //     capability exactly as M18 proves (no regression of the M18 path).
+        let p = disp(&mut tbl, home_ord, caps::M_MEM_WRITE_PROC, [OP_ADD, BODY_GOOD, DESC, IFACE]);
+        if p.status != caps::SysStatus::Ok {
+            m181_fail("propose ORDINARY skill via WRITE_PROCEDURAL was not Ok");
+        }
+        let id_ord = p.value;
+        let (st, adm) = tbl.harness_merge(home_ord, id_ord, &eval_tbl, eval_home, &human_tbl, Handle::NULL);
+        if st != caps::SysStatus::Ok || !adm {
+            m181_fail("an ORDINARY skill did not merge without approval (gate not additive)");
+        }
+        if tbl.skill_tier_of(home_ord, id_ord) != Some(ADMITTED) {
+            m181_fail("an ORDINARY merged skill did not flip PROPOSED->ADMITTED");
+        }
+
+        tb_hal::serial_write_str(
+            "mem: high-impact/EMIT_EXTERNAL merge fail-closed without APPROVE_HIGH_IMPACT (Denied), admitted only with the human-approval capability; ordinary skill still merges\n",
+        );
+    }
+
+    tb_hal::serial_write_str("M18.1: approval-gate OK\n"); // <-- the M18.1 DoD marker
+
     // --- L2.0: VMX-root + 1-instruction nested guest + caught VM-exit --------
     // The FIRST rung of the L2 sovereignty track (tb-core, a from-scratch Type-1
     // microhypervisor): the smallest proof that TABOS *is* the hypervisor. The

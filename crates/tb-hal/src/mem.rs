@@ -83,6 +83,12 @@ const TIER_COLD: u8 = 5;
 const SKILL_PROPOSED: u8 = 0;
 /// A skill the frozen held-out evaluator admitted (verification-before-commit).
 const SKILL_ADMITTED: u8 = 1;
+/// M18.1: `SkillRecord.provenance` bit marking the HIGH-IMPACT class -- a skill
+/// whose WIT interface declares an external/side-effecting requirement
+/// (`EMIT_EXTERNAL`-tagged, §5 "EMIT_EXTERNAL-tagged side-effecting steps are
+/// conservative"). Its MERGE is the one the mandatory human-approval gate (§8)
+/// fail-closes on; an ordinary skill leaves this bit clear and merges as before.
+const SKILL_PROV_EMIT_EXTERNAL: u8 = 1 << 0;
 /// ACT-R / EvolveR utility learning rate alpha=0.2 as an integer divisor (U +=
 /// (R-U)/5). Keeps the trust-promotion update FPU-free and replayable.
 const UTIL_ALPHA_DIV: i64 = 5;
@@ -912,16 +918,18 @@ impl MemSubstrate {
     /// `Rights::WRITE_PROCEDURAL` at the M11 chokepoint. An OP-SELECTOR rides
     /// `op` (the M17 `consolidate(op,..)` precedent -- NO new ABI method): op0
     /// ADD_SKILL, op1 UPDATE_UTILITY, op2 READ_SKILL (own body), op3 LINK_LINEAGE,
-    /// op4 READ_TIER (own tier). Returns the op scalar, or `None` (-> `NoMem`)
-    /// when the write-amplification quota is exhausted (fail-closed).
+    /// op4 READ_TIER (own tier), op5 ADD_SKILL_EMIT_EXTERNAL (the HIGH-IMPACT
+    /// class, M18.1). Returns the op scalar, or `None` (-> `NoMem`) when the
+    /// write-amplification quota is exhausted (fail-closed).
     pub(crate) fn write_proc(&mut self, op: u64, a: u64, b: u64, c: u64) -> Option<u64> {
         match op {
-            0 => self.skill_add(a, b, c),    // ADD_SKILL(body=a, desc=b, iface/embed packed=c)
-            1 => self.skill_bump_util(a, b), // UPDATE_UTILITY(id=a, reward!=0 => success)
-            2 => self.skill_read_body(a),    // READ_SKILL(id=a) -> own body_tok
-            3 => self.skill_link(a, b),      // LINK_LINEAGE(id=a, parent=b)
-            4 => self.skill_read_tier(a),    // READ_TIER(id=a) -> tier (PROPOSED/ADMITTED)
-            _ => Some(0),                    // NOOP
+            0 => self.skill_add(a, b, c),     // ADD_SKILL(body=a, desc=b, iface/embed packed=c)
+            1 => self.skill_bump_util(a, b),  // UPDATE_UTILITY(id=a, reward!=0 => success)
+            2 => self.skill_read_body(a),     // READ_SKILL(id=a) -> own body_tok
+            3 => self.skill_link(a, b),       // LINK_LINEAGE(id=a, parent=b)
+            4 => self.skill_read_tier(a),     // READ_TIER(id=a) -> tier (PROPOSED/ADMITTED)
+            5 => self.skill_add_ext(a, b, c), // ADD_SKILL_EMIT_EXTERNAL -> HIGH-IMPACT class
+            _ => Some(0),                     // NOOP
         }
     }
 
@@ -930,10 +938,25 @@ impl MemSubstrate {
         self.t4.skills.iter().position(|s| s.id == id)
     }
 
-    /// ADD_SKILL: push an INERT PROPOSED skill (utility 0, never beats the
-    /// deliberative path until admitted), reusing the T2/T3 `TOKEN_QUOTA`
-    /// write-amplification cap so a flood of proposals fails-closed (`None`).
+    /// ADD_SKILL: push an INERT PROPOSED ORDINARY skill (utility 0, never beats
+    /// the deliberative path until admitted). Provenance bits are clear, so its
+    /// merge needs no human approval (the M18 path, unchanged).
     fn skill_add(&mut self, body: u64, desc: u64, packed: u64) -> Option<u64> {
+        self.skill_add_class(body, desc, packed, 0)
+    }
+
+    /// M18.1 ADD_SKILL_EMIT_EXTERNAL: propose a HIGH-IMPACT skill -- one whose WIT
+    /// interface declares an external/side-effecting requirement
+    /// (`EMIT_EXTERNAL`-tagged, §5). It still lands INERT/PROPOSED exactly like an
+    /// ordinary skill; only its MERGE is gated on a human-approval capability (§8).
+    fn skill_add_ext(&mut self, body: u64, desc: u64, packed: u64) -> Option<u64> {
+        self.skill_add_class(body, desc, packed, SKILL_PROV_EMIT_EXTERNAL)
+    }
+
+    /// Shared ADD body: push an INERT PROPOSED skill tagged with `prov` (the
+    /// classification provenance), reusing the T2/T3 `TOKEN_QUOTA` write-
+    /// amplification cap so a flood of proposals fails-closed (`None`).
+    fn skill_add_class(&mut self, body: u64, desc: u64, packed: u64, prov: u8) -> Option<u64> {
         if self.quota.tokens_written.saturating_add(1) > TOKEN_QUOTA {
             return None; // KeyKOS space-bank: proposals fail-closed past the bound
         }
@@ -949,12 +972,20 @@ impl MemSubstrate {
             util: 0,
             lineage: Vec::new(),
             tier: SKILL_PROPOSED,
-            provenance: 0,
+            provenance: prov,
         });
         self.t4.next_id = self.t4.next_id.wrapping_add(1);
         self.quota.tokens_written = self.quota.tokens_written.saturating_add(1);
         self.clock = self.clock.wrapping_add(1);
         Some(id)
+    }
+
+    /// M18.1 HARNESS-ONLY (kernel-side; the agent never names this): `true` iff
+    /// skill `id` is in the HIGH-IMPACT / `EMIT_EXTERNAL` class -- the merge gate's
+    /// classifier. `None` if no such skill.
+    pub(crate) fn skill_is_high_impact(&self, id: u64) -> Option<bool> {
+        let i = self.skill_idx(id)?;
+        Some(self.t4.skills[i].provenance & SKILL_PROV_EMIT_EXTERNAL != 0)
     }
 
     /// UPDATE_UTILITY: the agent bumps its OWN skill usage counters; the EvolveR

@@ -888,6 +888,67 @@ impl HandleTable {
         (admitted, score)
     }
 
+    /// M18.1 classifier: is skill `id` behind `h` HIGH-IMPACT (`EMIT_EXTERNAL`-
+    /// tagged)? `None` if `h` does not resolve, carries no substrate, or has no
+    /// such skill.
+    fn skill_high_impact_of(&self, h: Handle, id: u64) -> Option<bool> {
+        let i = self.live(h).ok()?;
+        let o = self.core.object_at(i).as_ref()?;
+        o.mem.as_ref()?.borrow().skill_is_high_impact(id)
+    }
+
+    /// M18.1: does the capability `approval` resolve LIVE in THIS table AND carry
+    /// [`Rights::APPROVE_HIGH_IMPACT`]? This is the human-approval check the merge
+    /// gate consults. FAIL-CLOSED in every direction: [`Handle::NULL`] (no
+    /// capability presented) -> `Ok(false)`; a stale/forged handle propagates its
+    /// resolve error so the gate denies; only a live handle whose SLOT rights (not
+    /// the handle bits -- the M11 unforgeability invariant) include the approval
+    /// right yields `Ok(true)`.
+    fn carries_approval(&self, approval: Handle) -> Result<bool, SysStatus> {
+        if approval == Handle::NULL {
+            return Ok(false); // no human-approval capability was presented
+        }
+        let i = self.live(approval)?;
+        Ok(self.core.rights_at(i).contains(Rights::APPROVE_HIGH_IMPACT))
+    }
+
+    /// M18.1 MERGE GATE (kernel-side; the mandatory human-approval hook, §8). The
+    /// merge of a self-improvement skill that is classified HIGH-IMPACT /
+    /// `EMIT_EXTERNAL` is STRUCTURALLY BLOCKED unless `approval` (in
+    /// `approval_tbl`) carries [`Rights::APPROVE_HIGH_IMPACT`]. FAIL-CLOSED: no /
+    /// insufficient / stale approval capability -> [`SysStatus::Denied`] (or the
+    /// resolve error), and the skill stays PROPOSED -- the EXCEL-rung
+    /// [`Self::harness_admit`] is never reached. An ORDINARY skill skips the gate
+    /// and merges exactly as M18 already proves (the gate is purely ADDITIVE). The
+    /// whole guarantee REDUCES TO the SAME M11 rights-mask invariant: the agent's
+    /// own tables never carry the approval right, and a handle resolves only
+    /// against the table it is presented to. Returns `(status, admitted)`:
+    /// `(Ok, _)` when the gate passed (or did not apply), the merge verdict in
+    /// `admitted`; a non-`Ok` status when the gate denied.
+    pub fn harness_merge(
+        &mut self,
+        skill_home: Handle,
+        skill_id: u64,
+        eval_tbl: &HandleTable,
+        eval_home: Handle,
+        approval_tbl: &HandleTable,
+        approval: Handle,
+    ) -> (SysStatus, bool) {
+        let high = match self.skill_high_impact_of(skill_home, skill_id) {
+            Some(v) => v,
+            None => return (SysStatus::BadCap, false), // no such skill / no substrate
+        };
+        if high {
+            match approval_tbl.carries_approval(approval) {
+                Ok(true) => {}                                   // human approval present
+                Ok(false) => return (SysStatus::Denied, false), // MANDATORY gate, fail-closed
+                Err(e) => return (e, false),                    // stale/forged approval cap
+            }
+        }
+        let (admitted, _score) = self.harness_admit(skill_home, skill_id, eval_tbl, eval_home);
+        (SysStatus::Ok, admitted)
+    }
+
     /// M18 self-test witness: the PROPOSED/ADMITTED tier of skill `id` behind `h`.
     pub fn skill_tier_of(&self, h: Handle, id: u64) -> Option<u8> {
         self.skill_get_of(h, id).map(|(_b, t)| t)

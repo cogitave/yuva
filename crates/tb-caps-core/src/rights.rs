@@ -35,6 +35,15 @@ impl Rights {
     pub const EMIT_EXTERNAL: Rights = Rights(1 << 10);
     /// Delegate a slice of a budget to a child (M12).
     pub const DELEGATE_BUDGET: Rights = Rights(1 << 11);
+    /// M18.1: authorise the MERGE of a HIGH-IMPACT / `EMIT_EXTERNAL`-tagged
+    /// self-improvement skill (SELF-IMPROVEMENT-SPEC §8: "merge (human-approval
+    /// hook: mandatory in the high-impact class)"). A handle carrying this right
+    /// is the unforgeable human-approval CAPABILITY the merge gate demands; the
+    /// improving agent's own tables never carry it, so the gate is FAIL-CLOSED.
+    /// Just another named bit in the SAME monotonic-attenuation algebra the M11
+    /// Kani harnesses prove over `from_bits(any::<u32>())`, so adding it changes
+    /// no harness.
+    pub const APPROVE_HIGH_IMPACT: Rights = Rights(1 << 12);
 
     /// The raw bits of this rights set.
     #[inline]
