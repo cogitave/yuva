@@ -1,4 +1,9 @@
-#![no_std]
+// Host test/Miri builds (`cfg(test)`) link std so the libtest harness + the
+// `#[cfg(test)] mod tests` UB-checkable suites compile and run under
+// `cargo miri test`; the bare-metal build (`cfg(not(test))`, the ONLY path the
+// kernel / `cargo kbuild` / `cargo kani` ever take) stays byte-identical
+// `#![no_std]`. Mirrors the existing `tb-encode` leaf crate.
+#![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 //! `tb-caps-core` -- the host-verifiable capability CORE of TABOS M11.
 //!

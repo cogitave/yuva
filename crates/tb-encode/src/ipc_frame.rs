@@ -238,4 +238,159 @@ mod tests {
         assert_eq!(r.pop(), Some(5));
         assert_eq!(r.pop(), None);
     }
+
+    // -----------------------------------------------------------------------
+    // Extra UB-surface coverage for the Tier-0 Miri gate
+    // (.github/workflows/miri.yml). `decode` is the UNTRUSTED-input parser, so
+    // we drive it over a spread of buffer lengths + fill patterns (Miri checks
+    // every path for OOB / uninitialized reads), and we sweep the ring to
+    // capacity + overflow + index wrap-around.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frame_roundtrip_covers_flag_rights_payload_matrix() {
+        for &cap in &[false, true] {
+            for &rights in &[0u32, 1, 0x8000_0000, u32::MAX, 0x1234_5678] {
+                for &payload in &[0u64, 1, u64::MAX, 0xDEAD_BEEF_0000_0001] {
+                    let f = MessageFrame::new(payload, cap, rights);
+                    let bytes = f.encode();
+                    // Reserved discipline: byte 12 carries only the cap bit;
+                    // bytes 13..16 are always zero.
+                    assert_eq!(bytes[12] & 0xFE, 0);
+                    assert_eq!(bytes[13], 0);
+                    assert_eq!(bytes[14], 0);
+                    assert_eq!(bytes[15], 0);
+                    assert_eq!(MessageFrame::decode(&bytes), Ok(f));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decode_is_total_over_every_buffer_length() {
+        // Buffers of EVERY length 0..=FRAME_SIZE+2 under several fill patterns.
+        // `decode` must never panic and must be fail-closed on short input.
+        let mut full = [0u8; FRAME_SIZE + 2];
+        for &fill in &[0u8, 0xFF, 0x80, 0x01, 0xA5] {
+            for b in full.iter_mut() {
+                *b = fill;
+            }
+            for len in 0..=FRAME_SIZE + 2 {
+                let buf = &full[..len];
+                match MessageFrame::decode(buf) {
+                    Ok(f) => {
+                        // Only a >=16-byte, all-reserved-clear buffer decodes Ok;
+                        // here only the all-zero fill is well-formed, and
+                        // re-encoding reproduces the consumed 16 bytes exactly.
+                        assert!(len >= FRAME_SIZE);
+                        assert_eq!(fill, 0);
+                        assert_eq!(&f.encode()[..], &buf[..FRAME_SIZE]);
+                    }
+                    Err(FrameError::ShortBuffer { need, got }) => {
+                        assert!(len < FRAME_SIZE);
+                        assert_eq!(need, FRAME_SIZE);
+                        assert_eq!(got, len);
+                    }
+                    Err(FrameError::ReservedBitsSet) => {
+                        // A full-length buffer whose reserved bits/bytes are set.
+                        assert!(len >= FRAME_SIZE);
+                        assert_ne!(fill, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decode_rejects_each_reserved_bit_independently() {
+        // Each reserved flag bit (bits 1..=7 of byte 12) and each reserved
+        // trailing byte (13,14,15) must INDEPENDENTLY force a fail-closed reject.
+        let base = MessageFrame::new(0xAA55, true, 0x0F0F).encode();
+        for bit in 1..8u32 {
+            let mut b = base;
+            b[12] |= 1u8 << bit;
+            assert_eq!(MessageFrame::decode(&b), Err(FrameError::ReservedBitsSet));
+        }
+        for idx in 13..16usize {
+            let mut b = base;
+            b[idx] = 0xFF;
+            assert_eq!(MessageFrame::decode(&b), Err(FrameError::ReservedBitsSet));
+        }
+        // Control: the untouched base frame still decodes Ok.
+        assert_eq!(
+            MessageFrame::decode(&base),
+            Ok(MessageFrame::new(0xAA55, true, 0x0F0F))
+        );
+    }
+
+    #[test]
+    fn ring_capacity_one_cycles_without_growth() {
+        let mut r: BoundedRing<u8, 1> = BoundedRing::new();
+        assert!(r.is_empty());
+        assert_eq!(r.capacity(), 1);
+        assert!(r.push(7));
+        assert!(r.is_full());
+        assert!(!r.push(8)); // overflow rejected, no growth, no panic
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.pop(), Some(7));
+        assert!(r.is_empty());
+        assert_eq!(r.pop(), None);
+    }
+
+    #[test]
+    fn ring_wraps_head_around_the_buffer() {
+        // Sustain 2 in flight while pushing/popping 20 more, so head and tail
+        // sweep past the end of the [T; N] repeatedly; Miri validates that each
+        // indexed access stays in-bounds across every modular wrap.
+        let mut r: BoundedRing<u32, 4> = BoundedRing::new();
+        let mut next_in = 0u32;
+        let mut next_out = 0u32;
+        assert!(r.push(next_in));
+        next_in += 1;
+        assert!(r.push(next_in));
+        next_in += 1;
+        for _ in 0..20 {
+            assert!(r.push(next_in));
+            next_in += 1;
+            assert_eq!(r.pop(), Some(next_out));
+            next_out += 1;
+        }
+        // Drain the remaining 2 in FIFO order.
+        assert_eq!(r.pop(), Some(next_out));
+        next_out += 1;
+        assert_eq!(r.pop(), Some(next_out));
+        next_out += 1;
+        assert_eq!(r.pop(), None);
+        assert_eq!(next_in, next_out);
+    }
+
+    #[test]
+    fn ring_fills_then_rejects_overflow_then_drains_fifo() {
+        let mut r: BoundedRing<u16, 8> = BoundedRing::new();
+        for k in 0..8u16 {
+            assert_eq!(r.len(), k as usize);
+            assert!(r.push(k));
+        }
+        assert!(r.is_full());
+        // Repeated overflow attempts are all rejected; state is unchanged.
+        for _ in 0..3 {
+            assert!(!r.push(0xFFFF));
+            assert_eq!(r.len(), 8);
+        }
+        for k in 0..8u16 {
+            assert_eq!(r.pop(), Some(k));
+        }
+        assert!(r.is_empty());
+        assert_eq!(r.pop(), None);
+    }
+
+    #[test]
+    fn ring_default_is_empty_with_capacity() {
+        let mut r: BoundedRing<u64, 5> = BoundedRing::default();
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
+        assert_eq!(r.capacity(), 5);
+        assert!(r.push(99));
+        assert_eq!(r.pop(), Some(99));
+    }
 }

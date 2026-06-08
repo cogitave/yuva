@@ -1,0 +1,102 @@
+# TABOS Tier-0 dynamic Undefined-Behavior gate (Miri).
+#
+# Runs the Rust Project's OWN MIR interpreter over the PURE, host-runnable,
+# `#![forbid(unsafe_code)]` leaf crates -- `tb-caps-core` (the Rights algebra +
+# the generation-checked `CapTable<O>`) and `tb-encode` (the VMX / paging / EPT
+# encoders + the 16-byte IPC `MessageFrame` codec + `BoundedRing`) -- under their
+# host `#[cfg(test)]` suites. Miri executes every test path in an instrumented
+# interpreter that traps Undefined Behavior the type system cannot: out-of-bounds
+# / use-after-free, reads of uninitialized memory, invalid bool/enum/char values,
+# misaligned accesses, integer overflow, and strict-provenance violations.
+#
+# This is the DYNAMIC complement to the Kani proofs (kani.yml): Kani proves the
+# bit algebra symbolically; Miri EXECUTES the real Rust on concrete inputs --
+# crucially the untrusted-byte `MessageFrame::decode` parser, the bounded ring,
+# and the `CapTable` slot/generation/free-list logic.
+#
+# Miri CANNOT run the bare-metal kernel: `tb-hal` carries inline asm and targets
+# the `*-tabos-none` (`os = "none"`) triples Miri has no runtime for. So the
+# surface is deliberately the two pure leaf crates ONLY -- the SAME crates Kani
+# verifies, zero model drift, zero contact with any boot path.
+#
+# HARD GATE: the job FAILS if Miri reports ANY UB or ANY test fails (no
+# `|| true`); only a fully clean interpreter run reaches the DoD marker
+# `T0: miri OK`. Advisory (required-style) until the maintainer promotes it in
+# branch protection -- exactly like kani.yml.
+
+name: miri
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri-tier0:
+    name: "T0 UB gate (Miri)"
+    runs-on: ubuntu-latest
+    # Fail fast + clearly if the interpreter ever hangs; the two leaf crates'
+    # single-threaded suites run in well under this even with the ~10-50x Miri
+    # slowdown.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Overflow checks + debug assertions ON so every arithmetic overflow on the
+      # CapTable generation / ring index paths is a HARD error under the
+      # interpreter (the dev/test profile already enables both; this pins it
+      # explicitly so the gate never silently runs with them off).
+      # `-Zmiri-strict-provenance` halts on int->ptr provenance laundering and
+      # `-Zmiri-symbolic-alignment-check` catches under-aligned accesses; both are
+      # free insurance for these `#![forbid(unsafe_code)]` crates.
+      RUSTFLAGS: "-C overflow-checks=on -C debug-assertions=on"
+      MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install a nightly that ships BOTH `miri` and `rust-src`. With a `nightly`
+      # channel + requested components, dtolnay/rust-toolchain resolves the most
+      # recent nightly DATE that carries all of them, so the blocking gate never
+      # lands on a miri-less nightly. We pin that resolved toolchain into
+      # RUSTUP_TOOLCHAIN below so the repo's rust-toolchain.toml (bare `nightly`)
+      # cannot override it back to a possibly-miri-less latest nightly (rustup
+      # precedence: the RUSTUP_TOOLCHAIN env var > a directory rust-toolchain.toml).
+      - name: Install nightly + miri + rust-src
+        id: toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-miri-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # Build Miri's instrumented std sysroot up front, so a setup failure is
+      # distinct from an actual UB finding in the gate step below.
+      - name: cargo miri setup
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: cargo miri setup
+
+      # THE HARD GATE. Miri interprets the host test suites of the two pure leaf
+      # crates. ANY Undefined Behavior or ANY failing test makes `cargo miri test`
+      # exit non-zero and FAILS the job; only a clean run reaches the marker echo.
+      # `-p tb-caps-core -p tb-encode` (never `--workspace`) keeps tb-hal's inline
+      # asm + the bare-metal kernel out of the host interpreter entirely.
+      - name: Miri UB gate over tb-caps-core + tb-encode
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: |
+          cargo miri test -p tb-caps-core -p tb-encode
+          echo "T0: miri OK"

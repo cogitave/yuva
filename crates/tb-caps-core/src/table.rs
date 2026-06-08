@@ -311,3 +311,200 @@ impl<O> CapTable<O> {
         self.slots.len()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Host `#[cfg(test)]` suite -- real execution for the Tier-0 Miri UB gate
+// (.github/workflows/miri.yml). These drive the generation + slot + free-list +
+// rights logic on the REAL `CapTable<O>` over concrete inputs, so Miri can check
+// every path for OOB / use-after-free / uninitialized reads / overflow. They are
+// the dynamic complement to the `#[cfg(kani)]` symbolic proofs in `proofs.rs`.
+// Deterministic, no `#[should_panic]`. `Rights`/`Handle` derive no `Debug`, so
+// assertions compare `.bits()` / `.slot()` / `.generation()`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rights::Rights;
+
+    /// A common read|write rights set used across the table tests.
+    fn rw() -> Rights {
+        Rights::READ.union(Rights::WRITE)
+    }
+
+    #[test]
+    fn alloc_assigns_fresh_slots_at_generation_one() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        let a = t.alloc(Rights::READ, 100).unwrap();
+        let b = t.alloc(Rights::WRITE, 200).unwrap();
+        assert_eq!(a.generation(), 1);
+        assert_eq!(b.generation(), 1);
+        assert_ne!(a.slot(), b.slot());
+        assert_eq!(t.live(a).unwrap(), a.slot() as usize);
+        assert_eq!(t.rights_of(a).unwrap().bits(), Rights::READ.bits());
+        assert_eq!(t.rights_of(b).unwrap().bits(), Rights::WRITE.bits());
+    }
+
+    #[test]
+    fn alloc_is_capacity_bounded_failclosed() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(2);
+        assert!(t.alloc(Rights::READ, 1).is_some());
+        assert!(t.alloc(Rights::READ, 2).is_some());
+        // At cap -> None (the caller maps this to SysStatus::ObjFull); no panic.
+        assert!(t.alloc(Rights::READ, 3).is_none());
+    }
+
+    #[test]
+    fn live_rejects_out_of_range_wrong_generation_and_null() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        let h = t.alloc(Rights::READ, 7).unwrap();
+        // Slot index past the end of the table -> BadCap.
+        assert_eq!(t.live(Handle::new(1, 999)), Err(SysStatus::BadCap));
+        // Correct slot, stale generation -> Stale.
+        assert_eq!(
+            t.live(Handle::new(h.generation() + 1, h.slot())),
+            Err(SysStatus::Stale)
+        );
+        // The reserved NULL handle (generation 0) never resolves.
+        assert!(t.live(Handle::NULL).is_err());
+        // The valid handle still resolves Ok.
+        assert!(t.live(h).is_ok());
+    }
+
+    #[test]
+    fn dup_mints_sibling_with_identical_rights_and_object() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        let h = t.alloc(rw(), 42).unwrap();
+        let s = t.dup(h).unwrap();
+        assert_ne!(s.slot(), h.slot());
+        assert_eq!(t.rights_of(s).unwrap().bits(), rw().bits());
+        // Both handles resolve to the SAME (cloned) object payload.
+        let i = t.live(h).unwrap();
+        let j = t.live(s).unwrap();
+        assert_eq!(t.object_at(i), &Some(42));
+        assert_eq!(t.object_at(j), &Some(42));
+    }
+
+    #[test]
+    fn narrow_only_ever_attenuates() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        let full = Rights::READ.union(Rights::WRITE).union(Rights::TRANSFER);
+        let h = t.alloc(full, 1).unwrap();
+        // Narrowing drops TRANSFER.
+        let n = t.narrow(h, rw()).unwrap();
+        let nr = t.rights_of(n).unwrap();
+        assert!(nr.is_subset_of(full));
+        assert_eq!(nr.bits(), rw().bits());
+        // A mask with EVERY bit set can never amplify beyond the parent rights.
+        let n2 = t.narrow(h, Rights::from_bits(u32::MAX)).unwrap();
+        let n2r = t.rights_of(n2).unwrap();
+        assert!(n2r.is_subset_of(full));
+        assert_eq!(n2r.bits(), full.bits());
+    }
+
+    #[test]
+    fn transfer_moves_object_and_drains_source() {
+        let mut src: CapTable<u32> = CapTable::with_capacity(4);
+        let mut dst: CapTable<u32> = CapTable::with_capacity(4);
+        let h = src.alloc(rw(), 0xABCD).unwrap();
+        let moved = src.transfer_to(h, &mut dst).unwrap();
+        // Source slot drained -> the old handle is now Stale.
+        assert_eq!(src.live(h), Err(SysStatus::Stale));
+        // Destination carries the same rights and object.
+        assert_eq!(dst.rights_of(moved).unwrap().bits(), rw().bits());
+        let j = dst.live(moved).unwrap();
+        assert_eq!(dst.object_at(j), &Some(0xABCD));
+    }
+
+    #[test]
+    fn transfer_into_full_dst_strands_nothing() {
+        let mut src: CapTable<u32> = CapTable::with_capacity(4);
+        let mut dst: CapTable<u32> = CapTable::with_capacity(1);
+        let _fill = dst.alloc(Rights::READ, 1).unwrap();
+        let h = src.alloc(rw(), 9).unwrap();
+        // dst is full -> None, and the source is left intact (all-or-nothing).
+        assert!(src.transfer_to(h, &mut dst).is_none());
+        assert!(src.live(h).is_ok());
+        assert_eq!(src.rights_of(h).unwrap().bits(), rw().bits());
+    }
+
+    #[test]
+    fn revoke_makes_stale_then_reuse_bumps_generation() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(2);
+        let h = t.alloc(Rights::READ, 1).unwrap();
+        let slot = h.slot();
+        let g0 = h.generation();
+        assert_eq!(t.revoke(h), SysStatus::Ok);
+        assert_eq!(t.live(h), Err(SysStatus::Stale));
+        // Revoking an already-dead handle is fail-closed (returns the resolve
+        // error), never a double-free panic.
+        assert_eq!(t.revoke(h), SysStatus::Stale);
+        // The freed slot is reused with a BUMPED generation, so the old handle
+        // can never resolve Ok again.
+        let h2 = t.alloc(Rights::WRITE, 2).unwrap();
+        assert_eq!(h2.slot(), slot);
+        assert_ne!(h2.generation(), g0);
+        assert!(t.live(h).is_err());
+        assert!(t.live(h2).is_ok());
+    }
+
+    #[test]
+    fn detach_returns_payload_and_drains_source() {
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        let h = t.alloc(rw(), 0x1234).unwrap();
+        let (obj, rights) = t.detach(h).unwrap();
+        assert_eq!(obj, 0x1234);
+        assert_eq!(rights.bits(), rw().bits());
+        assert_eq!(t.live(h), Err(SysStatus::Stale));
+        // A second detach of the dead handle is fail-closed.
+        assert!(matches!(t.detach(h), Err(SysStatus::Stale)));
+    }
+
+    #[test]
+    fn free_list_reuse_holds_capacity_across_many_ops() {
+        // A long alloc/revoke/realloc sequence so Miri exercises the Vec growth,
+        // the LIFO free-list push/pop, and the generation bump on every path.
+        let mut t: CapTable<u32> = CapTable::with_capacity(8);
+        let mut handles = [Handle::NULL; 8];
+        for k in 0..8u32 {
+            handles[k as usize] = t.alloc(Rights::READ, k).unwrap();
+        }
+        assert!(t.alloc(Rights::READ, 99).is_none()); // at capacity
+        // Revoke every other capability.
+        let mut k = 0;
+        while k < 8 {
+            assert_eq!(t.revoke(handles[k]), SysStatus::Ok);
+            k += 2;
+        }
+        // Re-alloc into the freed slots; the table never exceeds its capacity.
+        for v in 0..4u32 {
+            let h = t.alloc(Rights::WRITE, 1000 + v).unwrap();
+            assert!(t.live(h).is_ok());
+        }
+        assert!(t.alloc(Rights::READ, 0).is_none()); // full again
+        // Every revoked original handle stays permanently dead.
+        let mut k = 0;
+        while k < 8 {
+            assert!(t.live(handles[k]).is_err());
+            k += 2;
+        }
+    }
+
+    #[test]
+    fn generation_overflow_retires_slot_instead_of_wrapping() {
+        // A slot whose generation is already at u32::MAX must be RETIRED on free
+        // (NOT returned to the free list), so a security generation never wraps
+        // to a value some stale handle could match. Built via the test-only
+        // `seed_slot` hook so we can place the slot at the overflow boundary.
+        let mut t: CapTable<u32> = CapTable::with_capacity(4);
+        t.seed_slot(u32::MAX, Rights::READ, Some(7));
+        assert_eq!(t.slot_count(), 1);
+        t.free_slot(0);
+        // Retired: generation left unchanged (no wrap) and the slot is vacant.
+        assert_eq!(t.peek_generation(0), u32::MAX);
+        assert!(!t.is_occupied(0));
+        // A fresh alloc must NOT reuse the retired slot 0 -- a new slot appears.
+        let h = t.alloc(Rights::WRITE, 8).unwrap();
+        assert_ne!(h.slot(), 0);
+        assert_eq!(t.slot_count(), 2);
+    }
+}
