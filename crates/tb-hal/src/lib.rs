@@ -40,6 +40,7 @@ extern crate alloc;
 mod arch;
 pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
 mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
+mod ipc; // M14: SAFE inter-agent IPC channel core (bounded ordered FIFO + cap move).
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
@@ -1408,6 +1409,122 @@ pub fn agent_mem_dispatch(
     };
     let ret = caps::dispatch(&mut ap.table, &args);
     Some((ret.status as u32, ret.value))
+}
+
+/// M14: open ONE ordered, bounded, bidirectional IPC channel between agents `a`
+/// and `b`, minting a fresh [`caps::ObjKind::Channel`] ENDPOINT into EACH agent's
+/// own table (side 0 in `a`, side 1 in `b`) over a shared `Rc<ipc::Channel>`
+/// core. Returns `(ep_a, ep_b)`, or `None` if either task is not a live agent or
+/// they are the same task. The two `AGENTS.slot()` borrows are taken in SEPARATE
+/// scopes (the `Rc` cloned across) so no two `&mut AgentProcess` ever overlap --
+/// the single-`&mut`-at-a-time discipline the registry relies on.
+pub fn agent_channel_connect(
+    a: Task,
+    b: Task,
+    bound: usize,
+) -> Option<(caps::Handle, caps::Handle)> {
+    let sa = a.raw();
+    let sb = b.raw();
+    if sa >= MAX_TASKS || sb >= MAX_TASKS || sa == sb {
+        return None;
+    }
+    let ch = ipc::create(bound);
+    let ep_rights = caps::Rights::READ
+        .union(caps::Rights::WRITE)
+        .union(caps::Rights::TRANSFER);
+    let ha = {
+        let ap_a = AGENTS.slot(sa).as_mut()?;
+        ap_a.table.mint_channel_endpoint(ep_rights, ch.clone(), 0)?
+    };
+    let hb = {
+        let ap_b = AGENTS.slot(sb).as_mut()?;
+        ap_b.table.mint_channel_endpoint(ep_rights, ch, 1)?
+    };
+    Some((ha, hb))
+}
+
+/// M14: drive `M_CHAN_SEND` against `t`'s OWN table through the M11 dispatch
+/// chokepoint -- `payload` in `args[0]`, the raw handle of an optional cap to
+/// MOVE in `args[1]` (`0` = bytes-only). Returns `(status, value)`, or `None` if
+/// `t` is not an agent.
+pub fn agent_chan_send(t: Task, ep: caps::Handle, payload: u64, cap_h: u64) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method: caps::M_CHAN_SEND,
+        handle: ep,
+        args: [payload, cap_h, 0, 0],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    Some((ret.status as u32, ret.value))
+}
+
+/// M14: the richer kernel-side RECV facade -- runs the READ-gated channel recv
+/// against `t`'s OWN table and returns `(status, inline payload, moved-handle)`.
+/// The single-scalar [`caps::SysReturn`] dispatch path can only return the moved
+/// handle; this tuple surfaces the inline payload too (the user ABI will deliver
+/// it via the deferred `copy_to_user`). `None` if `t` is not an agent.
+pub fn agent_chan_recv_full(t: Task, ep: caps::Handle) -> Option<(u32, u64, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let (st, payload, moved) = ap.table.chan_recv(ep);
+    Some((st as u32, payload, moved))
+}
+
+/// M14: run an arbitrary numbered, capability-checked [`caps::dispatch`] against
+/// `t`'s OWN table with an explicit `handle` + two inline args -- the kernel-side
+/// door the self-test uses to NARROW / INSPECT a cap inside an agent's table (the
+/// same chokepoint user code reaches). Returns `(status, value)`.
+pub fn agent_cap_dispatch(
+    t: Task,
+    method: u32,
+    handle: caps::Handle,
+    a0: u64,
+    a1: u64,
+) -> Option<(u32, u64)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let args = caps::SyscallArgs {
+        method,
+        handle,
+        args: [a0, a1, 0, 0],
+    };
+    let ret = caps::dispatch(&mut ap.table, &args);
+    Some((ret.status as u32, ret.value))
+}
+
+/// M14 test helper: mint a fresh identity-only [`caps::ObjKind::Generic`] cap
+/// with `rights` into `t`'s own table; returns its handle (`None` if `t` is not
+/// an agent or its table is full). Lets the self-test fabricate a transferable
+/// carried capability without a manifest grant.
+pub fn agent_mint_generic(t: Task, rights: caps::Rights) -> Option<caps::Handle> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    ap.table.mint(caps::ObjKind::Generic, rights)
+}
+
+/// M14 test helper: the raw rights bits attached to `handle` in `t`'s table, or
+/// `None` if it does not resolve -- lets the self-test assert cross-agent
+/// attenuation (a moved cap arrives with rights that are a SUBSET of the source).
+pub fn agent_rights_of(t: Task, handle: caps::Handle) -> Option<u32> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    ap.table.rights_of(handle).map(|r| r.bits())
 }
 
 /// M12 witness #1 (kernel-side, BEFORE the agent has run): `true` iff `task`'s

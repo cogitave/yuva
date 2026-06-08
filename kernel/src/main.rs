@@ -1370,6 +1370,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // side, driving caps::dispatch directly with the full [u64;4] encoding, and
     // (B) through the ACTUAL born-with home of freshly spawned agents (proving it
     // is a real per-agent guarantee, not a local toy). DoD marker: "M13: memory OK".
+    //
+    // M14 NOTE: agent_c / agent_d are spawned HERE, at function scope BEFORE the
+    // M13 block, so the M14 IPC self-test (after the M13 marker) can reuse them
+    // as the two channel peers WITHOUT consuming extra MAX_TASKS slots. Their
+    // slot assignment is unchanged from the green build (WITNESS A spawns nothing).
+    let agent_c = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_C.take());
+    let agent_d = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_D.take());
     {
         use tb_hal::caps::{self, Handle, ObjKind, Rights, SysStatus};
 
@@ -1491,9 +1498,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // Spawn two fresh agents; each is BORN with a real substrate behind its
         // memory_home (agent_spawn -> mint_memory_home). The timer stays disarmed,
         // so they never run a user instruction -- we drive their substrate from the
-        // kernel through agent_mem_dispatch (the M11 chokepoint).
-        let agent_c = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_C.take());
-        let agent_d = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_D.take());
+        // kernel through agent_mem_dispatch (the M11 chokepoint). (agent_c /
+        // agent_d were spawned at function scope just above this block so the M14
+        // IPC self-test can reuse them.)
 
         let (s, id_c) = match tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_WRITE, 0, TOK_K, V0, 5)
         {
@@ -1530,6 +1537,208 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M13: memory OK\n"); // <-- the M13 DoD marker
+
+    // --- M14: inter-agent IPC -- capability-passing channels + ordered streams --
+    // Two agents communicate over an ORDERED, BOUNDED, BIDIRECTIONAL message
+    // stream; a message can CARRY a capability MOVED from the sender's HandleTable
+    // into the receiver's (the M11 transfer_to move split across the ring --
+    // rights ride intact, attenuated cross-agent first via M_HANDLE_NARROW), all
+    // through the single M11 dispatch chokepoint. The timer is disarmed (single-
+    // core, interrupts masked -- exactly the discipline the channel's RefCell
+    // rings rely on). We reuse the already-born agent_c (side 0, sender) +
+    // agent_d (side 1, receiver) as the two peers (no extra task slots).
+    //
+    // The disarmed-timer self-test observes the CLOSED-STATUS form
+    // (WouldBlock / PeerClosed) DIRECTLY; the recv-blocks-off-the-runqueue /
+    // send-wakes-peer scheduler round-trip is the additive Step-2 layer the same
+    // milestone wires but a disarmed-timer self-test cannot exercise. The real
+    // variable-length BYTE payload (copy_to_user) is the ONLY M14 unsafe and is
+    // deliberately DEFERRED -- this marker rides the inline-scalar payload with
+    // the cap moved by handle, at ZERO new unsafe. DoD marker: "M14: ipc OK".
+    {
+        use tb_hal::caps::{self, Handle, ObjKind, Rights, SysStatus};
+
+        fn m14_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M14: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        let ok = SysStatus::Ok as u32;
+        let wb = SysStatus::WouldBlock as u32;
+        let den = SysStatus::Denied as u32;
+        let badcap = SysStatus::BadCap as u32;
+        let badmethod = SysStatus::BadMethod as u32;
+        let stale = SysStatus::Stale as u32;
+        let peerclosed = SysStatus::PeerClosed as u32;
+        let rd = Rights::READ.bits();
+        let wr = Rights::WRITE.bits();
+
+        // 1. CONNECT one bounded (cap=2) channel: ep_a (side 0) in C, ep_b
+        //    (side 1) in D, sharing ONE Rc<Channel>.
+        let (ep_a, ep_b) = match tb_hal::agent_channel_connect(agent_c, agent_d, 2) {
+            Some(x) => x,
+            None => m14_fail("channel connect failed"),
+        };
+
+        // 2. MINT a carried cap in C with READ|WRITE|TRANSFER, then NARROW it
+        //    (mask READ|TRANSFER) -> drops WRITE: the derived-narrowed capability.
+        let cap0 = match tb_hal::agent_mint_generic(
+            agent_c,
+            Rights::READ.union(Rights::WRITE).union(Rights::TRANSFER),
+        ) {
+            Some(h) => h,
+            None => m14_fail("mint carried cap failed"),
+        };
+        let narrow_mask = Rights::READ.union(Rights::TRANSFER).bits() as u64;
+        let (s, cap_h_raw) =
+            tb_hal::agent_cap_dispatch(agent_c, caps::M_HANDLE_NARROW, cap0, narrow_mask, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok || cap_h_raw == 0 {
+            m14_fail("narrow of the carried cap was not Ok");
+        }
+        let cap_h = Handle::from_raw(cap_h_raw);
+
+        // 3. SEND #1 (cap-carrying, payload 0xCAFE) C -> D.
+        let (s, _) =
+            tb_hal::agent_chan_send(agent_c, ep_a, 0xCAFE, cap_h_raw).unwrap_or((badcap, 0));
+        if s != ok {
+            m14_fail("cap-carrying send #1 was not Ok");
+        }
+        // The carried cap is now STALE in C ("A no longer can"): consumed on write.
+        let (s, _) = tb_hal::agent_cap_dispatch(agent_c, caps::M_OBJECT_INSPECT, cap_h, 0, 0)
+            .unwrap_or((ok, 0));
+        if s != stale {
+            m14_fail("carried cap was not STALE in the sender after send (move did not consume)");
+        }
+
+        // 4. SEND #2 (bytes-only, payload 0xF00D) -- fills the bound-2 outbox.
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0xF00D, 0).unwrap_or((badcap, 0));
+        if s != ok {
+            m14_fail("bytes-only send #2 was not Ok");
+        }
+
+        // 5. RECV #1 in D: FIFO head 0xCAFE, carrying the moved cap.
+        let (s, payload, moved_raw) =
+            tb_hal::agent_chan_recv_full(agent_d, ep_b).unwrap_or((badcap, 0, 0));
+        if s != ok || payload != 0xCAFE || moved_raw == 0 {
+            m14_fail("recv #1 did not deliver payload 0xCAFE with a moved cap");
+        }
+        let moved = Handle::from_raw(moved_raw);
+        // D USES the moved cap: a READ-gated inspect -> Ok, right ObjKind.
+        let (s, kind) = tb_hal::agent_cap_dispatch(agent_d, caps::M_OBJECT_INSPECT, moved, 0, 0)
+            .unwrap_or((badcap, 0));
+        if s != ok || kind != ObjKind::Generic as u64 {
+            m14_fail("receiver could not USE the moved cap (inspect failed / wrong kind)");
+        }
+        // ATTENUATION held CROSS-AGENT: the pre-send narrow dropped WRITE.
+        let mr = tb_hal::agent_rights_of(agent_d, moved).unwrap_or(0);
+        if (mr & rd) == 0 || (mr & wr) != 0 {
+            m14_fail("moved cap rights not attenuated cross-agent (want READ kept, WRITE dropped)");
+        }
+
+        // 6. FIFO: RECV #2 -> 0xF00D, no cap (proves 0xCAFE was delivered FIRST).
+        let (s, payload, moved2) =
+            tb_hal::agent_chan_recv_full(agent_d, ep_b).unwrap_or((badcap, 0, 0));
+        if s != ok || payload != 0xF00D || moved2 != 0 {
+            m14_fail("recv #2 broke per-direction FIFO (expected 0xF00D, no cap)");
+        }
+        tb_hal::serial_write_str("ipc: FIFO + capability moved + attenuated cross-agent\n");
+
+        // 7. EMPTY inbox, peer still open -> WouldBlock.
+        let (s, _, _) = tb_hal::agent_chan_recv_full(agent_d, ep_b).unwrap_or((badcap, 0, 0));
+        if s != wb {
+            m14_fail("recv on an empty-but-open inbox was not WouldBlock");
+        }
+
+        // 8. DENIED / non-channel paths (outbox has space; NONE of these enqueue).
+        //    (a) M_CHAN_SEND on a NON-channel object (Generic w/ WRITE): passes
+        //        the WRITE gate, the body sees chan==None -> BadCap.
+        let gen_w = match tb_hal::agent_mint_generic(agent_c, Rights::READ.union(Rights::WRITE)) {
+            Some(h) => h,
+            None => m14_fail("mint non-channel WRITE cap failed"),
+        };
+        let (s, _) = tb_hal::agent_chan_send(agent_c, gen_w, 0, 0).unwrap_or((ok, 0));
+        if s != badcap {
+            m14_fail("M_CHAN_SEND on a non-channel object was not BadCap");
+        }
+        //    (b) endpoint NARROWed to drop WRITE -> Denied at the required_right gate.
+        let (s, epa_no_w_raw) =
+            tb_hal::agent_cap_dispatch(agent_c, caps::M_HANDLE_NARROW, ep_a, rd as u64, 0)
+                .unwrap_or((badcap, 0));
+        if s != ok || epa_no_w_raw == 0 {
+            m14_fail("narrow of ep_a (drop WRITE) failed");
+        }
+        let (s, _) = tb_hal::agent_chan_send(agent_c, Handle::from_raw(epa_no_w_raw), 0xAA, 0)
+            .unwrap_or((ok, 0));
+        if s != den {
+            m14_fail("send on a WRITE-less endpoint was not Denied");
+        }
+        //    (c) carried cap lacking TRANSFER -> Denied (checked before any detach).
+        let cap_no_t = match tb_hal::agent_mint_generic(agent_c, Rights::READ) {
+            Some(h) => h,
+            None => m14_fail("mint no-TRANSFER cap failed"),
+        };
+        let (s, _) =
+            tb_hal::agent_chan_send(agent_c, ep_a, 0xBB, cap_no_t.raw()).unwrap_or((ok, 0));
+        if s != den {
+            m14_fail("sending a cap lacking TRANSFER was not Denied");
+        }
+        //    (d) sending an endpoint into its OWN channel -> Denied (Zircon NOT_SUPPORTED).
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0xCC, ep_a.raw()).unwrap_or((ok, 0));
+        if s != den {
+            m14_fail("sending an endpoint into its own channel was not Denied");
+        }
+        //    (e) unknown method 28 -> BadMethod (the closed method set is intact).
+        let (s, _) = tb_hal::agent_cap_dispatch(agent_c, 28, ep_a, 0, 0).unwrap_or((ok, 0));
+        if s != badmethod {
+            m14_fail("an unknown channel method was not BadMethod");
+        }
+
+        // 9. BACKPRESSURE + ATOMICITY: fill C's outbox to the bound (2), then a
+        //    cap-carrying send -> WouldBlock with the carried cap NOT stranded.
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0x1, 0).unwrap_or((badcap, 0));
+        if s != ok {
+            m14_fail("backpressure fill #1 was not Ok");
+        }
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0x2, 0).unwrap_or((badcap, 0));
+        if s != ok {
+            m14_fail("backpressure fill #2 was not Ok");
+        }
+        let cap2 = match tb_hal::agent_mint_generic(agent_c, Rights::READ.union(Rights::TRANSFER)) {
+            Some(h) => h,
+            None => m14_fail("mint atomicity cap failed"),
+        };
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0x3, cap2.raw()).unwrap_or((ok, 0));
+        if s != wb {
+            m14_fail("cap-carrying send into a full outbox was not WouldBlock");
+        }
+        // ATOMICITY: the carried cap is STILL live in C (never detached).
+        let (s, _) = tb_hal::agent_cap_dispatch(agent_c, caps::M_OBJECT_INSPECT, cap2, 0, 0)
+            .unwrap_or((stale, 0));
+        if s != ok {
+            m14_fail("WouldBlock send STRANDED the carried cap (atomicity broken)");
+        }
+        tb_hal::serial_write_str(
+            "ipc: full channel WouldBlock + non-channel BadCap + denied paths\n",
+        );
+
+        // 10. PEER-CLOSED (fire-and-forget): D closes its endpoint; a send from C
+        //     now sees the peer gone -> PeerClosed.
+        let (s, _) = tb_hal::agent_cap_dispatch(agent_d, caps::M_CHAN_CLOSE, ep_b, 0, 0)
+            .unwrap_or((badcap, 0));
+        if s != ok {
+            m14_fail("closing the receiver endpoint was not Ok");
+        }
+        let (s, _) = tb_hal::agent_chan_send(agent_c, ep_a, 0x9, 0).unwrap_or((ok, 0));
+        if s != peerclosed {
+            m14_fail("send to a closed peer was not PeerClosed");
+        }
+        tb_hal::serial_write_str("ipc: peer-closed surfaces PeerClosed (fire-and-forget close)\n");
+    }
+
+    tb_hal::serial_write_str("M14: ipc OK\n"); // <-- the M14 DoD marker
 
     tb_hal::halt()
 }

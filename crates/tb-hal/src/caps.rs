@@ -186,6 +186,11 @@ pub enum SysStatus {
     NoMem = 6,
     /// The table (or object registry) is at capacity.
     ObjFull = 7,
+    /// M14: the channel's peer endpoint has been closed -- a `send` to a closed
+    /// peer, or a `recv` on an inbox that is empty AND whose peer has closed (the
+    /// backlog is drained first, THEN this surfaces). Kept LAST so the closed
+    /// status surface stays total.
+    PeerClosed = 8,
 }
 
 /// The closed set of kernel object kinds. Identity-only at M11; per-subsystem
@@ -230,6 +235,14 @@ pub struct Object {
     /// M13: an inline scalar payload. A copy-on-retrieve [`ObjKind::MemoryRecord`]
     /// carries the recalled record id here; `0` for objects without one.
     scalar: u64,
+    /// M14: the optional IPC endpoint body. Present ONLY on an
+    /// [`ObjKind::Channel`] endpoint minted by [`HandleTable::mint_channel_endpoint`]:
+    /// an `Rc` clone of the shared [`crate::ipc::Channel`] core plus this
+    /// endpoint's side (`0` or `1`); `None` for identity-only objects (including
+    /// the M12 bootstrap-channel stub). The two endpoint objects of one channel
+    /// hold an `Rc` clone of the SAME core, so the two per-principal tables stay
+    /// disjoint yet rendezvous on it.
+    chan: Option<(Rc<crate::ipc::Channel>, u8)>,
 }
 
 /// The neutral, fully-owned syscall descriptor the per-arch register-lift shim
@@ -329,6 +342,20 @@ pub const M_BUDGET_DELEGATE: u32 = 22;
 pub const M_MEM_WRITE: u32 = 23;
 /// M13: read a memory record by id -- instant read-your-writes (needs READ).
 pub const M_MEM_READ: u32 = 24;
+/// M14: send a message on a channel endpoint (needs WRITE on the endpoint).
+/// `args[0]` = inline scalar payload; `args[1]` = raw handle of an optional
+/// capability to MOVE (0 / [`Handle::NULL`] = bytes-only). The carried cap must
+/// hold [`Rights::TRANSFER`]; `args[2..3]` reserved for the deferred user buffer.
+pub const M_CHAN_SEND: u32 = 25;
+/// M14: receive a message on a channel endpoint (needs READ on the endpoint).
+/// Returns the raw handle freshly installed for any MOVED capability (`0` if the
+/// message carried none); the inline payload is surfaced kernel-side via a richer
+/// facade tuple (and, later, `copy_to_user`).
+pub const M_CHAN_RECV: u32 = 26;
+/// M14: close this channel endpoint (needs no right -- closing your own endpoint
+/// is always allowed). Flips the peer-closed flag; the peer drains its backlog
+/// first, then observes [`SysStatus::PeerClosed`].
+pub const M_CHAN_CLOSE: u32 = 27;
 
 /// Map a method number to the single right it requires, or `None` for an
 /// unknown method (-> [`SysStatus::BadMethod`]). This closes the method space.
@@ -347,6 +374,9 @@ fn required_right(method: u32) -> Option<Rights> {
         M_MEM_CONSOLIDATE => Rights::CONSOLIDATE,
         M_MEM_WRITE => Rights::WRITE,
         M_MEM_READ => Rights::READ,
+        M_CHAN_SEND => Rights::WRITE,
+        M_CHAN_RECV => Rights::READ,
+        M_CHAN_CLOSE => Rights::NONE,
         M_EMIT_EXTERNAL => Rights::EMIT_EXTERNAL,
         M_BUDGET_DELEGATE => Rights::DELEGATE_BUDGET,
         _ => return None,
@@ -445,6 +475,7 @@ impl HandleTable {
                 kind,
                 mem: None,
                 scalar: 0,
+                chan: None,
             }),
         )
     }
@@ -461,6 +492,7 @@ impl HandleTable {
                 kind: ObjKind::MemoryHome,
                 mem: Some(RefCell::new(crate::mem::MemSubstrate::new())),
                 scalar: 0,
+                chan: None,
             }),
         )
     }
@@ -475,6 +507,29 @@ impl HandleTable {
                 kind: ObjKind::MemoryRecord,
                 mem: None,
                 scalar,
+                chan: None,
+            }),
+        )
+    }
+
+    /// M14: mint an [`ObjKind::Channel`] ENDPOINT carrying a real IPC body -- an
+    /// `Rc` clone of the shared [`crate::ipc::Channel`] core plus this endpoint's
+    /// `side` (`0` or `1`) -- with `rights`. The peer endpoint (the other side,
+    /// over the same core) is minted into the OTHER principal's table; the two
+    /// rendezvous on the `Rc`. `None` on `ObjFull`.
+    pub(crate) fn mint_channel_endpoint(
+        &mut self,
+        rights: Rights,
+        chan: Rc<crate::ipc::Channel>,
+        side: u8,
+    ) -> Option<Handle> {
+        self.alloc(
+            rights,
+            Rc::new(Object {
+                kind: ObjKind::Channel,
+                mem: None,
+                scalar: 0,
+                chan: Some((chan, side)),
             }),
         )
     }
@@ -533,9 +588,93 @@ impl HandleTable {
         let i = self.live(h).ok()?;
         let rights = self.slots[i].rights;
         let object = self.slots[i].object.clone()?;
-        let moved = dst.alloc(rights, object)?;
+        // ATOMIC: attach into `dst` FIRST; only vacate the source AFTER it lands,
+        // so a full `dst` never strands the object (M11 all-or-nothing preserved).
+        let moved = dst.attach((object, rights))?;
         self.free_slot(i);
         Some(moved)
+    }
+
+    /// M14 -- the SEND half of [`HandleTable::transfer_to`], split across an IPC
+    /// ring: resolve `h` (fail-closed `BadCap`/`Stale`), clone its object +
+    /// rights OUT, then `free_slot` so the capability goes STALE in THIS table
+    /// (Zircon "handles are consumed on write"). The returned `(Rc<Object>,
+    /// Rights)` is parked in the message; while parked NO table holds a handle --
+    /// the `Rc` alone keeps the object alive. The caller MUST confirm the outbox
+    /// has space BEFORE calling this, so a `WouldBlock` send never detaches.
+    pub(crate) fn detach(&mut self, h: Handle) -> Result<(Rc<Object>, Rights), SysStatus> {
+        let i = self.live(h)?;
+        let rights = self.slots[i].rights;
+        let object = self.slots[i].object.clone().ok_or(SysStatus::Stale)?;
+        self.free_slot(i);
+        Ok((object, rights))
+    }
+
+    /// M14 -- the RECV half of [`HandleTable::transfer_to`]: install a parked,
+    /// in-transit capability into THIS table, yielding a fresh slot + generation
+    /// (the raw handle value is never reused across tables). Object identity (the
+    /// `Rc`) and `rights` ride intact. `None` on `ObjFull`.
+    pub(crate) fn attach(&mut self, parked: (Rc<Object>, Rights)) -> Option<Handle> {
+        self.alloc(parked.1, parked.0)
+    }
+
+    /// M14 -- the RECV body shared by [`dispatch`] and the kernel-side facade:
+    /// pop one message from `ep`'s INBOX (drop the ring borrow before touching
+    /// the table) and `attach` any carried capability. Returns `(status, inline
+    /// payload, moved-handle-raw)` -- `WouldBlock` on an empty-but-open inbox,
+    /// `PeerClosed` on empty-and-peer-closed. The endpoint `Rc<Channel>` is
+    /// cloned OUT of the slot first so the table `&mut` never aliases the ring
+    /// borrow (single-core, interrupts masked -> no reentrant borrow).
+    pub(crate) fn chan_recv_body(&mut self, ep: Handle) -> (SysStatus, u64, u64) {
+        let i = match self.live(ep) {
+            Ok(i) => i,
+            Err(e) => return (e, 0, 0),
+        };
+        let ep_obj = match self.slots[i].object.clone() {
+            Some(o) => o,
+            None => return (SysStatus::Stale, 0, 0),
+        };
+        let (chan, side) = match &ep_obj.chan {
+            Some((c, s)) => (c.clone(), *s),
+            None => return (SysStatus::BadCap, 0, 0),
+        };
+        let msg = chan.inbox(side).borrow_mut().q.pop_front();
+        match msg {
+            None => {
+                if chan.peer_open(side) {
+                    (SysStatus::WouldBlock, 0, 0)
+                } else {
+                    (SysStatus::PeerClosed, 0, 0)
+                }
+            }
+            Some(m) => {
+                let payload = m.payload;
+                match m.cap {
+                    None => (SysStatus::Ok, payload, 0),
+                    Some(parked) => match self.attach(parked) {
+                        Some(h) => (SysStatus::Ok, payload, h.raw()),
+                        // Receiver table full: the cap cannot be re-slotted. The
+                        // self-test never hits this (table cap 16, few handles).
+                        None => (SysStatus::ObjFull, payload, 0),
+                    },
+                }
+            }
+        }
+    }
+
+    /// M14 -- the kernel-side RECV entry: apply the same READ gate [`dispatch`]
+    /// applies, then run [`HandleTable::chan_recv_body`]. Lets a facade surface
+    /// BOTH the inline payload AND the moved handle (the single-scalar
+    /// [`SysReturn`] dispatch path can only carry the handle).
+    pub(crate) fn chan_recv(&mut self, ep: Handle) -> (SysStatus, u64, u64) {
+        let i = match self.live(ep) {
+            Ok(i) => i,
+            Err(e) => return (e, 0, 0),
+        };
+        if !self.slots[i].rights.contains(Rights::READ) {
+            return (SysStatus::Denied, 0, 0);
+        }
+        self.chan_recv_body(ep)
     }
 }
 
@@ -656,6 +795,89 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                         args.args[3],
                     );
                     SysReturn::ok(n)
+                }
+                None => SysReturn::err(SysStatus::BadCap),
+            }
+        }
+        // M14: SEND a message on the endpoint behind `args.handle` (WRITE gated
+        // above). Clone the endpoint `Rc<Object>` OUT and read `(chan, side)`
+        // BEFORE touching the ring / detaching, so the table `&mut` never aliases
+        // the in-flight RefCell borrow (the M_MEM_* discipline). ATOMICITY: the
+        // outbox space check happens BEFORE any `detach`, so a WouldBlock send
+        // never strands a detached-and-lost capability.
+        M_CHAN_SEND => {
+            let ep_obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            let (chan, side) = match &ep_obj.chan {
+                Some((c, s)) => (c.clone(), *s),
+                None => return SysReturn::err(SysStatus::BadCap),
+            };
+            if !chan.peer_open(side) {
+                return SysReturn::err(SysStatus::PeerClosed);
+            }
+            // Backpressure: confirm space BEFORE detaching anything (atomic).
+            {
+                let ring = chan.outbox(side).borrow();
+                if ring.q.len() >= ring.cap {
+                    return SysReturn::err(SysStatus::WouldBlock);
+                }
+            }
+            let cap_raw = args.args[1];
+            let parked = if cap_raw != 0 {
+                let cap_h = Handle::from_raw(cap_raw);
+                let ci = match table.live(cap_h) {
+                    Ok(ci) => ci,
+                    Err(e) => return SysReturn::err(e),
+                };
+                // The carried cap must hold TRANSFER (the M_HANDLE_TRANSFER gate).
+                if !table.slots[ci].rights.contains(Rights::TRANSFER) {
+                    return SysReturn::err(SysStatus::Denied);
+                }
+                // Reject sending an endpoint into its OWN channel (Zircon
+                // NOT_SUPPORTED): the carried object IS this channel's core.
+                if let Some(carried) = table.slots[ci].object.clone() {
+                    if let Some((carried_chan, _)) = &carried.chan {
+                        if Rc::ptr_eq(carried_chan, &chan) {
+                            return SysReturn::err(SysStatus::Denied);
+                        }
+                    }
+                }
+                match table.detach(cap_h) {
+                    Ok(p) => Some(p),
+                    Err(e) => return SysReturn::err(e),
+                }
+            } else {
+                None
+            };
+            chan.outbox(side).borrow_mut().q.push_back(crate::ipc::Message {
+                payload: args.args[0],
+                cap: parked,
+            });
+            SysReturn::status(SysStatus::Ok)
+        }
+        // M14: RECV a message (READ gated above). The single-scalar SysReturn
+        // carries the moved handle in `value`; the inline payload is surfaced
+        // kernel-side via the facade tuple (and, later, copy_to_user).
+        M_CHAN_RECV => {
+            let (st, _payload, moved) = table.chan_recv_body(args.handle);
+            match st {
+                SysStatus::Ok => SysReturn::ok(moved),
+                e => SysReturn::err(e),
+            }
+        }
+        // M14: CLOSE this endpoint (no right required). Flips the peer-closed flag;
+        // the peer drains its backlog, then observes PeerClosed.
+        M_CHAN_CLOSE => {
+            let ep_obj = match table.slots[i].object.clone() {
+                Some(o) => o,
+                None => return SysReturn::err(SysStatus::Stale),
+            };
+            match &ep_obj.chan {
+                Some((c, s)) => {
+                    c.close_side(*s);
+                    SysReturn::status(SysStatus::Ok)
                 }
                 None => SysReturn::err(SysStatus::BadCap),
             }
