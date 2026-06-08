@@ -113,7 +113,7 @@ pub use pmm::pmm_collect_regions;
 // M8: the safe async-interrupt + timer surface (periodic LAPIC timer + first
 // async IRQ) plus the `rdtsc` in-guest cycle counter, re-exported so `lib.rs`
 // can expose `tb_hal::timer_demo` / `tb_hal::read_cycle_counter`.
-pub use timer::{read_cycle_counter, timer_demo};
+pub use timer::{read_cycle_counter, sched_irq_unmask, timer_demo, timer_disarm, timer_rearm};
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

@@ -200,27 +200,74 @@ fn timer_stop() {
 }
 
 // ---------------------------------------------------------------------------
+// M9 scheduler surface: re-arm / disarm the periodic timer + go preemptible.
+// (The GICv2 + EL1 timer sit in the identity-mapped Device gigabyte / EL1
+// system registers, so M9 re-arms WITHOUT any new mapping.)
+// ---------------------------------------------------------------------------
+
+/// M9: (re-)init the GIC, re-arm the EL1 physical timer and unmask IRQs so a
+/// tick drives `schedule()` from interrupt context. M8's `timer_demo` left the
+/// timer disabled (`CNTP_CTL = 0`) and IRQs masked; `gic_init` + `timer_start`
+/// are idempotent. The kernel calls it via `tb_hal::timer_rearm` AFTER it
+/// registers the schedule hook.
+pub fn timer_rearm() {
+    gic_init();
+    timer_start();
+    irq_unmask();
+}
+
+/// M9: mask IRQs and stop the timer. The boot task calls this via
+/// `tb_hal::timer_disarm` BEFORE printing the "M9: preempt OK" verdict so no
+/// further involuntary switch races the final serial output.
+pub fn timer_disarm() {
+    irq_mask();
+    timer_stop();
+}
+
+/// M9: unmask EL1 physical IRQs on the CURRENT task without touching the timer.
+/// A task first-activated through M2's `ctx_switch` `ret`s into its entry with
+/// PSTATE.I still SET (it never `eret`ed, which would have restored I from
+/// SPSR), so a fresh preemptible kernel task calls this ONCE at entry to become
+/// schedulable; thereafter the periodic timer can preempt it.
+pub fn sched_irq_unmask() {
+    irq_unmask();
+}
+
+// ---------------------------------------------------------------------------
 // IRQ entry (called from `trap.rs::aarch64_trap_handler` for source == IRQ).
 // ---------------------------------------------------------------------------
 
 /// Handle one EL1 physical IRQ taken through the `__vec_irq` slot. Acknowledges
 /// the GIC (read IAR); for the timer PPI it reloads `CNTP_TVAL_EL0` (re-arming
 /// the one-shot timer AND de-asserting the level-sensitive condition so it does
-/// not immediately re-fire -- this is what makes it periodic) and bumps the
-/// monotonic tick (+ runs the M9 hook) via `crate::dispatch_irq`; then it EOIs.
+/// not immediately re-fire -- this is what makes it periodic), EOIs the GIC
+/// FIRST, then bumps the monotonic tick (+ runs the M9 hook) via
+/// `crate::dispatch_irq` -- the M9 hook may ctx_switch away and not return on
+/// this stack, so the EOIR must precede it or the next task is starved of ticks.
 /// A spurious INTID (>= 1020) gets neither a tick nor an EOI. Returns so
 /// `RESTORE_CONTEXT`/`eret` resumes the exact interrupted instruction.
 pub(super) fn handle_irq() {
     let iar = gicc_read(GICC_IAR);
     let intid = iar & GIC_INTID_MASK;
     if intid >= GIC_SPURIOUS_MIN {
-        return; // spurious / no pending interrupt: no tick, no EOI
+        return; // spurious / no pending interrupt: no tick, no EOI (GICv2 IHI 0048)
     }
     if intid == TIMER_PPI {
-        write_cntp_tval(timer_period()); // re-arm + de-assert BEFORE EOI
-        crate::dispatch_irq(intid as u64); // bump tick + M9 hook (centralized)
+        // Re-arm the one-shot timer, which ALSO de-asserts the level-sensitive
+        // PPI (clears CNTP_CTL.ISTATUS) BEFORE the EOI, so it does not
+        // immediately re-fire the moment the running priority drops.
+        write_cntp_tval(timer_period());
+        // M9: EOI BEFORE dispatch. `dispatch_irq` runs M9's `schedule()`, which
+        // may ctx_switch to another task and NOT return on this stack for a
+        // while; writing GICC_EOIR first drops the running priority so the GIC
+        // CPU interface forwards the NEXT timer tick to the switched-in task
+        // instead of starving it. PSTATE.I stays masked until that task `eret`s,
+        // so no tick can nest between this EOI and the switch.
+        gicc_write(GICC_EOIR, iar);
+        crate::dispatch_irq(intid as u64); // bump tick + M9 schedule(); may switch away
+    } else {
+        gicc_write(GICC_EOIR, iar); // any other forwarded INTID: EOI, no tick
     }
-    gicc_write(GICC_EOIR, iar); // EOI uses the full IAR value
 }
 
 // ---------------------------------------------------------------------------

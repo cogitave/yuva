@@ -91,6 +91,17 @@ const MIN_STACK_SLOTS: usize = 32;
 /// * `next_sp` must be a context handle produced by a previous `ctx_switch`
 ///   save or by [`task_stack_init`], on a stack that is still alive
 ///   and not currently executing on any CPU.
+/// * Single-core use, with interrupts masked across the switch. M2 calls this
+///   cooperatively; M9 ALSO invokes it from interrupt context (the timer
+///   tick's `schedule()` -> `yield_to()` runs inside the handler). That is
+///   sound: vector 0x20 has IST=0, so the CPU builds the IRQ frame on the
+///   CURRENT ring0 stack and the `__alltraps` TrapFrame + suspended handler
+///   chain sit on that task's OWN stack; this switch swaps only the
+///   callee-saved set + SP, and resume unwinds back through that chain to the
+///   IRQ epilogue's `iretq`, which restores the full frame (including
+///   RFLAGS.IF) at the interrupted instruction. IF stays clear from the
+///   interrupt gate until that `iretq`, so no second tick can re-enter the
+///   switch on either task's stack.
 #[unsafe(naked)]
 pub unsafe extern "C" fn ctx_switch(prev_sp_save: *mut usize, next_sp: usize) {
     naked_asm!(

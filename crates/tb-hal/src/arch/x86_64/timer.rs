@@ -174,8 +174,10 @@ pub fn read_cycle_counter() -> u64 {
 /// Recognise + service an external (async) interrupt; returns `true` iff it was
 /// one of ours so the trap handler resumes WITHOUT consulting the synchronous
 /// trap hook (whose kernel policy halts on a non-`#BP`). Narrow + fail-closed:
-///  * `TIMER_VECTOR` (0x20): bump the monotonic tick (+ run the M9 hook) via the
-///    arch-neutral `crate::dispatch_irq`, then EOI the LAPIC.
+///  * `TIMER_VECTOR` (0x20): EOI the LAPIC FIRST, then bump the monotonic tick
+///    (+ run the M9 hook) via the arch-neutral `crate::dispatch_irq` -- the M9
+///    hook may ctx_switch away and not return on this stack, so the EOI must
+///    precede it or the next task is starved of further timer interrupts.
 ///  * `SPURIOUS_VECTOR` (0xFF): just resume -- a spurious interrupt takes no EOI
 ///    (Intel SDM Vol.3A §11.9).
 ///  * anything else: `false` -> falls through to the fatal `Other` classifier.
@@ -185,8 +187,16 @@ pub fn read_cycle_counter() -> u64 {
 /// exact interrupted instruction.
 pub(super) fn try_handle_irq(vector: u64) -> bool {
     if vector == TIMER_VECTOR {
-        crate::dispatch_irq(vector);
+        // M9: EOI the LAPIC BEFORE dispatch. `dispatch_irq` runs the registered
+        // hook -- M9's `schedule()` -- which may ctx_switch to another task and
+        // NOT return on this stack for a while; sending EOI first lets the LAPIC
+        // deliver the NEXT periodic tick to the switched-in task instead of
+        // starving it (the in-service ISR bit would otherwise stay set,
+        // blocking all further timer interrupts). `IF` stays clear (interrupt
+        // gate) until that task does its own `iretq`, so no tick can nest
+        // between this EOI and the switch.
         lapic_write(LAPIC_EOI, 0);
+        crate::dispatch_irq(vector);
         true
     } else if vector == SPURIOUS_VECTOR as u64 {
         true
@@ -220,6 +230,40 @@ fn lapic_timer_arm() {
 fn lapic_timer_disarm() {
     lapic_write(LAPIC_LVT_TIMER, (TIMER_VECTOR as u32) | LVT_MASKED);
     lapic_write(LAPIC_TIMER_INITIAL, 0);
+}
+
+// ---------------------------------------------------------------------------
+// M9 scheduler surface: re-arm / disarm the periodic timer + go preemptible.
+// (The LAPIC device page mapped by M8's `timer_demo` -> `map_device_page`
+// persists in PML4[3], so M9 re-arms WITHOUT re-mapping.)
+// ---------------------------------------------------------------------------
+
+/// M9: re-arm the periodic LAPIC timer and unmask interrupts so a tick drives
+/// `schedule()` from interrupt context. M8's `timer_demo` left the LAPIC enabled
+/// + its register page mapped but the timer LVT masked; this re-enables the
+/// LAPIC (idempotent), re-arms the periodic timer, then `sti`. The kernel calls
+/// it via `tb_hal::timer_rearm` AFTER registering the schedule hook.
+pub fn timer_rearm() {
+    lapic_enable();
+    lapic_timer_arm();
+    irq_enable();
+}
+
+/// M9: mask interrupts and disarm the periodic timer. The boot task calls this
+/// via `tb_hal::timer_disarm` BEFORE printing the "M9: preempt OK" verdict so no
+/// further involuntary switch races the final serial output.
+pub fn timer_disarm() {
+    irq_disable();
+    lapic_timer_disarm();
+}
+
+/// M9: unmask interrupts on the CURRENT task without touching the timer. A task
+/// first-activated through M2's `ctx_switch` `ret`s into its entry with
+/// `RFLAGS.IF` still clear (it never passed through an `iretq` that would
+/// restore `IF`), so a fresh preemptible kernel task calls this ONCE at entry to
+/// become schedulable; thereafter the periodic timer can preempt it.
+pub fn sched_irq_unmask() {
+    irq_enable();
 }
 
 // ---------------------------------------------------------------------------

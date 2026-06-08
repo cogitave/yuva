@@ -42,11 +42,12 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (currently
-  `M8: timer OK`). This is boot **plus the entire M0…latest self-test** (M2's
+  `M9: preempt OK`). This is boot **plus the entire M0…latest self-test** (M2's
   1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB
-  page-table-mapped + pattern-verified heap growths, and M8's
-  first-async-interrupt register-integrity canary), so it is labelled separately
-  and is **not** a pure boot number.
+  page-table-mapped + pattern-verified heap growths, M8's
+  first-async-interrupt register-integrity canary, and M9's round-robin
+  preemption of two no-yield spin tasks across ≥100 involuntary switches), so it
+  is labelled separately and is **not** a pure boot number.
 
 **Accel is auto-detected.** **Only the KVM number is a boot figure.** TCG
 (software emulation) inflates boot 10–50× and is reported solely as a portable

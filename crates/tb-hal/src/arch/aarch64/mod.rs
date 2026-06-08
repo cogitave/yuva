@@ -41,7 +41,7 @@ pub use mmu::{heap_window, map_heap_frames, mmu_init, mmu_selftest};
 pub use pmm::pmm_collect_regions;
 pub use sched::{ctx_switch, task_stack_init};
 pub use serial::{serial_init, serial_write_byte};
-pub use timer::{read_cycle_counter, timer_demo};
+pub use timer::{read_cycle_counter, sched_irq_unmask, timer_demo, timer_disarm, timer_rearm};
 pub use trap::breakpoint;
 pub use user::user_demo;
 

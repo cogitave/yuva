@@ -300,8 +300,11 @@ pub fn yield_to(next: Task) {
     // SAFETY: `next_sp` was produced by `arch::task_stack_init` (fabricated
     // frame) or a previous `ctx_switch` save; both leave a well-formed
     // callee-saved frame at that SP. `TASK_SP[prev].as_ptr()` is a valid
-    // 'static atomic for the single word `ctx_switch` stores. Single core +
-    // cooperative: no other context can touch either slot mid-switch.
+    // 'static atomic for the single word `ctx_switch` stores. Single core, and
+    // the switch is atomic w.r.t. interrupts: M2 calls this cooperatively while
+    // M9 calls it from IRQ context with RFLAGS.IF / PSTATE.I masked from
+    // exception entry until the switched-in task's own `iretq`/`eret`, so no
+    // timer tick can re-enter `yield_to` and touch either slot mid-switch.
     unsafe { arch::ctx_switch(TASK_SP[prev].as_ptr(), next_sp) }
 }
 
@@ -723,4 +726,150 @@ pub fn timer_demo() -> bool {
 /// guest-only `boot-cycles` figure (see docs/BENCHMARKS.md §2/§5).
 pub fn read_cycle_counter() -> u64 {
     arch::read_cycle_counter()
+}
+
+// ===========================================================================
+// M9: preemptive round-robin scheduler (involuntary full-context switch)
+// ===========================================================================
+//
+// On a timer tick the kernel INVOLUNTARILY switches kernel tasks: a task that
+// never voluntarily `yield_to`s still loses the CPU. The design REUSES the M2
+// cooperative `ctx_switch` UNCHANGED. Justification: the per-arch IRQ entry
+// (`__alltraps` on x86_64 / `__vec_irq`'s `SAVE_CONTEXT` on aarch64) already
+// saved the FULL interrupted register frame on the CURRENT task's own kernel
+// stack BEFORE any Rust ran, and the call chain down to `schedule()` is
+// [full IRQ frame] -> trap_handler -> try_handle_irq/handle_irq ->
+// `dispatch_irq` -> `schedule` -> `ctx_switch`. So when `ctx_switch` saves the
+// callee-saved continuation + SP and switches to the next task, that task --
+// whether it was preempted earlier (its full frame + its own suspended handler
+// chain sit on ITS stack) or is brand-new (a fabricated entry frame) -- resumes
+// by unwinding back through ITS handler chain and the IRQ epilogue's
+// `iretq`/`eret`, which restores ITS full frame at ITS interrupted instruction.
+// A separate "full-frame switch primitive" is therefore NOT needed: the full
+// frame is already on the stack; `ctx_switch` only has to swap the callee-saved
+// continuation that returns INTO that epilogue.
+//
+// No per-task `TSS.rsp0` / `SP_EL1` juggling is needed for M9: every task runs
+// at ring0 / EL1 on its OWN kernel stack, so the CPU builds each IRQ frame on
+// the current task's stack automatically. (User-task involuntary preemption --
+// a CPL/EL change on the saved frame, which DOES need a per-task rsp0/SP_EL1 --
+// is first exercised at M12; see ROADMAP-V2 §3.)
+//
+// The run queue + the involuntary-switch counter live HERE (safe atomics), so
+// the kernel crate stays `#![forbid(unsafe_code)]`: it only drives the scheduler
+// facade. `schedule(irq_id)` is a `fn(u64)`, so it slots straight into the M8
+// `set_irq_hook` seam. Round-robin to start; a QoS lane (INTERACTIVE / PIPELINE
+// / BULK) is the deferred M9+ hook. The seam is forward-compatible: M10 swaps
+// the address-space root inside the same switch, M12 adds the user-frame variant.
+
+/// Run queue: task slot indices scheduled round-robin. `usize::MAX` marks an
+/// empty entry. Populated by [`scheduler_init`] (the bootstrap task) and
+/// [`scheduler_spawn`]; read by [`schedule`] from interrupt context.
+static RUNQUEUE: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(usize::MAX) }; MAX_TASKS];
+
+/// Number of live entries at the front of [`RUNQUEUE`].
+static RUNQUEUE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Count of INVOLUNTARY context switches [`schedule`] has performed since boot.
+/// Written from interrupt context, read from the foreground; the M9 self-test
+/// asserts it crosses a threshold (proving a no-yield task really lost the CPU).
+static INVOLUNTARY_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Initialise the M9 round-robin scheduler: register the CURRENT context (the
+/// bootstrap task `rust_main` runs on) as the first runnable entry. Call ONCE,
+/// before [`scheduler_spawn`] and before re-arming the timer; pair with
+/// [`set_irq_hook`]`(`[`schedule`]`)` so a tick drives the switch.
+pub fn scheduler_init() {
+    let current = CURRENT_TASK.load(Ordering::Relaxed);
+    RUNQUEUE[0].store(current, Ordering::Relaxed);
+    RUNQUEUE_LEN.store(1, Ordering::Release);
+}
+
+/// Create a preemptible kernel task on `stack` starting at `entry` and append
+/// it to the run queue. Reuses the M2 [`task_create`] machinery UNCHANGED (so
+/// the fabricated entry frame, the minimum-stack check and the return guard all
+/// apply), then enqueues the new slot for round-robin scheduling.
+///
+/// `entry` must never voluntarily yield AND must unmask interrupts once at the
+/// top (see [`irq_unmask`]): a freshly-activated task is entered through
+/// `ctx_switch`'s plain return with interrupts still masked from the switching
+/// IRQ, so it re-enables them itself to become preemptible. Fatal (report +
+/// halt) if more than `MAX_TASKS` slots are queued.
+pub fn scheduler_spawn(stack: &'static mut [usize], entry: fn()) -> Task {
+    let task = task_create(stack, entry);
+    let len = RUNQUEUE_LEN.load(Ordering::Relaxed);
+    if len >= MAX_TASKS {
+        task_api_fatal("scheduler_spawn: run queue full");
+    }
+    RUNQUEUE[len].store(task.0, Ordering::Relaxed);
+    RUNQUEUE_LEN.store(len + 1, Ordering::Release);
+    task
+}
+
+/// The M9 tick policy: pick the next runnable task round-robin and perform an
+/// INVOLUNTARY switch to it. Registered as the [`set_irq_hook`] callback, so it
+/// runs from interrupt context on every timer tick (after [`tick_count`] was
+/// bumped by `dispatch_irq`). Reuses the M2 cooperative [`yield_to`] (hence the
+/// arch `ctx_switch`) UNCHANGED -- see the module note for why the already-saved
+/// IRQ frame makes that sufficient. A no-op when fewer than two tasks are
+/// runnable (it simply resumes the interrupted task).
+pub fn schedule(_irq_id: u64) {
+    let len = RUNQUEUE_LEN.load(Ordering::Acquire);
+    if len < 2 {
+        return; // nothing else runnable -> resume the interrupted task
+    }
+    let current = CURRENT_TASK.load(Ordering::Relaxed);
+    // Round-robin: the successor (mod len) of `current`'s position in the queue.
+    // `next` defaults to the head, which is also the correct fallback if the
+    // current task is somehow not enqueued (it never is in M9).
+    let mut next = RUNQUEUE[0].load(Ordering::Relaxed);
+    let mut i = 0;
+    while i < len {
+        if RUNQUEUE[i].load(Ordering::Relaxed) == current {
+            next = RUNQUEUE[(i + 1) % len].load(Ordering::Relaxed);
+            break;
+        }
+        i += 1;
+    }
+    if next == current {
+        return; // only one distinct runnable task -> no switch
+    }
+    INVOLUNTARY_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    // Reuse the M2 cooperative switch: it saves the callee-saved continuation
+    // (which returns INTO this task's IRQ epilogue) + SP and restores the next
+    // task's, so the next task resumes through its OWN epilogue + iret/eret.
+    yield_to(Task(next));
+}
+
+/// Total INVOLUNTARY context switches [`schedule`] has performed since boot. The
+/// M9 self-test asserts this crossed its threshold within the run window.
+pub fn involuntary_switch_count() -> u64 {
+    INVOLUNTARY_SWITCHES.load(Ordering::Relaxed)
+}
+
+/// M9: re-arm the periodic timer and unmask interrupts so a tick drives
+/// [`schedule`] from interrupt context. M8's [`timer_demo`] left the controller
+/// up but the timer masked; this is the "GO" the kernel calls AFTER
+/// [`scheduler_init`] + [`set_irq_hook`]. All the controller pokes + the first
+/// re-`sti` / `daifclr` live in `arch::*::timer`.
+pub fn timer_rearm() {
+    arch::timer_rearm();
+}
+
+/// M9: mask interrupts and disarm the periodic timer -- the "STOP" the boot task
+/// calls BEFORE printing the marker so the verdict renders with no further
+/// involuntary switch in flight.
+pub fn timer_disarm() {
+    arch::timer_disarm();
+}
+
+/// M9: unmask asynchronous interrupts on the CURRENT task WITHOUT touching the
+/// timer. A preemptible kernel task spawned via [`scheduler_spawn`] calls this
+/// ONCE at the top of its body to become schedulable: it is first entered
+/// through `ctx_switch`'s plain return (not an `iretq`/`eret`), so interrupts
+/// are still masked from the IRQ that switched into it and it must re-enable
+/// them itself. It must NOT later re-mask them (that would stop its own
+/// preemption).
+pub fn irq_unmask() {
+    arch::sched_irq_unmask();
 }

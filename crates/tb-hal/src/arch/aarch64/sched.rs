@@ -154,7 +154,17 @@ extern "C" {
     ///   [`task_stack_init`], or one stored through `prev_sp_save` by an
     ///   earlier `ctx_switch`, whose backing stack is still alive ('static in
     ///   M2) and which has not already been consumed by a switch.
-    /// * Cooperative single-core use only — never call from a trap handler.
+    /// * Single-core use, with interrupts masked across the switch. M2 calls
+    ///   this cooperatively; M9 ALSO invokes it from EL1h IRQ context (the
+    ///   timer tick's `schedule()` -> `yield_to()` runs inside the handler).
+    ///   That is sound: the EL1h IRQ keeps SP_EL1 (there is no separate
+    ///   exception stack), so the `__vec_irq` SAVE_CONTEXT frame and the
+    ///   suspended handler chain sit on the CURRENT task's OWN stack; this
+    ///   switch swaps only the callee-saved set + SP, and resume unwinds back
+    ///   through that chain to RESTORE_CONTEXT/`eret`, which restores the full
+    ///   frame (including PSTATE.I) at the interrupted instruction. PSTATE.I
+    ///   stays masked from exception entry until that `eret`, so no second
+    ///   tick can re-enter the switch on either task's stack.
     pub fn ctx_switch(prev_sp_save: *mut usize, next_sp: usize);
 }
 

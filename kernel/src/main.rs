@@ -56,7 +56,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::hint::black_box;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tb_hal::{Task, TaskStack, TrapAction, TrapInfo, TrapKind};
 
 /// The kernel-wide global allocator: a zero-sized handle whose `GlobalAlloc`
@@ -109,6 +109,20 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Set by task B after it audited its own canaries on its final round.
 static B_VERIFIED: AtomicBool = AtomicBool::new(false);
+
+// --- M9 preemptive-scheduler bookkeeping (all in THIS crate, all safe) ------
+
+/// Spin task C's stack: 4096 usize words (32 KiB), 16-byte aligned.
+static STACK_C: TaskStack<4096> = TaskStack::new();
+/// Spin task D's stack: 4096 usize words (32 KiB), 16-byte aligned.
+static STACK_D: TaskStack<4096> = TaskStack::new();
+
+/// Spin task C's advance counter: bumped in its infinite loop, read by the boot
+/// task to prove C actually ran -- which can ONLY happen via involuntary timer
+/// preemption, since the boot task never `yield_to`s it.
+static SPIN_C_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Spin task D's advance counter (as C).
+static SPIN_D_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Boot entry. Reached by EITHER of tb-hal's two x86_64 entries (or the
 /// aarch64 `_start`); each sets up a stack and places the boot-info pointer in
@@ -695,6 +709,107 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     write_hex_u64(boot_c1.wrapping_sub(boot_c0));
     tb_hal::serial_write_byte(b'\n');
 
+    // --- M9: preemptive scheduler (involuntary full-context switch) ---------
+    // On a timer tick the kernel INVOLUNTARILY switches kernel tasks: a task
+    // that never voluntarily `yield_to`s still loses the CPU. The M8 tick path
+    // now calls a SAFE round-robin `schedule()` and tb-hal performs the switch
+    // FROM INTERRUPT CONTEXT by REUSING M2's `ctx_switch` UNCHANGED -- the IRQ
+    // entry (`__alltraps` / `__vec_irq`) already saved the FULL interrupted
+    // frame on each task's own kernel stack, so the cooperative switch only has
+    // to swap the callee-saved continuation that returns INTO the IRQ epilogue,
+    // whose `iretq`/`eret` restores the full frame at the interrupted
+    // instruction. M2's cooperative ping-pong re-ran UNCHANGED above and printed
+    // "M2: context-switch OK", proving no regression. ALL the unsafe/asm lives
+    // in tb-hal; this crate only drives the safe scheduler facade + reads
+    // counters. DoD marker: "M9: preempt OK".
+    tb_hal::serial_write_str("preempt-test: arming round-robin preemption\n");
+
+    // Local fail helper (matches the m5_fail..m8_fail style; safe serial only).
+    let m9_fail = |why: &str| -> ! {
+        tb_hal::serial_write_str("M9: FAIL ");
+        tb_hal::serial_write_str(why);
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::halt()
+    };
+
+    // Register the boot task (the current context) as the first runnable entry,
+    // point the M8 tick hook at schedule() BEFORE arming the timer (decision 5),
+    // and spawn two no-yield spin tasks. Round-robin order becomes
+    // boot -> C -> D -> boot, so the boot task periodically REGAINS the CPU to
+    // observe the switch count and render the verdict (decision 3); the spin
+    // tasks never disable interrupts, so the timer keeps firing and the rotation
+    // never deadlocks.
+    tb_hal::scheduler_init();
+    tb_hal::set_irq_hook(tb_hal::schedule);
+    let _ = tb_hal::scheduler_spawn(STACK_C.take(), spin_c);
+    let _ = tb_hal::scheduler_spawn(STACK_D.take(), spin_d);
+
+    // The number of INVOLUNTARY switches that proves preemption. At the M8 ~1 ms
+    // tick this lands in ~100 ms -- far inside the 15 s QEMU / 30 s tb-vmm cap.
+    const REQUIRED_SWITCHES: u64 = 100;
+    // Fail-closed bound on a DEAD timer. Rather than a raw spin cap (which under
+    // TCG can out-run the 15 s runner cap before it trips), the wait below
+    // watches the M8 tick counter for STAGNATION: a live timer keeps
+    // `tick_count()` climbing, so the stall counter resets every slice; only a
+    // timer that never fires lets it reach STALL_LIMIT, yielding a clean
+    // "M9: FAIL" well inside the runner window. STALL_LIMIT sits far above the
+    // spins one ~1 ms tick slice can do, so it never trips on a healthy boot.
+    const STALL_LIMIT: u64 = 100_000_000;
+
+    // GO: re-arm the periodic timer (M8 left it masked after its canary) and
+    // unmask interrupts. From here a tick drives schedule() from IRQ context.
+    tb_hal::timer_rearm();
+
+    // The boot task spins until enough INVOLUNTARY switches have happened. Each
+    // tick preempts whoever runs; the boot task loses the CPU to C/D and later
+    // resumes HERE through the IRQ epilogue, so this loop is its own re-entry
+    // point and observes the count climb across its time slices. Fail-closed on
+    // tick STAGNATION: `last_ticks`/`stalled` reset whenever `tick_count()`
+    // advances, so only a dead timer lets `stalled` reach STALL_LIMIT and break
+    // early into the "M9: FAIL" path below.
+    let mut last_ticks = tb_hal::tick_count();
+    let mut stalled: u64 = 0;
+    while tb_hal::involuntary_switch_count() < REQUIRED_SWITCHES {
+        core::hint::spin_loop();
+        let now = tb_hal::tick_count();
+        if now != last_ticks {
+            last_ticks = now;
+            stalled = 0;
+        } else {
+            stalled = stalled.wrapping_add(1);
+            if stalled >= STALL_LIMIT {
+                break;
+            }
+        }
+    }
+
+    // STOP: mask interrupts + disarm the timer so the verdict + marker render in
+    // the boot context with no further preemption (decision 7: timer masked
+    // BEFORE the marker).
+    tb_hal::timer_disarm();
+
+    let switches = tb_hal::involuntary_switch_count();
+    let c_ran = SPIN_C_COUNT.load(Ordering::Relaxed);
+    let d_ran = SPIN_D_COUNT.load(Ordering::Relaxed);
+
+    // Optional diagnostic (does NOT gate the grep): how many involuntary
+    // switches landed. Printed BEFORE the marker, like M8's boot-cycles line.
+    tb_hal::serial_write_str("preempt: involuntary switches=");
+    write_hex_u64(switches);
+    tb_hal::serial_write_byte(b'\n');
+
+    if switches < REQUIRED_SWITCHES {
+        m9_fail("too few involuntary switches (timer never preempted)");
+    }
+    if c_ran == 0 {
+        m9_fail("spin task C never advanced");
+    }
+    if d_ran == 0 {
+        m9_fail("spin task D never advanced");
+    }
+
+    tb_hal::serial_write_str("M9: preempt OK\n"); // <-- the M9 DoD marker
+
     tb_hal::halt()
 }
 
@@ -829,6 +944,32 @@ fn fail(why: &str) -> ! {
     tb_hal::serial_write_str(why);
     tb_hal::serial_write_byte(b'\n');
     tb_hal::halt()
+}
+
+/// M9 spin task C: the involuntary-preemption proof. It NEVER `yield_to`s. It
+/// unmasks interrupts ONCE at the top -- a task first-activated through
+/// `ctx_switch` is entered with interrupts still masked from the IRQ that
+/// switched into it (it never passed through an `iretq`/`eret` that would
+/// restore them), so it must go preemptible itself -- then loops forever bumping
+/// its own counter. The loop has no `yield_to` / `wfi` / `hlt` / `cli`; only the
+/// periodic timer can take the CPU from it, which is exactly the property M9
+/// proves. It must never return (M2's `task_exit_guard` would catch it loudly).
+fn spin_c() {
+    tb_hal::irq_unmask(); // become preemptible exactly once, then never yield
+    loop {
+        SPIN_C_COUNT.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+}
+
+/// M9 spin task D: identical to `spin_c` but bumps its own counter, so the
+/// self-test can prove BOTH no-yield tasks advanced under round-robin preemption.
+fn spin_d() {
+    tb_hal::irq_unmask(); // become preemptible exactly once, then never yield
+    loop {
+        SPIN_D_COUNT.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
 }
 
 /// Safe trap-dispatch policy hook (kept from M1: policy lives in this
