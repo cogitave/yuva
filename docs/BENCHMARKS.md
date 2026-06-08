@@ -61,8 +61,12 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
   self-test span ≈ 5.2 B (≈0.04 %); aarch64 ≈ 32 k vs ≈ 63 M — i.e. **TABOS's
   actual boot is essentially instantaneous; every large number elsewhere on this
   page is self-test work or the VMM floor, not boot.** The quotable figure is
-  this counter from a `--release` build under `tb-vmm`, KVM (see §5); the KVM
-  `vmm-boot` CI job emits it on every push.
+  this counter from a `--release` build under KVM (see §5) — and because it is an
+  **in-guest** cycle delta it is VMM-independent (`tb-vmm` or QEMU-`microvm` give
+  the same guest-only span). **MEASURED (2026-06-09):** the `microvm-kvm` CI
+  lane's bench step boots a `--release` build under `-M microvm -accel kvm
+  -cpu host` and reports `boot-ready-cycles=0x14a396` = **1,352,598 cycles ≈
+  0.5 ms** (§3) — Bucket 1's fast end, peer to Unikraft's sub-ms.
 - **`boot-cycles`** = `rust_main` entry → just after the **M8** marker. Spans the
   M0–M8 self-test; a *correctness*-cost gauge, NOT a boot figure.
 
@@ -140,7 +144,7 @@ different model entirely (shared host kernel) and is context only.
 | **OSv** | **4–5 ms** (Firecracker) | first instr → `main()`, read-only rootfs (cross-measure); ATC'14 origin | [ATC'14](https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity) | high |
 | Minimal **custom Linux** | **6 ms** (Firecracker `--boot-timer`) | vCPU start → userland MMIO write; SMP off, 2 MiB hugepages | [davidv.dev](https://blog.davidv.dev/posts/minimizing-linux-boot-times/) | low |
 | **Hermitux** | **30–32 ms** (uHyve) | boot → application (cross-measure) | [arXiv:2104.12721](https://arxiv.org/abs/2104.12721) | medium |
-| **TABOS** | **Bucket 1, fast end (target)** | VMM-spawn → serial marker, KVM (see §2). Tiny no_std image, no driver/FS/ACPI/SMP probing, direct long-mode `tb-boot` entry — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI). | this repo | — |
+| **TABOS** | **~0.5 ms measured** (≈1.35 M cycles, `--release`, KVM) | **guest-only, in-guest rdtsc**: `rust_main` entry → serial-ready (M0 done), BEFORE the M0+ self-test span. `boot-ready-cycles=0x14a396` = **1,352,598 cycles** under `-M microvm -accel kvm -cpu host`, ÷ a ~2.6–2.8 GHz runner ≈ **0.48–0.52 ms** (the pre-`rust_main` `_start` asm is a handful of instructions, so first-instr→ready ≈ this + ε). Tiny no_std image, no driver/FS/ACPI/SMP probing — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI); lands at Bucket 1's fast end, peer to Unikraft's guest-only sub-ms. | this repo (`microvm-kvm` CI bench step) | medium |
 
 ### Bucket 2 — full-stack microVM/VM: (firmware?) + Linux kernel + init (VMM-start → `/sbin/init`)
 
