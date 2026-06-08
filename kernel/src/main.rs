@@ -1002,6 +1002,148 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M10: addrspace OK\n"); // <-- the M10 DoD marker
 
+    // --- M11: capability handle table + object registry + agent-native ABI --
+    // Every kernel object is reached ONLY through an unforgeable, generation-
+    // checked, rights-masked Handle in a per-principal table; unprivileged code
+    // reaches the kernel through ONE numbered, capability-checked dispatcher
+    // returning a CLOSED SysStatus -- zero ambient authority (no fd/errno/
+    // ioctl/path). ALL cap machinery is SAFE Rust (tb_hal::caps, which is
+    // forbid(unsafe_code)); the only new unsafe is the per-arch register-lift
+    // shim. The timer was disarmed before M9's marker, so the table is touched
+    // single-threaded with interrupts masked. DoD marker: "M11: caps OK".
+    {
+        use tb_hal::caps::{self, Handle, ObjKind, Rights, SyscallArgs, SysStatus};
+
+        // Fail-closed: report which invariant broke and park the core (no M11
+        // marker is printed, so the runner's grep fails loudly).
+        fn m11_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M11: FAIL ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::halt()
+        }
+
+        // (1) A heap-backed per-principal table; mint the ROOT object as the
+        //     FIRST capability so its handle is the deterministic (generation 1,
+        //     slot 0) = 0x0000_0001_0000_0000 the ring3/EL0 stub names by const.
+        let mut root = caps::HandleTable::with_capacity(8);
+        let broad = Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::DUP)
+            .union(Rights::TRANSFER)
+            .union(Rights::REVOKE)
+            .union(Rights::SPAWN_AGENT);
+        let h_root = match root.mint(ObjKind::Agent, broad) {
+            Some(h) => h,
+            None => m11_fail("could not mint the root capability"),
+        };
+
+        // (2) ABI proof: drive ONE numbered, capability-checked syscall FROM
+        //     ring3/EL0 through the new register-lift shim, then feed the lifted
+        //     call to the SAFE dispatcher and require Ok -- no fd/errno crossed
+        //     the boundary, only a (method, handle) the kernel re-validates.
+        //     `caps_user_probe` also fails closed unless the stub presented the
+        //     deterministic root handle, a second check beside the assert below.
+        let lifted = match tb_hal::caps_user_probe(h_root.raw()) {
+            Some(a) => a,
+            None => m11_fail("ring3 numbered syscall did not reach the dispatcher"),
+        };
+        if lifted.method != caps::M_OBJECT_INSPECT || lifted.handle != h_root {
+            m11_fail("register-lift shim mis-marshalled the numbered syscall");
+        }
+        if caps::dispatch(&mut root, &lifted).status != SysStatus::Ok {
+            m11_fail("dispatcher rejected a valid ring3 capability invocation");
+        }
+        tb_hal::serial_write_str("caps: ring3 numbered dispatcher returned Ok\n");
+
+        // (3) The capability algebra matrix -- kernel-side safe Rust (the proof).
+        //     (a) unknown method -> BadMethod (closed method set).
+        if caps::dispatch(&mut root, &SyscallArgs::call(0xDEAD, h_root)).status
+            != SysStatus::BadMethod
+        {
+            m11_fail("unknown method was not BadMethod");
+        }
+        //     (b) a handle that names no slot -> BadCap (out of range).
+        if caps::dispatch(
+            &mut root,
+            &SyscallArgs::call(caps::M_OBJECT_INSPECT, Handle::from_raw(0x0000_0001_0000_0007)),
+        )
+        .status
+            != SysStatus::BadCap
+        {
+            m11_fail("dangling handle was not BadCap");
+        }
+        //     (c) confused-deputy stop: a method whose right the cap lacks ->
+        //         Denied (rights live in the slot, not the handle).
+        let h_ro = match root.mint(ObjKind::MemoryHome, Rights::READ) {
+            Some(h) => h,
+            None => m11_fail("could not mint the read-only capability"),
+        };
+        if caps::dispatch(&mut root, &SyscallArgs::call(caps::M_MEM_WRITE_PROC, h_ro)).status
+            != SysStatus::Denied
+        {
+            m11_fail("missing right was not Denied");
+        }
+        //     (d) monotonic attenuation: narrow-only, result ALWAYS a subset.
+        let narrowed = match root.narrow(h_root, Rights::READ) {
+            Some(h) => h,
+            None => m11_fail("could not attenuate the root capability"),
+        };
+        let r_narrow = match root.rights_of(narrowed) {
+            Some(r) => r,
+            None => m11_fail("attenuated handle did not resolve"),
+        };
+        let r_root = match root.rights_of(h_root) {
+            Some(r) => r,
+            None => m11_fail("root handle did not resolve"),
+        };
+        if !r_narrow.is_subset_of(r_root) {
+            m11_fail("attenuation widened rights");
+        }
+        //     (e) revoke = generation bump -> the SAME handle is now Stale
+        //         (O(1) use-after-revoke).
+        let h_victim = match root.mint(ObjKind::Generic, Rights::READ) {
+            Some(h) => h,
+            None => m11_fail("could not mint the revoke-victim capability"),
+        };
+        if root.revoke(h_victim) != SysStatus::Ok {
+            m11_fail("revoke of a held capability failed");
+        }
+        if caps::dispatch(&mut root, &SyscallArgs::call(caps::M_OBJECT_INSPECT, h_victim)).status
+            != SysStatus::Stale
+        {
+            m11_fail("revoked handle was not Stale");
+        }
+        //     (f) transfer = MOVE across principals: source goes Stale, the
+        //         destination gets a fresh handle to the same object.
+        let mut child = caps::HandleTable::with_capacity(4);
+        let moved = match root.transfer_to(narrowed, &mut child) {
+            Some(h) => h,
+            None => m11_fail("transfer to the child principal failed"),
+        };
+        if caps::dispatch(&mut root, &SyscallArgs::call(caps::M_OBJECT_INSPECT, narrowed)).status
+            != SysStatus::Stale
+        {
+            m11_fail("transferred-from handle was still valid");
+        }
+        if caps::dispatch(&mut child, &SyscallArgs::call(caps::M_OBJECT_INSPECT, moved)).status
+            != SysStatus::Ok
+        {
+            m11_fail("transferred handle was not usable in the destination");
+        }
+        //     (g) object-table exhaustion is a closed status, never a panic.
+        let mut tiny = caps::HandleTable::with_capacity(1);
+        if tiny.mint(ObjKind::Generic, Rights::READ).is_none() {
+            m11_fail("first mint into a capacity-1 table failed");
+        }
+        if tiny.mint(ObjKind::Generic, Rights::READ).is_some() {
+            m11_fail("over-capacity mint was not refused");
+        }
+        tb_hal::serial_write_str("caps: attenuate/transfer/revoke/ObjFull algebra holds\n");
+    }
+
+    tb_hal::serial_write_str("M11: caps OK\n"); // <-- the M11 DoD marker
+
     tb_hal::halt()
 }
 

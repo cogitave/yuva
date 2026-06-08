@@ -106,7 +106,7 @@ pub use mmu::{
 // can expose `tb_hal::user_demo`. Drops to ring3, runs the stub's `int 0x80`,
 // handles it in ring0 and returns whether the syscall was observed from user
 // mode with the expected arg. (Same name + signature as the aarch64 arm.)
-pub use user::user_demo;
+pub use user::{caps_user_probe, user_demo};
 
 // M6: the x86_64 boot memory-map reader, re-exported through `arch/mod.rs` so
 // `crate::pmm` can call `crate::arch::pmm_collect_regions`. Same name +

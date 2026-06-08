@@ -519,3 +519,188 @@ fn write_hex_u64(value: u64) {
         shift -= 4;
     }
 }
+
+// ===========================================================================
+// M11: the numbered capability syscall path (the register-lift shim).
+// ===========================================================================
+// Generalises the M4 `int 0x80` round trip into a NUMBERED, capability-checked
+// dispatcher entry. A second ring3 stub loads (method, handle, a0, a1) into
+// (rax, rdi, rsi, rdx) and traps via a FRESH DPL=3 vector `int 0x81`; the new
+// `caps_syscall_entry` is the ONLY new x86 unsafe -- it MARSHALS those
+// registers out of the trap into SysV order and hands them to the safe Rust
+// recorder. NO table walk / rights compare / generation logic in asm: the
+// policy is the pure-safe `crate::caps::dispatch`, driven by the kernel from
+// the lifted `SyscallArgs` this path records. The M4 path (vector 0x80 + the
+// USER_CODE page) is left byte-for-byte intact.
+
+/// The IDT vector the M11 numbered cap stub traps through (M4 owns 0x80).
+const CAPS_SYSCALL_VECTOR: usize = 0x81;
+/// The deterministic bootstrap capability the cap stub presents: the FIRST
+/// mint into a fresh table is `(generation 1, slot 0)` == `1 << 32`.
+const CAPS_PROBE_HANDLE: u64 = 0x0000_0001_0000_0000;
+/// VA of the M11 cap code page: a THIRD leaf (`PT[2]`) under the same M4
+/// `PML4[1]->PDPT[0]->PD[0]` chain (a first-map, so no TLB shootdown needed).
+/// Does NOT touch the heap window (`PML4[2]`) or the LAPIC window (`PML4[3]`).
+const CAPS_CODE_VA: usize = USER_CODE_VA + 0x2000;
+/// `CAPS_CODE_VA`'s PT index (VA bits 20:12) -- `2` (M4 uses `PT[0]`/`PT[1]`).
+const CAPS_PT_IDX: usize = (CAPS_CODE_VA >> 12) & 0x1FF;
+
+/// Set by [`caps_x86_syscall_shim`] when the numbered cap syscall is observed.
+static CAPS_SEEN: AtomicBool = AtomicBool::new(false);
+/// The method selector lifted from the numbered cap syscall (`rax`).
+static CAPS_METHOD: AtomicU64 = AtomicU64::new(0);
+/// The target capability handle lifted from the numbered cap syscall (`rdi`).
+static CAPS_HANDLE: AtomicU64 = AtomicU64::new(0);
+/// Inline arg 0 lifted from the numbered cap syscall (`rsi`).
+static CAPS_A0: AtomicU64 = AtomicU64::new(0);
+/// Inline arg 1 lifted from the numbered cap syscall (`rdx`).
+static CAPS_A1: AtomicU64 = AtomicU64::new(0);
+
+/// The M11 cap code page (the numbered stub is copied here, mapped P|U exec).
+static CAPS_CODE: Cell4K = Cell4K::new();
+
+// The position-independent ring3 numbered-cap stub: load (method, handle, a0,
+// a1) into (rax, rdi, rsi, rdx) and `int 0x81`. Handle = (gen 1, slot 0) is
+// built with `mov edi,1; shl rdi,32` (NO imm64 relocation -> stays PIC at the
+// aliased CAPS_CODE_VA). A distinct numeric label (`3:`) avoids clashing with
+// the M4 stub's `2:` in the shared `.text.user` emission. The kernel longjmps
+// back, so the trailing spin is unreachable.
+global_asm!(
+    r#"
+.section .text.user, "ax", @progbits
+.balign 16
+.global caps_user_stub_start
+.global caps_user_stub_end
+caps_user_stub_start:
+    xor eax, eax           // method = M_OBJECT_INSPECT (0)
+    mov edi, 1             // build handle = (generation 1, slot 0) = 1 << 32 ...
+    shl rdi, 32            //   ... no imm64, so the stub stays position-independent
+    xor esi, esi           // a0 = 0
+    xor edx, edx           // a1 = 0
+    int 0x81               // ring3 -> ring0 via the DPL=3 vector-0x81 gate
+3:
+    jmp 3b                 // unreachable: the kernel longjmps, never iretq's back
+caps_user_stub_end:
+"#
+);
+
+extern "C" {
+    /// First byte of the ring3 numbered-cap stub (identity-mapped == phys).
+    static caps_user_stub_start: u8;
+    /// One-past-the-last byte of the ring3 numbered-cap stub.
+    static caps_user_stub_end: u8;
+}
+
+/// Stage the numbered-cap stub into [`CAPS_CODE`] and first-map it executable at
+/// [`CAPS_CODE_VA`] (`PT[2]`) under the existing M4 chain.
+///
+/// # Safety
+/// Ring 0, single vCPU, interrupts masked. [`map_user_pages`] must have run (it
+/// is run by the caller) so the `PML4[1]->PDPT[0]->PD[0]->PT` chain + the user
+/// stack page exist; this only adds a fresh leaf (`PT[2]` was zero), so no TLB
+/// shootdown is required.
+unsafe fn map_caps_code() {
+    let src = addr_of!(caps_user_stub_start) as *const u8;
+    let len = (addr_of!(caps_user_stub_end) as usize) - (src as usize);
+    debug_assert!(len <= 4096, "cap stub must fit in one page");
+    // SAFETY: `src` spans the PIC stub in identity-mapped, ring0-readable
+    // `.text`; `len <= 4096` keeps the copy inside the one CAPS_CODE frame;
+    // the regions are disjoint.
+    unsafe {
+        copy_nonoverlapping(src, CAPS_CODE.byte_ptr(), len);
+        // First-map PT[2] -> the cap code page: P|U, NX clear (ring3 executes).
+        write_volatile(
+            USER_PT.entry_ptr(CAPS_PT_IDX),
+            CAPS_CODE.phys_base() | PTE_P | PTE_US,
+        );
+        invlpg(CAPS_CODE_VA);
+    }
+}
+
+// caps_syscall_entry: the ONLY new x86 unsafe -- the register-lift shim. ring3
+// `int 0x81` lands here in ring0 on the TSS RSP0 stack with rax=method,
+// rdi=handle, rsi=a0, rdx=a1. It shuffles them into SysV order and calls the
+// safe Rust recorder, then performs the SAME non-local return as M4's
+// `syscall_entry` (reload the parked kernel SP, pop callee-saved, ret).
+#[unsafe(naked)]
+unsafe extern "C" fn caps_syscall_entry() {
+    naked_asm!(
+        // Lift (method, handle, a0, a1) into SysV (rdi, rsi, rdx, rcx). The
+        // moves are ordered so no source is clobbered before it is read.
+        "mov rcx, rdx",   // a1     -> SysV arg4
+        "mov rdx, rsi",   // a0     -> SysV arg3
+        "mov rsi, rdi",   // handle -> SysV arg2
+        "mov rdi, rax",   // method -> SysV arg1
+        "sub rsp, 8",     // re-establish 16-alignment (CPU pushed 5 qwords)
+        "call {shim}",
+        // Non-local return into the kernel (identical to M4 syscall_entry).
+        "lea rax, [rip + {resume_sp}]",
+        "mov rsp, [rax]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "ret",
+        shim = sym caps_x86_syscall_shim,
+        resume_sp = sym KERNEL_RESUME_SP,
+    )
+}
+
+/// The safe Rust recorder for the lifted numbered cap syscall: stash the four
+/// scalars + set the seen flag. The ENTIRE capability policy (resolve, rights
+/// mask, generation check, method dispatch) is `crate::caps::dispatch`, run by
+/// the kernel from the [`SyscallArgs`](crate::caps::SyscallArgs) it reads back.
+extern "C" fn caps_x86_syscall_shim(method: u64, handle: u64, a0: u64, a1: u64) {
+    CAPS_METHOD.store(method, Ordering::Release);
+    CAPS_HANDLE.store(handle, Ordering::Release);
+    CAPS_A0.store(a0, Ordering::Release);
+    CAPS_A1.store(a1, Ordering::Release);
+    CAPS_SEEN.store(true, Ordering::Release);
+}
+
+/// Drive ONE numbered, capability-checked syscall from ring3 through the
+/// register-lift shim and return the neutral
+/// [`SyscallArgs`](crate::caps::SyscallArgs) it lifted (`None` if the trap never
+/// arrived or `root_handle` is not the deterministic bootstrap cap). Mirrors
+/// [`user_demo`]; reuses the M4 ring3 machinery unchanged and only adds the new
+/// cap stub + vector + lift shim.
+pub fn caps_user_probe(root_handle: u64) -> Option<crate::caps::SyscallArgs> {
+    if root_handle != CAPS_PROBE_HANDLE {
+        return None;
+    }
+    // SAFETY: ring 0, single vCPU, interrupts masked. `map_user_pages`
+    // (re)builds the M4 ring3 chain + stack page; `map_caps_code` adds the cap
+    // code leaf. Both are idempotent here (M4 already ran).
+    unsafe {
+        map_user_pages();
+        map_caps_code();
+    }
+    // Open the numbered syscall door at a fresh DPL=3 vector (M4 keeps 0x80).
+    idt::set_user_gate(CAPS_SYSCALL_VECTOR, caps_syscall_entry as *const () as u64);
+    CAPS_SEEN.store(false, Ordering::Release);
+    // SAFETY: same iret-frame contract as `user_demo`; CAPS_CODE_VA is mapped
+    // U/S=1 executable and the selectors are the DPL3 user descriptors (RPL=3).
+    unsafe {
+        enter_ring3(
+            CAPS_CODE_VA as u64,
+            USER_STACK_TOP,
+            (gdt::USER_CODE_SEL | 3) as u64,
+            (gdt::USER_DATA_SEL | 3) as u64,
+        );
+    }
+    if !CAPS_SEEN.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(crate::caps::SyscallArgs {
+        method: CAPS_METHOD.load(Ordering::Acquire) as u32,
+        handle: crate::caps::Handle::from_raw(CAPS_HANDLE.load(Ordering::Acquire)),
+        args: [
+            CAPS_A0.load(Ordering::Acquire),
+            CAPS_A1.load(Ordering::Acquire),
+            0,
+            0,
+        ],
+    })
+}

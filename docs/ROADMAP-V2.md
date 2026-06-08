@@ -181,6 +181,23 @@ reduces to this rights-mask invariant). Decide the revocation model **here**:
 v2 ships per-slot generation revoke; transitive/recursive revoke (seL4 CDT) is a
 noted refinement.
 
+*As shipped:* the revocation model is **per-slot generation revoke with
+retire-on-overflow** — a slot whose `u32` generation would wrap is retired,
+never reissued, closing the resurrected-stale-handle vector. The per-object
+epoch ("kill the object in every table at once") and the seL4 CDT subtree revoke
+are noted refinements the `u64` `Handle` layout stays forward-compatible with
+(they land at M14 with no ABI break). The only new unsafe is the per-arch
+register-lift shim: x86_64 routes the numbered cap syscall through a FRESH DPL=3
+`int 0x81` gate into a SEPARATE `PT[2]` cap code page, and aarch64 maps a FRESH
+EL0 window at the vacant `L1[5]` gated on a `CAPS_PROBE` flag — both leave the M4
+`int 0x80` / EL0 `svc` path (and the aarch64 M7 heap window at `L1[4]`)
+byte-for-byte intact, so `M4: user/ring OK` and the heap-backed cap table cannot
+regress. The entire handle table, rights algebra, object registry and dispatch
+live in `crates/tb-hal/src/caps.rs` under `#![forbid(unsafe_code)]`. M11 proves
+the INBOUND boundary (a numbered, capability-checked syscall reaches `dispatch`
+and yields a closed `SysStatus` kernel-side); returning that status into the
+ring3/EL0 result register is the explicit M12 generalisation.
+
 ### M12 — Agent runtime: `AgentProcess` · `M12: agent OK`
 Agents become first-class OS entities: `tb_agent_spawn(manifest)` mints an
 `AgentProcess` in its **own** address space with **only** its manifest-declared
@@ -358,8 +375,9 @@ and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evalu
 | **M8** (async interrupt + timer tick) | ✅ **complete**, CI-green (x86_64 LAPIC + LAPIC timer on IDT vec 0x20 via a UC device window in PML4[3]; aarch64 GICv2 + EL1 physical timer PPI 30 through the `__vec_irq` slot; first `sti`/`daifclr`, register-integrity canary across many ticks, timer re-masked; in-guest `rdtsc`/`CNTPCT_EL0` cycle counter) |
 | **M9** (preemptive scheduler) | ✅ **complete**, CI-green (timer-tick round-robin `schedule()` from IRQ context via the M8 `set_irq_hook` seam; M2 `ctx_switch` reused UNCHANGED — the IRQ entry already saved the full frame, so the cooperative switch swaps only the callee-saved continuation that returns into the IRQ epilogue's `iretq`/`eret`; EOI/EOIR moved BEFORE dispatch on both arches so the switched-in task is not starved of ticks; boot+C+D round-robin run queue in `lib.rs`, two no-yield spin tasks both advance under ≥100 involuntary switches; M2 cooperative ping-pong re-runs UNCHANGED → no regression) |
 | **M10** (per-agent address spaces) | ✅ **complete**, CI-green (x86_64 + aarch64 QEMU + tb-vmm/`/dev/kvm`) — symmetric copy-the-live-root `AddressSpace` (no TTBR1/TTBR0 split): each entity gets a fresh top-level table copying the whole kernel root (kernel half shared by reference), private pages in a vacant slot (`PML4[4]` / `L1[6]`) via the new `map_in_root` primitive, the switch folds into `yield_to` (`TASK_AS[]`), two tasks in two spaces map the same VA to different private frames and see only their own, a cross-space access faults (trap hook + guarded resume), serial/kernel survive every switch, and `M3: mmu OK` re-asserts unchanged |
-| **M11** (capability handle table + object model + syscall ABI) | ⏳ **in progress** (next increment) |
-| M12 – M18 | ⬜ planned (this document) |
+| **M11** (capability handle table + object model + syscall ABI) | ✅ **complete**, CI-green (x86_64 microvm + aarch64 virt + tb-vmm/`/dev/kvm`) — per-principal `HandleTable` with `Handle = (generation:u32)<<32 \| slot`, generation-checked O(1) resolve→`Stale`, the 12-bit `Rights` bitset whose only narrowing primitive is intersect (monotonic attenuation), the closed `SysStatus` enum, an `Rc`-counted object registry, and ONE numbered capability-checked `dispatch`er — all SAFE Rust in `caps.rs` (`#![forbid(unsafe_code)]`); the only new unsafe is a per-arch register-lift shim (x86_64 fresh DPL=3 `int 0x81` + a new `PT[2]` cap code page; aarch64 fresh EL0 window at the vacant `L1[5]` gated on `CAPS_PROBE`) — the M4 `int 0x80`/EL0 path and the aarch64 heap window (`L1[4]`) left byte-for-byte intact; per-slot generation revoke (retire-on-overflow), seL4 CDT noted for v3 |
+| **M12** (agent runtime — `AgentProcess`) | ⏳ **in progress** (next increment) |
+| M13 – M18 | ⬜ planned (this document) |
 | L2 (own Type-1 microhypervisor) | ⬜ parallel north-star track ([SOVEREIGNTY-ROADMAP](SOVEREIGNTY-ROADMAP.md)) |
 
 Every milestone increment is shipped by the same pipeline — codified as the

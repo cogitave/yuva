@@ -30,7 +30,15 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+// M11: the capability subsystem (`caps`) needs heap-backed collections
+// (`Vec`/`Rc`). `alloc` is brought online crate-wide by the kernel's
+// `#[global_allocator]` (tb-hal's `heap.rs`); this single line lets tb-hal name
+// it too. No allocator is defined here -- only the final kernel binary does, and
+// `cargo kbuild` recompiles `alloc` via `-Zbuild-std=core,compiler_builtins,alloc`.
+extern crate alloc;
+
 mod arch;
+pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
 mod heap; // M5: free-list global allocator over a fixed .bss arena.
 mod mmu; // M3: shared typed page-table layer (PageTable512/Frame4K + entry math).
 mod pmm; // M6: intrusive free-frame physical allocator over the boot memory map.
@@ -1067,4 +1075,34 @@ pub fn addr_load(va: u64) -> u64 {
 /// every address-space switch. tb-hal owns the raw read + the expected magic.
 pub fn m3_test_va_intact() -> bool {
     arch::m3_test_va_intact()
+}
+
+// ===========================================================================
+// M11: capability handle table + object model + numbered dispatcher
+// ===========================================================================
+//
+// The cap MACHINERY -- [`caps::Handle`]/[`caps::Rights`]/[`caps::SysStatus`],
+// the per-principal [`caps::HandleTable`], the object registry and the numbered
+// [`caps::dispatch`] -- is 100% SAFE Rust in the `caps` module (it carries
+// `#![forbid(unsafe_code)]`). The ONLY new unsafe M11 adds is the per-arch
+// register-lift shim that reads a numbered syscall's args out of the ring3/EL0
+// trap frame and hands them to the safe dispatcher; it lives in
+// `arch::{x86_64,aarch64}::user`, next to the M4 round trip it generalises
+// (mirroring how M1's `set_trap_hook`/`dispatch_trap` split the raw-frame deref
+// from the safe policy). The per-arch capture atomics live next to each shim;
+// this facade is thin, exactly like [`user_demo`].
+
+/// Drive ONE numbered, capability-checked syscall from ring3/EL0 through the
+/// per-arch register-lift shim and return the neutral [`caps::SyscallArgs`] the
+/// shim lifted out of the trap frame (`None` if the trap never arrived). The
+/// kernel M11 self-test feeds the result to [`caps::dispatch`] to prove the
+/// unprivileged boundary is numbered + capability-checked end-to-end.
+///
+/// `root_handle` is the raw value of the bootstrap capability the unprivileged
+/// stub presents. The deterministic first-minted root is `(generation 1, slot
+/// 0)`, which the position-independent stub carries as an immediate, so a
+/// mismatched expectation returns `None` fail-closed. Mirrors [`user_demo`]:
+/// all the new unsafe/asm is confined to tb-hal.
+pub fn caps_user_probe(root_handle: u64) -> Option<caps::SyscallArgs> {
+    arch::caps_user_probe(root_handle)
 }

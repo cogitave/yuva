@@ -408,13 +408,28 @@ pub(super) extern "C" fn aarch64_el0_sync_handler(frame: *const Frame) -> ! {
     let ec = (esr >> ESR_EC_SHIFT) & ESR_EC_MASK;
 
     if ec == EC_SVC64 {
-        // x0 of the trapping EL0 context = the syscall argument.
-        let arg = frame.gpr[0];
-        SYSCALL_ARG.store(arg, Ordering::Release);
-        SYSCALL_SEEN.store(true, Ordering::Release);
-        crate::serial_write_str("syscall from user: arg=");
-        write_hex_u64(arg);
-        crate::serial_write_byte(b'\n');
+        if CAPS_PROBE.load(Ordering::Acquire) {
+            // M11: a numbered capability syscall. Lift the method (x8), the
+            // target handle (x0) and the inline args (x1, x2) into the arch-
+            // local capture atomics for the SAFE `crate::caps::dispatch` the
+            // kernel runs -- NO table/rights/generation logic here, it only
+            // READS registers (the M4 lift, widened by three registers).
+            CAPS_METHOD.store(frame.gpr[8], Ordering::Release);
+            CAPS_HANDLE.store(frame.gpr[0], Ordering::Release);
+            CAPS_A0.store(frame.gpr[1], Ordering::Release);
+            CAPS_A1.store(frame.gpr[2], Ordering::Release);
+            CAPS_SEEN.store(true, Ordering::Release);
+            CAPS_PROBE.store(false, Ordering::Release);
+        } else {
+            // M4: the single-arg round trip. Byte-identical behaviour when
+            // CAPS_PROBE is clear -- its default, and its state throughout M4.
+            let arg = frame.gpr[0];
+            SYSCALL_ARG.store(arg, Ordering::Release);
+            SYSCALL_SEEN.store(true, Ordering::Release);
+            crate::serial_write_str("syscall from user: arg=");
+            write_hex_u64(arg);
+            crate::serial_write_byte(b'\n');
+        }
     } else {
         // Any other synchronous exception from EL0 (e.g. an instruction/data
         // abort if the user mapping were wrong) is unexpected. Report it and
@@ -502,4 +517,131 @@ pub fn user_demo() -> bool {
 
     // (5) Verdict: the `svc` must have been observed from EL0 with arg 0xCAFE.
     SYSCALL_SEEN.load(Ordering::Acquire) && SYSCALL_ARG.load(Ordering::Acquire) == USER_SYSCALL_ARG
+}
+
+// ===========================================================================
+// M11: the numbered capability syscall -- a SECOND EL0 round trip whose stub
+// loads (method, handle, args) and `svc`s. The EL0 sync handler, when
+// `CAPS_PROBE` is set, lifts x8=method, x0=handle, x1/x2=args into the arch-
+// local capture atomics for the SAFE `crate::caps::dispatch` the kernel runs
+// (no table/rights logic in the handler), then takes the SAME longjmp back into
+// the kernel. A FRESH EL0 window at the VACANT L1[5] (VA 5 GiB) keeps BOTH the
+// M4 window (L1[3]) AND the M7 heap window (L1[4], `HEAP_WINDOW_BASE` in
+// mmu.rs) untouched -- so neither "M4: user/ring OK" nor the heap-backed cap
+// table can regress; the slot was invalid, so a first map needs no
+// Break-Before-Make / TLBI.
+// ===========================================================================
+
+/// The deterministic bootstrap capability the cap stub presents: the FIRST mint
+/// into a fresh table is `(generation 1, slot 0)` == `1 << 32`.
+const CAPS_PROBE_HANDLE: u64 = 0x0000_0001_0000_0000;
+
+/// M11 user code page VA: 5 GiB (L1[5], L2[0], L3[0]) -- a VACANT root slot.
+/// L1[0..4] are taken (Device, RAM, M3, M4 user, M7 heap @ `HEAP_WINDOW_BASE`
+/// = 0x1_0000_0000 = L1[4]); L1[5] is free, so writing it never disturbs the
+/// heap or the M4 window. Within the 39-bit (T0SZ=25) VA space.
+const CAPS_USER_CODE_VA: u64 = 0x1_4000_0000;
+/// M11 user stack page VA: `CAPS_USER_CODE_VA + 4 KiB` (L1[5], L2[0], L3[1]).
+const CAPS_USER_STACK_VA: u64 = CAPS_USER_CODE_VA + 0x1000;
+/// Top of the (downward-growing) M11 user stack.
+const CAPS_USER_STACK_TOP_VA: u64 = CAPS_USER_STACK_VA + 0x1000;
+/// Root (L1) index of the M11 window: VA[38:30] = 5.
+const CAPS_USER_L1_IDX: usize = ((CAPS_USER_CODE_VA >> 30) & 0x1FF) as usize;
+/// L3 index of the M11 code page: VA[20:12] = 0.
+const CAPS_USER_CODE_L3_IDX: usize = ((CAPS_USER_CODE_VA >> 12) & 0x1FF) as usize;
+/// L3 index of the M11 stack page: VA[20:12] = 1.
+const CAPS_USER_STACK_L3_IDX: usize = ((CAPS_USER_STACK_VA >> 12) & 0x1FF) as usize;
+
+const _: () = assert!(CAPS_USER_L1_IDX == 5);
+const _: () = assert!(CAPS_USER_CODE_L3_IDX == 0 && CAPS_USER_STACK_L3_IDX == 1);
+const _: () = assert!((CAPS_USER_CODE_VA >> 21) & 0x1FF == 0);
+
+/// L2 table for the M11 window (hung under root L1[5]).
+static CAPS_USER_L2: Page = Page::new();
+/// L3 table for the M11 window (hung under CAPS_USER_L2[0]).
+static CAPS_USER_L3: Page = Page::new();
+/// Backing frame for the M11 user stack page.
+static CAPS_USER_STACK_FRAME: Page = Page::new();
+
+/// Set by [`caps_user_probe`] before the `eret`; read by the EL0 sync handler
+/// to route an `svc` to the M11 register-lift path instead of the M4 single-arg
+/// path. Cleared once the lift is captured.
+static CAPS_PROBE: AtomicBool = AtomicBool::new(false);
+/// Set true by the EL0 sync handler when it captures the numbered cap syscall.
+static CAPS_SEEN: AtomicBool = AtomicBool::new(false);
+/// Method selector (x8) lifted from the numbered cap syscall.
+static CAPS_METHOD: AtomicU64 = AtomicU64::new(0);
+/// Target capability handle (x0) lifted from the numbered cap syscall.
+static CAPS_HANDLE: AtomicU64 = AtomicU64::new(0);
+/// Inline arg 0 (x1) lifted from the numbered cap syscall.
+static CAPS_A0: AtomicU64 = AtomicU64::new(0);
+/// Inline arg 1 (x2) lifted from the numbered cap syscall.
+static CAPS_A1: AtomicU64 = AtomicU64::new(0);
+
+/// The M11 EL0 stub: load the method (x8), the well-known ROOT handle
+/// (x0 = 0x0000_0001_0000_0000 = generation 1, slot 0), the inline args
+/// (x1/x2), then `svc #0`. Built from movz/movk only (position-independent),
+/// valid at the aliased VA.
+#[unsafe(naked)]
+extern "C" fn caps_user_stub() -> ! {
+    naked_asm!(
+        "mov  x8, #0",          // method = M_OBJECT_INSPECT (0)
+        "mov  x0, #0",          // handle low half = slot 0
+        "movk x0, #1, lsl #32", // gen 1 into bits[47:32] -> 0x0000_0001_0000_0000
+        "mov  x1, #0",          // a0 = 0
+        "mov  x2, #0",          // a1 = 0
+        "svc  #0",              // -> EL1 sync (ESR_EL1.EC = 0x15)
+        "1: b 1b",              // unreachable: the kernel longjmps, never erets back
+    )
+}
+
+/// Drive ONE numbered, capability-checked syscall from EL0 through the register-
+/// lift shim and return the neutral [`SyscallArgs`](crate::caps::SyscallArgs) it
+/// lifted (`None` if the trap never arrived or `root_handle` is not the
+/// deterministic bootstrap cap). Maps a fresh EL0 window at L1[5] aliasing the
+/// M11 stub's page (the M4 L1[3] window AND the M7 heap L1[4] window are left
+/// untouched), arms [`CAPS_PROBE`], drops to EL0, and reads the lifted args
+/// back. Mirrors [`user_demo`]; reuses `enter_el0` unchanged.
+pub fn caps_user_probe(root_handle: u64) -> Option<crate::caps::SyscallArgs> {
+    if root_handle != CAPS_PROBE_HANDLE {
+        return None;
+    }
+    let stub_pa = caps_user_stub as *const () as u64;
+    let code_page_pa = stub_pa & !0xFFF;
+    let code_offset = stub_pa & 0xFFF;
+    let entry_va = CAPS_USER_CODE_VA | code_offset;
+
+    // Build the leaves (code EL0-exec, stack EL0 RW no-exec) + the L2->L3 link,
+    // publish, then plug L2 into the LIVE root at the vacant L1[5].
+    page_set(&CAPS_USER_L3, CAPS_USER_CODE_L3_IDX, code_page_pa | PAGE_USER_CODE);
+    page_set(&CAPS_USER_L3, CAPS_USER_STACK_L3_IDX, CAPS_USER_STACK_FRAME.pa() | PAGE_USER_STACK);
+    page_set(&CAPS_USER_L2, 0, CAPS_USER_L3.pa() | DESC_TABLE);
+    dsb_ishst();
+
+    let l1 = (read_ttbr0_el1() & TTBR_BADDR_MASK) as *mut u64;
+    // SAFETY: `l1` is the live L1 table base in identity-mapped RAM (PA == VA,
+    // directly writable), 512 entries; CAPS_USER_L1_IDX = 5 is in bounds and was
+    // invalid (a first map needs no TLBI). Single vCPU; sequenced by the
+    // surrounding `dsb ishst` / `isb`.
+    unsafe { write_volatile(l1.add(CAPS_USER_L1_IDX), CAPS_USER_L2.pa() | DESC_TABLE) };
+    dsb_ishst();
+    isb();
+
+    CAPS_SEEN.store(false, Ordering::Release);
+    CAPS_PROBE.store(true, Ordering::Release);
+    enter_el0(entry_va, CAPS_USER_STACK_TOP_VA);
+
+    if !CAPS_SEEN.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(crate::caps::SyscallArgs {
+        method: CAPS_METHOD.load(Ordering::Acquire) as u32,
+        handle: crate::caps::Handle::from_raw(CAPS_HANDLE.load(Ordering::Acquire)),
+        args: [
+            CAPS_A0.load(Ordering::Acquire),
+            CAPS_A1.load(Ordering::Acquire),
+            0,
+            0,
+        ],
+    })
 }

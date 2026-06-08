@@ -37,20 +37,20 @@
 pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
-    address_space_new, breakpoint, ctx_switch, current_root, halt, heap_window, install_traps,
-    m3_test_va_intact, map_heap_frames, map_in_root, mmu_init, mmu_selftest, pmm_collect_regions,
-    read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte, switch_root,
-    task_stack_init, timer_demo, timer_disarm, timer_rearm, user_demo,
+    address_space_new, breakpoint, caps_user_probe, ctx_switch, current_root, halt, heap_window,
+    install_traps, m3_test_va_intact, map_heap_frames, map_in_root, mmu_init, mmu_selftest,
+    pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
+    switch_root, task_stack_init, timer_demo, timer_disarm, timer_rearm, user_demo,
 };
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::{
-    address_space_new, breakpoint, ctx_switch, current_root, halt, heap_window, install_traps,
-    m3_test_va_intact, map_heap_frames, map_in_root, mmu_init, mmu_selftest, pmm_collect_regions,
-    read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte, switch_root,
-    task_stack_init, timer_demo, timer_disarm, timer_rearm, user_demo,
+    address_space_new, breakpoint, caps_user_probe, ctx_switch, current_root, halt, heap_window,
+    install_traps, m3_test_va_intact, map_heap_frames, map_in_root, mmu_init, mmu_selftest,
+    pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
+    switch_root, task_stack_init, timer_demo, timer_disarm, timer_rearm, user_demo,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
