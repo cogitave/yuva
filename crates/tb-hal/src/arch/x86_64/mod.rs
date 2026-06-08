@@ -71,7 +71,20 @@ pub mod pmm;
 // x86_64 unsafe/asm lives here.
 pub mod timer;
 
+// L2.0 (the L2 sovereignty track): VMX-root bring-up — VMXON, a minimal VMCS,
+// an EPT identity map, a 1-instruction (`CPUID`) long-mode nested guest, the
+// host<->guest world switch, the caught VM-exit and VMXOFF. ALL the new
+// silicon-unsafe + asm (the largest single new unsafe surface in the project)
+// is confined to this `vmx/` subtree; the kernel reaches it only through the
+// safe `tb_hal::vmx_selftest()` facade. x86-only; gracefully skips when VMX is
+// not exposed (the TCG `qemu64` case).
+pub mod vmx;
+
 pub use serial::{serial_init, serial_write_byte};
+
+// L2.0: the safe VMX-root self-test facade, re-exported through `arch/mod.rs`
+// so `lib.rs` can expose `tb_hal::vmx_selftest()`.
+pub use vmx::vmx_selftest;
 
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
 // `int3` lives in `trap.rs`. `set_trap_hook`/`TrapInfo`/`TrapKind`/`TrapAction`

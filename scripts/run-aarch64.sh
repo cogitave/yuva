@@ -24,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M18: evolve OK"
+MARKER="L2.0: vmxroot OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then

@@ -41,7 +41,7 @@ pub use self::x86_64::{
     current_root, halt, heap_window, install_traps, m3_test_va_intact, map_heap_frames, map_in_root,
     mmu_init, mmu_selftest, pmm_collect_regions, read_cycle_counter, sched_irq_unmask,
     serial_init, serial_write_byte, set_kernel_stack, switch_root, task_stack_init,
-    task_stack_init_user, timer_demo, timer_disarm, timer_rearm, user_demo,
+    task_stack_init_user, timer_demo, timer_disarm, timer_rearm, user_demo, vmx_selftest,
 };
 
 #[cfg(target_arch = "aarch64")]

@@ -1907,3 +1907,56 @@ pub fn agent_evolve_request(task: Task, skill_id: u64) -> Option<(u32, bool)> {
     // eval_tbl / eval_home drop HERE -- the frozen domain never leaves the kernel.
     Some((caps::SysStatus::Ok as u32, admitted))
 }
+
+// ===========================================================================
+// L2.0: VMX-root self-test facade (the L2 sovereignty track).
+//
+// The first rung of `tb-core`, the from-scratch Type-1 microhypervisor: a SAFE
+// entry point the `#![forbid(unsafe_code)]` kernel calls to drive the silicon-
+// unsafe VMX bring-up confined to `arch/x86_64/vmx/`. On x86_64 it does the full
+// VMXON -> minimal VMCS -> EPT identity map -> 1-`CPUID` long-mode nested guest
+// -> world-switch -> caught VM-exit -> VMXOFF proof (or skips gracefully when VMX
+// is not exposed, the TCG `qemu64` case). On aarch64 (no VMX) it is N/A: the EL2
+// world-switch is a LATER L2 sub-milestone. Mirrors the `mmu_selftest`/`user_demo`
+// pattern — all unsafe stays in tb-hal/arch, the kernel only branches on a value.
+// ===========================================================================
+
+/// L2.0 VMX-root self-test outcome (returned to the kernel for marker rendering).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmxProof {
+    /// This arch has no VMX (aarch64): the EL2 path is a later sub-milestone.
+    NotApplicable,
+    /// VMX is not exposed or the BIOS locked VT-x off — graceful skip (no VMX
+    /// instruction was executed). The TCG `qemu64` case; mirrors the `vmm-boot`
+    /// `KVM_OK` allow-skip.
+    Unavailable,
+    /// VMXON itself failed (VMfail) — VMX advertised but the substrate could not
+    /// enter VMX operation (e.g. incomplete emulation under `-cpu max` TCG).
+    VmxonFailed,
+    /// VMXON succeeded but VM-entry failed; `vm_error` is the VMCS
+    /// VM-instruction-error (0 if even VMPTRLD failed before launch).
+    EntryFailed {
+        /// The VMCS VM-instruction-error code (Intel SDM Vol 3C §30.4).
+        vm_error: u64,
+    },
+    /// THE PROOF: the world switch ran and the nested guest's VM-exit was caught;
+    /// `exit_reason` is the basic exit reason (10 = CPUID, the expected value).
+    Proven {
+        /// The basic VM-exit reason (VMCS field 0x4402, bits 15:0).
+        exit_reason: u32,
+    },
+}
+
+/// L2.0: run the VMX-root + nested-guest + caught-VM-exit self-test (x86_64), or
+/// report [`VmxProof::NotApplicable`] on aarch64. See [`VmxProof`].
+#[cfg(target_arch = "x86_64")]
+pub fn vmx_selftest() -> VmxProof {
+    arch::vmx_selftest()
+}
+
+/// L2.0: aarch64 has no VMX — the EL2 world-switch is a later L2 sub-milestone,
+/// so this reports [`VmxProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "aarch64")]
+pub fn vmx_selftest() -> VmxProof {
+    VmxProof::NotApplicable
+}
