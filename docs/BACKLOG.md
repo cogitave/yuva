@@ -1,6 +1,10 @@
 # TABOS Forward Backlog
 
 > Prioritized, dependency-ordered task plan produced by an ultracode mine+synthesize workflow (2026-06-08), after the v2 agent-native chain M5–M18 went fully CI-green and the L2 sovereignty track started at L2.0. Raw: [research/raw/forward-backlog.json](../research/raw/forward-backlog.json).
+>
+> **Detailed per-task implementation plans:** [plans/INDEX.md](plans/INDEX.md) — a second ultracode workflow (2026-06-08) authored a research-backed, decision-closed plan for the highest-priority forward tasks (verification, L2 sovereignty, IPC, aarch64 EL2), with a synthesized critical-path / parallel-track view. Each plan there carries its own DoD marker, file list, decisions, verification steps and research citations.
+>
+> **#1 (Fix M8 LAPIC/timer fault under QEMU-microvm+KVM) is DONE** (2026-06-08, commits `80e6ce3` + `2de01c2`): root cause was `lapic_enable()` leaving the non-timer LVTs unmasked, so the first `sti` took a stray ExtINT → `#DE` on `microvm` (no 8259 PIC). The microvm+KVM lane now reaches `M18: evolve OK`. See [`tabos-overnight-autonomous-run`] memory + the l2-nested-vmx CI lane.
 
 ## Summary
 
