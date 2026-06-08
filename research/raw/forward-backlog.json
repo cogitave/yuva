@@ -1,0 +1,383 @@
+{
+  "plan": {
+    "summary": "Forward task backlog for TABOS (from-scratch no_std Rust framekernel) synthesized from mined deferred-hooks, the L2 sovereignty chain, verification gaps, portability bugs, perf/bench, and docs debt. The v1 (M0-M4) + v2 agent-native chain (M5-M18) are complete and CI-green (TCG + tb-vmm/KVM); the L2 microhypervisor track has started at L2.0 (VMX-root, builds + boots via a graceful-skip path that proves nothing about the world switch). Ordering is leverage-first: (1) the F2 M8 LAPIC/timer fault under QEMU-microvm+KVM is a real boot bug that also unblocks the KVM bench full number; (2) the F1 nested-VMX validation substrate gates every L2.0-L2.6 real hardware-virt proof since hosted CI has no nested VMX; (3) the M11 rights-subset/confused-deputy formal proof is load-bearing for M18's entire frozen-boundary safety guarantee. These three are P0. Then Miri-in-CI (mandatory Tier-0) and the L2.0 real VMLAUNCH proof, then the L2.1..L2.9 chain in strict dependency order (each its own task), the aarch64 tb-boot/EL2 parallel track (CI-friendly TCG world-switch proof), then the deferred features (byte-payload IPC, blocking-recv IPC, durable VirtioBlkStore, real inference adapters + virtio transport, M18 human-approval gate, M18 held-out evaluator, M15 unmap/reclaim), broader Kani harnesses, and finally perf-bench + docs reconciliation. Grounded against crates/tb-hal/src/arch/x86_64/vmx/ (controls/ept/exit/vmcs/vmxon/world_switch.rs), timer.rs (LAPIC at PML4[3] VA 0x0000_0180_0000_0000 -> PA 0xFEE0_0000), caps.rs (args[2..3] reserved buffer + rights-subset invariant doc), ipc.rs (copy_to/from_user deferred + WouldBlock), mem.rs (BackingStore/RamStore, VirtioBlk deferred), scripts/bench-boot.sh (FINAL_MARKER='L2.0: vmxroot OK', -M microvm full=NA), and .github/workflows/{ci,vmm-boot,l2-nested-vmx}.yml. 30 tasks.",
+    "tasks": [
+      {
+        "subject": "Fix M8 LAPIC/timer fault under QEMU-microvm+KVM (F2)",
+        "track": "portability-bug",
+        "priority": "P0",
+        "dod": "Kernel boots M0->M18 and streams the final cumulative marker under `qemu-system-x86_64 -M microvm -accel kvm -cpu host`; no trap at cause=0x0 fault_addr=0x0 ~pc=0x1311ff during M8 bring-up. Root-caused in crates/tb-hal/src/arch/x86_64/timer.rs (LAPIC UC page at PML4[3] VA 0x0000_0180_0000_0000 -> PA 0xFEE0_0000; IA32_APIC_BASE/SVR/LVT sequence) vs the KVM in-kernel-irqchip path; passes in all three lanes (TCG, tb-vmm/KVM, microvm+KVM).",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "A real boot bug (echo of the M6 ID_LO boot-substrate gap) that no current CI lane catches and the sole cause of the user's bench full=NA on QEMU-microvm+KVM."
+      },
+      {
+        "subject": "Stand up a nested-VMX validation substrate (self-hosted or bare-metal lane) (F1)",
+        "track": "infra",
+        "priority": "P0",
+        "dod": "A CI/test lane exists where vmx is present in /proc/cpuinfo and kvm_intel nested=1 is loaded (self-hosted nesting runner OR a documented bare-metal procedure on Arda's hardware), capable of running -cpu host,+vmx so VMXON/VMLAUNCH/EPT/exit instructions actually execute. Resolves OPEN-Q 'NESTED-VMX CI SUBSTRATE'; the l2-nested-vmx.yml informational probe is replaced or supplemented by a lane that CAN go red.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "Hosted GitHub/Azure runners expose no nested VMX, so every L2.0-L2.6 real hardware-virt proof is unvalidatable without this substrate."
+      },
+      {
+        "subject": "Prove M11 capability rights-subset / no-confused-deputy invariant with Kani/Verus",
+        "track": "verification",
+        "priority": "P0",
+        "dod": "A Kani (or Verus) harness in-tree proves capability-derivation monotonicity: across every {mint, dup, narrow, transfer, revoke} sequence the rights of any resolvable handle are a SUBSET of its parent's, and no derivation closure can reach an evaluator capability (the DGM node-114 / confused-deputy property). Harness runs in CI green; targets crates/tb-hal/src/caps.rs rights algebra.",
+        "depends_on": "none",
+        "effort": "L",
+        "rationale": "M18's entire frozen-boundary safety guarantee reduces to this M11 invariant; caps.rs was deliberately built as the largest pure-safe Kani-targetable subsystem but no harness exists yet."
+      },
+      {
+        "subject": "Wire Miri into CI as a mandatory Tier-0 gate",
+        "track": "verification",
+        "priority": "P0",
+        "dod": "A miri.yml (or job in ci.yml) runs `cargo +nightly miri test` over the host-testable no_std crates and is a required, blocking check. Green on main; catches dynamic UB per LANGUAGE-AND-STANDARDS §5 / OPEN-Q §I 'Miri mandatory' decision.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "The dynamic-UB detector the Rust project itself uses is mandated by spec but absent from .github/workflows (only ci/vmm-boot/l2-nested-vmx exist)."
+      },
+      {
+        "subject": "Add QEMU-microvm+KVM as a third CI boot lane",
+        "track": "infra",
+        "priority": "P1",
+        "dod": "A CI job boots the kernel under `-M microvm -accel kvm -cpu host` and asserts the M18 cumulative marker; emits a comparable boot-ready number alongside ci(TCG) and vmm-boot(tb-vmm/KVM). Lane is green and required.",
+        "depends_on": "Fix M8 LAPIC/timer fault under QEMU-microvm+KVM (F2)",
+        "effort": "S",
+        "rationale": "BENCHMARKS.md flags microvm+KVM as an untested config; making it a lane prevents F2-class faults from regressing silently and yields a third comparable boot figure."
+      },
+      {
+        "subject": "Execute the L2.0 real VMLAUNCH proof (Proven exit_reason=10)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "On the nested-VMX substrate, the VMXON->VMCS->EPT->VMLAUNCH->caught-exit path runs the REAL (non-skip) flow and emits Proven{exit_reason:10} (CPUID forced-exit); the graceful-skip branch is bypassed. Marker 'L2.0: vmxroot OK' is backed by an actually-executed world entry, not the Unavailable path.",
+        "depends_on": "Stand up a nested-VMX validation substrate (self-hosted or bare-metal lane) (F1)",
+        "effort": "M",
+        "rationale": "L2.0 is implemented and builds but the Proven{exit_reason:10} path has never executed anywhere; without it nothing about the world switch is proven."
+      },
+      {
+        "subject": "Implement L2.1 EPT-violation demand handling (ept OK)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "A trivial guest touches an unmapped GPA; tb-core catches exit reason 48, reads the guest-physical-address, maps a frame, issues INVEPT, and resumes; EPT-misconfig (49) treated as fatal. Serial marker 'ept OK' on the nested-VMX lane.",
+        "depends_on": "Execute the L2.0 real VMLAUNCH proof (Proven exit_reason=10)",
+        "effort": "L",
+        "rationale": "Proves the R/W/X stage-2 EPT triple is the isolation primitive replacing /dev/kvm — the foundation every later L2 milestone builds on."
+      },
+      {
+        "subject": "Implement L2.2 full MUST exit set (exits OK)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "tb-core handles the §4 MUST exit set: CPUID forge, RDMSR/WRMSR via MSR bitmap, CR-access (28), HLT (12), triple-fault teardown (2), VMCALL (18) as the hypercall entry; RIP-advance discipline enforced (advance after trapping exits, never after EPT-violations/exceptions); exact hidden GPR save/restore. Serial marker 'exits OK'.",
+        "depends_on": "Implement L2.1 EPT-violation demand handling (ept OK)",
+        "effort": "L",
+        "rationale": "The full exit-handling surface is the contract every guest depends on; the MSR-bitmap and RIP-advance discipline are the classic silent VM-entry-failure traps."
+      },
+      {
+        "subject": "Implement L2.3 device-model seam and extract crates/tb-core (devmodel OK)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "An I/O-exit (reason 30, COM1 0x3f8) is forwarded to a deprivileged 16550 callback that prints; the tb-core<->device-model EXIT-UPCALL + vcpu_run-returns-exit-reason ABI is defined; crates/tb-core is created as a no_std #![forbid(unsafe_code)] orchestrator over tb-hal vmx wrappers; tb-vmm device.rs/serial.rs are re-hosted no_std. Serial marker 'devmodel OK'.",
+        "depends_on": "Implement L2.2 full MUST exit set (exits OK)",
+        "effort": "XL",
+        "rationale": "This is where the privileged-core/device-model split is drawn and crates/tb-core is extracted — the structural decision the whole <10K-LOC TCB budget rests on."
+      },
+      {
+        "subject": "Implement L2.4 nested TABOS M0-M18 guest boot (tabos-guest OK)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "tb-core boots the REAL unmodified TABOS M0-M18 kernel as its nested guest using the same tb-boot v0 register file written into VMCS guest-state plus the device-model console; nested M-markers are forwarded out. Confirms ZERO guest changes. Serial marker 'tabos-guest OK'.",
+        "depends_on": "Implement L2.3 device-model seam and extract crates/tb-core (devmodel OK)",
+        "effort": "L",
+        "rationale": "First end-to-end sovereignty milestone — TABOS running under TABOS-on-bare-VMX with no /dev/kvm; validates CPUID/MSR behavioural parity with KVM."
+      },
+      {
+        "subject": "Implement L2.5 sovereign VMX-preemption-timer scheduling (sched OK)",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "The VMX-preemption timer (exit reason 52) drives a tb-core scheduler tick; >1 vCPU is time-sliced under tb-core ownership; VMX_MISC preemption-timer scale factor is correctly applied. Serial marker 'sched OK'.",
+        "depends_on": "Implement L2.4 nested TABOS M0-M18 guest boot (tabos-guest OK)",
+        "effort": "M",
+        "rationale": "TABOS retains Xen-like scheduling ownership (its one divergence from pKVM/KVM); the preemption-timer scale factor is the known mis-scaling hazard."
+      },
+      {
+        "subject": "Implement L2.6 SMP / AP bring-up (smp OK)",
+        "track": "L2-sovereignty",
+        "priority": "P2",
+        "dod": "INIT-SIPI-SIPI + APIC AP startup brings up >1 physical CPU; per-pCPU VMXON + per-vCPU VMCS established; the guest runs across multiple physical cores. Serial marker 'smp OK'. Closes OPEN-Q §J 'type1-x86-vmx' SMP gap.",
+        "depends_on": "Implement L2.5 sovereign VMX-preemption-timer scheduling (sched OK)",
+        "effort": "XL",
+        "rationale": "SMP is the biggest latent v2 debt — entirely new platform code (M0-M18 are single-core) and a Type-1 prerequisite."
+      },
+      {
+        "subject": "Build the firmware-baremetal platform body (ACPI/PCIe-ECAM/APIC/timer-cal)",
+        "track": "L2-sovereignty",
+        "priority": "P2",
+        "dod": "A platform crate/module parses ACPI (RSDP, MADT, MCFG), walks PCIe ECAM, programs the APIC, and calibrates the timer, suitable for use after ExitBootServices; unit-tested against captured tables. Tracked as its own milestone (closes the 'untracked beyond a P2 note' gap).",
+        "depends_on": "none",
+        "effort": "XL",
+        "rationale": "This platform body is 'plausibly bigger than tb-core itself', currently untracked, and hard-gates L2.7 bare-metal launch."
+      },
+      {
+        "subject": "Implement L2.7 UEFI bare-metal Type-1 launch (baremetal OK)",
+        "track": "L2-sovereignty",
+        "priority": "P2",
+        "dod": "tb-core runs as an EFI app (uefi-rs): captures the UEFI memory map + ACPI RSDP + GOP framebuffer, calls ExitBootServices, installs in VMX-root with NO host kernel, builds EPT, and boots TABOS from bare metal. Serial/framebuffer marker 'baremetal OK' on real (or nesting-capable) hardware.",
+        "depends_on": "Implement L2.4 nested TABOS M0-M18 guest boot (tabos-guest OK), Build the firmware-baremetal platform body (ACPI/PCIe-ECAM/APIC/timer-cal)",
+        "effort": "XL",
+        "rationale": "Where full sovereignty actually lands — a Type-1 with no Linux underneath; the single largest work stream in the L2 track."
+      },
+      {
+        "subject": "Implement L2.8 VT-d IOMMU DMA confinement (iommu OK)",
+        "track": "L2-sovereignty",
+        "priority": "P2",
+        "dod": "DMAR parsed defensively (refuse passthrough on malformed table/RMRR per Xen posture); root/per-bus context tables + second-level tables mirroring each guest's EPT + mandatory VT-d interrupt remapping built; a passed-through device's DMA is confined under IOMMU-GROUP granularity behind a certified-hardware allow-list. Lands in tb-hal arch/x86_64/iommu_vtd.rs; table-programming verified in emulated intel-iommu, isolation gated on ACS-clean hardware. Marker 'iommu OK'.",
+        "depends_on": "Implement L2.7 UEFI bare-metal Type-1 launch (baremetal OK)",
+        "effort": "XL",
+        "rationale": "DMA isolation is the prerequisite for any safe device passthrough; emulation can only prove table-programming, so a real-HW gate is required."
+      },
+      {
+        "subject": "Implement L2.9 full split-VMM with <10K-LOC TCB budget (split-vmm OK)",
+        "track": "L2-sovereignty",
+        "priority": "P2",
+        "dod": "The complete tb-vmm device model is demoted to a deprivileged guest; tb-core forwards ALL MMIO/PIO exits over the hypercall/shared-ring ABI and contains ZERO device emulation; the KVM-facing spine (memory.rs, vmm.rs run loop, arch/boot.rs) moves into tb-core while device.rs/serial.rs/loader.rs are re-hosted no_std on the hypercall ABI. Privileged TCB measured <10K LOC. Marker 'split-vmm OK'.",
+        "depends_on": "Implement L2.4 nested TABOS M0-M18 guest boot (tabos-guest OK)",
+        "effort": "XL",
+        "rationale": "Completes the trusted-core/untrusted-device split; the <10K-LOC budget is the falsifiable proof the architecture is right."
+      },
+      {
+        "subject": "Build aarch64 tb-boot producer + _tb_start EL1 entry",
+        "track": "portability-bug",
+        "priority": "P1",
+        "dod": "An aarch64 tb-boot producer writes a TbBootInfo and an _tb_start-equivalent EL1 entry (PSTATE=EL1h, X0=TbBootInfo*) exists alongside the current x0=FDT path; tb-vmm gains an aarch64 backend able to launch it. Boots green to the M18 marker on aarch64.",
+        "depends_on": "none",
+        "effort": "L",
+        "rationale": "Blocks the L1 aarch64 path AND gates the ARM L2/EL2 track; tb-vmm currently has x86_64-only backends and the aarch64 _start only consumes a DTB."
+      },
+      {
+        "subject": "Implement aarch64 EL2 (nVHE) world-switch smoke proof (el2 OK) under TCG",
+        "track": "L2-sovereignty",
+        "priority": "P1",
+        "dod": "el2.rs (HCR_EL2/VTCR_EL2/VTTBR_EL2 + EL2 vectors + ERET) and stage2.rs (IPA->PA + TLBI VMALLS12E1) bring up an EL2->EL1 world switch under QEMU virt `-machine virtualization=on -cpu max` in PURE TCG; serial marker 'el2 OK' on a stock hosted runner (no nested KVM).",
+        "depends_on": "Build aarch64 tb-boot producer + _tb_start EL1 entry",
+        "effort": "L",
+        "rationale": "The CI-friendliest way to de-risk the world-switch SHAPE — a real EL2 proof on any hosted runner without the nested-VMX substrate the x86 path needs."
+      },
+      {
+        "subject": "Author Kani harnesses for silicon-unsafe encoders and protocol parsers",
+        "track": "verification",
+        "priority": "P1",
+        "dod": "Kani harnesses cover: tb-boot POD/ELF-note validators, EPT/VMCS guest-state encoders, the control-MSR adjust algorithm (the legality gate / #1 cause of silent VM-entry failure), VT-d DMAR/context builders, and the M13 BM25+/ACT-R BLA fixed-point ranking + M17 eviction math. All run green in CI.",
+        "depends_on": "Prove M11 capability rights-subset / no-confused-deputy invariant with Kani/Verus",
+        "effort": "L",
+        "rationale": "The no-heap->heap transition and silicon-unsafe encoders are correctness-uncovered today; on-target markers prove liveness only, not correctness."
+      },
+      {
+        "subject": "Implement M14 byte-payload copy_to_user/copy_from_user IPC",
+        "track": "deferred-feature",
+        "priority": "P1",
+        "dod": "Variable-length BYTE payloads transfer via copy_to_user/copy_from_user using the args[2..3] user buffer reserved in caps.rs; SMAP/PAN-awareness handled; the single deliberately-deferred M14 unsafe is implemented behind the existing facade (ipc.rs / kernel main.rs); host tests + on-target marker pass.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "M14 currently rides an inline-scalar payload with the cap moved by handle; the byte-payload path is the only deferred M14 unsafe and the real IPC data channel."
+      },
+      {
+        "subject": "Implement M14 blocking-recv / runnable-on-send scheduler<->IPC integration",
+        "track": "deferred-feature",
+        "priority": "P1",
+        "dod": "recv blocks off the M9 runqueue and send wakes the peer (Step-2 additive layer); demonstrated with the timer armed (not the synchronous disarmed-timer self-test); WouldBlock/PeerClosed semantics preserved; round-trip marker passes.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "M14 shipped FIFO + cap-move + WouldBlock but not the blocking-recv/runnable-on-send wake path a disarmed-timer self-test cannot exercise."
+      },
+      {
+        "subject": "Implement M13 durable VirtioBlkStore BackingStore",
+        "track": "deferred-feature",
+        "priority": "P2",
+        "dod": "A VirtioBlkStore implements the BackingStore trait (mem.rs) behind the existing RamStore seam; flush() actually persists; epoch is the T3 freshness counter across reboot; the 'persistent' memory pillar survives a power cycle. The eventual sole new unsafe is isolated behind the trait.",
+        "depends_on": "Implement M16 virtio transport + tb-vmm host-side device backend",
+        "effort": "L",
+        "rationale": "RamStore is the only impl today and flush() is a no-op, so the persistent-memory pillar has no real block device; needs the virtio ring to land first."
+      },
+      {
+        "subject": "Implement M16 virtio transport + tb-vmm host-side device backend",
+        "track": "deferred-feature",
+        "priority": "P2",
+        "dod": "A tb-hal virtio ring (virtio-pci x86 / virtio-mmio aarch64, vsock-style) with completion IRQ wired through the M8 timer/IRQ path streams over an ordered M14 stream; tb-vmm gains a host-side device backend. In-kernel router stays zero-unsafe; transport unsafe isolated to the ring.",
+        "depends_on": "none",
+        "effort": "L",
+        "rationale": "Shipped M16 is a zero-unsafe in-kernel router + const ROUTES table only; the virtio transport is the shared substrate for both real inference adapters and durable storage."
+      },
+      {
+        "subject": "Implement M16 real inference adapters (Anthropic/OpenAI HTTP + vsock GPU)",
+        "track": "deferred-feature",
+        "priority": "P2",
+        "dod": "Anthropic + OpenAI HTTP backends and a vsock-local GPU/CUDA driver-VM adapter all implement the existing InferBackend trait (infer.rs) and route via the longest-prefix model: scheme (plus the deferred preference-vector scoring if landed); a real model call returns tokens through the M14 stream. MockBackend remains for deterministic tests.",
+        "depends_on": "Implement M16 virtio transport + tb-vmm host-side device backend",
+        "effort": "L",
+        "rationale": "Only a deterministic MockBackend ships today; real adapters are what make the inference pillar functional, and they need the virtio/vsock transport."
+      },
+      {
+        "subject": "Implement the M18 mandatory human-approval gate for EMIT_EXTERNAL/high-impact skills",
+        "track": "deferred-feature",
+        "priority": "P1",
+        "dod": "A merge of a high-impact / EMIT_EXTERNAL skill is structurally blocked pending an explicit human-approval capability; the gate is mandatory in the high-impact class per SELF-IMPROVEMENT-SPEC §8; verified by a test that an evolve-merge of an external-emitting candidate cannot complete without the approval token.",
+        "depends_on": "Prove M11 capability rights-subset / no-confused-deputy invariant with Kani/Verus",
+        "effort": "M",
+        "rationale": "The structural capability boundary holds but the documented mandatory approval gate itself is unbuilt; it rests on the M11 rights-mask being proven sound."
+      },
+      {
+        "subject": "Implement M18 rotating held-out evaluator partition",
+        "track": "deferred-feature",
+        "priority": "P2",
+        "dod": "Multiple held-out evaluators with a rotating never-exposed partition replace the single frozen score_candidate evaluator; the visible metric an agent can optimize against is decoupled from the scoring evaluator (anti-Goodhart). Verified an evolving agent cannot read the active evaluator's parameters.",
+        "depends_on": "Prove M11 capability rights-subset / no-confused-deputy invariant with Kani/Verus",
+        "effort": "M",
+        "rationale": "A single visible metric will be Goodharted; today there is one frozen evaluator in a kernel-only eval_tbl/eval_home."
+      },
+      {
+        "subject": "Implement M15 M_BLOCK_UNMAP + frame reclamation",
+        "track": "deferred-feature",
+        "priority": "P2",
+        "dod": "Method 29 (M_BLOCK_UNMAP) unmaps a block and reclaims its frames without a stale-PTE use-after-free (TLB shootdown / generation check); frames are no longer pinned for the whole kernel-session lifetime. Host + on-target test confirms no stale mapping survives reclaim.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "Frames are currently pinned for the session lifetime and no unmap primitive exists; reclamation was deferred precisely to avoid the stale-PTE UAF hazard."
+      },
+      {
+        "subject": "Replace the BENCHMARKS TABOS placeholder with a measured release boot-ready-cycles number",
+        "track": "perf-bench",
+        "priority": "P1",
+        "dod": "A measured --release boot-ready-cycles figure (in-guest rdtsc / CNTPCT_EL0, from the vmm-boot KVM job) replaces the 'Bucket 1 fast end (target)' / confidence '—' row in BENCHMARKS.md §3, converting target->measured against the Unikraft/MirageOS/OSv peer table.",
+        "depends_on": "none",
+        "effort": "S",
+        "rationale": "The only quotable figure is the release+tb-vmm+KVM in-guest counter; TABOS has strictly less to do than OSv/minimal-Linux and should publish a real number."
+      },
+      {
+        "subject": "Harden bench-boot.sh fast-KVM marker capture (n=4/20 -> reliable)",
+        "track": "perf-bench",
+        "priority": "P2",
+        "dod": "Under fast KVM the FINAL_MARKER ('L2.0: vmxroot OK') is captured on >=18/20 runs (currently ~4/20) via a robust file-poll/settle in bench-boot.sh; n_full reported by the harness is no longer dominated by reader-flake drops.",
+        "depends_on": "Fix M8 LAPIC/timer fault under QEMU-microvm+KVM (F2)",
+        "effort": "S",
+        "rationale": "The whole M0-M18 self-test streams before the reader settles, so the cumulative marker is lost on most fast-KVM runs — a tracked harness-robustness limitation."
+      },
+      {
+        "subject": "Reconcile MILESTONES.md + ARCHITECTURE.md with the M5-M18 chain and L2 track",
+        "track": "docs",
+        "priority": "P1",
+        "dod": "docs/MILESTONES.md and docs/ARCHITECTURE.md describe the completed M5-M18 agent-native chain and the L2 tb-core sovereignty narrative (L0/L1 Firecracker-guest framing updated to include the Type-1 L2 story); ROADMAP-V2 §6 status table stays synchronized with the current L2 row. No remaining text framing the kernel as only a Firecracker/KVM guest.",
+        "depends_on": "none",
+        "effort": "M",
+        "rationale": "v1 docs still describe only the M0-M4 foundation and the four-pillar vision with no L2 tb-core narrative — they have not been reconciled with what shipped."
+      }
+    ]
+  },
+  "mine": {
+    "deferred_hooks": [
+      "M14 variable-length BYTE payload: copy_to_user/copy_from_user (the ONLY M14 unsafe, DELIBERATELY DEFERRED per ipc.rs:21 + kernel/src/main.rs:1566); M14 currently rides an inline-scalar payload with the cap moved by handle. caps.rs:370 reserves args[2..3] for the deferred user buffer; SMAP/PAN-awareness noted as 'later' (ROADMAP-V2 M14).",
+      "M14 scheduler<->IPC round-trip: recv-blocks-off-the-M9-runqueue + send-wakes-peer wake path. The additive Step-2 layer a disarmed-timer self-test cannot exercise (ROADMAP-V2 line 381; ipc.rs). M14 shipped FIFO + cap-move + WouldBlock/PeerClosed but NOT the blocking-recv/runnable-on-send integration.",
+      "M13 durable persistence: virtio-blk BackingStore. RamStore is the only impl now; a future VirtioBlkStore is 'the eventual sole new unsafe' behind the BackingStore trait (mem.rs:184-210, 436). 'Persistent' memory pillar has no block device yet; ROADMAP-V2 risk says decide durability scope. flush() is a no-op, epoch is the T3 freshness seam.",
+      "M16 real inference adapters: Anthropic/OpenAI HTTP backends + vsock-local GPU/CUDA driver-VM adapter, all behind the SAME InferBackend trait (infer.rs:20-39, ROADMAP-V2 line 383). Only a deterministic stateless MockBackend (model:mock/echo, model:local/llama3) ships today.",
+      "M16 virtio transport + host-side device backend: ROADMAP-V2 M16 specced a tb-hal virtio ring (virtio-pci x86 / virtio-mmio aarch64, vsock-style) with completion IRQ wired through M8, streaming tokens over an ordered M14 stream, and 'tb-vmm gains a host-side device backend'. Shipped M16 is ZERO-unsafe in-kernel router + const ROUTES table only; the virtio ring + tb-vmm backend are deferred.",
+      "M16 typed inference DAG + {cost,speed,intelligence} preference vector router scoring: infer.rs:102 reserves a pure-preference binding (router scores by Prefs/Qos) that is deferred; shipped M16 routes by longest-prefix model: scheme only. The DEFERRED dynamic non-scalar path (block/channel-carried payload, infer.rs:39,183) is the only place a future unsafe could appear.",
+      "M15 M_BLOCK_UNMAP (method 29) + frame reclamation: frames are PINNED for the kernel-session lifetime; unmap/reclamation deferred to avoid a stale-PTE use-after-free (blocks.rs:30, ROADMAP-V2 line 382). No unmap primitive exists yet.",
+      "M18 mandatory human-approval gate on high-impact / EMIT_EXTERNAL skills: a documented deferred hook (ROADMAP-V2 line 385, SELF-IMPROVEMENT-SPEC §8 'merge (human-approval hook: mandatory in the high-impact class)'). The structural capability boundary holds without it, but the gate itself is unbuilt.",
+      "M18 rotating never-exposed evaluator partition + MULTIPLE held-out evaluators as default (single visible metric will be Goodharted). Noted follow-up (git log line 172, ROADMAP-V2 line 385, SELF-IMPROVEMENT-SPEC §1). Today one frozen score_candidate evaluator in a kernel-only eval_tbl/eval_home.",
+      "RO-write HARDWARE fault via CR0.WP: rejection is currently the portable cap-layer min(request,rights) cross-check because CR0.WP=0 makes the hardware RO-write-fault unobservable kernel-side on x86_64 (blocks.rs:131-132, lib.rs:1747, kernel/src/main.rs:1818). The genuine hardware RO trap is deferred.",
+      "M11 revocation refinements: per-object epoch revoke ('kill the object in every table at once') + seL4 CDT transitive/recursive subtree revoke. v2 ships per-slot generation revoke with retire-on-overflow; the u64 Handle layout stays forward-compatible and these land 'at M14 with no ABI break' (ROADMAP-V2 M11 as-shipped note) but are NOT built.",
+      "M17 deferred hooks: the armed-window concurrency witness (M17 self-test runs SYNCHRONOUSLY with timer disarmed) + the M9-scheduled BULK consolidation daemon task (kswapd-analog runs on the BULK lane). Documented deferred hooks (ROADMAP-V2 line 384).",
+      "x86_64 SYSCALL/SYSRET fast path: M4/M11/M12 use int 0x80/0x81/0x82 trap gates; the SYSCALL/SYSRET fast path is an explicit deferred optimization (arch/x86_64/user.rs:9).",
+      "aarch64 FDT-driven UART: serial is a hard-coded PL011; the FDT-driven UART for the Firecracker / tb-vmm profile is a TODO (arch/aarch64/serial.rs:92, milestone MV).",
+      "aarch64 from-scratch FDT walker: M6 hard-codes the QEMU virt memory map; a real FDT parser that excludes device/reserved memory is a deferred refinement (git log line 689, ROADMAP-V2 M6 risk fallback).",
+      "aarch64 Lower-EL exception quadrant: only the EL0 Sync (svc) + EL0 IRQ slot are real handlers; the rest of the Lower-EL quadrant (IRQ/FIQ/SError vectoring) remains a fatal stub (arch/aarch64/mod.rs:28, user.rs:56, vectors.rs).",
+      "M13 T4 procedural WRITE band: M_MEM_WRITE_PROC=18 / WRITE_PROCEDURAL was reserved at M11 and kept inert through M13-M17 (CoALA asymmetry) before M18 filled it; the privileged T4 procedural path stays reserved (mem.rs:399, caps.rs).",
+      "SELF-IMPROVEMENT-SPEC unbuilt services (PROPOSAL-tagged): the Curriculum Daemon (§6 failed-task retry queue + task-proposal OS service), the Population Archive + proportional parent-selection + staged eval 10->50->200 (§7), the Skill Compiler / Soar-chunking dependency-trace compilation (§5), the fork->modify->validate->merge default-deny network sandbox (§8), and continuous safety telemetry (Safety Score / Risk Ratio / Leakage Rate, §9 OPEN).",
+      "Token-economy / budget primitives: tb_budget_split delegable+revocable token+dollar capability, OTPM output-budget reservation, lease-renewal economics, cache-locality-vs-fairness aging (OPEN-Q §D P0/P1) — designed, not implemented."
+    ],
+    "l2_chain": [
+      "L2.0 REAL proof execution (the load-bearing gap): VMXON->VMCS->EPT->VMLAUNCH->caught-exit is IMPLEMENTED and builds, but runs only via the GRACEFUL-SKIP path everywhere it has booted (local QEMU 6.2 TCG flatly refuses the VMX CPUID bit even with -cpu max/+vmx; aarch64 prints x86-only n/a). The Proven{exit_reason:10} path has NEVER executed. Needs a KVM + nested-VMX lane (-cpu host,+vmx with L0 kvm_intel nested=1) or bare metal (SOVEREIGNTY-L2-ROADMAP §8a).",
+      "F1 nested-VMX validation strategy: hosted GitHub/Azure CI exposes NO nested VMX (vmx absent from /proc/cpuinfo, kvm_intel not loaded) — confirmed by the l2-nested-vmx.yml probe, which is INFORMATIONAL-ONLY (continue-on-error, can never go red). So L2.0-L2.6's real hardware-virt proofs cannot be validated on hosted CI; they require Arda's bare-metal hardware OR a SELF-HOSTED nested-virt runner. Decide whether a self-hosted/nesting runner is acceptable for the Tier-2 boot DoD (open_decision: NESTED-VMX CI SUBSTRATE).",
+      "L2.1 'ept OK': EPT-violation demand handling — trivial guest touches an UNMAPPED gpa, tb-core catches exit reason 48, reads guest-physical-address, maps a frame, INVEPT, resumes. Proves the R/W/X stage-2 triple is THE isolation primitive replacing /dev/kvm. Risk: EPT-misconfig (49) fatal; INVEPT must follow every edit.",
+      "L2.2 'exits OK': full §4 MUST exit set — CPUID forge, RDMSR/WRMSR via MSR bitmap, CR-access (28), HLT (12), triple-fault teardown (2), VMCALL (18) as the tb-core hypercall entry. Enforce RIP-advance discipline (advance after trapping exits, NEVER after EPT-violations/exceptions); the hidden GPR save/restore must be exact.",
+      "L2.3 'devmodel OK': device-model seam — forward an I/O-exit (reason 30, COM1 0x3f8) to a deprivileged 16550 callback that prints. Defines the tb-core<->device-model EXIT-UPCALL + vcpu_run-returns-exit-reason ABI. Requires the std->no_std re-host of tb-vmm device.rs/serial.rs. THIS is where crates/tb-core is extracted.",
+      "L2.4 'tabos-guest OK': tb-core runs the REAL TABOS M0-M18 kernel as its NESTED guest using the SAME tb-boot v0 register file written into VMCS guest-state + the device-model console; nested markers forwarded out. Confirms ZERO guest changes. Risk: guest RAM sizing/EPT coverage, behavioural parity with KVM on CPUID/MSR leaves.",
+      "L2.5 'sched OK': sovereign scheduling — VMX-preemption-timer (reason 52) drives a tb-core scheduler tick, >1 vCPU time-sliced. TABOS RETAINS Xen-like scheduling ownership (the one divergence from pKVM/KVM). Risk: VMX_MISC preemption-timer scale factor mis-scaling.",
+      "L2.6 'smp OK': SMP / AP bring-up — per-pCPU VMXON + per-vCPU VMCS; run the guest across >1 physical CPU. Closes the OPEN-Q §J P1 'type1-x86-vmx' SMP gap. M0-M18 are SINGLE-CORE; INIT-SIPI-SIPI + APIC AP startup is entirely new platform code with no prior TABOS surface. SMP is flagged the biggest latent v2 debt.",
+      "L2.7 'baremetal OK': UEFI Type-1 launch with NO /dev/kvm — tb-core as an EFI app (uefi-rs), capture memory map + ACPI RSDP + GOP framebuffer, ExitBootServices, install in VMX-root with no host kernel, build EPT, boot TABOS from bare metal. THIS is where full sovereignty lands. Requires the firmware-baremetal platform body (ACPI MADT/MCFG, PCIe ECAM, APIC, timer calibration) — the largest single work stream, 'plausibly bigger than tb-core itself, untracked beyond a P2 note'. Needs a real/nesting-capable machine.",
+      "L2.8 'iommu OK': IOMMU (VT-d first) — DMAR parse (DEFENSIVE on broken BIOS/RMRR per Xen posture: refuse passthrough rather than trust a malformed table) + root/per-bus context tables + second-level tables MIRRORING each guest's EPT + MANDATORY interrupt remapping (VT-d IR). Confine a passed-through device's DMA. Enforce IOMMU-GROUP granularity + ACS-clean topology + FLR-capable functions behind a 'certified hardware' allow-list. aarch64 SMMUv3 mirror later. Lands in tb-hal arch/x86_64/iommu_vtd.rs.",
+      "L2.9 'split-vmm OK': full split-VMM — demote the COMPLETE tb-vmm device model to a deprivileged guest; tb-core forwards ALL MMIO/PIO exits over the hypercall/shared-ring ABI; the trusted core contains ZERO device emulation. Verify the <10K-LOC privileged TCB budget holds (exceeding it = proof the split is wrong). The KVM-facing spine (memory.rs, vmm.rs run loop, arch/boot.rs ioctls) MOVES into tb-core; device.rs/serial.rs/loader.rs re-hosted on no_std talking via hypercall ABI not ioctls.",
+      "tb-core crate extraction: create crates/tb-core as a new no_std bare-metal #![forbid(unsafe_code)] orchestrator (Vcpu struct, exit dispatch, scheduler, EPT/IOMMU policy, hypercall handlers) over tb-hal's silicon-unsafe wrappers — joins the no_std family, NOT a sibling of the std tb-vmm workspace. Prototype VMX inside the kernel crate first, extract at L2.3/L2.4 when the device-model seam forms (open_decision: WHERE L2.0-6 CODE LIVES).",
+      "aarch64 EL2 (nVHE) parallel smoke-track: el2.rs (HCR_EL2/VTCR_EL2/VTTBR_EL2 + EL2 vectors + ERET), stage2.rs (IPA->PA + TLBI VMALLS12E1), smmu.rs (SMMUv3). CI UPSIDE: QEMU virt -machine virtualization=on -cpu cortex-a57|max gives the guest EL2 under PURE TCG (no nested KVM, no /dev/kvm) so an 'el2 OK' world-switch proof runs on ANY stock hosted runner — the CI-friendliest way to de-risk the world-switch SHAPE. PREREQ: build an aarch64 tb-boot PRODUCER + an _tb_start-equivalent EL1 entry (PSTATE=EL1h, X0=TbBootInfo*); today the aarch64 _start consumes x0=FDT and tb-vmm has no aarch64 backend.",
+      "L2 open_decisions to resolve (SOVEREIGNTY-L2-ROADMAP §11): ARCH-FIRST gate (x86 VMX recommended vs aarch64 EL2); device-model re-host shape (NOVA/Bareflank no_std per-guest VMM recommended vs Xen-dom0 tiny control VM); interrupt virtualization (hardware APICv/AVIC + VMX-preemption-timer vs trap-and-emulate LAPIC — affects the <10K budget and how M8's timer source reproduces under tb-core); EPT mapping policy (gpa==hpa identity vs fixed relocated base); VMX-reachability/SKIP probe policy when IA32_FEATURE_CONTROL is BIOS-locked."
+    ],
+    "verification_gaps": [
+      "M11 confused-deputy / rights-subset proof (THE load-bearing gap): M18's entire frozen-boundary safety guarantee REDUCES TO the M11 rights-mask invariant — 'M18 can pass its marker and still be unsafe if a confused-deputy bug in M11 lets an agent reach an evaluator (the DGM node-114 lesson)' (ROADMAP-V2 M18 + §5). caps.rs dispatch is deliberately the largest pure-safe subsystem to be Kani/Verus-targetable, but NO Kani/Verus harness exists in the tree today. This proof (capability-derivation monotonicity / rights-subset / no-cap-in-derivation-closure-to-evaluator) is required, not optional.",
+      "Miri in CI (Tier 0, MANDATORY per LANGUAGE-AND-STANDARDS §5 + OPEN-Q §I DECISION 'Miri+coding-guidelines mandatory'): no Miri job is present in .github/workflows (only ci.yml TCG, vmm-boot.yml KVM, l2-nested-vmx.yml). The dynamic-UB detector the Rust Project itself uses is not yet wired.",
+      "Kani harnesses on every unsafe block + protocol parser (Tier 1, 'weeks' per LANGUAGE-AND-STANDARDS §5): targets named but unbuilt — tb-boot POD/ELF-note validators, EPT/VMCS guest-state encoders, the control-MSR adjust algorithm (the legality gate; the #1 cause of silent VM-entry failure), VT-d DMAR/context builders, the BM25+/ACT-R BLA fixed-point ranking math (M13), eviction/forgetting (M17), and the capability algebra (M11).",
+      "Verus (Tier 2, selective, 'months' — the VeriSMo pattern): capability invariants, scheme-daemon state machines, the WASM sandbox boundary (LANGUAGE-AND-STANDARDS §5.3, KERNEL-FOUNDATION-SPEC §8). Reserve any formal-verification budget for tb-core ONLY (<10K-LOC TCB); do NOT verify tb-vmm.",
+      "The no-heap->heap transition is one-way and correctness-uncovered: allocator math (M5-M7), BM25/BLA ranking (M13), eviction (M17), capability algebra (M11) MUST be covered by host cargo test / Kani because 'the on-target marker only proves LIVENESS, not correctness' (ROADMAP-V2 §5). The cumulative serial markers are liveness gates, not correctness proofs.",
+      "P0 confused-deputy intent gap (OPEN-Q §B, risk R1, B-P0 spec-freeze gate): the rights mask bounds blast-radius but does NOT encode intent — how prompt-injection abusing a legitimate capability is constrained is the sharpest unresolved isolation question; spec freeze is blocked on it; G2 Phase-2 entry requires an independent security review proving R1 mitigation.",
+      "Raw asm is test-covered, NOT formal (KERNEL-FOUNDATION-SPEC §8) — the entire VMX/EL2/IOMMU world-switch + GPR save/restore silicon-unsafe block (the largest single new unsafe surface in the project) has no formal coverage; assurance rests on human review of that block.",
+      "no_std core dependency-base audit (OPEN-Q §I P1): Rust std/core is not yet verified (AWS verify-std initiative ongoing, ~7.5k unsafe functions); the minimal trusted crate set the kernel/nanoprocess-runtime will trust is undecided.",
+      "L2.8 IOMMU DMA-isolation is unprovable in emulation: emulated VT-d (QEMU -device intel-iommu) exercises only the DMAR/root/context/IR table-PROGRAMMING logic; the actual DMA-isolation guarantee can ONLY be finally validated on real ACS-clean hardware — a coverage hole between CI unit/integration tests and real silicon that needs a separate real-HW gate.",
+      "seL4 MCS verification-status tracking (OPEN-Q §I/A P1): whether the seL4 formal approach is realistic for the handle layer; MCS is still outside proof-coverage and must be tracked."
+    ],
+    "portability_bugs": [
+      "F2 (root-cause portability bug): the kernel FAULTS at M8 under QEMU -M microvm -accel kvm -cpu host — boots M0-M7 clean then traps (cause=0x0 fault_addr=0x0 pc=0x1311ff, a kernel PC during the M8 LAPIC/timer bring-up). It boots clean under QEMU/TCG (ci.yml) AND tb-vmm/KVM (vmm-boot.yml), so this untested config was never caught. Suspect surface: the M8 LAPIC UC device window mapped at PML4[3] / VA 0x0000_0180_0000_0000 -> PA 0xFEE0_0000 (arch/x86_64/timer.rs) and the IA32_APIC_BASE/SVR/LVT bring-up, which behaves differently under the QEMU microvm in-kernel-irqchip+KVM path than under TCG or tb-vmm's KVM LAPIC. This is the root cause of the user's bench full=NA on QEMU-microvm+KVM and is an echo of the old M6 ID_LO PVH-vs-TbBootInfo allocator-divergence gap.",
+      "bench-boot.sh full=NA harness lane: BENCHMARKS.md §2 explicitly flags that bench-boot.sh's full=NA under qemu -M microvm -accel kvm is an UNTESTED config — CI exercises ci (TCG) and vmm-boot (tb-vmm/KVM, which DOES reach M18) but the QEMU-microvm+KVM path is NOT yet a CI lane; treat its full as unverified. (The full=NA capture/reader-settle fix landed at git line 607, but the lane itself stays untested — and F2 is why it actually fails, not just a reader flake.) Make QEMU-microvm+KVM a CI lane once F2 is fixed.",
+      "tb-vmm has NO aarch64 backend: tb-vmm/src/arch contains only x86_64 (mod.rs + x86_64/). The aarch64 kernel _start consumes x0=FDT/DTB (the QEMU virt contract), NOT a TbBootInfo, and there is no _tb_start-equivalent EL1 entry. This blocks the L1 aarch64 path AND gates the ARM L2/EL2 track (which otherwise has free TCG-EL2 CI). Build an aarch64 tb-boot PRODUCER + an EL1 entry (PSTATE=EL1h, X0=TbBootInfo*).",
+      "M6 boot-map divergence (the original of the F2 echo): x86_64 must yield the SAME frame allocator from BOTH the PVH boot path AND the TbBootInfo path (may force a tb-boot v0->v1 bump); aarch64 currently HARD-CODES the QEMU virt memory map because the from-scratch FDT parser that must exclude device/reserved memory is deferred (ROADMAP-V2 §5 + git line 689). Divergent boot substrates are the recurring source of untested-config faults.",
+      "x86_64 L2.0 can never exercise the real path locally: this repo's QEMU 6.2 (Debian) under TCG flatly REFUSES the VMX CPUID bit even with -cpu max / -cpu qemu64,+vmx ('TCG doesn't support requested feature: CPUID.01H:ECX.vmx [bit 5]'), so the probe returns Unavailable in EVERY local config and no VMX instruction ever executes. Both arches boot green via skip — proving nothing about the world switch.",
+      "SMP single-vCPU debt threads through ALL of v2: 'independently scheduled' means preemptive time-multiplex on ONE core (interrupt-masked critical sections, not real locks). SMP is the biggest latent debt; AP startup (INIT-SIPI-SIPI, APIC) is new platform code with no prior TABOS surface and a Type-1 needs per-pCPU VMXON + per-vCPU VMCS (L2.6, OPEN-Q §J P1).",
+      "aarch64 serial portability: serial is hard-coded PL011; the FDT-driven UART for the Firecracker / tb-vmm profile is an open TODO (arch/aarch64/serial.rs:92) — a different VMM/board could present a different UART base/type the kernel cannot discover.",
+      "Firmware-floor honesty (not a bug but a portability/scope ceiling): even a correct Type-1 at ring -1/EL2 sits BELOW SMM (ring -2), Intel ME / AMD PSP, and GPU firmware; 'full sovereignty' at L2 is always relative to that floor — do not over-promise a zero-Linux full-speed local-inference endpoint (the GPU/CUDA driver-VM tax is permanent)."
+    ],
+    "perf_bench": [
+      "F2's fix UNLOCKS the QEMU-microvm+KVM bench full number: today bench-boot.sh reports full=NA on qemu -M microvm -accel kvm because the kernel traps at M8 before reaching the FINAL_MARKER ('L2.0: vmxroot OK'). Fix F2 -> the marker streams -> full becomes a real number AND QEMU-microvm+KVM becomes a third comparable boot lane alongside ci(TCG) and vmm-boot(tb-vmm/KVM).",
+      "The ONLY quotable boot figures are --release builds under tb-vmm + KVM, timed by the in-guest cycle counter (rdtsc x86_64 / CNTPCT_EL0 aarch64) — standing rule 2026-06-07 (BENCHMARKS §5). Never a debug build, never a QEMU wall-clock (which conflates unoptimized code + QEMU's heavy device-model VMM floor + host scheduling noise). boot-ready-cycles is emitted by the vmm-boot KVM CI job on every push.",
+      "boot-ready cross-system comparison table is incomplete: BENCHMARKS §3 Bucket 1 lists Unikraft ~1ms / MirageOS 1-2ms / LightVM ~2ms / OSv 4-5ms / minimal Linux 6ms / Hermitux 30-32ms but the TABOS row is 'Bucket 1 fast end (target)' with confidence '—' — TABOS needs to land a MEASURED release boot-ready-cycles number on that chart (it has strictly less to do than OSv/minimal-Linux), converting target->measured.",
+      "Second clock missing: TABOS today boots a self-test then HALTS — no agent-ready state — so the only honest metric is VMM-spawn->serial-marker (KVM). The guest-first-instruction -> agent-ready second clock is owed once an agent-ready state exists (BENCHMARKS §2/§5).",
+      "Harness robustness: under fast KVM the whole M0-M18 self-test streams out before the reader settles, so the final cumulative marker is captured on only n=4/20 fast-KVM runs (BENCHMARKS §2 + git line 730) — a tracked harness-robustness limitation, not a kernel issue; needs a more robust capture (the file-poll fix at bench-boot.sh:75-93 partially addresses it).",
+      "boot-to-first-output is VMM/host-spawn-bound, not guest-bound: the CI KVM run (~47ms) is SLOWER than local TCG (~26-28ms) purely from QEMU process startup + nested-KVM overhead on a contended shared runner — exactly the methodology trap §1 warns about; only the in-guest cycle counter is VMM-independent.",
+      "Memory/economy perf claims literature-proven, NOT measured by TABOS (PROCESS §3.4): p95 retrieval <200ms (Mem0), quota efficiency >=3x effective work (arithmetic only, not implemented), sleep-time payback >=2x compute reduction (Letta ~5x). An OS-lifetime memory benchmark must be DESIGNED (OPEN-Q §C P1: DMR saturated, DialSim F1<4).",
+      "<50ms spawn validation-gate (OPEN-Q §A GATE): bound to the M0/M3 DoD; Hermit pure-Rust unikernel boots on Firecracker as precedent; measure in Phase 1, fall back to Firecracker+minimal-guest if it falls short. E2B latency claim (80ms vs <200ms, OPEN-Q §F P2) needs an independent benchmark to fix success-criterion #1.",
+      "L2.8 IOMMU two-tier perf/coverage: emulated intel-iommu exercises table-programming in CI; the DMA-isolation guarantee needs a real ACS-clean-hardware gate (emulation cannot prove isolation)."
+    ],
+    "docs_debt": [
+      "v1 docs do not reflect v2/L2: docs/MILESTONES.md (10118 bytes) and docs/ARCHITECTURE.md (19719 bytes) still describe the M0-M4 v1 foundation + the four-pillar vision and the Firecracker/KVM L0 substrate; they have NOT been reconciled with the completed M5-M18 agent-native chain or the started L2 sovereignty track. ARCHITECTURE.md still frames the kernel as a Firecracker/KVM guest (L0/L1) with no L2 tb-core narrative.",
+      "Firmware-baremetal gap is 'untracked beyond a P2 note' (OPEN-Q §J P2, SOVEREIGNTY-L2-ROADMAP risk + L2.7): the UEFI(uefi-rs)+ACPI(MADT/DMAR/MCFG)+PCIe ECAM+APIC/GIC+SMMU+timer-calibration platform body — 'plausibly bigger than tb-core itself' — has no tracked plan; it gates L2.7 and needs its own milestone breakdown.",
+      "BENCHMARKS.md TABOS row is unquantified: the Bucket-1 peer-group table shows TABOS as 'target' / confidence '—'; once a release+tb-vmm+KVM boot-ready-cycles number exists it must replace the placeholder (BENCHMARKS §3).",
+      "60 OPEN-QUESTIONS unresolved (P0x7, P1x32, P2x21 as of 2026-06-07); spec freeze is NOT declared before the 7 P0s close (confused-deputy binding, capability granularity, multi-agent shared-memory conflict semantics, graph-tier default, cache-locality-vs-fairness, kernel-vs-userspace KV boundary, introspection-vs-hidden-evaluator boundary).",
+      "Naming debt: TABOS is a CODE NAME (Arda 2026-06-06); the final name DECISION + namespace reservation are deliberately deferred, the formal trademark search (Nice 9/42, USPTO/EUIPO/TURKPATENT — a human/attorney job) is owed, and naming-tabos.json's web column is NOT SWEPT (full Google/Bing sweep mandatory before announcement); tabos.org/tabos.com owner-confusion monitoring outstanding (OPEN-Q §G).",
+      "Persona validation owed (OPEN-Q §H P1, PROCESS §4): the draft personas/JTBDs were produced at the desk, NOT validated with real agent developers/operators — a Design-Thinking Empathize gap that is a G0 gate criterion. SUCCESS-MEASURES.md (the Phase-1 R/Y/G gate-tracking tooling for VISION §7 measures) is not yet created.",
+      "AIOS syscall catalog (Table 2) must be verified from the agiresearch/AIOS source tree BEFORE the tb_ syscall naming freezes (OPEN-Q §A P1) — the table is embedded as an image in the HTML, an open data item.",
+      "L2 §11 open_decisions are documented but unresolved and gate opening the tb-hal vmx/ tree: arch-first (x86 VMX vs aarch64 EL2), code-locus (kernel self-test vs crates/tb-core day one), device-model re-host shape, nested-VMX CI substrate, aarch64 tb-boot handoff, interrupt virtualization, EPT mapping policy, VMX-reachability probe policy.",
+      "ROADMAP-V2 §6 status table is long/truncated past line 370 and must stay synchronized as L2.1+ land; the L2 row currently reads 'track STARTED / L2.0 implemented & boots green (real proof pending a KVM+nested lane)'. EU CRA timeline (Sep 2026 reporting, Dec 2027 CE) + SBOM/SLSA/in-toto provenance pipeline setup is an open scheduling item (OPEN-Q §I P2)."
+    ],
+    "sources_scanned": [
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\ROADMAP-V2.md (full M5-M18 milestone bodies + §4 sequencing + §5 risks + §6 status table incl. the L2 row)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\SOVEREIGNTY-L2-ROADMAP.md (full: §2 split-VMM, §3 TCB boundary, §4 VMX bring-up, §5 EL2, §6 IOMMU, §7 L2.0-L2.9 chain table, §8/§8a L2.0 design+impl status, §9 test strategy, §10 new unsafe, §11 open_decisions, §12 risks)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\SOVEREIGNTY-ROADMAP.md (L0-L3 ladder, L3 descoped, IOMMU §5, GPU tax §6, firmware floor §8, gap closure §9)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\OPEN-QUESTIONS.md (full A-J P0/P1/P2 tables incl. §J sovereignty gaps; 60-item count)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\SELF-IMPROVEMENT-SPEC.md (full: three-laws, frozen/evolving split, evolution API, reflection, sleep-time, skill tier T4, curriculum daemon, archive, self-mod op, telemetry)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\BENCHMARKS.md (full: boot-metric classes, harness, full=NA caveat, in-guest counters, Bucket 1/2/3 tables, honesty guardrails §5, reproduce §6)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\LANGUAGE-AND-STANDARDS.md (grep: §5 tiered verification Miri/Kani/Verus/VeriSMo)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\docs\\KERNEL-FOUNDATION-SPEC.md, ARCHITECTURE.md, MEMORY-SPEC.md, MILESTONES.md, PROCESS.md, AGENTS-SPEC.md (grep hits for formal/proof/deferred/human-approval/QoS/personas/success-measures)",
+      "git log -n 40..60 --format='%h %s%n%b' (commit-message mining for defer/scope/follow-up/future/later/TODO/reserved/stub/not-yet/pending; incl. the full=NA fix, the l2-nested-vmx job add, the M8 cycle-counter+BENCHMARKS commit, M5-M18 milestone commits)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\caps.rs (deferred user-buffer args[2..3], M11 stubs, reserved bands, RO-write portable cross-check)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\mem.rs (BackingStore trait, RamStore, virtio-blk deferred, M17 link stub, T4)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\ipc.rs (copy_to/from_user deferred, send-wakes-peer deferred)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\blocks.rs (M_BLOCK_UNMAP/reclamation deferred, CR0.WP RO-write note)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\infer.rs (Anthropic/OpenAI+vsock adapters deferred behind InferBackend, preference-vector router deferred, dynamic non-scalar path)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\heap.rs + lib.rs (deferred M9+ QoS hook, TTBR1-split deferred, copy_to_user facade, RO-write cross-check)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\arch\\x86_64\\timer.rs (M8 LAPIC UC window PML4[3]->0xFEE0_0000, IA32_APIC_BASE/SVR/LVT bring-up — the F2 fault surface), user.rs (SYSCALL/SYSRET deferred), mod.rs, idt.rs, vmx/ subtree listing",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\crates\\tb-hal\\src\\arch\\aarch64\\mod.rs/user.rs/vectors.rs/serial.rs (Lower-EL stub quadrant, FDT-driven UART TODO)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\kernel\\src\\main.rs (M14 copy_to_user deferred, RO rejection cap-layer note)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\tb-vmm\\src\\ (arch/ has x86_64 ONLY — no aarch64 backend; device.rs/serial.rs/loader.rs/memory.rs/vmm.rs the L2.9 demote targets; error.rs Unimplemented variant)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\.github\\workflows\\l2-nested-vmx.yml (informational-only continue-on-error nested-VMX probe; confirms hosted-runner vmx absence path), ci.yml, vmm-boot.yml (listed)",
+      "C:\\Users\\Arda\\workspaces\\@cogitave\\tabos\\scripts\\bench-boot.sh (FINAL_MARKER='L2.0: vmxroot OK', -M microvm, full=NA capture/reader logic), run-x86_64.sh / run-aarch64.sh / run-vmm-x86_64.sh (listed)"
+    ]
+  }
+}
