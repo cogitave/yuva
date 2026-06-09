@@ -239,6 +239,9 @@ jobs:
           fi
 
           CPU=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed "s/^ *//")
+          # Also echo the headline numbers to STDOUT (the step summary is not in
+          # the plain run log), so the result is visible from `gh run view --log`.
+          echo "BENCH-RESULT | axisA tb-vmm-median=$(ms $TV_MED)ms p99=$(ms $TV_P99)ms fc-median=$(ms $FC_MED)ms p99=$(ms $FC_P99)ms ratio=$RATIO (n=$TV_N) | axisB boot-ready-cycles=$BRC_DEC tsc-base-hz=$TSC_DEC B_MS=$B_MS"
           {
             echo "## TABOS vs Firecracker boot bench (same KVM runner)"
             echo ""
