@@ -91,42 +91,62 @@ pub enum InferError {
 }
 
 // ===========================================================================
-// The `model:` scheme grammar -- safe, panic-free parser + longest-prefix router.
+// The `model:` scheme grammar + longest-prefix router. The PURE string logic --
+// the `model:<provider>/<path>` parser and the longest-prefix-match INDEX
+// decision -- lives in the host-verifiable `tb_encode::route`, where the Tier-0
+// Miri lane EXECUTES it over adversarial vectors (panic-freedom + correctness +
+// zero UB on untrusted input). `resolve` keeps OWNERSHIP of the `&'static dyn`
+// ROUTES table and DELEGATES the string matching to those proven helpers.
 // ===========================================================================
 
-/// `model:provider/path[@version]` -> `(provider, path)`. Returns `None` for a
-/// non-`model:` scheme (so `memory:x` / `block:y` cleanly reject) -- so a bad
+/// `model:<provider>/<path>[@version]` -> `(provider, path)`. Re-exported from
+/// [`tb_encode::route`] so `tb_hal::infer::parse_scheme` keeps resolving for
+/// existing callers (the M16 self-test) -- the byte-identical, panic-free pure
+/// parser now lives in the host-verifiable crate. Returns `None` for a
+/// non-`model:` scheme (so `memory:x` / `block:y` cleanly reject), so a bad
 /// scheme can never crash the kernel. NEVER panics.
-///
-/// A bare `model:auto` / `model:default` (no `/`) parses to `(provider, "")` --
-/// the reserved pure-preference binding (router scores by Prefs/Qos; deferred).
-pub fn parse_scheme(uri: &str) -> Option<(&str, &str)> {
-    let rest = uri.strip_prefix("model:")?;
-    match rest.split_once('/') {
-        Some((p, path)) if !p.is_empty() && !path.is_empty() => Some((p, path)),
-        None if !rest.is_empty() => Some((rest, "")),
-        _ => None,
-    }
-}
+pub use tb_encode::route::parse_scheme;
 
-/// Resolve a `model:` URI to a REGISTERED backend. `None` => unknown scheme =>
-/// a clean `BadCap` at the facade (NEVER a panic). The provider segment is the
-/// registry key; no global root, no `..`, so a prompt-injection path-traversal
-/// is unrepresentable.
+/// Upper bound on the route-key scratch buffer in [`resolve`]. The in-kernel
+/// [`ROUTES`] table is far smaller; this is a generous, panic-safe cap (the loop
+/// is clamped to it and a `debug_assert!` flags an overflow).
+const MAX_ROUTES: usize = 16;
+
+/// Resolve a `model:` URI to a REGISTERED backend via a LONGEST-PREFIX match
+/// over the provider segment. `None` => unknown scheme => a clean `BadCap` at
+/// the facade (NEVER a panic). The provider segment is the registry key; no
+/// global root, no `..`, so a prompt-injection path-traversal is unrepresentable
+/// (the path rides opaquely in the matched-away remainder).
 ///
-/// Exact-scheme match suffices for the marker; production refines this to a
-/// longest-prefix match over the provider segment.
+/// `resolve` owns the immutable `&'static dyn` [`ROUTES`] table; it DELEGATES the
+/// pure routing decision to [`tb_encode::route::longest_prefix_index`] (proven
+/// panic-free + correct under Miri), keyed on each route's OWN provider segment
+/// so the keys can never drift from the table (one source of truth: the
+/// backend's `scheme()` literal). This fulfils the longest-prefix-over-provider
+/// routing the marker-era exact match deferred.
 pub fn resolve(uri: &str) -> Option<(ModelId, &'static dyn InferBackend)> {
-    // Reject a non-`model:` scheme cleanly first.
-    parse_scheme(uri)?;
+    // Split the untrusted URI; a non-`model:` scheme rejects cleanly here.
+    let (provider, _path) = parse_scheme(uri)?;
+    // Materialize each route's PROVIDER key (derived from its own scheme literal,
+    // so the keys can never drift from the table) into a fixed stack slice, in
+    // lockstep with ROUTES, then delegate the longest-prefix routing decision.
+    let n = ROUTES.len().min(MAX_ROUTES);
+    debug_assert!(ROUTES.len() <= MAX_ROUTES, "route table exceeds the key buffer");
+    let mut keys: [&str; MAX_ROUTES] = [""; MAX_ROUTES];
     let mut i = 0;
-    while i < ROUTES.len() {
-        if ROUTES[i].scheme() == uri {
-            return Some((ModelId(i as u32), ROUTES[i]));
-        }
+    while i < n {
+        // Each registered scheme is a well-formed `model:<provider>/...`, so its
+        // provider IS the prefix key. A (currently unreachable) malformed entry
+        // falls back to its full scheme literal -- always NON-EMPTY, so it can
+        // never degrade into an empty catch-all that swallows unknown schemes.
+        keys[i] = match parse_scheme(ROUTES[i].scheme()) {
+            Some((p, _)) => p,
+            None => ROUTES[i].scheme(),
+        };
         i += 1;
     }
-    None
+    let idx = tb_encode::route::longest_prefix_index(provider, &keys[..n])?;
+    Some((ModelId(idx as u32), ROUTES[idx]))
 }
 
 // ===========================================================================
@@ -141,7 +161,8 @@ pub fn resolve(uri: &str) -> Option<(ModelId, &'static dyn InferBackend)> {
 /// Object-safe (no generic methods) so `&'static dyn InferBackend` is legal in
 /// `no_std` + `alloc`; `Sync` so a `static` instance is shareable single-core.
 pub trait InferBackend: Sync {
-    /// This backend's longest-prefix routing key (its `model:` scheme literal).
+    /// This backend's `model:` scheme literal; its provider segment is the
+    /// longest-prefix routing key consumed by [`resolve`].
     fn scheme(&self) -> &'static str;
     /// Run ONE synchronous, deterministic inference at M16.
     fn infer(&self, req: &InferRequest) -> InferResponse;

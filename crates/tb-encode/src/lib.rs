@@ -33,6 +33,10 @@
 //!  * [`ipc_frame`] -- the mature 16-byte on-wire IPC [`MessageFrame`] codec
 //!    (`encode`/`decode`, fail-closed on malformed input) and a fixed-capacity
 //!    [`ipc_frame::BoundedRing`] with FIFO + capacity invariants.
+//!  * [`route`] -- the M16 `model:`-scheme routing helpers lifted out of
+//!    `tb-hal::infer`: the panic-free `model:<provider>/<path>` grammar parser
+//!    (`route::parse_scheme`) and the longest-prefix-match routing decision
+//!    (`route::longest_prefix_index`) over the in-kernel route-key literals.
 //!
 //! ## Verification
 //!
@@ -44,6 +48,7 @@
 
 pub mod ipc_frame;
 pub mod paging;
+pub mod route;
 pub mod vmx;
 
 // The Kani proof harnesses. Gated on `cfg(kani)` (set ONLY under `cargo kani`)
