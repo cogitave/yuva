@@ -26,12 +26,30 @@ PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
 MARKER="M19: virtio OK"
-TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
+# DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
+# hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
+# whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
+# ceiling raced that cold start and produced intermittent rc=124 timeouts where
+# the LAST serial line flushed was whatever marker had printed (on two re-runs
+# of the aL2.4 branch that happened to be "frame-test: parsing boot memory map",
+# which looked like an M6 hang but was a startup-race artifact -- aL2.4 boots to
+# M19 deterministically under qemu-6.2 AND qemu-8.2.2 here). Two changes make the
+# boot wall-time deterministic so it can NEVER race the ceiling again:
+#   * default the ceiling to 90s (CI may still override via QEMU_TIMEOUT);
+#   * run TCG single-threaded (-accel tcg,thread=single) so the cold-start cost
+#     is stable run-to-run instead of varying with runner core contention.
+TIMEOUT_SECS="${QEMU_TIMEOUT:-90}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then
     echo "[run-aarch64] error: '${QEMU}' not found on PATH" >&2
     exit 127
 fi
+
+# Print the exact QEMU build FIRST (fix_plan §B): the hosted ubuntu-24.04 runner
+# image may ship a different 8.2.x point-release than the apt snapshot tested
+# locally, and the version line is the one variable that pins which build a
+# future CI log came from. Cheap, always emitted, never gates the verdict.
+echo "[run-aarch64] qemu: $(${QEMU} --version | head -1)"
 
 # -M virt,virtualization=on,gic-version=2 : QEMU AArch64 'virt'; virtualization=on
 #                    exposes EL2 so the vCPU enters at EL2h (the L2.0 nVHE EL2
@@ -41,6 +59,14 @@ fi
 #                    virtualization=on, guest entry = EL2h, MMU off, DAIF masked,
 #                    x0=FDT; without it the vCPU enters at EL1h (green skip path).
 # -m 128M          : virt RAM = 0x4000_0000..0x4800_0000; image links at +512 KiB
+# -accel tcg,thread=single : DETERMINISM (fix_plan §A.1). Pin TCG to ONE
+#                    translation thread so the cold-start-to-rust_main wall-time
+#                    is stable run-to-run on a contended runner (no MTTCG worker
+#                    scheduling jitter). The aarch64 guest is single-vCPU anyway,
+#                    so this costs no boot throughput; it only removes the timing
+#                    variance that let a tight ceiling race the boot and emit a
+#                    spurious rc=124 mid-chain. Verified to still reach M19 under
+#                    both qemu-6.2 and qemu-8.2.2.
 # -nographic       : headless; PL011 -> this terminal's stdio (see note above)
 # -no-reboot       : do not loop on a fatal guest event
 # -kernel <ELF>    : load PT_LOADs at p_paddr, jump to e_entry (= _start)
@@ -50,6 +76,7 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -M virt,virtualization=on,gic-version=2 \
         -cpu cortex-a72 \
         -m 128M \
+        -accel tcg,thread=single \
         -nographic \
         -no-reboot \
         -nic none \
@@ -63,6 +90,17 @@ set -e
 printf '%s\n' "${OUTPUT}"
 
 if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
+    # M4: the user/ring (EL0 drop -> svc -> trap-back) proof must print its OK
+    # marker, NOT "M4: FAIL". M4 aliases ONE 4 KiB page over the EL0 stub; a stub
+    # that straddles a 4 KiB boundary takes an EL0 instruction abort and prints
+    # "M4: FAIL esr=0x82...0f" while the boot still parks in wfi at M19 -- so the
+    # M19 grep alone would PASS a broken M4. The stub is now `.balign 64`-pinned
+    # so it can't straddle, but assert M4 here too so any future layout drift
+    # that re-breaks it fails CI loudly instead of silently riding through.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M4: user/ring OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M4: user/ring OK' missing (M4 user/ring regressed)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -97,13 +135,24 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.3: el2-trap OK' missing" >&2
         exit 1
     fi
+    # aL2.4: the EL2 nested-guest (GENUINE two-stage) proof must ALSO print (the
+    # monitor arms the GiB0+GiB1 identity stage-2, the EL1 guest BUILDS + ENABLES
+    # its OWN stage-1 under our stage-2, stores+reads back a sentinel through a VA
+    # with no flat meaning -- a genuine VA->IPA->PA two-stage walk -- takes its OWN
+    # EL1 brk trap, and the monitor tears stage-2 down + restores the kernel's
+    # stage-1 sysregs before unwinding). Assert it directly so the el2 -> stage2 ->
+    # el2-exits -> el2-trap -> el2-guest -> virtio order is fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.4: el2-guest OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.4: el2-guest OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 
