@@ -299,9 +299,27 @@ jobs:
             fi
           done
           echo "Axis-A FC samples: $(wc -l < fc-axisA-ns.txt)"
-          # Surface the first FC log once for debugging (PVH boot must reach the
-          # nano-guest's serial byte; if empty, FC rejected the PVH note).
-          echo "--- first FC Axis-A log ---"; head -c 200 fc-axisA-out-1.log 2>/dev/null || true; echo
+          # ---- DIAGNOSTIC (temporary): the Axis-A FC numbers were invalid (FC
+          # emitted "Failed to build MicroVM from Json" — it never booted the
+          # nano-guest; the poll caught FC's own stdout log, not the guest's
+          # sentinel). Dump the COMPLETE error + a CONTROL booting the FULL
+          # release kernel so we learn whether the failure is nano-guest-specific
+          # or TABOS-PVH-wide. Removed once FC boots the nano-guest. ----
+          echo "=== FULL first FC Axis-A nano-guest log (complete config-build error) ==="
+          cat fc-axisA-out-1.log 2>/dev/null || true; echo
+          echo "=== nano-guest ELF program headers + notes FC was given ==="
+          { readelf -ln nano-guest.elf || llvm-readelf -ln nano-guest.elf; } 2>/dev/null | head -50 || true
+          echo "=== CONTROL: can FC boot the FULL release tabos-kernel via PVH? ==="
+          KREL="target/x86_64-tabos-none/release/tabos-kernel"
+          if [ -f "$KREL" ]; then
+            sed "s#NANO_GUEST_ELF_PATH#$(pwd)/${KREL}#" bench/nano-guest/fc-axisA-config.json > fc-ctl-config.json
+            ( timeout 15 firecracker --no-api --config-file "$(pwd)/fc-ctl-config.json" > fc-ctl.log 2>&1 & echo $! > fc-ctl.pid )
+            sleep 4; kill -9 "$(cat fc-ctl.pid)" 2>/dev/null || true
+            echo "--- full-kernel FC control log (first 1800 bytes) ---"
+            head -c 1800 fc-ctl.log 2>/dev/null || true; echo
+          else
+            echo "(release kernel not found at $KREL)"
+          fi
 
       # ----------------------------------------------------------------------
       # Emit the NEW Axis-A table (common nano-guest) + the AXISA-RESULT line,
