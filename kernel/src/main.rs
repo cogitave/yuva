@@ -3390,6 +3390,41 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- L2.2: EL2 exit-dispatch table -- the aarch64 analog of the x86
+    // arm_exit_handlers[] table, the THIRD L2 rung built ON TOP of L2.0's
+    // resident EL2 monitor. Inside a short self-test window the monitor routes
+    // EVERY guest exit through the PURE, Kani-proven classify_exit() table, then
+    // fires TWO distinct arms: a trapped WFx (HCR_EL2.TWI|TWE) it RESUMES one
+    // instruction past, and an FP/SIMD access (CPTR_EL2.TFP, EC 0x07, NOT in the
+    // MUST set) that hits the fail-closed inject-UNDEF DEFAULT -- software-
+    // synthesized exactly as KVM's enter_exception64 and caught by the guest's
+    // OWN EL1 vector, which echoes a magic. The window is torn down (HCR/CPTR
+    // back to baseline) BEFORE the monitor unwinds, so the kernel resumes here
+    // cleanly (zero regression). ALL the new asm/unsafe is confined to tb-hal's
+    // arch/aarch64/{exits,exits_vectors,el2,el2_vectors}.rs, so this crate stays
+    // unsafe-free; the kernel only branches on ExitsProof. On x86_64 there is no
+    // EL2, so it reports the n/a path. DoD: "L2.2: el2-exits OK".
+    match tb_hal::el2_exits_selftest() {
+        tb_hal::ExitsProof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.2: el2-exits OK\n"); // <-- the L2.2 aarch64 DoD marker
+        }
+        tb_hal::ExitsProof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no window armed.
+            tb_hal::serial_write_str("L2.2: el2-exits OK (no EL2, skipped)\n");
+        }
+        tb_hal::ExitsProof::NotApplicable => {
+            // x86_64: no EL2 -- the vmxroot block above is this arch's rung.
+            tb_hal::serial_write_str("L2.2: el2-exits OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::ExitsProof::Faulted { code } => {
+            // Booted at EL2 but the exit round-trip faulted -- surfaced honestly,
+            // with NO 'el2-exits OK' substring, so the run-script grep fails (red).
+            tb_hal::serial_write_str("L2.2: el2-exits FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     // --- M19: poll-based virtio-mmio virtio-rng -- the kernel's FIRST real
     // device I/O, the new cumulative boot tail. A MODERN (Version=2) virtio-rng
     // (DeviceID 4) driven over ONE virtqueue: a hard-coded slot scan, the

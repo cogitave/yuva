@@ -27,8 +27,8 @@
 //! would turn it FAILED, so the suite is provably non-vacuous.
 
 use crate::el2_trap::{
-    esr_dfsc, esr_ec, esr_is_translation_fault, esr_s1ptw, esr_wnr, hpfar_fault_ipa, EC_DABT_LOW,
-    EC_HVC64, EC_IABT_LOW,
+    classify_exit, esr_dfsc, esr_ec, esr_inject_undef, esr_is_translation_fault, esr_s1ptw,
+    esr_wnr, hpfar_fault_ipa, ExitClass, EC_DABT_LOW, EC_HVC64, EC_IABT_LOW,
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
@@ -574,4 +574,45 @@ fn kani_hpfar_fault_ipa() {
     kani::assume(hpfar < (1u64 << 44));
     let ipa = hpfar_fault_ipa(hpfar);
     assert!(ipa < (1u64 << 52));
+}
+
+// ===========================================================================
+// L2.2: the aarch64 ESR_EL2.EC exit-dispatch classifier (`el2_trap::classify_exit`)
+// + the injected-UNDEF syndrome encoder. The ARM analog of x86 `arm_exit_handlers[]`.
+// ===========================================================================
+
+/// `classify_exit` is TOTAL: for EVERY u64 ESR it returns a defined `ExitClass`
+/// without panic; the six MUST-handle ECs map to their NAMED arms; and EVERY
+/// other EC (all 58 remaining) maps to `Undef` (the fail-closed inject-UNDEF
+/// default) -- the `arm_exit_handlers[0..EC_MAX]=kvm_handle_unknown_ec`
+/// discipline, machine-checked. Also pins the injected-syndrome encoder.
+///
+/// NEGATIVE CONTROL #1 (default non-vacuity): if `classify_exit` lost its
+/// `_ => Undef` arm it would not COMPILE; if a MUST arm were mis-mapped (e.g.
+/// `EC_SMC64 => Undef`) the `0x17 => Smc` assertion below FAILS. NEGATIVE
+/// CONTROL #2 (a real non-MUST EC really defaults): the explicit `ec == 0x07`
+/// (FP_ASIMD, the self-test's default trigger) is asserted `Undef`; routing it
+/// to a named arm reddens the lane. NEGATIVE CONTROL #3 (encoder): placing IL at
+/// bit26 instead of bit25 makes `esr_ec(esr_inject_undef()) == 0x00` FAIL.
+#[kani::proof]
+fn kani_exit_classifier_total() {
+    let esr: u64 = kani::any();
+    let class = classify_exit(esr); // total: returns for every input
+    let ec = esr_ec(esr); // proven < 64 by kani_esr_decode_total
+    match ec {
+        0x24 | 0x20 => assert_eq!(class, ExitClass::StageTwoAbort),
+        0x16 => assert_eq!(class, ExitClass::Hvc),
+        0x17 => assert_eq!(class, ExitClass::Smc),
+        0x18 => assert_eq!(class, ExitClass::Sys64),
+        0x01 => assert_eq!(class, ExitClass::Wfx),
+        _ => assert_eq!(class, ExitClass::Undef), // the fail-closed default
+    }
+    // Concrete anchors (non-vacuity + the real negative control on EC 0x07):
+    assert_eq!(classify_exit(0x07 << 26), ExitClass::Undef); // FP_ASIMD -> default
+    assert_eq!(classify_exit(0x00 << 26), ExitClass::Undef); // UNKNOWN  -> default
+    assert_ne!(classify_exit(0x16 << 26), ExitClass::Undef); // HVC64 is NAMED
+
+    // The injected UNKNOWN syndrome decodes back to EC=0x00 with IL set.
+    assert_eq!(esr_inject_undef(), (0x00u64 << 26) | (1u64 << 25));
+    assert_eq!(esr_ec(esr_inject_undef()), 0x00);
 }

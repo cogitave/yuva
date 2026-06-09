@@ -59,6 +59,7 @@ SECTIONS
         KEEP(*(.text._start))      /* boot entry -- must be e_entry           */
         KEEP(*(.text._vectors))    /* VBAR_EL1 table, self-aligned to 2 KiB   */
         KEEP(*(.text._el2_vectors))/* L2.0 VBAR_EL2 table, self-aligned 2 KiB */
+        KEEP(*(.text._l2_guest_vectors)) /* L2.2 guest VBAR_EL1 table, 2 KiB-aligned */
         *(.text .text.*)
     } :text
 

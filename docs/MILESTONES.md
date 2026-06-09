@@ -251,6 +251,7 @@ M18.2: held-out OK
 L2.0: vmxroot OK                 # x86_64: real proof on the nested-VMX lane, else "(vmx unavailable, skipped)"; aarch64 prints "(x86-only, n/a on aarch64)"
 L2.0: el2 OK                     # aarch64: genuine EL2 world-switch under TCG; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.1: stage2 OK                  # aarch64: genuine stage-2 demand-translation round-trip under TCG; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
+L2.2: el2-exits OK               # aarch64: genuine ESR_EL2.EC exit-dispatch round-trip under TCG (WFx-resume + fail-closed inject-UNDEF default, classify_exit Kani-proven); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 M19: virtio OK                   # the LAST cumulative marker: the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
 ```
 

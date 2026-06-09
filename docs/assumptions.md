@@ -39,9 +39,40 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   (EC/DFSC/WnR/S1PTW decode total over ALL 64-bit syndromes; the translation-fault
   classifier is exact against an independent re-derivation), and
   `kani_hpfar_fault_ipa` (the faulting IPA is page-aligned for every input and in
-  range over the reachable HPFAR domain). The `prove-encode` CI lane fails closed
-  on a pinned **`EXPECTED_HARNESSES = 20`** (the 15 pre-L2.1 harnesses + these 5),
-  so a silently deleted, renamed, or vacuous harness reddens the lane.
+  range over the reachable HPFAR domain). L2.2 adds ONE more —
+  `kani_exit_classifier_total` (the total `ESR_EL2.EC` exit-dispatch table
+  `classify_exit`: the six MUST ECs map to their named arms and EVERY other EC
+  maps to the fail-closed `Undef`/inject-UNDEF default, the
+  `arm_exit_handlers[0..EC_MAX]=kvm_handle_unknown_ec` discipline machine-checked,
+  plus the injected-UNDEF syndrome encoder `esr_inject_undef`). The `prove-encode`
+  CI lane fails closed on a pinned **`EXPECTED_HARNESSES = 21`** (the 15 pre-L2.1
+  harnesses + the 5 L2.1 lemmas + this 1 L2.2 classifier lemma), so a silently
+  deleted, renamed, or vacuous harness reddens the lane.
+
+- **The L2.2 exit-dispatch glue (silicon-unsafe, OUTSIDE the proof boundary).**
+  The `tb-hal/arch/aarch64/{exits,exits_vectors,el2}.rs` glue that arms the exit
+  window (`msr HCR_EL2.TWI|TWE` + `msr CPTR_EL2.TFP`), resumes a trapped `WFx`
+  (`ELR_EL2 += 4`, the `kvm_incr_pc`), and SOFTWARE-SYNTHESIZES an EL1
+  Undefined-Instruction exception (`msr ESR_EL1/ELR_EL1/SPSR_EL1`, redirect
+  `ELR_EL2` to `VBAR_EL1 + 0x200` — the Current-EL-SPx Synchronous slot, NOT the
+  Lower-EL `+0x400`, exactly `enter_exception64`'s `mode == target_mode`) carries
+  three residual obligations. (1) COHERENCY — the served-mask cells are
+  EL2-only (`SCTLR_EL2.M=0`, non-cacheable) and the VERDICT leaves via the x0
+  register channel, never an EL1-read cacheable static, so the same
+  EL2(MMU-off)/EL1(Normal-WB) coherency caveat L2.0/L2.1 carry applies and is
+  mitigated identically; on real silicon the injected-exception path would
+  additionally need cache cleans the TCG no-cache model elides. (2) FP-TRAP
+  PRIORITY — the default-arm trigger (EC `0x07`) only reaches the `CPTR_EL2.TFP`
+  EL2 trap because the facade opens `CPACR_EL1.FPEN=0b11` for the window (else a
+  lower-EL FP trap to EL1 would win), and the trigger is emitted via
+  `.inst 0x1e2703e0` (`fmov s0, wzr`) so the softfloat `-fp-armv8,-neon`
+  assembler gate does not reject it. (3) TEARDOWN — the done HVC restores
+  `HCR_EL2`/`CPTR_EL2` to the boot baseline as its FIRST action, so the kernel's
+  own later `wfi` (in `halt()`) and any FP use never trap outside the window
+  (zero regression). Sound under TCG now because QEMU A-profile TCG honors
+  `HCR_EL2.TWI/TWE` and `CPTR_EL2.TFP` and the inject reduces to a plain
+  EL2→EL1 `eret`-to-a-computed-PC (the L2.0/L2.1 primitive); a glue bug surfaces
+  as `L2.2: el2-exits OK` MISSING (a red marker), never a false green.
 
 - **The rights-subset / attenuation induction (Kani, `tb-caps-core`).** The
   pKVM-style "stage-2 only ever maps frames the guest owns or has been granted"

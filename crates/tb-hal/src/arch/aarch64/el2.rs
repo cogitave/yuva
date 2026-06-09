@@ -53,17 +53,16 @@ use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use tb_encode::el2_trap::{
-    esr_is_translation_fault, esr_s1ptw, hpfar_fault_ipa, EC_DABT_LOW, EC_IABT_LOW,
+    classify_exit, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, hpfar_fault_ipa,
+    ExitClass, EC_DABT_LOW, EC_IABT_LOW, EL1_SYNC_SPX_OFFSET,
 };
+
+use super::exits::{EXIT_UNDEF_BIT, EXIT_WFX_BIT};
 
 // ===========================================================================
 // Load-bearing constants (Tier-1: locked by const-asserts; mirror boot.rs).
 // ===========================================================================
 
-/// `ESR_ELx.EC` field shift (bits[31:26]) -- same as `trap.rs`/`user.rs`.
-const ESR_EC_SHIFT: u64 = 26;
-/// `ESR_ELx.EC` field mask (6 bits).
-const ESR_EC_MASK: u64 = 0x3F;
 /// EC for `HVC` executed in AArch64 state (Linux `esr.h` ESR_ELx_EC_HVC64).
 const EC_HVC64: u64 = 0x16;
 /// `ESR_ELx.ISS` HVC immediate field (the 16-bit `#imm` of the HVC).
@@ -152,6 +151,47 @@ const _: () = assert!(HVC_STAGE2_ARM == 2 && HVC_STAGE2_DONE == 3);
 const _: () = assert!(STAGE2_GUEST_MAGIC == 0xACE);
 const _: () = assert!(EC_HVC64 == tb_encode::el2_trap::EC_HVC64);
 const _: () = assert!(EC_DABT_LOW == 0x24 && EC_IABT_LOW == 0x20);
+
+// ===========================================================================
+// L2.2 exit-dispatch constants (the third L2 rung; the two new HVC immediates
+// that bookend the exits window + the inject-UNDEF magic + the FAIL codes).
+// ===========================================================================
+
+/// L2.2: the kernel's exits bootstrap HVC immediate (`hvc #4`) -- "arm the
+/// exit-dispatch window (HCR_EL2.TWI|TWE + CPTR_EL2.TFP) and eret into the L2.2
+/// guest stub".
+const HVC_EXITS_ARM: u64 = 4;
+/// L2.2: the guest's exits done HVC immediate (`hvc #5`) -- "round-trip complete;
+/// tear the window DOWN, then verify the served bits + magic and unwind". The
+/// teardown is the FIRST action on this branch (leaving TWI|TWE|TFP armed would
+/// trap the kernel's own later `wfi` -- the L2.1 teardown-first discipline).
+const HVC_EXITS_DONE: u64 = 5;
+/// L2.2: the magic the guest's EL1 UNDEF vector echoes once it CATCHES the
+/// injected UNDEF (proves the software-synthesized exception was delivered to
+/// EL1). `0xE22` fits a single MOVZ; MUST match `exits_vectors.rs`'s handler.
+const UNDEF_GUEST_MAGIC: u64 = 0xE22;
+
+// L2.2 FAIL codes (distinct nonzero; any -> `ExitsProof::Faulted` -> red marker,
+// rendered WITHOUT an "el2-exits OK" substring so the run-script grep stays
+// fail-closed).
+/// The `WFx` arm never fired (the guest's `wfi` did not trap + resume).
+const FAIL_EXITS_WFX_MISS: u64 = 0x0000_0E22_0000_0001;
+/// The inject-UNDEF DEFAULT arm never fired (the FP/SIMD trap did not route to
+/// `Undef` -> `el2_inject_undef`).
+const FAIL_EXITS_UNDEF_MISS: u64 = 0x0000_0E22_0000_0002;
+/// The guest's EL1 UNDEF vector echoed the WRONG magic (the injected exception
+/// was not a genuine UNKNOWN, or a stray vector slot fired the fail trampoline).
+const FAIL_EXITS_BAD_MAGIC: u64 = 0x0000_0E22_0000_0003;
+
+// Tier-1 compile-time locks on the L2.2 dispatch constants (a drift is a build
+// error). `EL1_SYNC_SPX_OFFSET` + the injected syndrome are imported from the
+// proven decoder crate, so the inject vectoring can never diverge from the Kani
+// harness (`kani_exit_classifier_total`).
+const _: () = assert!(HVC_EXITS_ARM == 4 && HVC_EXITS_DONE == 5);
+const _: () = assert!(UNDEF_GUEST_MAGIC == 0xE22);
+const _: () = assert!(EL1_SYNC_SPX_OFFSET == 0x200);
+const _: () = assert!(esr_inject_undef() == 0x0200_0000);
+const _: () = assert!(EXIT_WFX_BIT == 1 && EXIT_UNDEF_BIT == 2);
 
 // ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
@@ -251,17 +291,50 @@ extern "C" fn guest_stub() -> ! {
 #[no_mangle]
 pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
     let esr = read_esr_el2();
-    let ec = (esr >> ESR_EC_SHIFT) & ESR_EC_MASK;
-    // L2.1: a stage-2 abort from a LOWER EL (Data/Instruction Abort) is routed
-    // here through the SAME 0x400 Lower-EL-AArch64 Synchronous vector as an HVC.
-    // It can ONLY occur while HCR_EL2.VM=1 (the L2.1 self-test window) -- VM=0
-    // for the whole M0..M18 + L2.0 run -- so it never collides with the HVC path.
-    if ec == EC_DABT_LOW || ec == EC_IABT_LOW {
-        aarch64_el2_stage2_abort(frame, esr);
-    }
-    if ec != EC_HVC64 {
-        // Not an HVC at the lower-EL sync slot -- unexpected. Fail, don't loop.
-        el2_return_to_kernel(FAIL_BAD_EC, esr);
+    // L2.2: route EVERY EL2 synchronous exit through the PURE, Kani-proven
+    // ESR_EL2.EC dispatch table (`classify_exit`) -- the ARM analog of x86
+    // `arm_exit_handlers[]`. Each non-HVC arm DIVERGES (handles the exit + erets);
+    // the `Hvc` arm falls through to the unchanged HVC immediate dispatch below.
+    // StageTwoAbort folds in the L2.1 abort path; Wfx/Undef/Smc/Sys64 are NEW and
+    // only ACT inside the armed L2.2 window, else they fail closed EXACTLY as the
+    // old `ec != EC_HVC64 -> FAIL_BAD_EC` path did (so M0..M19 + L2.0/L2.1 are
+    // byte-for-byte unchanged: those runs only ever take HVC64 / DABT / IABT here).
+    match classify_exit(esr) {
+        // L2.1: a stage-2 abort from a LOWER EL, routed through the SAME 0x400
+        // vector as an HVC. ONLY occurs while HCR_EL2.VM=1 (the L2.1 window) --
+        // VM=0 for the whole M0..M18 + L2.0/L2.2 run -- so it never collides.
+        ExitClass::StageTwoAbort => aarch64_el2_stage2_abort(frame, esr),
+        // L2.2: a trapped WFI/WFE (only while HCR_EL2.TWI|TWE armed). RESUME the
+        // guest one insn PAST the WFx (the `kvm_incr_pc` that closes
+        // `kvm_handle_wfx`), recording the arm fired; outside the window it is
+        // unexpected -> fail closed.
+        ExitClass::Wfx => {
+            if super::exits::armed() {
+                super::exits::set_exit_served(EXIT_WFX_BIT);
+                // SAFETY: `frame` is the WFx trap frame on the single-accessor
+                // monitor stack; `elr` (offset 0xF8) is the faulting PC. Advance it
+                // by 4 (WFx is a 32-bit insn) so the restore-and-eret resumes PAST
+                // the WFx, then reuse the L2.1 restore/eret body (`el2_abort_retry`).
+                unsafe { (*frame).elr += 4 };
+                el2_abort_retry(frame);
+            }
+            el2_return_to_kernel(FAIL_BAD_EC, esr);
+        }
+        // L2.2: the FAIL-CLOSED DEFAULT (the FP/SIMD trap EC 0x07 via CPTR_EL2.TFP
+        // -- NOT in the MUST set, exactly as `arm_exit_handlers[]`'s
+        // kvm_handle_unknown_ec). Inside the window: software-inject an UNDEF into
+        // the guest's own EL1 vector; outside: unexpected -> fail closed.
+        ExitClass::Undef => {
+            if super::exits::armed() {
+                el2_inject_undef(frame);
+            }
+            el2_return_to_kernel(FAIL_BAD_EC, esr);
+        }
+        // No SMC/SYS64 emulation path exists in TABOS yet -- surface them honestly
+        // as a fail rather than silently passing (the fail-closed table discipline).
+        ExitClass::Smc | ExitClass::Sys64 => el2_return_to_kernel(FAIL_BAD_EC, esr),
+        // An HVC64 -- fall through to the immediate dispatch below (UNCHANGED).
+        ExitClass::Hvc => {}
     }
     match esr & HVC_IMM_MASK {
         HVC_BOOTSTRAP => {
@@ -358,10 +431,123 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             };
             el2_return_to_kernel(outcome, served);
         }
+        HVC_EXITS_ARM => {
+            // imm == 4: the kernel's L2.2 bootstrap. Arm the exit-dispatch window
+            // (record armed + reset the served mask, then trap WFx via
+            // HCR_EL2.TWI|TWE and FP/SIMD via CPTR_EL2.TFP) and `eret` INTO the
+            // L2.2 guest stub. Leave this frame (B0 == __el2_stack_top - 0x110)
+            // resident (SP_EL2 reset to it) so the guest's WFx/FP traps + the
+            // inject + the `hvc #5` stack below it and the done unwind hits B0.
+            super::exits::set_armed(true);
+            super::exits::reset_served();
+            super::exits::arm_exits_el2();
+            let stub = exits_guest_stub as *const () as u64;
+            // SAFETY: reset SP_EL2 = &B0 (= frame), program ELR_EL2/SPSR_EL2 for
+            // an EL1h entry at the identity-mapped L2.2 stub, `eret`. `noreturn`:
+            // control leaves EL2 for the guest (now with WFx/FP trapped) and
+            // re-enters only via those traps or the guest's `hvc #5`.
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    options(noreturn),
+                );
+            }
+        }
+        HVC_EXITS_DONE => {
+            // imm == 5: the guest's L2.2 done HVC. TEARDOWN IS THE FIRST ACTION
+            // (leaving HCR_EL2.TWI|TWE or CPTR_EL2.TFP armed would trap the
+            // kernel's own later `wfi`/FP outside any window). Then verify BOTH
+            // arms fired (the WFx resume AND the inject-UNDEF default) AND the
+            // guest's EL1 vector echoed the right magic, and unwind to the kernel
+            // through the resident B0 (== __el2_stack_top - 0x110).
+            super::exits::disarm_exits_el2();
+            super::exits::set_armed(false);
+            // SAFETY: `frame` is the done-HVC frame on the monitor stack; `gpr[0]`
+            // is the magic the guest's UNDEF vector placed in x0.
+            let magic = unsafe { (*frame).gpr[0] };
+            let served = super::exits::served();
+            let outcome = if served & EXIT_WFX_BIT == 0 {
+                FAIL_EXITS_WFX_MISS
+            } else if served & EXIT_UNDEF_BIT == 0 {
+                FAIL_EXITS_UNDEF_MISS
+            } else if magic != UNDEF_GUEST_MAGIC {
+                FAIL_EXITS_BAD_MAGIC
+            } else {
+                0
+            };
+            el2_return_to_kernel(outcome, served);
+        }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
             el2_return_to_kernel(FAIL_BAD_IMM, other);
         }
+    }
+}
+
+// ===========================================================================
+// L2.2: software-synthesize an Undefined-Instruction exception from EL2 into the
+// EL1 guest -- a faithful inline of KVM `inject_undef64()` + `kvm_inject_sync()`
+// followed by `enter_exception64(PSR_MODE_EL1h, except_type_sync)`. The
+// fail-closed DEFAULT arm of the exit-dispatch table (`kvm_handle_unknown_ec`).
+// Never returns: it erets into the guest's EL1 UNDEF vector.
+// ===========================================================================
+// (a) PRE : entered at EL2h from the `Undef` arm with the exits window armed;
+//           `frame` = the FP-trap frame, `frame.elr` = the faulting guest PC,
+//           `frame.spsr` = the guest PSTATE at the trap; VBAR_EL1 ==
+//           __l2_guest_vectors (set by the facade). POST: never returns -- erets
+//           to VBAR_EL1 + 0x200 at EL1h, where the guest's UNDEF vector echoes
+//           its magic via `hvc #5`. (b) ABI: plain fn, all asm below.
+// (c) TEST: scripts/run-aarch64.sh -- the inject round-trip prints
+//           "L2.2: el2-exits OK".
+/// Inject an UNKNOWN/UNDEF synchronous exception into the EL1 guest: program
+/// `ESR_EL1`/`ELR_EL1`/`SPSR_EL1`, redirect `ELR_EL2` to `VBAR_EL1 + 0x200` (the
+/// Current-EL-SPx Synchronous slot -- source EL == target EL == EL1h), set the
+/// new EL1 PSTATE, and `eret`. There is NO hardware exception-delivery feature
+/// involved -- the vectoring is software-synthesized exactly as
+/// `enter_exception64` does in C, so it reduces to a plain EL2->EL1 `eret` to a
+/// computed PC (the same primitive L2.0/L2.1 already run under TCG).
+fn el2_inject_undef(frame: *mut Frame) -> ! {
+    // Record that the inject-UNDEF DEFAULT arm fired (read by the done verdict).
+    super::exits::set_exit_served(EXIT_UNDEF_BIT);
+    // SAFETY: `frame` is the FP-trap frame on the single-accessor monitor stack;
+    // `elr`/`spsr` (offsets 0xF8/0x100) were framed by SAVE_CONTEXT_EL2.
+    let (elr, spsr) = unsafe { ((*frame).elr, (*frame).spsr) };
+    let esr_el1 = esr_inject_undef(); // EC=0x00 (UNKNOWN) | IL == 0x0200_0000
+    // Compute the EL1 vector entry in Rust (VBAR_EL1 + 0x200, the Current-EL-SPx
+    // Synchronous slot -- NOT the Lower-EL +0x400 slot, since source EL == target
+    // EL == EL1h). `read_vbar_el1()` is a side-effect-free `mrs` legal at EL2 too
+    // (VBAR_EL1 is EL2-accessible); computing it here avoids a scratch *output*
+    // register, which the `noreturn` asm below forbids.
+    let vector = read_vbar_el1().wrapping_add(EL1_SYNC_SPX_OFFSET);
+    // SAFETY: at EL2, ESR_EL1/ELR_EL1/SPSR_EL1 are EL2-accessible. We program the
+    // guest's exception-return state (ESR/ELR/SPSR_EL1), redirect the EL2 eret to
+    // the computed EL1 vector with the INIT_PSTATE_EL1 SPSR, and `eret`.
+    // `noreturn`: control leaves EL2 for the guest's EL1 UNDEF vector and re-enters
+    // only via that vector's `hvc #5`. All operands are INPUTS (noreturn forbids
+    // outputs).
+    unsafe {
+        asm!(
+            "msr esr_el1,  {esr}",   // inject_undef64: ESR_EL1 = UNKNOWN | IL
+            "msr elr_el1,  {gelr}",  // enter_exception64: ELR_EL1 = faulting PC
+            "msr spsr_el1, {gspsr}", // enter_exception64: SPSR_EL1 = old PSTATE
+            "msr elr_el2,  {vec}",   // redirect the EL2 eret -> VBAR_EL1 + 0x200
+            "msr spsr_el2, {npsr}",  // new EL1 PSTATE = EL1h + DAIF (INIT_PSTATE_EL1)
+            "isb",
+            "eret",
+            esr   = in(reg) esr_el1,
+            gelr  = in(reg) elr,
+            gspsr = in(reg) spsr,
+            vec   = in(reg) vector,
+            npsr  = in(reg) SPSR_EL1H_DAIF,
+            options(noreturn),
+        );
     }
 }
 
@@ -692,5 +878,176 @@ pub fn stage2_selftest() -> crate::Stage2Proof {
         Stage2Proof::Proven { fault_ipa }
     } else {
         Stage2Proof::Faulted { code: outcome }
+    }
+}
+
+// ===========================================================================
+// L2.2: the EL1 guest stub that fires TWO distinct trapping exits.
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #4` handler's `eret`, executing at EL1h
+//           (SPSR_EL2 = 0x3C5) under the kernel's live stage-1 MMU (HCR_EL2.VM=0,
+//           NO stage-2 -- the L2.0 simple world) with the exit window armed
+//           (HCR_EL2.TWI|TWE + CPTR_EL2.TFP). Its VA == PA: identity-mapped,
+//           EL1-executable kernel `.text` (GiB1). POST: the `wfi` traps to EL2
+//           (EC 0x01 WFx) -> the Wfx arm resumes one insn PAST it; the FP `.inst`
+//           then traps to EL2 (EC 0x07 FP_ASIMD via CPTR_EL2.TFP) -> the Undef
+//           DEFAULT arm injects an UNDEF, so the SAME `.inst` never executes and
+//           control redirects to the guest's EL1 UNDEF vector -- the stub never
+//           reaches the `b 1b` (the monitor unwinds, never returns here).
+// (b) ABI : `#[unsafe(naked)]` -- PC-relative / immediate only (valid at its
+//           identity VA), NO stack (SP_EL1 untouched). The FP trigger is emitted
+//           via `.inst 0x1e2703e0` (= `fmov s0, wzr`, an FP/SIMD access) so the
+//           softfloat `-fp-armv8,-neon` assembler gate does NOT reject it.
+// (c) TEST: scripts/run-aarch64.sh -- the exit round-trip prints "L2.2: el2-exits OK".
+/// The L2.2 guest: execute a `wfi` (traps -> Wfx arm -> resume) then an FP/SIMD
+/// access (traps -> Undef default -> inject UNDEF), proving TWO exit-table arms.
+#[unsafe(naked)]
+extern "C" fn exits_guest_stub() -> ! {
+    naked_asm!(
+        "wfi",              // 1st trap: WFx (EC 0x01) -> Wfx arm -> ELR+=4, resume
+        ".inst 0x1e2703e0", // 2nd trap: fmov s0, wzr (FP/SIMD) -> CPTR.TFP (EC 0x07)
+        "1: b 1b",          // unreachable: the monitor injects UNDEF + unwinds, never here
+    )
+}
+
+// ===========================================================================
+// L2.2: EL1 privileged-register helpers for the self-test facade (asm confined).
+// ===========================================================================
+
+/// `CPACR_EL1.FPEN = 0b11` (bits[21:20]) -- do NOT trap EL1&0 FP/SIMD to EL1, so
+/// the L2.2 FP trigger reaches the `CPTR_EL2.TFP` EL2 trap (the fail-closed
+/// default arm). The facade sets this for the window and restores the saved value.
+const CPACR_FPEN_NOTRAP: u64 = 0b11 << 20;
+const _: () = assert!(CPACR_FPEN_NOTRAP == 0x30_0000);
+
+/// EL1: read `VBAR_EL1` (the current EL1 exception vector base). Side-effect-free.
+fn read_vbar_el1() -> u64 {
+    let v: u64;
+    // SAFETY: VBAR_EL1 is EL1-readable; `mrs` has no memory/stack effect and
+    // leaves NZCV unchanged.
+    unsafe {
+        asm!("mrs {v}, vbar_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: write `VBAR_EL1` + `isb` so the new vector base is architecturally visible.
+fn write_vbar_el1(v: u64) {
+    // SAFETY: writing VBAR_EL1 is legal at EL1; `isb` synchronizes the change so
+    // the very next exception uses the new base.
+    unsafe {
+        asm!("msr vbar_el1, {v}", "isb", v = in(reg) v, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// EL1: read `CPACR_EL1` (the FP/SIMD + copro access-control register).
+fn read_cpacr_el1() -> u64 {
+    let v: u64;
+    // SAFETY: CPACR_EL1 is EL1-readable; side-effect-free.
+    unsafe {
+        asm!("mrs {v}, cpacr_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: write `CPACR_EL1` + `isb` so the new FP-trap policy is in effect.
+fn write_cpacr_el1(v: u64) {
+    // SAFETY: writing CPACR_EL1 is legal at EL1; `isb` synchronizes the FP-trap
+    // policy change before the guest's FP trigger executes.
+    unsafe {
+        asm!("msr cpacr_el1, {v}", "isb", v = in(reg) v, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// EL1: compute `&__l2_guest_vectors` (the L2.2 guest EL1 vector table in
+/// `exits_vectors.rs`) PC-relative -- no memory access.
+fn l2_guest_vectors_addr() -> u64 {
+    let v: u64;
+    // SAFETY: `adrp`/`add :lo12:` form the address of the linker-kept symbol with
+    // no memory access; NZCV preserved.
+    unsafe {
+        asm!(
+            "adrp {v}, __l2_guest_vectors",
+            "add  {v}, {v}, :lo12:__l2_guest_vectors",
+            v = out(reg) v,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    v
+}
+
+// ===========================================================================
+// L2.2: the safe facade: el2_exits_selftest() -> ExitsProof.
+// ===========================================================================
+// (a) PRE : called once from the kernel at the L2.2 slot (right after L2.1,
+//           before M19), at EL1h, with the resident monitor armed
+//           (BOOTED_AT_EL2 == 1). POST: installed the L2.2 guest vectors +
+//           opened CPACR_EL1.FPEN, masked IRQs, issued ONE `HVC #4`, drove the
+//           arm -> WFx-trap+resume -> FP-trap -> inject-UNDEF -> guest-vector
+//           -> `hvc #5` -> TEARDOWN -> unwind round-trip, restored CPACR_EL1 +
+//           VBAR_EL1, and returns the outcome enum. The kernel resumes here at
+//           EL1 with the exit window fully torn down (HCR/CPTR back to baseline).
+//           Graceful skip (no HVC, no fault) when not booted at EL2.
+// (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `exits.rs` /
+//           `exits_vectors.rs`, so the `#![forbid(unsafe_code)]` kernel only
+//           branches on the returned `ExitsProof`.
+// (c) TEST: scripts/run-aarch64.sh -- "L2.2: el2-exits OK" iff this is `Proven`.
+/// Drive the EL1->EL2(arm)->EL1-guest->EL2(WFx resume)->EL1-guest->EL2(inject
+/// UNDEF)->EL1-guest-vector->EL2(done+teardown)->EL1 exit-dispatch round-trip and
+/// report the outcome. `Unavailable` if we did not boot at EL2 (a green skip);
+/// `Proven{served}` on a closed round-trip that fired BOTH the WFx and inject-UNDEF
+/// arms; `Faulted{code}` on any monitor-reported fault.
+pub fn el2_exits_selftest() -> crate::ExitsProof {
+    use crate::ExitsProof;
+
+    // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
+    if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
+        return ExitsProof::Unavailable;
+    }
+
+    // Save the kernel's VBAR_EL1 + CPACR_EL1, then install the L2.2 guest vector
+    // table (so the injected UNDEF vectors into the guest's UNDEF handler) and
+    // open CPACR_EL1.FPEN=0b11 (so the FP trigger is NOT trapped to EL1 by CPACR
+    // -- the CPTR_EL2.TFP EL2 trap must win priority for the default arm).
+    let saved_vbar = read_vbar_el1();
+    let saved_cpacr = read_cpacr_el1();
+    write_vbar_el1(l2_guest_vectors_addr());
+    write_cpacr_el1(saved_cpacr | CPACR_FPEN_NOTRAP);
+
+    // Mask EL1 IRQs across the whole window (the VBAR_EL1-hijack risk: while
+    // VBAR_EL1 points at the guest table, a stray EL1 IRQ/abort would vector into
+    // it -- masking + the guest fail-trampoline keep that fail-closed, never a
+    // hang). The guest also runs DAIF-masked (SPSR=0x3C5).
+    let daif = super::timer::local_irq_save();
+
+    let code: u64;
+    let served: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #4`, arms the exit window
+    // (HCR.TWI|TWE + CPTR.TFP) and erets into the EL1 exits stub. The stub's `wfi`
+    // traps -> Wfx arm -> resume; its FP `.inst` traps -> Undef default -> inject
+    // UNDEF -> the guest's EL1 vector echoes the magic via `hvc #5`; the done
+    // handler tears the window DOWN, verifies the served bits + magic, and unwinds
+    // here with x0 = outcome, x1 = served, every other kernel register restored
+    // from B0. The result arrives in registers -- nothing here touches the EL2
+    // stack. x0/x1 are caller-saved, covered by clobber_abi("C").
+    unsafe {
+        asm!(
+            "hvc #4",
+            out("x0") code,
+            out("x1") served,
+            clobber_abi("C"),
+        );
+    }
+
+    super::timer::local_irq_restore(daif);
+
+    // Restore the kernel's CPACR_EL1 + VBAR_EL1 (the EL1-side window teardown).
+    write_cpacr_el1(saved_cpacr);
+    write_vbar_el1(saved_vbar);
+
+    if code == 0 {
+        ExitsProof::Proven { served }
+    } else {
+        ExitsProof::Faulted { code }
     }
 }

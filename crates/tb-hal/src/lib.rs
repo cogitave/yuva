@@ -2468,6 +2468,76 @@ pub fn stage2_selftest() -> Stage2Proof {
 }
 
 // ===========================================================================
+// L2.2: EL2 exit-dispatch self-test facade (the aarch64 analog of the x86
+// `arm_exit_handlers[]` table — the THIRD L2 sovereignty rung, built ON TOP of
+// L2.0's resident EL2 monitor and SIBLING to L2.1's stage-2 demand path).
+//
+// Where L2.0 proved TABOS *is* the hypervisor and L2.1 proved the stage-2 leaf
+// is the isolation primitive, L2.2 proves the EL2 *exit-dispatch table* itself:
+// inside a short self-test window the monitor routes EVERY guest exit through
+// the PURE, Kani-proven `tb_encode::el2_trap::classify_exit` (the ARM analog of
+// x86 `arm_exit_handlers[]`), then fires TWO distinct arms — a trapped `WFx`
+// (HCR_EL2.TWI|TWE) it RESUMES one instruction past, and an FP/SIMD access
+// (CPTR_EL2.TFP, EC 0x07, NOT in the MUST set) that hits the fail-closed
+// inject-UNDEF DEFAULT (the `[0..EC_MAX]=kvm_handle_unknown_ec` discipline,
+// software-synthesized exactly as KVM's `enter_exception64`). The injected UNDEF
+// is caught by the guest's OWN EL1 vector, which echoes a magic; the verdict
+// requires BOTH arms to have fired AND the magic to round-trip. ALL the
+// silicon-unsafe/asm is confined to `arch/aarch64/{exits,exits_vectors,el2,
+// el2_vectors}.rs` (the window is OFF for the whole M0..M19 + L2.0/L2.1 run and
+// torn down before this returns — zero regression), so this crate stays
+// unsafe-free and the kernel only branches on a closed enum. On x86_64 (no EL2)
+// it is N/A — mirroring the `El2Proof`/`Stage2Proof` blocks above.
+// ===========================================================================
+
+/// L2.2 EL2 exit-dispatch self-test outcome (returned to the kernel for marker
+/// rendering). A SIBLING of [`El2Proof`]/[`Stage2Proof`]: the proof is a closed
+/// round-trip that fires TWO exit-table arms (the `WFx` resume AND the
+/// fail-closed inject-UNDEF default), rather than a single trap-and-emulate exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitsProof {
+    /// This arch has no EL2 exit-dispatch table (x86_64): the VMX
+    /// `arm_exit_handlers[]` analog is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// exit window is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean exit dispatch (the `WFx` arm missed, the inject-UNDEF
+    /// default missed, or the guest echoed the wrong magic); `code` is the
+    /// nonzero diagnostic (surfaced honestly as a red marker WITHOUT an
+    /// "el2-exits OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the exit-dispatch round-trip closed — the `WFx` trap was
+    /// resumed AND the FP/SIMD trap hit the fail-closed inject-UNDEF default,
+    /// whose injected exception the guest's EL1 vector caught and echoed.
+    /// `served` is the EL2 served mask (`WFX|UNDEF` bits, == `0b11`).
+    Proven {
+        /// The served-arm bitmask the monitor accumulated (`WFX(1) | UNDEF(2)`).
+        served: u64,
+    },
+}
+
+/// L2.2: run the EL2 exit-dispatch self-test (aarch64), or report
+/// [`ExitsProof::NotApplicable`] on x86_64. See [`ExitsProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_exits_selftest() -> ExitsProof {
+    arch::el2_exits_selftest()
+}
+
+/// L2.2: x86_64 has no EL2 exit-dispatch table — the VMX `arm_exit_handlers[]`
+/// analog (see [`vmx_selftest`]) is this arch's realization of the rung, so this
+/// reports [`ExitsProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_exits_selftest() -> ExitsProof {
+    ExitsProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //
