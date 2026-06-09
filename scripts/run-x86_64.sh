@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='L2.0: vmxroot OK'
+MARKER='M19: virtio OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -62,6 +62,8 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     -kernel "${KERNEL}" \
     -no-reboot \
     -nic none \
+    -global virtio-mmio.force-legacy=false \
+    -device virtio-rng-device \
     -serial stdio -display none 2>&1)"
 RC=$?
 set -e

@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="el2 OK"
+MARKER="M19: virtio OK"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then
@@ -53,6 +53,8 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -nographic \
         -no-reboot \
         -nic none \
+        -global virtio-mmio.force-legacy=false \
+        -device virtio-rng-device \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
 QEMU_RC=$?
@@ -61,13 +63,20 @@ set -e
 printf '%s\n' "${OUTPUT}"
 
 if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
+    # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
+    # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
+    # assert it directly so the el2->virtio order is fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.0: el2 OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.0: el2 OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

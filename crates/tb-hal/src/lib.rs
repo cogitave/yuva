@@ -2399,3 +2399,66 @@ pub fn el2_selftest() -> El2Proof {
 pub fn el2_selftest() -> El2Proof {
     El2Proof::NotApplicable
 }
+
+// ===========================================================================
+// M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
+// real device I/O.
+//
+// A single, NON-cfg-gated facade ([`virtio_selftest`]) over an `arch` arm that
+// exists on BOTH architectures (mirroring `mmu_selftest`/`timer_demo`, NOT the
+// cfg-split `vmx_selftest`/`el2_selftest` pair — virtio-mmio is identical on
+// x86_64 `microvm` and aarch64 `virt`). Each arm drives a MODERN (Version=2)
+// virtio-rng (DeviceID 4) over ONE virtqueue: a hard-coded slot scan, the
+// reset->ACK->DRIVER->features->FEATURES_OK->queue->DRIVER_OK handshake, one
+// WRITE-ONLY descriptor pointing at an entropy buffer in a single identity-
+// mapped DMA frame, a poll-only (`VIRTQ_AVAIL_F_NO_INTERRUPT`) used-ring
+// completion, and a fail-closed iteration cap so a dead device bails to
+// [`VirtioProof::Failed`] instead of hanging. ALL the MMIO/DMA/asm unsafe is
+// confined to `arch/{x86_64,aarch64}/virtio.rs` (the UC device-window map +
+// `dmb`/`dsb` barriers live there too); this crate stays unsafe-free and the
+// `#![forbid(unsafe_code)]` kernel only branches on the returned `VirtioProof`.
+// Absent (no DeviceID==4 in any slot) is a GRACEFUL GREEN skip — so a runner
+// with no virtio-rng backend (e.g. `tb-vmm` with no `-device`, where the scan
+// reads open-bus `0xFFFF_FFFF` != magic) stays green with no backend added.
+// ===========================================================================
+
+/// M19 virtio-rng self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict the `#![forbid(unsafe_code)]` kernel
+/// matches on — mirroring [`VmxProof`]/[`El2Proof`] but arch-neutral.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VirtioProof {
+    /// No virtio-rng (DeviceID 4) in any scanned slot — a GRACEFUL GREEN skip.
+    /// The `tb-vmm`-with-no-`-device` case (open-bus read != magic) and any
+    /// QEMU run that omits `-device virtio-rng-device`.
+    Absent,
+    /// A virtio-rng was found but it is LEGACY (`Version` != 2) — an honest skip
+    /// (this driver speaks only the modern transport); still GREEN.
+    LegacyUnsupported,
+    /// THE PROOF: the full modern handshake + one write-only descriptor + a
+    /// polled used-ring completion ran, and the entropy buffer came back
+    /// non-trivially filled. `slot` is the bus slot index, `device_id` == 4,
+    /// `len` is the device-reported `used.ring[0].len` (bytes written).
+    Proven {
+        /// The virtio-mmio slot index the entropy device was found at.
+        slot: u32,
+        /// The probed DeviceID (4 == entropy/rng; the expected value).
+        device_id: u32,
+        /// The device-reported number of entropy bytes written (`> 0`).
+        len: u32,
+    },
+    /// Found + driven, but the round-trip failed fail-closed (handshake
+    /// rejected, FEATURES_OK cleared, queue unready, or `used.idx` never
+    /// advanced before the cap). `stage` localises the failure; the kernel
+    /// renders it WITHOUT a "virtio OK" substring, so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (1 map .. 6 completion-validate).
+        stage: u32,
+    },
+}
+
+/// M19: run the poll-based virtio-rng round-trip self-test (both arches) and
+/// report the outcome. See [`VirtioProof`]. Brings up no interrupt controller
+/// (poll-only) and touches NO scheduler; all raw work is in `arch::*::virtio`.
+pub fn virtio_selftest() -> VirtioProof {
+    arch::virtio_selftest()
+}

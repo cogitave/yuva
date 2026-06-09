@@ -75,7 +75,9 @@ jobs:
           # -M microvm,rtc=off -accel kvm -cpu host = the exact config that
           # surfaced #36. PVH entry; LAPIC is the only interrupt controller.
           timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
-            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none -serial stdio -display none \
+            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none \
+            -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+            -serial stdio -display none \
             > serial.log 2>&1 || true
           echo "=== serial tail (last 30 lines) ==="; tail -30 serial.log || true
           # boot-ready-cycles is an in-guest rdtsc span (DEBUG build here; the
@@ -114,7 +116,9 @@ jobs:
           cargo kbuild --release --target targets/x86_64-tabos-none.json
           K=target/x86_64-tabos-none/release/tabos-kernel
           timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
-            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none -serial stdio -display none \
+            -m 256M -smp 1 -kernel "$K" -no-reboot -nic none \
+            -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+            -serial stdio -display none \
             > rel.log 2>&1 || true
           brc=$(grep -oE "boot-ready-cycles=0x[0-9a-fA-F]+" rel.log | head -1 | grep -oE "0x[0-9a-fA-F]+" || true)
           dec=$([ -n "$brc" ] && printf "%d" "$brc" || echo "")

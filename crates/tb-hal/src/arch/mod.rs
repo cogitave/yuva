@@ -67,7 +67,7 @@ pub use self::x86_64::{
     map_user_in_root, mmu_init, mmu_selftest,
     pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
     set_kernel_stack, switch_root, task_stack_init, task_stack_init_user, timer_demo, timer_disarm,
-    timer_rearm, unmap_in_root, user_demo, va_to_pa_in_root, vmx_selftest,
+    timer_rearm, unmap_in_root, user_demo, va_to_pa_in_root, virtio_selftest, vmx_selftest,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -80,7 +80,7 @@ pub use self::aarch64::{
     map_in_root, map_user_in_root, mmu_init, mmu_selftest,
     pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
     set_kernel_stack, switch_root, task_stack_init, task_stack_init_user, timer_demo, timer_disarm,
-    timer_rearm, unmap_in_root, user_demo, va_to_pa_in_root,
+    timer_rearm, unmap_in_root, user_demo, va_to_pa_in_root, virtio_selftest,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

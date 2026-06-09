@@ -86,11 +86,25 @@ pub mod timer;
 // not exposed (the TCG `qemu64` case).
 pub mod vmx;
 
+// M19: poll-based modern virtio-mmio virtio-rng — the kernel's FIRST real device
+// I/O. The UC device-window map (PML4[3], reusing the M8 LAPIC chain via
+// `mmu::map_device_page`), the slot scan, the modern handshake, the single
+// write-only descriptor + polled used-ring completion, and the DMA-ring volatile
+// pokes — ALL the new x86_64 unsafe — live here; the kernel reaches it only
+// through the safe `tb_hal::virtio_selftest()` facade. Gracefully skips (Absent)
+// when no virtio-rng is present (e.g. tb-vmm with no `-device`: open-bus read).
+pub mod virtio;
+
 pub use serial::{serial_init, serial_write_byte};
 
 // L2.0: the safe VMX-root self-test facade, re-exported through `arch/mod.rs`
 // so `lib.rs` can expose `tb_hal::vmx_selftest()`.
 pub use vmx::vmx_selftest;
+
+// M19: the safe virtio-rng self-test facade, re-exported through `arch/mod.rs`
+// so `lib.rs` can expose `tb_hal::virtio_selftest()`. Same name + signature as
+// the aarch64 arm, one uniform contract.
+pub use virtio::virtio_selftest;
 
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
 // `int3` lives in `trap.rs`. `set_trap_hook`/`TrapInfo`/`TrapKind`/`TrapAction`

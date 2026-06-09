@@ -39,8 +39,10 @@ mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
 mod uaccess; // M14.1: cross-address-space user-buffer copy (the only new aarch64 unsafe).
 mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
 mod vectors; // VBAR_EL1 table + entry/exit stubs; pure `global_asm!` module.
+mod virtio; // M19: poll-based modern virtio-mmio virtio-rng (the kernel's FIRST device I/O).
 
 pub use el2::el2_selftest; // L2.0: the safe EL2 world-switch self-test facade.
+pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
     map_user_in_root, mmu_init, mmu_selftest, switch_root, unmap_in_root, va_to_pa_in_root,
