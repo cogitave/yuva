@@ -39,7 +39,7 @@ case "${ARCH}" in
     ;;
   aarch64)
     KERNEL="${2:-${REPO_ROOT}/target/aarch64-tabos-none/debug/tabos-kernel}"
-    QEMU="${QEMU:-qemu-system-aarch64 -semihosting}"
+    QEMU="${QEMU:-qemu-system-aarch64}"
     ;;
   *) echo "usage: bench-boot.sh <x86_64|aarch64> [kernel]" >&2; exit 2 ;;
 esac

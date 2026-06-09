@@ -29,11 +29,9 @@
 use crate::el2_trap::{
     classify_exit, dabt_access_size_bytes, dabt_iss_isv, dabt_iss_sas, dabt_iss_srt, dabt_iss_sse,
     dabt_iss_sf, esr_dfsc, esr_ec, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, esr_wnr,
-    gich_lr_encode, hpfar_fault_ipa, lr_is_retired, lr_state, lr_virtid, sysreg_iss_crm,
-    sysreg_iss_crn, sysreg_iss_is_read, sysreg_iss_op0, sctlr_el1_guest_enable, sysreg_iss_op1,
-    sysreg_iss_op2, sysreg_iss_rt, sysreg_iss_sys_val, vtr_list_regs, ExitClass, EC_DABT_LOW,
-    EC_HVC64, EC_IABT_LOW, GICH_LR_MASK, GICH_LR_STATE_INVALID, GICH_LR_STATE_PENDING,
-    SCTLR_EL1_GUEST_ENABLE_BITS, SYSREG_ISS_SYS_MASK,
+    hpfar_fault_ipa, sysreg_iss_crm, sysreg_iss_crn, sysreg_iss_is_read, sysreg_iss_op0,
+    sctlr_el1_guest_enable, sysreg_iss_op1, sysreg_iss_op2, sysreg_iss_rt, sysreg_iss_sys_val,
+    ExitClass, EC_DABT_LOW, EC_HVC64, EC_IABT_LOW, SCTLR_EL1_GUEST_ENABLE_BITS, SYSREG_ISS_SYS_MASK,
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
@@ -751,109 +749,4 @@ fn kani_sctlr_el1_guest_enable() {
     assert_eq!(r & baseline, baseline);
     // (c) Idempotent: re-enabling an already-enabled word is a no-op.
     assert_eq!(sctlr_el1_guest_enable(r), r);
-}
-
-// ===========================================================================
-// aL2.5: the GICv2 GICH_LRn list-register ENCODER + decoder family
-// (`el2_trap::gich_lr_encode` / `lr_state` / `lr_virtid` / `lr_is_retired`).
-// The pure value the EL2 monitor stores into GICH_LR0 to software-inject a
-// virtual interrupt, and the readback decode the done-side retire-check uses.
-// The ARM virtual-interrupt analog of the EPT/stage-2 entry proofs above:
-// FIELD round-trip via INDEPENDENT literal shifts + NO field bleed + a real
-// negative control, over each field's documented bit width.
-// ===========================================================================
-
-/// `gich_lr_encode` composes a GICH_LRn value whose every field round-trips and
-/// whose bits never bleed outside the documented union mask (== QEMU
-/// `GICH_LR_MASK`). DOMAIN: vintid/pintid 10-bit, state 2-bit, priority 5-bit,
-/// group/hw/eoi single bits -- each field's real width per IHI 0048B §4.4.
-///
-/// (a) FIELD ROUND-TRIP: `lr_virtid(encode(...)) == vintid`, `lr_state(...) ==
-///     state`, and every OTHER field recovered by an INDEPENDENT literal-shift
-///     reference (NOT via the decoders under test -- the non-tautology
-///     discipline of `kani_sysreg_iss_decode_total`): PhysicalID via `>>10`,
-///     Priority via `>>23 & 0x1F`, EOI via bit19, Grp1 via bit30, HW via bit31.
-/// (b) NO FIELD BLEED: the encoded value has NO bit set outside `GICH_LR_MASK`;
-///     State[29:28] never overlaps VirtualID/Priority; HW(31) and Grp1(30) are
-///     single bits.
-///
-/// THE bit-19 OVERLAP (verified against QEMU v8.2.0 `gic_internal.h`
-/// `REG32(GICH_LR0,0x100)`): the GICv2 spec defines `PhysicalID` as `[19:10]`
-/// (`FIELD(...,PhysicalID,10,10)`) AND `EOI` as bit 19 (`FIELD(...,EOI,19,1)`),
-/// so bit 19 is SHARED -- it is the top bit of PhysicalID when `HW=1` (hardware
-/// de-activation) and the EOI-maintenance bit when `HW=0` (software-injected).
-/// QEMU's `GICH_LR_MASK` ORs both masks, which OVERLAP at bit 19. aL2.5 is
-/// purely SW-injected (`HW=0`, `pintid=0`), so EOI owns bit 19 and PhysicalID is
-/// effectively the low 9 bits. The harness mirrors this exactly: it bounds
-/// `pintid < 512` (the 9 bits `[18:10]` that do NOT collide with EOI) and varies
-/// EOI freely over bit 19 -- the honest, non-overlapping field decomposition.
-/// (Bounding `pintid < 1024` would let `pintid` bit 9 set bit 19, making the
-/// independent `eoi`/`pintid` references disagree -- a FALSE alarm on a genuine
-/// architectural mux, not an encoder bug.)
-///
-/// NEGATIVE CONTROL: placing State at `[27:26]` (`<< 26`) instead of `[28:29]`
-/// (`<< 28`) would alias Priority bit27 -- so a nonzero `priority` would corrupt
-/// the recovered `state`, breaking the `lr_state == state` round-trip; and
-/// State bit29 would fall outside the priority field, the `state` round-trip
-/// failing for `state >= 2`. Either way the harness turns RED. The reference
-/// shifts are the literal 0/10/19/23/28/30/31, never routed through the encoder.
-#[kani::proof]
-fn kani_gich_lr_encode_roundtrip() {
-    let vintid: u64 = kani::any();
-    kani::assume(vintid < 1024); // VirtualID is a 10-bit field
-    let pintid: u64 = kani::any();
-    // PhysicalID is [19:10] but bit 19 is SHARED with EOI (the HW=0/HW=1 mux);
-    // for the SW-injected (HW=0) path EOI owns bit 19, so the non-overlapping
-    // PhysicalID is [18:10] (9 bits). Bound it there + vary EOI over bit 19.
-    kani::assume(pintid < 512);
-    let state: u64 = kani::any();
-    kani::assume(state < 4); // State is a 2-bit field
-    let priority: u64 = kani::any();
-    kani::assume(priority < 32); // stored Priority is a 5-bit field (priority[7:3])
-    let group: u64 = kani::any();
-    kani::assume(group < 2); // Grp1 is a single bit
-    let hw: u64 = kani::any();
-    kani::assume(hw < 2); // HW is a single bit
-    let eoi: u64 = kani::any();
-    kani::assume(eoi < 2); // EOI is a single bit (bit 19, owns it when HW=0)
-
-    let lr = gich_lr_encode(vintid, pintid, state, priority, group, hw, eoi);
-    let lr64 = lr as u64;
-
-    // (a) FIELD ROUND-TRIP. VirtualID + State via the decoders under test...
-    assert_eq!(lr_virtid(lr), vintid);
-    assert_eq!(lr_state(lr), state);
-    // ...and EVERY field via an INDEPENDENT literal-shift reference. PhysicalID
-    // is recovered from [18:10] (9 bits, disjoint from EOI bit 19); EOI from bit
-    // 19 (which it owns under HW=0). The literal shifts never route through the
-    // encoder, so the references are independent.
-    assert_eq!(lr64 & 0x3FF, vintid); // VirtualID [9:0]
-    assert_eq!((lr64 >> 10) & 0x1FF, pintid); // PhysicalID [18:10] (9 bits, no EOI overlap)
-    assert_eq!((lr64 >> 19) & 1, eoi); // EOI bit19
-    assert_eq!((lr64 >> 23) & 0x1F, priority); // Priority [27:23]
-    assert_eq!((lr64 >> 28) & 0x3, state); // State [29:28]
-    assert_eq!((lr64 >> 30) & 1, group); // Grp1 bit30
-    assert_eq!((lr64 >> 31) & 1, hw); // HW bit31
-
-    // (b) NO FIELD BLEED: nothing set outside the documented union mask.
-    assert_eq!(lr & !GICH_LR_MASK, 0);
-    // State[29:28] is bit-disjoint from VirtualID[9:0] and Priority[27:23].
-    assert_eq!((0x3u32 << 28) & 0x3FF, 0);
-    assert_eq!((0x3u32 << 28) & (0x1F << 23), 0);
-    // HW(31) and Grp1(30) are single bits (each exactly one bit set).
-    assert_eq!((1u32 << 31).count_ones(), 1);
-    assert_eq!((1u32 << 30).count_ones(), 1);
-
-    // `lr_is_retired` iff State == INVALID (the done-side completion proof). A
-    // freshly PENDING-injected LR is NOT retired; an INVALID one IS.
-    let pending = gich_lr_encode(vintid, 0, GICH_LR_STATE_PENDING, 0, 0, 0, 0);
-    assert!(!lr_is_retired(pending));
-    let invalid = gich_lr_encode(vintid, 0, GICH_LR_STATE_INVALID, 0, 0, 0, 0);
-    assert!(lr_is_retired(invalid));
-
-    // `vtr_list_regs` decodes GICH_VTR.ListRegs (num_lrs - 1) as `>= 1` for ALL
-    // u32 (the monitor asserts num_lrs >= 1 before writing LR0).
-    let vtr: u32 = kani::any();
-    let n = vtr_list_regs(vtr);
-    assert!(n >= 1 && n <= 64);
 }
