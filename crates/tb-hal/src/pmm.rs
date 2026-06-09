@@ -166,6 +166,54 @@ fn align_down(x: u64, a: u64) -> u64 {
 }
 
 // ===========================================================================
+// Seed-diagnostic serial helpers (fix_plan §A.2)
+// ===========================================================================
+//
+// Pure-safe, allocation-free, `core::fmt`-free writers over the tb-hal serial
+// facade. Used ONLY by `PmmState::seed` to make a future CI stall-at-M6
+// diagnosable (it would print the last range / total it reached). They perform
+// no `unsafe` — they fan out to `crate::serial_write_str` / `serial_write_byte`,
+// which are themselves pure-safe loops over the per-arch byte writer.
+
+/// Write a `u64` as a fixed-width `0x…` 16-hex-digit string over serial.
+fn write_hex_u64(value: u64) {
+    crate::serial_write_str("0x");
+    let mut shift: i32 = 60;
+    while shift >= 0 {
+        let nibble = ((value >> shift) & 0xf) as u8;
+        let c = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        };
+        crate::serial_write_byte(c);
+        shift -= 4;
+    }
+}
+
+/// Write a `usize` as a base-10 string over serial (no leading zeros; `0`
+/// prints as `"0"`). Buffer is 20 bytes — wide enough for `u64::MAX`.
+fn write_dec_usize(value: usize) {
+    if value == 0 {
+        crate::serial_write_byte(b'0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut n = value;
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    let mut j = i;
+    while j < buf.len() {
+        crate::serial_write_byte(buf[j]);
+        j += 1;
+    }
+}
+
+// ===========================================================================
 // Kernel-image span (linker symbols)
 // ===========================================================================
 
@@ -298,6 +346,17 @@ impl PmmState {
     }
 
     /// Push every usable, non-reserved 4 KiB frame onto the intrusive stack.
+    ///
+    /// DIAGNOSTIC PRINT (per fix_plan §A.2): before iterating each usable range
+    /// this emits `seed: range[i] [START,END) ...` and, after the loop, the
+    /// final `seed: total_frames=N` — all via the pure-safe `serial_write_str`
+    /// facade (no extra `unsafe`). The print is byte-cheap (~1 line per range,
+    /// the `virt` map has ONE usable range) and lands between the kernel's
+    /// `frame-test: parsing boot memory map` and `M6: frame alloc OK` markers —
+    /// exactly the gap where the CI-only aarch64 stall was last observed. It
+    /// turns a future silent stall-at-M6 into a diagnosable one: the last
+    /// `seed:` line flushed pins the range + frame the seed was touching when
+    /// it died, instead of leaving only the upstream `parsing` line.
     fn seed(&mut self) {
         self.head = 0;
         self.total_frames = 0;
@@ -306,6 +365,15 @@ impl PmmState {
             let r = self.usable[i];
             let mut f = align_up(r.base, FRAME);
             let end = align_down(r.end(), FRAME);
+            // Defensive diagnostic: the computed frame-aligned [start, end) the
+            // seed loop is about to walk for this usable range.
+            crate::serial_write_str("seed: range[");
+            write_dec_usize(i);
+            crate::serial_write_str("] [");
+            write_hex_u64(f);
+            crate::serial_write_str(", ");
+            write_hex_u64(end);
+            crate::serial_write_str(")\n");
             while f < end {
                 if f != 0 && !self.is_reserved_frame(f) {
                     // SAFETY: `f` is a 4 KiB-aligned frame fully inside a parsed
@@ -323,6 +391,12 @@ impl PmmState {
             i += 1;
         }
         self.free_count = self.total_frames;
+        // Defensive diagnostic: the seeded free-frame total (== the M6 stat the
+        // kernel self-test asserts on). A future stall that never prints this
+        // line localises the hang to the seed loop above, not the parser.
+        crate::serial_write_str("seed: total_frames=");
+        write_dec_usize(self.total_frames);
+        crate::serial_write_str("\n");
     }
 
     /// `true` iff the frame `[f, f + FRAME)` intersects any reservation.

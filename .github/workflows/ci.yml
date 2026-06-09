@@ -38,10 +38,17 @@ jobs:
             target: targets/x86_64-tabos-none.json
             qemu_pkg: qemu-system-x86
             run: scripts/run-x86_64.sh
+            qemu_timeout: 40
           - arch: aarch64
             target: targets/aarch64-tabos-none.json
             qemu_pkg: qemu-system-arm
             run: scripts/run-aarch64.sh
+            # aarch64 lane is pure TCG + single-threaded (-accel tcg,thread=single
+            # in run-aarch64.sh); the cold start to rust_main on a contended
+            # runner needs more headroom than x86. 90s makes the wall-clock
+            # ceiling un-raceable so it never SIGTERMs a slow-but-healthy boot
+            # mid-chain (the aL2.4 M6 "stall" was that startup-race artifact).
+            qemu_timeout: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,10 +85,13 @@ jobs:
         # a fraction of a second and parks, so QEMU runs to this wall-clock
         # ceiling either way. A 15s ceiling left no headroom and produced
         # intermittent rc=124 startup-race failures (qemu killed before the
-        # final marker ever printed -- not a real boot fault). 40s gives ample
-        # room for a slow start plus the full chain. The fast KVM boot lanes
-        # (microvm-kvm.yml / vmm-boot.yml) are separate workflows and keep their
-        # own shorter timeouts, so they pay no idle cost from this.
+        # final marker ever printed -- not a real boot fault). The per-arch
+        # ceiling (matrix.qemu_timeout: x86 40s, aarch64 90s) gives ample room
+        # for a slow start plus the full chain; the aarch64 lane is additionally
+        # pinned to single-threaded TCG in run-aarch64.sh so its cold-start
+        # wall-time is deterministic and can never race the ceiling. The fast
+        # KVM boot lanes (microvm-kvm.yml / vmm-boot.yml) are separate workflows
+        # and keep their own shorter timeouts, so they pay no idle cost here.
         env:
-          QEMU_TIMEOUT: 40
+          QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
         run: bash ${{ matrix.run }}

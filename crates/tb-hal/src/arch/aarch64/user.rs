@@ -331,6 +331,17 @@ const _: () = assert!(core::mem::offset_of!(Frame, spsr) == 0x100);
 #[unsafe(naked)]
 extern "C" fn user_stub() -> ! {
     naked_asm!(
+        // STRADDLE GUARD: `user_demo` aliases exactly ONE 4 KiB page
+        // (`code_page_pa = stub_pa & !0xFFF`) at USER_CODE_VA. If this stub
+        // straddled a 4 KiB boundary its tail would land in the UNMAPPED next
+        // page and the EL0 instruction fetch would abort (ESR EC=0x20 instr
+        // abort, the `M4: FAIL esr=0x82...0f` symptom). Force the symbol onto a
+        // 64-byte boundary: 64 >= this stub's body AND 4096 is a multiple of
+        // 64, so the whole stub is guaranteed to sit inside the single mapped
+        // page regardless of where image layout places it. (Verified: an
+        // in-body `.balign` on a `#[naked]` fn aligns the symbol itself, not
+        // just the first instruction.)
+        ".balign 64",
         "mov x0, #0xcafe", // magic arg in x0 (preserved across svc)
         "svc #0",          // synchronous trap to EL1 (ESR_EL1.EC = 0x15)
         "1: b 1b",         // unreachable: the kernel never returns to EL0
@@ -598,6 +609,11 @@ static CAPS_A1: AtomicU64 = AtomicU64::new(0);
 #[unsafe(naked)]
 extern "C" fn caps_user_stub() -> ! {
     naked_asm!(
+        // STRADDLE GUARD (see `user_stub`): `caps_user_probe` aliases a single
+        // 4 KiB page; align the symbol to 64 bytes (>= this stub's body, and a
+        // divisor of 4096) so it can never straddle a page boundary into the
+        // unmapped next page regardless of image layout.
+        ".balign 64",
         "mov  x8, #0",          // method = M_OBJECT_INSPECT (0)
         "mov  x0, #0",          // handle low half = slot 0
         "movk x0, #1, lsl #32", // gen 1 into bits[47:32] -> 0x0000_0001_0000_0000

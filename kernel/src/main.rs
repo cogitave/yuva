@@ -3483,6 +3483,48 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- aL2.4: EL2 nested guest (GENUINE two-stage) -- a REAL minimal TABOS
+    // guest that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU live,
+    // the FIFTH L2 rung built ON TOP of L2.0's resident EL2 monitor. The monitor
+    // arms the GiB0+GiB1 identity stage-2 (HCR_EL2.VM=1) and erets into a guest
+    // that BUILDS its own 3-level stage-1 (reusing the REAL kernel M3 paging
+    // encoders + the mmu.rs MAIR/TCR geometry), ENABLES it (SCTLR_EL1.M=1 -- the
+    // Kani-proven "S1 after S2" step), and stores+reads back a sentinel through a
+    // VA that has NO flat meaning -- a GENUINE VA->(guest S1)->IPA->(our S2)->PA
+    // two-stage walk, the guest's own stage-1 walk itself re-translated by our
+    // stage-2 (S1PTW). It then installs its OWN VBAR_EL1 and takes its OWN EL1
+    // `brk` exception (an EL1->EL1 trap, NOT an EL2 exit), and HVCs done. The
+    // verdict requires BOTH the guest's two-stage readback AND its EL1 trap to
+    // have fired, corroborated by an INDEPENDENT EL2-side identity-alias readback
+    // the guest cannot fake. Stage-2 is torn down (HCR.VM=0) BEFORE unwinding AND
+    // the facade restores the kernel's TTBR0/TCR/MAIR/SCTLR/VBAR_EL1 (the EL1-side
+    // teardown -- the new surface the guest mutated), so the kernel resumes on its
+    // OWN stage-1 (zero regression -- M19 still prints after). ALL the new
+    // asm/unsafe is confined to tb-hal's arch/aarch64/{el2,el2_nested_vectors,
+    // stage2}.rs, so this crate stays unsafe-free; the kernel only branches on
+    // NestedGuestProof. On x86_64 there is no EL2, so it reports the n/a path.
+    // DoD: "L2.4: el2-guest OK".
+    match tb_hal::el2_nested_guest_selftest() {
+        tb_hal::NestedGuestProof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.4: el2-guest OK\n"); // <-- the aL2.4 aarch64 DoD marker
+        }
+        tb_hal::NestedGuestProof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no stage-2 armed.
+            tb_hal::serial_write_str("L2.4: el2-guest OK (no EL2, skipped)\n");
+        }
+        tb_hal::NestedGuestProof::NotApplicable => {
+            // x86_64: no EL2/two-stage -- the vmxroot block above is this arch's rung.
+            tb_hal::serial_write_str("L2.4: el2-guest OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::NestedGuestProof::Faulted { code } => {
+            // Booted at EL2 but the two-stage round-trip faulted -- surfaced
+            // honestly, with NO 'el2-guest OK' substring, so the run grep fails (red).
+            tb_hal::serial_write_str("L2.4: el2-guest FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     // --- M19: poll-based virtio-mmio virtio-rng -- the kernel's FIRST real
     // device I/O, the new cumulative boot tail. A MODERN (Version=2) virtio-rng
     // (DeviceID 4) driven over ONE virtqueue: a hard-coded slot scan, the
