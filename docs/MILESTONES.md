@@ -6,8 +6,10 @@
 > + frame reclamation), **M18.1** (mandatory human-approval gate), **M18.2**
 > (rotating held-out evaluator), and **M19** (a poll-based virtio-mmio virtio-rng
 > round-trip — the kernel's FIRST real device I/O, now the LAST cumulative marker)
-> — plus the first sovereignty-L2 rung **L2.0** (x86_64 VMX-root graceful-skip +
-> aarch64 EL2 world-switch, printed before M19) — every milestone verified by
+> — plus the first two sovereignty-L2 rungs, **L2.0** (x86_64 VMX-root
+> graceful-skip + aarch64 EL2 world-switch) and **L2.1** (a genuine aarch64
+> stage-2 demand-translation round-trip under TCG — the ARM analog of x86
+> EPT-violation handling), both printed before M19 — every milestone verified by
 > booting under QEMU (and, on x86_64, the project's own `tb-vmm`/KVM) on every
 > change. A **formally-verified core** now backs the chain: M11's capability
 > rights-subset invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
@@ -55,15 +57,16 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M18, + L2.0, + M19)
+## 2. The milestone chain (M0 → M18, + L2.0, + L2.1, + M19)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
 milestones cumulatively, so every boot is a full regression of M0 through the
 latest. A green boot prints the M0–M4 foundation trace (below), then the M5–M18
 agent-native markers (now including the M14.1/M14.2/M15.1/M18.1/M18.2 follow-ons),
-then the two L2.0 sovereignty lines, then the final `M19: virtio OK` device-I/O
-marker — the complete ordered sequence is listed further below.
+then the two L2.0 sovereignty lines, then the `L2.1: stage2 OK` stage-2
+demand-translation line, then the final `M19: virtio OK` device-I/O marker — the
+complete ordered sequence is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -247,6 +250,7 @@ M18.1: approval-gate OK
 M18.2: held-out OK
 L2.0: vmxroot OK                 # x86_64: real proof on the nested-VMX lane, else "(vmx unavailable, skipped)"; aarch64 prints "(x86-only, n/a on aarch64)"
 L2.0: el2 OK                     # aarch64: genuine EL2 world-switch under TCG; x86_64 prints "(aarch64-only, n/a on x86_64)"
+L2.1: stage2 OK                  # aarch64: genuine stage-2 demand-translation round-trip under TCG; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 M19: virtio OK                   # the LAST cumulative marker: the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
 ```
 
@@ -283,15 +287,26 @@ Two machine-checked guarantees back the chain:
   wrong constant turns into a silent VM-entry failure — was extracted into a NEW
   pure `crates/tb-encode` (`no_std`, `#![forbid(unsafe_code)]`, host-buildable;
   `tb-hal` now CALLS it, the `vmwrite`/`read_volatile`/asm staying behind) and is
-  machine-proven by **Kani**: **11 `#[kani::proof]` harnesses** cover the
-  control-MSR adjust-legality gate (force all allowed-0 bits, clear all
-  non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition), the CR0/CR4
-  fixed-bit clamp, the page-table / EPT entry encoders (address + flags preserved,
-  level index < 512, EPTP well-formed), the 16-byte IPC frame round-trip + total
-  fail-closed decode of untrusted bytes, and a bounded no-alloc ring. The
-  `.github/workflows/kani.yml` `prove-encode` job runs `cargo kani -p tb-encode`
-  and **fails closed** unless every harness verifies, then emits
-  `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
+  machine-proven by **Kani**. The suite now totals **20 `#[kani::proof]`
+  harnesses**: the control-MSR adjust-legality gate (force all allowed-0 bits,
+  clear all non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition),
+  the CR0/CR4 fixed-bit clamp, the page-table / EPT entry encoders (address +
+  flags preserved, level index < 512, EPTP well-formed), the 16-byte IPC frame
+  round-trip + total fail-closed decode of untrusted bytes, a bounded no-alloc
+  ring, the fixed-point memory-scoring lemmas — and, landed with **L2.1**, **five
+  new aarch64 stage-2/el2_trap lemmas** in
+  `crates/tb-encode/src/{stage2,el2_trap}.rs`: the stage-2 (VMSAv8-64) leaf and
+  table/`VTTBR_EL2` descriptor round-trips with address + `S2AP`/attribute
+  preservation (`kani_s2_leaf_wellformed`, `kani_s2_table_and_vttbr`), `VTCR_EL2`
+  well-formedness catching the SL0/T0SZ off-by-one (`kani_vtcr_wellformed`), and
+  the total `ESR_EL2` / `HPFAR_EL2` abort-syndrome decode the EL2 monitor imports
+  verbatim — the `EC` class (`0x24` Data-Abort / `0x20` Instruction-Abort /
+  `0x16` HVC64) and the faulting IPA (`kani_esr_decode_total`,
+  `kani_hpfar_fault_ipa`). The `.github/workflows/kani.yml` `prove-encode` job
+  runs `cargo kani -p tb-encode` and **fails closed** unless every harness
+  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 20`
+  (`scripts/verify-encode.sh`, bumped from 15 in lockstep with the five new
+  lemmas), then emits `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
   `prove-caps` job in the same workflow; neither can break the other.)
 - **Tier-0 UB gate (Miri).** `cargo miri test -p tb-caps-core -p tb-encode`
   interprets the EXACT pure host-runnable leaf crates the kernel runs (the same
@@ -319,7 +334,7 @@ Six CI lanes guard the tree:
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
-| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 11 harnesses) |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 20 harnesses) |
 | **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
 
 ## 3. Development pipeline
@@ -383,9 +398,16 @@ is the rest of the L2 track plus a set of named debts:
 - **L2 — `tb-core`** (the **north-star**): TABOS as its own minimal Type-1
   microhypervisor (own VMX/SVM/EL2 + EPT/stage-2 + IOMMU + sovereign scheduling,
   <10K-LOC TCB), replacing `/dev/kvm` and quarantining the proprietary GPU/CUDA
-  stack in a confined Linux driver VM — where **full sovereignty** lands. **L2.0
-  is done** (x86_64 `vmxroot` — a graceful skip pending a nested-VMX lane;
-  aarch64 `el2` — a genuine executing EL2 world-switch under TCG; see §2). The
+  stack in a confined Linux driver VM — where **full sovereignty** lands. **L2.0 and L2.1 are done** (x86_64 `vmxroot`
+  — a graceful skip pending a nested-VMX lane; aarch64 `el2` — a genuine
+  executing EL2 world-switch under TCG; and aarch64 `L2.1: stage2 OK` — a genuine
+  stage-2 demand-translation round-trip under TCG, the ARM analog of x86
+  EPT-violation handling; see §2). The **active rung is the aarch64 L2 chain**,
+  which advances **CI-green under pure TCG** on a stock runner with no hardware,
+  no `/dev/kvm`, and no nesting; the x86 `L2.1`–`L2.6` chain (EPT-demand handling
+  onward) is **gated on the #37 nested-VMX substrate** — a hardware-provisioning
+  task for Arda, not a coding gap (QEMU-TCG emulates no Intel VMX, and stock CI
+  runners expose no second VMX level). The
   ten-rung plan L2.0→L2.9 (EPT-demand handling, the full exit set, the
   device-model seam, the real-TABOS nested guest, sovereign scheduling, SMP, the
   bare-metal UEFI Type-1 launch, the IOMMU, and the full split-VMM) is tracked in

@@ -63,7 +63,7 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
   self-test span ≈ 5.2 B (≈0.04 %); aarch64 ≈ 32 k vs ≈ 63 M — i.e. **TABOS's
   actual boot is essentially instantaneous; every large number elsewhere on this
   page is self-test work or the VMM floor, not boot.** The quotable figure is
-  this counter from a `--release` build under KVM (see §5) — and because it is an
+  this counter from a `--release` build under KVM (see §6) — and because it is an
   **in-guest** cycle delta it is VMM-independent (`tb-vmm` or QEMU-`microvm` give
   the same guest-only span). **MEASURED (2026-06-09):** the `microvm-kvm` CI
   lane's bench step boots a `--release` build under `-M microvm -accel kvm
@@ -71,6 +71,23 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
   0.5 ms** (§3) — Bucket 1's fast end, peer to Unikraft's sub-ms.
 - **`boot-cycles`** = `rust_main` entry → just after the **M8** marker. Spans the
   M0–M8 self-test; a *correctness*-cost gauge, NOT a boot figure.
+
+**Counter-frequency correctness — divide by the MEASURED base, never an inferred
+GHz.** A cycle count means nothing without the frequency of the clock that
+produced it — and that frequency is **not** the core's GHz. `rdtsc` (x86_64)
+ticks at the **invariant-TSC base rate** (read via CPUID leaf `0x15`), not the
+turbo core frequency; `CNTPCT_EL0`/`CNTVCT_EL0` (aarch64) tick at the **fixed
+`CNTFRQ_EL0` nominal rate** — often 62.5 MHz or 1 GHz under QEMU, *not* the CPU
+GHz. So the kernel **reads and prints the counter base on the same boot** (CPUID
+`0x15` for x86_64, `CNTFRQ_EL0` for aarch64), and the harness derives wall-time
+by dividing the cycle delta by that **measured** base. We never run it backwards
+(never "1.35 M cycles ≈ 0.5 ms ⟹ ~2.7 GHz"): inferring a GHz from a cycle/time
+pair launders an assumption into a measurement.
+
+| Target | In-guest counter | Measured base (printed same boot) | `boot-ready` (cycles) | `boot-ready` (÷ measured base) | Accel |
+|---|---|---|---|---|---|
+| x86_64 | `rdtsc` | TSC base via CPUID leaf `0x15` | `0x14a396` = **1,352,598** | ÷ measured TSC base ≈ **0.48–0.52 ms** | `microvm`+KVM, `--release` |
+| aarch64 | `CNTPCT_EL0` | `CNTFRQ_EL0` (often 62.5 MHz / 1 GHz under QEMU — **not** CPU GHz) | **KVM/hardware-only** (TCG cycle counts meaningless — see caveat) | KVM / bare-metal-Arm only | KVM / real board |
 
 > Caveat on the harness wall-clock: `bench-boot.sh`'s `full=NA` under
 > `qemu -M microvm -accel kvm` is an **untested config for the wall-clock
@@ -87,6 +104,16 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
 upper bound — *never* compared against another system's KVM result. (This is
 the single most common way "microVM boot" numbers become accidentally
 non-comparable.)
+
+> **aarch64 under TCG is functional-green only — its timing is meaningless.**
+> QEMU's TCG is *instruction-accurate, not cycle-accurate*, so aarch64
+> boot-time, world-switch, and exit-latency cycle counts taken from the TCG CI
+> (where the L2.1 stage-2 chain runs **REAL** on `cortex-a72`,
+> `virt,virtualization=on`) verify **correctness**, never **performance**. Every
+> aarch64 perf figure on this page must come from a **KVM-accelerated or
+> bare-metal Arm host** — an open hardware question (no Arm KVM box in CI yet);
+> until one exists the aarch64 lane publishes only the green functional marker
+> (`L2.1: stage2 OK`), no quotable latency (§5–§6).
 
 ### TABOS measured — today (kernel boots the cumulative M0…M19 self-test then halts)
 
@@ -151,7 +178,7 @@ different model entirely (shared host kernel) and is context only.
 | **OSv** | **4–5 ms** (Firecracker) | first instr → `main()`, read-only rootfs (cross-measure); ATC'14 origin | [ATC'14](https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity) | high |
 | Minimal **custom Linux** | **6 ms** (Firecracker `--boot-timer`) | vCPU start → userland MMIO write; SMP off, 2 MiB hugepages | [davidv.dev](https://blog.davidv.dev/posts/minimizing-linux-boot-times/) | low |
 | **Hermitux** | **30–32 ms** (uHyve) | boot → application (cross-measure) | [arXiv:2104.12721](https://arxiv.org/abs/2104.12721) | medium |
-| **TABOS** | **~0.5 ms measured** (≈1.35 M cycles, `--release`, KVM) | **guest-only, in-guest rdtsc**: `rust_main` entry → serial-ready (M0 done), BEFORE the M0+ self-test span. `boot-ready-cycles=0x14a396` = **1,352,598 cycles** under `-M microvm -accel kvm -cpu host`, ÷ a ~2.6–2.8 GHz runner ≈ **0.48–0.52 ms** (the pre-`rust_main` `_start` asm is a handful of instructions, so first-instr→ready ≈ this + ε). Tiny no_std image, no driver/FS/ACPI/SMP probing — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI); lands at Bucket 1's fast end, peer to Unikraft's guest-only sub-ms. | this repo (`microvm-kvm` CI bench step) | medium |
+| **TABOS** | **~0.5 ms measured** (≈1.35 M cycles, `--release`, KVM) | **guest-only, in-guest rdtsc**: `rust_main` entry → serial-ready (M0 done), BEFORE the M0+ self-test span. `boot-ready-cycles=0x14a396` = **1,352,598 cycles** under `-M microvm -accel kvm -cpu host`, ÷ the **measured TSC base** (CPUID leaf `0x15`, printed on the same boot — never an inferred core GHz; see §2) ≈ **0.48–0.52 ms** (the pre-`rust_main` `_start` asm is a handful of instructions, so first-instr→ready ≈ this + ε). Tiny no_std image, no driver/FS/ACPI/SMP probing — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI); lands at Bucket 1's fast end, peer to Unikraft's guest-only sub-ms. | this repo (`microvm-kvm` CI bench step) | medium |
 
 ### Bucket 2 — full-stack microVM/VM: (firmware?) + Linux kernel + init (VMM-start → `/sbin/init`)
 
@@ -163,6 +190,7 @@ different model entirely (shared host kernel) and is context only.
 | **QEMU q35 + SeaBIOS** | **~245 ms** (exec→userspace) | per-phase: QEMU init 34 ms · SeaBIOS **8.9 ms** · fw→`start_kernel` (decompress) **78.8 ms** · `start_kernel`→init **122 ms** | [Garzarella](https://stefano-garzarella.github.io/posts/2019-08-24-qemu-linux-boot-time/) | low |
 | **Alpine** on Firecracker | **~330 ms** | first instr → app (cross-measure) | [arXiv:2104.12721](https://arxiv.org/abs/2104.12721) | medium |
 | **Stock Ubuntu kernel** on Firecracker | **~1 s** (+900 ms vs minimal) | *same* Firecracker, stock kernel | [NSDI'20](https://www.usenix.org/system/files/nsdi20-paper-agache.pdf) | high |
+| **TABOS** *(band-C, VMM-inclusive — new axis)* | **TO MEASURE** (spawn → guest `ready`) | host `clock_gettime` bracketing the qemu/firecracker spawn → a guest-emitted `ready` (isa-debug-exit / serial / vsock) — the only apples-to-apples point against FC's **≤125 ms** [[NSDI'20](https://www.usenix.org/system/files/nsdi20-paper-agache.pdf)] in this band. Today only a VMM-spawn-bound **~47 ms** CI *sanity* figure exists, which is **not a kernel number**: a faster KVM box yielding a *larger* number proves it is VMM/host-spawn-dominated (the §2 trap) — it sits on the shared VMM floor (~3 ms for Solo5/FC, more for QEMU's device model [[EuroSys'21](https://arxiv.org/abs/2104.12721)]), not on the TABOS kernel. The guest-only **0.5 ms** figure (Bucket 1) is **not** comparable to this band and stays footnoted as such. | this repo (`microvm-kvm` CI) | low |
 
 ### Bucket 3 — container/sandbox/FaaS/Wasm cold start (no guest kernel) · *context only*
 
@@ -204,7 +232,45 @@ runs **orders of magnitude** below any full-Linux microVM (Bucket 2's
 18–330 ms) — because most of *their* time is Linux kernel init that a
 from-scratch kernel never runs.
 
-## 5. What we do **not** claim (honesty guardrails)
+## 5. L2 world-switch / exit-latency micro-benchmark axis (hardware-only)
+
+Boot time (§1–§4) is one axis; a **microhypervisor** lives or dies on a second,
+orthogonal one — **world-switch / exit latency**, the cycles a guest pays to
+cross into EL2 and back. This is **not** a boot row and never enters the buckets
+of §3; it is reported in **`CNTPCT_EL0` cycles**, on real Arm silicon, against
+the canonical microhypervisor exit baseline.
+
+Two paths, both already exercised by the committed L2.0/L2.1 chain:
+
+- **L2.0 — HVC EL1↔EL2 round-trip.** The synchronous-exception world switch: a
+  guest `HVC` traps to the EL2 vector, EL2 handles it, `ERET`s back. This is the
+  path the **two L2.0 world-switch probes** (printed just before `M19`, §2)
+  already walk; the micro-benchmark simply brackets it with `CNTPCT_EL0` reads.
+- **L2.1 — stage-2 demand-translation round-trip** (the ARM analog of an x86
+  EPT-violation): a guest access faults, EL2 takes a stage-2 abort, reads the
+  faulting IPA from **`HPFAR_EL2`**, demand-maps the page, and `ERET`-retries the
+  faulting instruction. Stage-2 is armed by `HVC #2` and torn down by `HVC #3`;
+  the pure encoders are Kani-proven in `tb-encode/{stage2,el2_trap}.rs`, the
+  silicon glue lives in `tb-hal/arch/aarch64/{stage2,el2}.rs`, and the green
+  marker is `L2.1: stage2 OK`.
+
+**Baseline.** NOVA — the reference ~9 KLOC microhypervisor — reports a
+**~3900-cycle VM exit** (x86 VT-x) [[EuroSys'10](https://hypervisor.org/eurosys2010.pdf)].
+That cross-ISA number is what a from-scratch EL2 core must be measured against on
+this axis — **not** a boot figure, and never placed in the boot buckets.
+
+**Why this axis is hardware-only.** Under QEMU TCG — where the L2.1 chain runs
+**REAL** on `cortex-a72`, `virt,virtualization=on`, and is CI-green for
+*correctness* — the emulator is instruction-accurate, **not cycle-accurate**, so
+a `CNTPCT_EL0` exit-latency count from TCG is meaningless. This axis therefore
+stays empty in the TCG CI and is filled only from a **KVM-accelerated or
+bare-metal Arm host** (an open hardware question; no Arm KVM box in CI yet). On
+the *boot* axis TABOS's peers are Unikraft's sub-ms and OSv's 4–5 ms guest-only
+figures [[EuroSys'21](https://arxiv.org/abs/2104.12721); [ATC'14](https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity)];
+on *this* axis the peer is NOVA's exit latency [[EuroSys'10](https://hypervisor.org/eurosys2010.pdf)]
+— keeping the two axes apart is itself part of the honesty discipline (§6).
+
+## 6. What we do **not** claim (honesty guardrails)
 
 - **We never compare a TCG number against another system's KVM number.** TCG
   inflates boot 10–50×.
@@ -232,11 +298,24 @@ from-scratch kernel never runs.
   after the `M8: timer OK` marker, and the kernel prints the guest-only
   `boot-cycles=0x…` delta. `boot-to-first-output` under QEMU/KVM remains only a
   coarse, VMM-floor-dominated sanity figure, not a competitor comparison.
+- **Every aarch64 performance number is footnoted as KVM/hardware-sourced —
+  never TCG.** QEMU TCG is instruction-accurate, not cycle-accurate, so an
+  aarch64 boot, world-switch, or exit-latency cycle count taken under TCG is
+  *meaningless as a perf figure* — it verifies correctness only. Until a
+  KVM-accelerated or bare-metal Arm host is in CI, the aarch64 lane publishes
+  the green functional marker (`L2.1: stage2 OK`) and **no** quotable latency
+  (§2, §5).
+- **Every cycle figure carries its measured counter base.** A `boot-ready` /
+  world-switch / exit-latency cycle count is published only alongside the
+  frequency that produced it — the **TSC base** (CPUID leaf `0x15`, x86_64) or
+  **`CNTFRQ_EL0`** (aarch64), read and printed on the *same* boot — and
+  wall-time is the cycle delta ÷ that **measured** base. We never infer a core
+  GHz from a cycle/time pair (§2).
 - Figures marked low-confidence (marketing: "<125 ms" bare, "2 orders faster
   than docker", "fastest Wasm VM", "zero cold start") are flagged, never quoted
   bare.
 
-## 6. Reproduce
+## 7. Reproduce
 
 ```bash
 # Build, then benchmark (auto KVM if /dev/kvm is usable, else TCG):
