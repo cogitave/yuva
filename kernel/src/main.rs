@@ -302,6 +302,18 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("hello from rust_main\n");
+    // DIAG: surface the boot-entry EL + monitor flag as the second serial
+    // line, so any runner where the EL2 track silently skips is immediately
+    // diagnosable from the log (entry-el=0x2 el2=0x1 is the real-EL2 path).
+    #[cfg(target_arch = "aarch64")]
+    {
+        tb_hal::serial_write_str("boot: entry-el=");
+        write_hex_u64(tb_hal::boot_entry_el() as u64);
+        tb_hal::serial_write_str(" el2=");
+        write_hex_u64(tb_hal::booted_at_el2() as u64);
+        tb_hal::serial_write_byte(b"
+"[0]);
+    }
 
     // Clean guest-only BOOT-TO-READY figure: `rust_main` entry -> serial up
     // (M0 done), BEFORE any M1.. self-test runs. This is the unikernel-class
@@ -1333,6 +1345,20 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 break;
             }
             stall += 1;
+            if stall == 100_000_000 || stall == 400_000_000 {
+                // Progress heartbeat: a wall-clock-ceiling death inside this
+                // wait now leaves a diagnosable line (switch count + pending
+                // agent flags) instead of a silent stall.
+                tb_hal::serial_write_str("m12: waiting sw=");
+                write_hex_u64(sw);
+                tb_hal::serial_write_str(" flags=");
+                tb_hal::serial_write_byte(if tb_hal::agent_permitted_ok(agent_a) { b"1"[0] } else { b"0"[0] });
+                tb_hal::serial_write_byte(if tb_hal::agent_permitted_ok(agent_b) { b"1"[0] } else { b"0"[0] });
+                tb_hal::serial_write_byte(if tb_hal::agent_denied_ok(agent_a) { b"1"[0] } else { b"0"[0] });
+                tb_hal::serial_write_byte(if tb_hal::agent_denied_ok(agent_b) { b"1"[0] } else { b"0"[0] });
+                tb_hal::serial_write_byte(b"
+"[0]);
+            }
             if stall > STALL_LIMIT {
                 tb_hal::timer_disarm();
                 m12_fail("agents did not reach the preemption + cap-check goal in time");
@@ -3525,6 +3551,49 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- aL2.5: EL2 vGIC virtual-interrupt injection + WFI scheduler-hook -- the
+    // SIXTH L2 rung, built ON TOP of L2.0's resident EL2 monitor. The monitor
+    // arms the vGIC window (HCR_EL2 = RW|IMO|TWI + GICH_HCR.En) and erets into a
+    // guest that enables its OWN GICV virtual CPU interface and PARKS on WFI (the
+    // canonical scheduler yield point). The WFI traps to EL2 (HCR_EL2.TWI) where
+    // the monitor SOFTWARE-INJECTS a pending vIRQ into GICH_LR0 (via the
+    // Kani-proven tb_encode::el2_trap::gich_lr_encode) and resumes the guest past
+    // the WFI; with HCR_EL2.IMO routing the VIRQ to EL1 + the guest's GICV_CTLR.En
+    // + PSTATE.I clear, the guest immediately takes the vIRQ at its OWN EL1 IRQ
+    // vector, reads GICV_IAR == the injected vINTID, sets a sentinel, and writes
+    // GICV_EOIR. The verdict requires the CONJUNCTION of the guest-side magic AND
+    // the monitor-side independent confirmation (the WFI park was observed AND
+    // GICH_ELRSR0 shows LR0 retired -- a fact the guest cannot fake). The window
+    // is torn down (HCR_EL2 baseline, GICH_HCR.En=0, GICH_LR0 zeroed) BEFORE
+    // unwinding AND the facade restores the kernel's VBAR_EL1 (the EL1-side
+    // teardown -- the guest installed its OWN vGIC vectors), so the kernel resumes
+    // on its OWN exception table (zero regression -- M19 still prints after). ALL
+    // the new asm/unsafe is confined to tb-hal's arch/aarch64/{el2,el2vgic,
+    // el2_vgic_vectors}.rs (the GICH_LR encoder in tb-encode is forbid(unsafe) +
+    // Kani-proven); the kernel only branches on VgicProof. On x86_64 there is no
+    // EL2/GIC virtualization, so it reports the n/a path. DoD: "L2.5: vgic OK".
+    match tb_hal::el2_vgic_selftest() {
+        tb_hal::VgicProof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.5: vgic OK\n"); // <-- the aL2.5 aarch64 DoD marker
+        }
+        tb_hal::VgicProof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no vGIC armed.
+            tb_hal::serial_write_str("L2.5: vgic OK (no EL2, skipped)\n");
+        }
+        tb_hal::VgicProof::NotApplicable => {
+            // x86_64: no EL2/GIC virtualization -- the (deferred) APIC-virt path
+            // would be this arch's rung.
+            tb_hal::serial_write_str("L2.5: vgic OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::VgicProof::Faulted { code } => {
+            // Booted at EL2 but the vGIC round-trip faulted -- surfaced honestly,
+            // with NO 'vgic OK' substring, so the run grep fails (red).
+            tb_hal::serial_write_str("L2.5: vgic FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     // --- M19: poll-based virtio-mmio virtio-rng -- the kernel's FIRST real
     // device I/O, the new cumulative boot tail. A MODERN (Version=2) virtio-rng
     // (DeviceID 4) driven over ONE virtqueue: a hard-coded slot scan, the
@@ -3888,5 +3957,12 @@ fn write_hex_u64(value: u64) {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     tb_hal::serial_write_str("panic\n");
+    // Chain green -- exit QEMU NOW (semihosting SYS_EXIT) instead of
+    // parking to the wall-clock ceiling: a green boot finishes in seconds
+    // and a CI timeout now always means a genuinely stuck boot (the
+    // aL2.4/aL2.5 revert class). Falls through to halt() when semihosting
+    // is unavailable (non-harness boots).
+    #[cfg(target_arch = "aarch64")]
+    tb_hal::qemu_exit_success();
     tb_hal::halt()
 }

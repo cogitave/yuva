@@ -111,6 +111,13 @@ _start:
     // Are we at EL2? CurrentEL holds the current EL in bits[3:2]. QEMU
     // `virt,virtualization=on` enters at EL2; a plain `virt` enters at EL1.
     mrs  x1, CurrentEL
+    // DIAG: record raw CurrentEL[3:2] ASAP (before ANY branching) into a
+    // .data static (nonzero init -- survives the later .bss zeroing; written
+    // MMU-off, read under TCG where caches are not modeled). x2/x3 are dead.
+    adrp x2, BOOT_ENTRY_EL
+    add  x2, x2, :lo12:BOOT_ENTRY_EL
+    lsr  x3, x1, #2
+    strb w3, [x2]
     lsr  x1, x1, #2
     cmp  x1, #2
     b.ne 1f                       // not EL2: legacy direct-EL1 boot (x20 = 0)
@@ -244,3 +251,10 @@ global_asm!(
     .quad   _tb_start               // n_desc   = 64-bit EL1 entry (LE u64)
 "#
 );
+
+/// Raw CurrentEL[3:2] recorded by `_start` BEFORE any EL branching. 0xFF =
+/// entry did not pass through `_start` (e.g. the tb-vmm `_tb_start` path).
+/// Nonzero initializer => .data placement, so the pre-.bss-zero store survives.
+#[unsafe(no_mangle)]
+pub(super) static BOOT_ENTRY_EL: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0xFF);
