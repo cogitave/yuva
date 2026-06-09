@@ -20,9 +20,11 @@
 set -euo pipefail
 
 # The exact number of `#[kani::proof]` harnesses in
-# crates/tb-encode/src/proofs.rs (VMX x4 + paging/EPT x4 + IPC frame/ring x3).
+# crates/tb-encode/src/proofs.rs (VMX x4 + paging/EPT x4 + IPC frame/ring x3 +
+# memscore recall-ranking-math x4: log2_fixed/ln_fixed/bla_raw panic-free+bounded
+# and minmax-in-[0,SCALE]).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=11
+EXPECTED_HARNESSES=15
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

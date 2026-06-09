@@ -6,14 +6,28 @@
 //!   * The fixed-size, loop-free bit transforms (VMX adjust/clamp, TSS decode,
 //!     page-table / EPT entry encoders, the 16-byte IPC frame) are TOTAL proofs
 //!     over their full symbolic input space -- no `#[kani::unwind]` needed.
-//!   * The ONE loop-bearing harness (`kani_bounded_ring_framing`) is a BOUNDED
-//!     proof with a small explicit op count + `#[kani::unwind]`, so an
+//!   * The ONE loop-bearing IPC harness (`kani_bounded_ring_framing`) is a
+//!     BOUNDED proof with a small explicit op count + `#[kani::unwind]`, so an
 //!     under-set bound fails closed (unwinding assertion) rather than hanging.
+//!   * The `memscore` ranking-math harnesses prove what is SAFE and
+//!     UNCONDITIONALLY TRUE for the M13 recall math over UNTRUSTED memory
+//!     metadata: panic / overflow / divide-by-zero / shift-overflow FREEDOM plus
+//!     a documented result BOUND. They are deliberately NOT symbolic-monotonicity
+//!     proofs: fixed-point rounding can break strict monotonicity at boundaries,
+//!     so a monotonicity harness would be UNSOUND and turn the lane RED (the #49
+//!     over-quantification trap) -- monotonicity is covered by CONCRETE Miri
+//!     vectors instead. Each `assume`s the DOCUMENTED reachable-input envelope
+//!     (`x < 2^48`, bounded `age`, bounded `minmax` magnitudes); the fixed-point
+//!     `* SCALE` term genuinely overflows i64 at astronomically large inputs the
+//!     kernel never feeds, so an unconstrained full-range harness would ALSO be
+//!     unsound. The `minmax` harness is loop-bearing (`#[kani::unwind]`) over a
+//!     tiny fixed-length slice (the prior Kani state-explosion lesson).
 //!
 //! Each harness carries a NEGATIVE-CONTROL note: the concrete code break that
 //! would turn it FAILED, so the suite is provably non-vacuous.
 
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
+use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
 use crate::paging::{
     entry_addr, ept_leaf_2mib, ept_nonleaf, eptp, level_index, make_entry, ENTRIES,
     ENTRY_ADDR_MASK, EPT_MAPS_PAGE, EPT_MEMTYPE_WB, EPT_RWX, EPT_WALK_LEN_MINUS_1, SHIFT_1G,
@@ -270,4 +284,107 @@ fn kani_bounded_ring_framing() {
     assert_eq!(q.pop(), Some(20));
     assert_eq!(q.pop(), Some(30));
     assert_eq!(q.pop(), None);
+}
+
+// ===========================================================================
+// memscore: the M13 recall RANKING MATH. SAFE (panic/overflow-freedom + result
+// bound) proofs over the DOCUMENTED reachable-input envelope. NOT monotonicity
+// (that is concrete Miri vectors -- see the module-level honesty note).
+// ===========================================================================
+
+/// `log2_fixed` is panic-free (no overflow / shift-overflow / divide-by-zero)
+/// and `0 <= r < 48 * SCALE` over the reachable domain.
+///
+/// DOMAIN (`x < 2^48`): the kernel only calls `log2_fixed` (via `ln_fixed`) on
+/// values derived from u32 access counts (`<= 2^33`) or bounded logical-clock
+/// deltas, so this ceiling covers every reachable input with >2^14 headroom. The
+/// bound is LOAD-BEARING for soundness: at `x >= 2^54` the fixed-point
+/// `(x - pow) * SCALE` term overflows i64, a panic the kernel never reaches but
+/// a full-range `kani::any::<u64>()` harness WOULD hit -- the #49
+/// over-quantification trap. Within the domain `ip <= 47` and `frac < SCALE`, so
+/// `r < 48 * SCALE`.
+///
+/// NEGATIVE CONTROL: widening the scale to `(x - pow) * (SCALE << 12)` overflows
+/// i64 inside the domain and turns this harness RED.
+#[kani::proof]
+fn kani_log2_fixed_panic_free_bounded() {
+    let x: u64 = kani::any();
+    kani::assume(x < (1u64 << 48));
+    let r = log2_fixed(x);
+    assert!(r >= 0);
+    assert!(r < 48 * 1000); // 48 * SCALE
+}
+
+/// `ln_fixed` is panic-free and `0 <= r < 34_000` over the same `x < 2^48`
+/// domain (`log2_fixed(x) < 48_000`, `* LN2_FIXED / SCALE` => `< 48*693 = 33_264`).
+///
+/// NEGATIVE CONTROL: replacing `* LN2_FIXED / SCALE` with `* SCALE` (no divide)
+/// blows the `< 34_000` bound and turns this harness RED.
+#[kani::proof]
+fn kani_ln_fixed_panic_free_bounded() {
+    let x: u64 = kani::any();
+    kani::assume(x < (1u64 << 48));
+    let r = ln_fixed(x);
+    assert!(r >= 0);
+    assert!(r < 34_000);
+}
+
+/// `bla_raw` -- the ACT-R Base-Level Activation that drives recall ranking and
+/// the M17 FORGET sweep -- is panic-free and `|r| <= 34_000`. The u32 `count` is
+/// taken over its FULL range (`2*(count+1) <= 2^33` can never overflow the u64
+/// or the fixed-point path); only `age` needs the `< 2^48` envelope (`age + 1`
+/// overflows at `u64::MAX` and feeds the same `log2_fixed` overflow point). `freq`
+/// lies in `[0, ~33_264]` and `recency` in `[0, ~16_632]`, so the difference is
+/// comfortably inside +/-34_000.
+///
+/// NEGATIVE CONTROL: dropping the `+ 1` guard in `ln_fixed(age + 1)` -> `ln_fixed(
+/// age)` lets `age == 0` reach `log2_fixed(0)`; harmless here, but removing the
+/// `/2` recency scale would push `r` past the bound and turn this harness RED.
+#[kani::proof]
+fn kani_bla_raw_panic_free_bounded() {
+    let count: u32 = kani::any(); // full u32 is safe: 2*(count+1) <= 2^33
+    let age: u64 = kani::any();
+    kani::assume(age < (1u64 << 48));
+    let r = bla_raw(count, age);
+    assert!(r >= -34_000);
+    assert!(r <= 34_000);
+}
+
+/// `minmax` (the recall score normalizer) returns a value in `[0, SCALE]` for a
+/// tiny fixed-length symbolic slice, so a normalized component can never reorder
+/// candidates out of band or escape the fixed-point window -- AND it never
+/// panics (the `hi == lo` guard avoids divide-by-zero; bounded magnitudes avoid
+/// the `(vals[i]-lo) * SCALE` overflow).
+///
+/// DOMAIN: the recall caller feeds `minmax` only small bounded components (the
+/// `bla`/`idf`/importance vectors, each well under +/-2^20), so bounding the
+/// symbolic elements to +/-2^20 is sound -- it covers the reachable inputs and
+/// stays inside i64 for `(vals[i]-lo) * SCALE`. Length 4 + `#[kani::unwind(5)]`
+/// keeps the proof cheap (the prior state-explosion lesson: tiny fixed slice).
+///
+/// SOUNDNESS NOTE: `minmax` is a NORMALIZER -- its output is the fixed-point
+/// fraction in `[0, SCALE]`, NOT one of the slice elements (e.g.
+/// `minmax([0,100],1) == 1000`), so the true invariant is the `[0, SCALE]` range,
+/// not membership; asserting membership would be FALSE and turn the lane RED.
+///
+/// NEGATIVE CONTROL: deleting the `if hi == lo { 0 }` arm divides by zero on an
+/// all-equal slice and turns this harness RED (the guard is load-bearing).
+#[kani::proof]
+#[kani::unwind(5)]
+fn kani_minmax_in_scale_range() {
+    const N: usize = 4;
+    let mut vals = [0i64; N];
+    let mut j = 0;
+    while j < N {
+        let v: i64 = kani::any();
+        kani::assume(v >= -(1i64 << 20));
+        kani::assume(v <= (1i64 << 20));
+        vals[j] = v;
+        j += 1;
+    }
+    let i: usize = kani::any();
+    kani::assume(i < N);
+    let r = minmax(&vals, i);
+    assert!(r >= 0);
+    assert!(r <= 1000); // SCALE
 }

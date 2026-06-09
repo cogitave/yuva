@@ -25,10 +25,15 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+// M13/M17/M18: the PURE fixed-point recall-ranking math now lives in the
+// host-verifiable `tb-encode::memscore` leaf (Kani-proven panic/overflow-free
+// over untrusted memory metadata); the kernel CALLS the exact same functions, so
+// the M13 recall ranking / M17 FORGET decay / M18 frozen evaluator stay
+// byte-identical to the in-line copies these imports replaced.
+use tb_encode::memscore::{bla_raw, ln_fixed, minmax, skill_transform};
+
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
 const SCALE: i64 = 1000;
-/// `ln(2)` scaled by [`SCALE`] (converts an integer `log2` into `ln`).
-const LN2_FIXED: i64 = 693;
 /// Bounded T0 context-register slots (ACT-R buffers; const-bounded prompt).
 const N_REG: usize = 8;
 /// Bounded per-agent Finsts ring (ACT-R `:recently-retrieved` breaker).
@@ -92,74 +97,17 @@ const SKILL_PROV_EMIT_EXTERNAL: u8 = 1 << 0;
 /// ACT-R / EvolveR utility learning rate alpha=0.2 as an integer divisor (U +=
 /// (R-U)/5). Keeps the trust-promotion update FPU-free and replayable.
 const UTIL_ALPHA_DIV: i64 = 5;
-/// The held-out evaluator's kernel-private transform seed (golden-ratio const,
-/// the `REFLECT_SEED` discipline) -- non-zero so an all-zero body still mixes.
-const SKILL_XFORM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-/// FNV-style odd multiplier mixing the held-out input into the transform.
-const SKILL_XFORM_MUL: u64 = 0x0000_0100_0000_01B3;
-
-// --- fixed-point integer math (no floats: deterministic, FPU-hazard-free) -----
-
-/// `log2(x) * SCALE` as an integer (`0` for `x <= 1`): floor part from the
-/// leading-bit position, fractional part by a linear interpolation in `[0, 1)`.
-fn log2_fixed(x: u64) -> i64 {
-    if x <= 1 {
-        return 0;
-    }
-    let ip = 63 - x.leading_zeros() as i64; // floor(log2 x)
-    let pow = 1u64 << (ip as u32);
-    let frac = ((x - pow) as i64 * SCALE) / pow as i64; // linear in [0, SCALE)
-    ip * SCALE + frac
-}
-
-/// `ln(x) * SCALE` as an integer, via `log2(x) * ln(2)`.
-fn ln_fixed(x: u64) -> i64 {
-    log2_fixed(x) * LN2_FIXED / SCALE
-}
-
-/// The ACT-R base-level activation BLA(d=0.5) in fixed point (the O(1) fallback,
-/// Petrov optimized-learning): grows with access frequency, decays with age.
-/// Higher = more active (more recent and/or more often accessed).
-fn bla_raw(count: u32, age: u64) -> i64 {
-    let freq = ln_fixed(2 * (count as u64 + 1)); // frequency term
-    let recency = ln_fixed(age + 1) / 2; // 0.5 * ln(age) decay
-    freq - recency
-}
-
-/// M18: the deterministic fixed-point transform modeling a candidate skill's
-/// behavior on one held-out input (the held-out evaluator's KERNEL-PRIVATE
-/// scoring rule -- the same no-float discipline as recall). It is SENSITIVE to
-/// `body`, so only the secret target body reproduces every held-out expected
-/// value: a skill that games a visible slice still misses the held-out set. The
-/// candidate never runs in the evaluator's sandbox, so it can neither introspect
-/// nor rewrite this function (the "validate, not just hide" sharpening).
-fn skill_transform(body: u64, input: u64) -> u64 {
-    let mut h = body ^ SKILL_XFORM_SEED;
-    h = h.rotate_left((input & 63) as u32);
-    h ^= input.wrapping_mul(SKILL_XFORM_MUL);
-    h = h.rotate_left(17) ^ (body >> 7);
-    h
-}
-
-/// Min-max normalize `vals[i]` over the candidate set into `[0, SCALE]`; a
-/// degenerate (all-equal) component contributes `0` so it cannot reorder.
-fn minmax(vals: &[i64], i: usize) -> i64 {
-    let mut lo = vals[0];
-    let mut hi = vals[0];
-    for &v in vals.iter() {
-        if v < lo {
-            lo = v;
-        }
-        if v > hi {
-            hi = v;
-        }
-    }
-    if hi == lo {
-        0
-    } else {
-        (vals[i] - lo) * SCALE / (hi - lo)
-    }
-}
+// --- fixed-point integer math: MOVED to `tb-encode::memscore` ----------------
+//
+// `LN2_FIXED`, `SKILL_XFORM_SEED`, `SKILL_XFORM_MUL` and the five PURE ranking
+// functions (`log2_fixed` / `ln_fixed` / `bla_raw` / `skill_transform` /
+// `minmax`) now live VERBATIM in the host-verifiable `tb-encode::memscore` leaf
+// and are imported at the top of this module. The kernel CALLS the exact same
+// functions, so the M13 recall ranking, the M17 FORGET decay, and the M18 frozen
+// evaluator are byte-identical -- only now the math is Kani-proven panic /
+// overflow-free + range-bounded over untrusted memory metadata, with zero model
+// drift. `SCALE` stays here: the EvolveR-utility, BM25 IDF, and score-
+// normalization callers below reference it directly.
 
 // --- the durability seam (BackingStore) --------------------------------------
 

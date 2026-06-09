@@ -37,6 +37,11 @@
 //!    `tb-hal::infer`: the panic-free `model:<provider>/<path>` grammar parser
 //!    (`route::parse_scheme`) and the longest-prefix-match routing decision
 //!    (`route::longest_prefix_index`) over the in-kernel route-key literals.
+//!  * [`memscore`] -- the M13 memory-recall RANKING MATH lifted out of
+//!    `tb-hal::mem`: the pure fixed-point `log2`/`ln`, the ACT-R Base-Level
+//!    Activation `bla_raw` that drives recall + the M17 FORGET sweep, the
+//!    `minmax` score normalizer, and the M18 frozen-evaluator `skill_transform`
+//!    -- panic/overflow-freedom + bounds proven over UNTRUSTED memory metadata.
 //!
 //! ## Verification
 //!
@@ -47,6 +52,7 @@
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
 pub mod ipc_frame;
+pub mod memscore;
 pub mod paging;
 pub mod route;
 pub mod vmx;
