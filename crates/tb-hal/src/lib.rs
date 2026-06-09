@@ -759,6 +759,28 @@ pub fn read_cycle_counter() -> u64 {
     arch::read_cycle_counter()
 }
 
+/// x86_64 boot benchmark: emit the host-observable "boot-ready" PIO signal
+/// (`out 0x510, al`) — the Firecracker `--boot-timer` analog. The kernel calls
+/// this ONCE, immediately after the in-guest `boot-ready-cycles=` print, so a
+/// watching `tb-vmm --report-spawn` can timestamp spawn→ready wall-clock at the
+/// SAME instant the guest declares itself ready. Unclaimed (benign) under QEMU.
+/// aarch64 has no PIO and exposes no analog (it reads `CNTFRQ_EL0` instead).
+#[cfg(target_arch = "x86_64")]
+pub fn boot_ready_signal() {
+    arch::boot_ready_signal();
+}
+
+/// x86_64 boot benchmark: the invariant-TSC base frequency in Hz via CPUID leaf
+/// `0x15` (`ECX * EBX / EAX`), or `0` when the leaf reports zeros / is absent.
+/// `rdtsc` ticks at THIS rate, not the core's turbo GHz, so the kernel prints it
+/// on the same boot and the harness divides `boot-ready-cycles` by this MEASURED
+/// base — never an inferred GHz (docs/BENCHMARKS.md §2). aarch64 reads
+/// `CNTFRQ_EL0` for the equivalent counter base, so this is x86_64-only.
+#[cfg(target_arch = "x86_64")]
+pub fn tsc_base_hz() -> u64 {
+    arch::tsc_base_hz()
+}
+
 // ===========================================================================
 // M9: preemptive round-robin scheduler (involuntary full-context switch)
 // ===========================================================================

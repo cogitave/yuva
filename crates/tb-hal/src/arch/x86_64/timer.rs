@@ -179,6 +179,78 @@ pub fn read_cycle_counter() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Boot-time benchmark instrumentation (the FAIR, self-certifying measurement;
+// docs/BENCHMARKS.md §2). x86_64-only: the magic-port `out` has no aarch64
+// analog (no PIO), and aarch64 already reads `CNTFRQ_EL0` for its counter base.
+// ---------------------------------------------------------------------------
+
+/// I/O port the kernel writes ONCE to signal "boot-ready" to a watching host
+/// VMM (the Firecracker `--boot-timer` MMIO-write analog, done with PIO here).
+/// Chosen clear of COM1 (`0x3f8..=0x3ff`) AND of QEMU's isa-debug-exit (`0x501`)
+/// so no real device claims it: under QEMU it is an unclaimed PIO write (benign,
+/// silently dropped), and under `tb-vmm --report-spawn` a `BootReady` BusDevice
+/// at `0x510` timestamps the write. A plain `out`; it never faults at ring 0.
+const BOOT_READY_PORT: u16 = 0x510;
+
+/// CPUID leaf that reports the TSC / core-crystal-clock ratio + the nominal
+/// crystal Hz (Intel SDM Vol.2A, "CPUID — Time Stamp Counter and Nominal Core
+/// Crystal Clock Information"): EAX = denominator, EBX = numerator, ECX =
+/// nominal crystal Hz. `tsc_hz = ECX * EBX / EAX` when all three are nonzero.
+const CPUID_TSC_LEAF: u32 = 0x15;
+
+/// Emit the host-observable "boot-ready" signal: a single `out 0x510, al`
+/// (`al` = 0). The companion of the in-guest `boot-ready-cycles` print — the
+/// host's `Instant` at this write minus its spawn `t0` is the spawn→ready
+/// wall-clock (the Firecracker `--boot-timer` analog). Idempotent in effect (a
+/// host captures only the first write); the kernel calls it exactly once.
+pub fn boot_ready_signal() {
+    // SAFETY: `out dx, al` is ring-0-legal; `BOOT_READY_PORT` (0x510) is not
+    // claimed by any emulated device on the boot paths we run (QEMU microvm /
+    // tb-vmm), so the write has no side effect beyond the host timestamp. No
+    // memory or stack effect; the arithmetic condition flags are untouched.
+    unsafe {
+        asm!("out dx, al", in("dx") BOOT_READY_PORT, in("al") 0u8,
+            options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Read the invariant-TSC base frequency in Hz via CPUID leaf `0x15`
+/// (`ECX * EBX / EAX`), or `0` when the leaf is unsupported / reports zeros
+/// (older CPUs, or a hypervisor that does not fill the crystal Hz). The kernel
+/// prints this on the same boot so the bench harness divides the
+/// `boot-ready-cycles` delta by the **measured** base — never an inferred core
+/// GHz (docs/BENCHMARKS.md §2). `rdtsc` ticks at THIS rate, not the turbo GHz.
+pub fn tsc_base_hz() -> u64 {
+    // CPUID clobbers EAX/EBX/ECX/EDX; LLVM reserves RBX, so go through a scratch.
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    // SAFETY: `cpuid` is ring-0-legal and side-effect-free (a pure read of CPU
+    // identification leaves). We move EBX out via a scratch register because
+    // LLVM reserves RBX; no memory or stack effect, condition flags untouched.
+    unsafe {
+        asm!(
+            "mov {tmp:r}, rbx",
+            "cpuid",
+            "mov {ebx:e}, ebx",
+            "mov rbx, {tmp:r}",
+            tmp = out(reg) _,
+            ebx = out(reg) ebx,
+            inout("eax") CPUID_TSC_LEAF => eax,
+            out("ecx") ecx,
+            out("edx") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    // denominator (EAX), numerator (EBX), nominal crystal Hz (ECX). All three
+    // must be nonzero for the ratio to be meaningful; else the base is unknown.
+    if eax == 0 || ebx == 0 || ecx == 0 {
+        return 0;
+    }
+    (ecx as u64) * (ebx as u64) / (eax as u64)
+}
+
+// ---------------------------------------------------------------------------
 // M14.2: interrupt-mask save/restore -- the lost-wakeup-free critical-section
 // tool the blocking-recv path wraps around {empty-recheck -> register waiter ->
 // mark BLOCKED -> yield}. On a single core a sender can only run after the

@@ -314,6 +314,28 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     write_hex_u64(boot_ready.wrapping_sub(boot_c0));
     tb_hal::serial_write_byte(b'\n');
 
+    // x86_64 boot-benchmark instrumentation (the FAIR, self-certifying axes of
+    // docs/BENCHMARKS.md §2). Two emissions, BOTH at the M0-ready point, BEFORE
+    // any M1.. self-test, and BOTH confined to x86_64 (aarch64 has no PIO and
+    // already prints its `CNTFRQ_EL0` base elsewhere):
+    //   1. `tsc-base-hz=0x..` — the MEASURED invariant-TSC base (CPUID leaf
+    //      0x15). `rdtsc` ticks at this rate, NOT the core GHz, so the harness
+    //      divides `boot-ready-cycles` by THIS, never an inferred GHz. `0x0`
+    //      means the leaf reported zeros (older CPU / hypervisor) — the harness
+    //      then treats the wall-time as unknown rather than fabricating one.
+    //   2. `out 0x510, al` — the host-observable boot-ready signal (Firecracker
+    //      `--boot-timer` analog). A watching `tb-vmm --report-spawn` timestamps
+    //      spawn→ready at this exact instant; QEMU drops the unclaimed PIO write
+    //      benignly. tb-hal owns both the `cpuid` and the `out` asm; the kernel
+    //      stays `#![forbid(unsafe_code)]` and only branches on the returned u64.
+    #[cfg(target_arch = "x86_64")]
+    {
+        tb_hal::serial_write_str("tsc-base-hz=");
+        write_hex_u64(tb_hal::tsc_base_hz());
+        tb_hal::serial_write_byte(b'\n');
+        tb_hal::boot_ready_signal();
+    }
+
     // --- M1 proof (kept): install traps, take a breakpoint, resume ---------
     tb_hal::install_traps();
     tb_hal::set_trap_hook(trap_hook);

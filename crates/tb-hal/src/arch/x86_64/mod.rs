@@ -165,8 +165,8 @@ pub use pmm::pmm_collect_regions;
 // async IRQ) plus the `rdtsc` in-guest cycle counter, re-exported so `lib.rs`
 // can expose `tb_hal::timer_demo` / `tb_hal::read_cycle_counter`.
 pub use timer::{
-    local_irq_restore, local_irq_save, read_cycle_counter, sched_irq_unmask, timer_demo,
-    timer_disarm, timer_rearm,
+    boot_ready_signal, local_irq_restore, local_irq_save, read_cycle_counter, sched_irq_unmask,
+    timer_demo, timer_disarm, timer_rearm, tsc_base_hz,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};

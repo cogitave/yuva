@@ -1,0 +1,263 @@
+# bench — TABOS-vs-Firecracker boot benchmark (the FAIR, self-certifying lane).
+#
+# NON-BLOCKING (informational): this is a benchmark, not a gate. It boots
+# tb-vmm and Firecracker on the SAME GitHub KVM runner and emits an HONEST,
+# per-axis comparison to the step summary. It NEVER produces a "0.5 ms vs 125 ms"
+# headline — FC's ~125 ms is mostly a real Linux kernel boot; the only fair claim
+# on the same runner is axis A (VMM-spawn) and the tb-vmm/FC RATIO.
+#
+# Three axes (docs/BENCHMARKS.md §1-§3):
+#   A = VMM-spawn: tb-vmm spawn->guest-ready (the 0x510 boot-ready PIO write)
+#       vs FC spawn->first guest serial byte. Apples-to-apples: both are the
+#       host-observed VMM/host spawn floor. THIS is the fair, comparable axis.
+#   B = guest-only boot: TABOS in-guest `boot-ready-cycles` (rust_main entry ->
+#       serial-ready, BEFORE the self-test) / its MEASURED `tsc-base-hz` base.
+#       VMM-independent; the unikernel-class figure. NOT comparable to FC's
+#       end-to-end ms (different metric class).
+#   C = end-to-end: FC spawn->first serial byte (a real Linux kernel boots),
+#       reported WITH the different-guest-OS caveat. NOT a TABOS-kernel number.
+#
+# Runner caveat: absolute ms on a nested-virt shared GitHub runner are
+# runner-relative; only the tb-vmm/FC RATIO on the SAME runner is the fair claim.
+#
+# Skips gracefully (like vmm-boot) when /dev/kvm is absent.
+
+name: bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pin Firecracker + its CI guest version so the number is reproducible. CI_VERSION
+# is the major.minor of FC_VER (the firecracker-ci/<CI_VERSION>/ S3 prefix layout).
+env:
+  FC_VER: v1.12.1
+  FC_CI_VERSION: v1.12
+  BENCH_ITERS: 30
+
+jobs:
+  bench:
+    name: TABOS vs Firecracker boot bench (x86_64, /dev/kvm)
+    runs-on: ubuntu-latest
+    # Informational lane: a failed measurement must never red-X the PR.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Enable /dev/kvm for the runner user
+        run: |
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::notice::/dev/kvm absent on this runner — the bench lane will skip (it is informational, not a gate)."
+            echo "KVM_OK=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm
+          echo "KVM_OK=1" >> "$GITHUB_ENV"
+
+      - name: Cache cargo + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            tb-vmm/target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (--release, custom target)
+        run: cargo kbuild --release --target targets/x86_64-tabos-none.json
+
+      - name: Build tb-vmm (--release)
+        run: cd tb-vmm && cargo build --release
+
+      # ----------------------------------------------------------------------
+      # Axis A + B: run tb-vmm --report-spawn N times. Each run emits, on the
+      # SAME boot:
+      #   * spawn-ready-ns=..  (host spawn->guest-ready 0x510 write; axis A)
+      #   * boot-ready-cycles=0x..  (in-guest rust_main->serial-ready; axis B)
+      #   * tsc-base-hz=0x..   (the MEASURED TSC base for the cycles->ms divide)
+      # ----------------------------------------------------------------------
+      - name: Bench tb-vmm (axis A spawn + axis B in-guest cycles)
+        if: env.KVM_OK == '1'
+        run: |
+          set -o pipefail
+          K=target/x86_64-tabos-none/release/tabos-kernel
+          TBVMM=tb-vmm/target/release/tb-vmm
+          : > tbvmm-spawn-ns.txt
+          BRC=""; TSC=""
+          for i in $(seq 1 "$BENCH_ITERS"); do
+            OUT=$(timeout 10 "$TBVMM" --kernel "$K" --report-spawn --print-exit \
+              --timeout-secs 10 2>/dev/null || true)
+            ns=$(printf '%s\n' "$OUT" | grep -oE "spawn-ready-ns=[0-9]+" | head -1 | cut -d= -f2 || true)
+            [ -n "$ns" ] && echo "$ns" >> tbvmm-spawn-ns.txt
+            # The in-guest figures are stable across runs; capture once.
+            if [ -z "$BRC" ]; then
+              BRC=$(printf '%s\n' "$OUT" | grep -oE "boot-ready-cycles=0x[0-9a-fA-F]+" | head -1 | cut -d= -f2 || true)
+              TSC=$(printf '%s\n' "$OUT" | grep -oE "tsc-base-hz=0x[0-9a-fA-F]+" | head -1 | cut -d= -f2 || true)
+            fi
+          done
+          echo "TBVMM_BRC=${BRC:-}" >> "$GITHUB_ENV"
+          echo "TBVMM_TSC=${TSC:-}" >> "$GITHUB_ENV"
+          echo "tb-vmm spawn samples: $(wc -l < tbvmm-spawn-ns.txt) ; boot-ready-cycles=${BRC:-NA} tsc-base-hz=${TSC:-NA}"
+
+      # ----------------------------------------------------------------------
+      # Axis C: install the PINNED Firecracker release + a minimal CI guest
+      # (vmlinux + ext4 rootfs from the FC CI S3 bucket), boot it N times via
+      # --config-file (no API socket / TAP / SSH), timing host spawn -> first
+      # guest serial byte. This is FC's end-to-end (a REAL Linux kernel boots).
+      # ----------------------------------------------------------------------
+      - name: Install Firecracker (pinned) + minimal CI guest
+        if: env.KVM_OK == '1'
+        run: |
+          set -euo pipefail
+          ARCH=x86_64
+          REL="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}"
+          curl -fsSL "${REL}/firecracker-${FC_VER}-${ARCH}.tgz" | tar -xz
+          sudo install -m 0755 "release-${FC_VER}-${ARCH}/firecracker-${FC_VER}-${ARCH}" /usr/local/bin/firecracker
+          firecracker --version | head -1
+
+          S3="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_CI_VERSION}/${ARCH}"
+          # Pin the exact CI kernel + rootfs keys so the figure is reproducible.
+          KBASE=$(curl -fsSL "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${FC_CI_VERSION}/${ARCH}/vmlinux-&list-type=2" \
+            | grep -oE "firecracker-ci/${FC_CI_VERSION}/${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]{1,3}" | sort -V | tail -1)
+          curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${KBASE}" -o vmlinux.bin
+          # The CI rootfs is a squashfs; convert it to the ext4 FC wants as a drive.
+          SQUASH=$(curl -fsSL "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${FC_CI_VERSION}/${ARCH}/ubuntu-&list-type=2" \
+            | grep -oE "firecracker-ci/${FC_CI_VERSION}/${ARCH}/ubuntu-[0-9]+\.[0-9]+\.squashfs" | sort -V | tail -1)
+          curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${SQUASH}" -o rootfs.squashfs
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends squashfs-tools e2fsprogs
+          unsquashfs -d squashfs-root rootfs.squashfs >/dev/null
+          truncate -s 512M rootfs.ext4
+          sudo mkfs.ext4 -q -d squashfs-root -F rootfs.ext4
+          ls -l vmlinux.bin rootfs.ext4
+
+          # Minimal config: boot-source + rootfs ONLY (no net/TAP/vsock/SSH). The
+          # boot args reach an early serial byte on ttyS0, which is the axis-A
+          # end event we time against (host spawn -> first guest serial byte).
+          cat > fc-config.json <<JSON
+          {
+            "boot-source": {
+              "kernel_image_path": "$(pwd)/vmlinux.bin",
+              "boot_args": "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+            },
+            "drives": [
+              {
+                "drive_id": "rootfs",
+                "path_on_host": "$(pwd)/rootfs.ext4",
+                "is_root_device": true,
+                "is_read_only": true
+              }
+            ],
+            "machine-config": { "vcpu_count": 1, "mem_size_mib": 256, "smt": false }
+          }
+          JSON
+
+      - name: Bench Firecracker (axis C spawn -> first serial byte)
+        if: env.KVM_OK == '1'
+        run: |
+          set -o pipefail
+          : > fc-spawn-ns.txt
+          for i in $(seq 1 "$BENCH_ITERS"); do
+            SOCK="/tmp/fc-bench-$i.sock"; sudo rm -f "$SOCK"
+            # Time host spawn -> first byte on FC stdout. `timeout` bounds a stuck
+            # boot; we kill FC right after the first byte so the loop stays fast.
+            t0=$(date +%s%N)
+            ( timeout 30 firecracker --no-api --config-file "$(pwd)/fc-config.json" \
+                > "fc-out-$i.log" 2>&1 & echo $! > "fc-$i.pid" )
+            # Poll for the first serial byte (the FC stdout log becoming non-empty).
+            for _ in $(seq 1 30000); do
+              if [ -s "fc-out-$i.log" ]; then break; fi
+              sleep 0.0005 2>/dev/null || true
+            done
+            t1=$(date +%s%N)
+            kill -9 "$(cat "fc-$i.pid")" 2>/dev/null || true
+            if [ -s "fc-out-$i.log" ]; then
+              echo $(( t1 - t0 )) >> fc-spawn-ns.txt
+            fi
+          done
+          echo "FC spawn samples: $(wc -l < fc-spawn-ns.txt)"
+
+      # ----------------------------------------------------------------------
+      # Compute median / p99 / min for each series + emit the honest per-axis
+      # comparison table to the step summary, with the runner-relative caveat,
+      # the tb-vmm/FC ratio headline, and the forbidden-claim note.
+      # ----------------------------------------------------------------------
+      - name: Emit honest per-axis comparison table
+        if: env.KVM_OK == '1'
+        run: |
+          stat_ns() {  # prints "median p99 min n" (ns) for a file of ns samples
+            local f="$1"
+            if [ ! -s "$f" ]; then echo "NA NA NA 0"; return; fi
+            sort -n "$f" | awk '
+              { a[NR]=$1 } END {
+                n=NR
+                med = (n%2) ? a[int(n/2)+1] : int((a[n/2]+a[n/2+1])/2)
+                p99i = int(n*0.99); if (p99i < 1) p99i=1; if (p99i > n) p99i=n
+                printf "%d %d %d %d", med, a[p99i], a[1], n
+              }'
+          }
+          ms() { # ns -> ms with 3 decimals, or NA
+            if [ "$1" = "NA" ]; then echo "NA"; else awk -v v="$1" 'BEGIN{printf "%.3f", v/1e6}'; fi
+          }
+
+          read TV_MED TV_P99 TV_MIN TV_N < <(stat_ns tbvmm-spawn-ns.txt)
+          read FC_MED FC_P99 FC_MIN FC_N < <(stat_ns fc-spawn-ns.txt)
+
+          # Axis B: in-guest boot-ready-cycles / measured tsc-base-hz -> ms.
+          BRC_HEX="${TBVMM_BRC:-}"; TSC_HEX="${TBVMM_TSC:-}"
+          BRC_DEC="NA"; TSC_DEC="NA"; B_MS="NA"
+          if [ -n "$BRC_HEX" ]; then BRC_DEC=$(printf "%d" "$BRC_HEX"); fi
+          if [ -n "$TSC_HEX" ]; then TSC_DEC=$(printf "%d" "$TSC_HEX"); fi
+          if [ "$BRC_DEC" != "NA" ] && [ "$TSC_DEC" != "NA" ] && [ "$TSC_DEC" -gt 0 ]; then
+            B_MS=$(awk -v c="$BRC_DEC" -v hz="$TSC_DEC" 'BEGIN{printf "%.4f", (c/hz)*1000}')
+          fi
+
+          # Axis A headline ratio: FC spawn / tb-vmm spawn on the SAME runner.
+          RATIO="NA"
+          if [ "$TV_MED" != "NA" ] && [ "$FC_MED" != "NA" ] && [ "$TV_MED" -gt 0 ]; then
+            RATIO=$(awk -v fc="$FC_MED" -v tv="$TV_MED" 'BEGIN{printf "%.1fx", fc/tv}')
+          fi
+
+          CPU=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed "s/^ *//")
+          {
+            echo "## TABOS vs Firecracker boot bench (same KVM runner)"
+            echo ""
+            echo "Runner CPU: \`$CPU\` · Firecracker \`$FC_VER\` (CI guest \`$FC_CI_VERSION\`) · iters/axis: \`$BENCH_ITERS\`"
+            echo ""
+            echo "| Axis | What it measures | System | median | p99 | min | n |"
+            echo "|---|---|---|---:|---:|---:|---:|"
+            echo "| **A** VMM-spawn | host spawn → guest-ready (apples-to-apples) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
+            echo "| **A** VMM-spawn | host spawn → first guest serial byte | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
+            echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | TABOS | ${B_MS} ms | — | — | 1 |"
+            echo "| **C** end-to-end | spawn → first serial byte (REAL Linux kernel boots) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
+            echo ""
+            echo "**Headline (the ONLY fair cross-system claim):** on this same runner, tb-vmm spawn→ready is **${RATIO}** vs Firecracker spawn→first-serial-byte (axis A median)."
+            echo ""
+            echo "Axis B detail: \`boot-ready-cycles=${BRC_HEX:-NA}\` (= ${BRC_DEC} cycles) ÷ measured \`tsc-base-hz=${TSC_HEX:-NA}\` (= ${TSC_DEC} Hz) ≈ **${B_MS} ms** — the VMM-independent, unikernel-class figure (NOT comparable to axis C ms)."
+            echo ""
+            echo "### Honesty guardrails"
+            echo "- **Absolute ms are runner-relative.** This is a nested-virt shared GitHub runner; a faster box can yield a LARGER number (VMM/host-spawn-dominated). Only the **tb-vmm/FC ratio on the same runner** (axis A) is the fair claim."
+            echo "- **Never a \"0.5 ms vs 125 ms\" headline.** Firecracker's full-stack ~125 ms (NSDI'20) is mostly a real Linux kernel boot — that is axis C, a DIFFERENT guest OS, not the TABOS kernel. The 0.5 ms guest-only figure is axis B and is **not** comparable to it."
+            echo "- **We do not claim to beat the shared VMM floor** (FC/Solo5 fork + KVM setup + vCPU bring-up is VMM-bound; any guest inherits it)."
+            echo "- See docs/BENCHMARKS.md §1-§6 for the full metric-class discipline."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip note (no KVM)
+        if: env.KVM_OK != '1'
+        run: echo "::notice::bench lane skipped — no /dev/kvm. It is informational (non-blocking); the required boot gates live in ci / microvm-kvm / vmm-boot."

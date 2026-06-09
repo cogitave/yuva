@@ -22,6 +22,7 @@ use crate::device::Bus;
 use crate::error::VmmError;
 use crate::loader;
 use crate::memory::GuestRam;
+use crate::report::{self, BootReady, ReadyCell, SpawnPhases};
 use crate::serial::Serial;
 
 /// COM1 base port + register span (16550 has 8 registers).
@@ -60,12 +61,24 @@ pub struct Vmm {
     #[allow(dead_code)]
     ram: GuestRam,
     _kvm: Kvm,
+    // Spawn-path benchmark state (`--report-spawn`): the sub-phase Instants of
+    // `Vmm::new`, the shared cell the BootReady (0x510) device fills on the
+    // guest's boot-ready `out`, and a one-shot guard so the report prints once.
+    spawn_phases: SpawnPhases,
+    ready_cell: ReadyCell,
+    reported: bool,
 }
 
 impl Vmm {
     /// Build the VM: open KVM, allocate + register guest RAM, load the kernel,
     /// create the vCPU, attach devices, and run the arch boot configuration.
     pub fn new(config: Config) -> Result<Self, VmmError> {
+        // Spawn `t0`: the VERY FIRST line of `Vmm::new`. The host-observed
+        // spawn->ready wall-clock (axis A; docs/BENCHMARKS.md §2) is measured
+        // from here to the guest's boot-ready PIO write. Always captured (cheap);
+        // only PRINTED under `--report-spawn`.
+        let spawn_t0 = Instant::now();
+
         let kvm = Kvm::new().map_err(VmmError::KvmInit)?;
         let api = kvm.get_api_version();
         if api != KVM_API_VERSION as i32 {
@@ -91,10 +104,14 @@ impl Vmm {
         // map, so the existing late `set_tss_address` in arch::setup remains
         // sufficient.
         vm.create_irq_chip()?;
+        // Spawn phase 1: KVM open + VM create + irqchip done.
+        let after_kvm = Instant::now();
 
         // Guest RAM + KVM memslots.
         let ram = GuestRam::new(config.mem_bytes)?;
         ram.register_with_kvm(&vm)?;
+        // Spawn phase 2: guest RAM allocated + memslots registered.
+        let after_ram = Instant::now();
 
         // Load the kernel ELF into guest RAM and resolve the 64-bit entry.
         let image = std::fs::read(&config.kernel_path)
@@ -106,14 +123,21 @@ impl Vmm {
                 loaded.entry, loaded.image_end
             );
         }
+        // Spawn phase 3: kernel ELF read + PT_LOAD segments copied into RAM.
+        let after_load = Instant::now();
 
         let vcpu = vm.create_vcpu(0)?;
 
-        // Devices: a 16550A UART on COM1 carrying guest output to stdout.
+        // Devices: a 16550A UART on COM1 carrying guest output to stdout, plus
+        // the BootReady (0x510) device that timestamps the guest's boot-ready
+        // PIO write into a shared cell (the `--report-spawn` axis-A clock).
         let mut pio_bus = Bus::new();
         let mmio_bus = Bus::new();
         let serial = Arc::new(Mutex::new(Serial::new(Box::new(io::stdout()))));
         pio_bus.register(COM1_BASE, COM1_LEN, serial)?;
+        let ready_cell = report::ready_cell();
+        let boot_ready = Arc::new(Mutex::new(BootReady::new(ready_cell.clone())));
+        pio_bus.register(report::BOOT_READY_PORT, report::BOOT_READY_LEN, boot_ready)?;
 
         // Arch boot configuration (boot structures + sregs/regs).
         let params = BootParams {
@@ -122,6 +146,16 @@ impl Vmm {
             cmdline: &config.cmdline,
         };
         arch::setup(&kvm, &vm, &vcpu, ram.inner(), &params)?;
+        // Spawn phase 4: arch boot config done — the vCPU is ready to run.
+        let after_setup = Instant::now();
+
+        let spawn_phases = SpawnPhases {
+            t0: spawn_t0,
+            after_kvm,
+            after_ram,
+            after_load,
+            after_setup,
+        };
 
         Ok(Self {
             config,
@@ -131,6 +165,9 @@ impl Vmm {
             vm,
             ram,
             _kvm: kvm,
+            spawn_phases,
+            ready_cell,
+            reported: false,
         })
     }
 
@@ -190,6 +227,13 @@ impl Vmm {
                     break Outcome::RunErr(e);
                 }
             }
+
+            // If the guest just wrote the boot-ready port (`out 0x510, al`), the
+            // BootReady device timestamped it into `ready_cell`; print the
+            // machine-parseable spawn report ONCE (under `--report-spawn`) and
+            // keep running (the in-kernel LAPIC parks `hlt`; the timeout guard
+            // bounds the run, exactly as without the flag).
+            self.maybe_report_spawn();
         };
 
         // Post-loop: the vCPU borrow from the run() exit has ended, so we may
@@ -225,6 +269,25 @@ impl Vmm {
                 Err(VmmError::Kvm(e))
             }
         }
+    }
+
+    /// Print the machine-parseable spawn report ONCE, the first run-loop
+    /// iteration after the guest has written the boot-ready PIO port (0x510).
+    /// A no-op unless `--report-spawn` is set and the BootReady device has
+    /// captured the guest's ready `Instant`. The report goes to STDOUT (so the
+    /// CI bench lane greps it alongside the in-guest serial markers); it never
+    /// stops the run — the timeout guard still bounds it, exactly as without the
+    /// flag, so the existing vmm-boot behaviour is unchanged when the flag is off.
+    fn maybe_report_spawn(&mut self) {
+        if !self.config.report_spawn || self.reported {
+            return;
+        }
+        let ready = match *self.ready_cell.lock().expect("BootReady cell poisoned") {
+            Some(instant) => instant,
+            None => return,
+        };
+        println!("{}", report::format_report(&self.spawn_phases, ready));
+        self.reported = true;
     }
 
     /// Best-effort dump of vCPU state to stderr for boot-failure triage.

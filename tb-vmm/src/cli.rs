@@ -21,6 +21,10 @@ OPTIONS:\n\
     --timeout-secs <N>      Wall-clock guard; the run aborts if the guest does\n\
                             not halt within this many seconds. [default: 30]\n\
     --print-exit            Print the VM-exit reason + vCPU state to stderr.\n\
+    --report-spawn          Time the spawn path: print a machine-parseable\n\
+                            `spawn-ready-ns=<n> phase-kvm-ns=.. ...` line when\n\
+                            the guest writes the boot-ready PIO port (0x510),\n\
+                            then keep running until the timeout guard.\n\
     -h, --help              Print this help.\n";
 
 /// The default kernel image path (the debug build of the custom target).
@@ -46,6 +50,9 @@ pub struct Config {
     pub timeout_secs: u64,
     /// Whether to print exit diagnostics to stderr.
     pub print_exit: bool,
+    /// Whether to time the spawn path and print the machine-parseable
+    /// `spawn-ready-ns=..` breakdown when the guest writes the boot-ready port.
+    pub report_spawn: bool,
 }
 
 /// The outcome of parsing argv.
@@ -104,6 +111,7 @@ impl Cli {
         let mut cmdline = String::new();
         let mut timeout_secs = DEFAULT_TIMEOUT_SECS;
         let mut print_exit = false;
+        let mut report_spawn = false;
 
         while let Some(arg) = it.next() {
             match arg {
@@ -115,6 +123,7 @@ impl Cli {
                     timeout_secs = parse_u64(req_value(&mut it, "--timeout-secs")?, "--timeout-secs")?
                 }
                 "--print-exit" => print_exit = true,
+                "--report-spawn" => report_spawn = true,
                 other => return Err(CliError::Unknown(other.to_string())),
             }
         }
@@ -129,6 +138,7 @@ impl Cli {
             cmdline,
             timeout_secs,
             print_exit,
+            report_spawn,
         }))
     }
 }
@@ -167,6 +177,7 @@ mod tests {
                 assert_eq!(c.cmdline, "");
                 assert_eq!(c.timeout_secs, DEFAULT_TIMEOUT_SECS);
                 assert!(!c.print_exit);
+                assert!(!c.report_spawn);
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -185,6 +196,7 @@ mod tests {
             "--timeout-secs",
             "60",
             "--print-exit",
+            "--report-spawn",
         ])
         .unwrap();
         let CliAction::Run(c) = action else {
@@ -195,6 +207,19 @@ mod tests {
         assert_eq!(c.cmdline, "verbose=1");
         assert_eq!(c.timeout_secs, 60);
         assert!(c.print_exit);
+        assert!(c.report_spawn);
+    }
+
+    #[test]
+    fn report_spawn_defaults_off_and_parses() {
+        let CliAction::Run(c) = parse(&["tb-vmm"]).unwrap() else {
+            panic!("expected Run")
+        };
+        assert!(!c.report_spawn);
+        let CliAction::Run(c) = parse(&["tb-vmm", "--report-spawn"]).unwrap() else {
+            panic!("expected Run")
+        };
+        assert!(c.report_spawn);
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod device;
 mod error;
 mod loader;
 mod memory;
+mod report;
 mod serial;
 mod vmm;
 
