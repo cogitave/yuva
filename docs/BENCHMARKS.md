@@ -41,13 +41,15 @@ convention — VMM-start as t0):
 - **boot-to-first-output** = spawn → the first guest serial byte
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
-- **boot+selftest** = spawn → the final cumulative marker (currently
-  `M18: evolve OK`). This is boot **plus the entire M0…M18 self-test** (M2's
+- **boot+selftest** = spawn → the final cumulative marker (now
+  `M19: virtio OK`). This is boot **plus the entire M0…M19 self-test** (M2's
   1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB heap
-  growths, M8's interrupt canary, M9's ≥100 involuntary switches, and the
-  M10–M18 isolation / capability / memory / IPC / inference / consolidation /
-  evolve self-tests), so it is labelled separately and is **emphatically not** a
-  boot number — it is an exhaustive correctness suite that happens to run at boot.
+  growths, M8's interrupt canary, M9's ≥100 involuntary switches, the
+  M10–M19 isolation / capability / memory / IPC / inference / consolidation /
+  evolve / approval-gate / held-out / virtio self-tests, plus the two L2.0
+  world-switch probes that print just before M19), so it is labelled separately
+  and is **emphatically not** a boot number — it is an exhaustive correctness
+  suite that happens to run at boot.
 
 **In-guest cycle counters (the VMM-independent, honest guest-only figures).**
 The kernel reads `rdtsc` (x86_64) / `CNTPCT_EL0` (aarch64) at `rust_main` entry
@@ -71,10 +73,14 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
   M0–M8 self-test; a *correctness*-cost gauge, NOT a boot figure.
 
 > Caveat on the harness wall-clock: `bench-boot.sh`'s `full=NA` under
-> `qemu -M microvm -accel kvm` is an **untested config** — CI exercises `ci`
-> (QEMU/TCG) and `vmm-boot` (our own `tb-vmm`/KVM, which DOES reach
-> `M18: evolve OK`); the QEMU-microvm+KVM path is not yet a CI lane, so treat its
-> `full` as unverified until that lane (or the in-guest counter above) lands.
+> `qemu -M microvm -accel kvm` is an **untested config for the wall-clock
+> harness** — `bench-boot.sh` itself exercises `ci` (QEMU/TCG) and `vmm-boot`
+> (our own `tb-vmm`/KVM, which DOES reach the final `M19: virtio OK`). The
+> QEMU-microvm+KVM path now has its **own** required `microvm-kvm` CI lane (it
+> boots `-M microvm -accel kvm -cpu host`, asserts the cumulative chain, and is
+> where the in-guest `--release` boot-ready figure in §3 is measured); only
+> `bench-boot.sh`'s own wall-clock `full` under that accel is still uncaptured, so
+> treat that harness `full` as unverified (use the in-guest counter above).
 
 **Accel is auto-detected.** **Only the KVM number is a boot figure.** TCG
 (software emulation) inflates boot 10–50× and is reported solely as a portable
@@ -82,7 +88,7 @@ upper bound — *never* compared against another system's KVM result. (This is
 the single most common way "microVM boot" numbers become accidentally
 non-comparable.)
 
-### TABOS measured — today (M8, kernel boots a self-test then halts)
+### TABOS measured — today (kernel boots the cumulative M0…M19 self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
@@ -99,7 +105,8 @@ non-comparable.)
 > pushes the TCG figure to ~1.1 s. **None of this is "boot":** it is one-time
 > init + an exhaustive correctness self-test, all hardware-fast under KVM (the
 > guest boot to first output is unchanged at ~28 ms). The honest TABOS claim
-> stays architectural (§4), measured guest-only at M8.
+> stays architectural (§4), with the guest-only boot figure now **MEASURED at
+> ~0.5 ms** (`--release`, microvm+KVM; §3).
 
 > **Read these numbers correctly — they measure the harness's t0 (VMM process
 > spawn), not the TABOS kernel.** The clearest evidence: the KVM run on the CI

@@ -1,14 +1,22 @@
 # TABOS Milestones & Development Pipeline
 
 > Status: the agent-native milestone chain **M0 → M18 is complete and CI-green on
-> both architectures** (x86_64 + aarch64), plus the first sovereignty-L2 rung
-> **L2.0** (x86_64 VMX-root + aarch64 EL2 world-switch) — every milestone verified
-> by booting under QEMU (and, on x86_64, the project's own `tb-vmm`/KVM) on every
-> change. M11's capability rights-subset invariant is additionally **machine-proven
-> by Kani** (marker `M11: caps-subset PROVEN`). This document records what each
-> milestone delivers, how it is proven, and how the codebase is built and run; the
-> full sequenced, risk-analysed v2 plan with per-milestone detail is
-> **[ROADMAP-V2](ROADMAP-V2.md)**.
+> both architectures** (x86_64 + aarch64), extended since by six follow-on markers
+> — **M14.1** (byte-payload IPC), **M14.2** (blocking-recv), **M15.1** (block unmap
+> + frame reclamation), **M18.1** (mandatory human-approval gate), **M18.2**
+> (rotating held-out evaluator), and **M19** (a poll-based virtio-mmio virtio-rng
+> round-trip — the kernel's FIRST real device I/O, now the LAST cumulative marker)
+> — plus the first sovereignty-L2 rung **L2.0** (x86_64 VMX-root graceful-skip +
+> aarch64 EL2 world-switch, printed before M19) — every milestone verified by
+> booting under QEMU (and, on x86_64, the project's own `tb-vmm`/KVM) on every
+> change. A **formally-verified core** now backs the chain: M11's capability
+> rights-subset invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
+> `crates/tb-caps-core`), the silicon-unsafe encoders/parsers are **Kani-proven** in
+> a new `crates/tb-encode` (`V1: kani-encoders OK`), and a **Miri Tier-0 UB gate**
+> interprets both leaf crates (`T0: miri OK`); CI now runs **six lanes**. This
+> document records what each milestone delivers, how it is proven, and how the
+> codebase is built and run; the full sequenced, risk-analysed v2 plan with
+> per-milestone detail is **[ROADMAP-V2](ROADMAP-V2.md)**.
 > Related: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) (the assembly plan
 > the M0–M4 milestones implement) · [ROADMAP-V2](ROADMAP-V2.md) (the M5→M18
 > detail) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) (the L2 track) ·
@@ -47,14 +55,15 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M18, + L2.0)
+## 2. The milestone chain (M0 → M18, + L2.0, + M19)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
 milestones cumulatively, so every boot is a full regression of M0 through the
 latest. A green boot prints the M0–M4 foundation trace (below), then the M5–M18
-agent-native markers, then the two L2.0 sovereignty lines — the complete ordered
-sequence is listed further below.
+agent-native markers (now including the M14.1/M14.2/M15.1/M18.1/M18.2 follow-ons),
+then the two L2.0 sovereignty lines, then the final `M19: virtio OK` device-I/O
+marker — the complete ordered sequence is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -149,9 +158,13 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M14.1** | Variable-length byte payload (bounce buffer, `MAX_PAYLOAD = 4096`) | `M14.1: payload OK` | `copy_to_user`/`copy_from_user` in `arch/*/uaccess.rs` |
 | **M14.2** | recv-blocks-on-empty / send-wakes-peer scheduler↔IPC round-trip | `M14.2: blocking-recv OK` | none |
 | **M15** | Shared memory blocks + session blackboard | `M15: blocks OK` | none (reuses M10 map machinery) |
-| **M16** | LLM-agnostic inference bridge (the `model:` scheme) | `M16: infer OK` | none yet (mock backend; virtio ring deferred with the real provider) |
+| **M15.1** | Owner-only block unmap + frame reclamation (`M_BLOCK_UNMAP`, `Rights::REVOKE`) | `M15.1: unmap OK` | `unmap_in_root`/`va_to_pa_in_root` in `arch/*/mmu.rs` |
+| **M16** | LLM-agnostic inference bridge (the `model:` scheme) | `M16: infer OK` | none (safe mock backend; the virtio ring landed separately at M19) |
 | **M17** | Sleep-time consolidation / reflection / forgetting daemons | `M17: consolidate OK` | none |
 | **M18** | Frozen-kernel self-improvement harness + held-out evaluators + T4 skill tier | `M18: evolve OK` | none |
+| **M18.1** | Mandatory human-approval gate on `EMIT_EXTERNAL`/high-impact skills | `M18.1: approval-gate OK` | none (new `APPROVE_HIGH_IMPACT` right; reduces to the M11 invariant) |
+| **M18.2** | Rotating never-exposed held-out evaluator partition (anti-Goodhart) | `M18.2: held-out OK` | none |
+| **M19** | Poll-based virtio-mmio device I/O — a virtio-rng round-trip (the FIRST real device I/O; prints AFTER the L2.0 lines, the LAST cumulative marker; completion-IRQ deferred) | `M19: virtio OK` | virtio-mmio ring (MMIO/DMA) in `arch/{x86_64,aarch64}/virtio.rs` |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
@@ -226,11 +239,15 @@ M14: ipc OK
 M14.1: payload OK
 M14.2: blocking-recv OK
 M15: blocks OK
+M15.1: unmap OK
 M16: infer OK
 M17: consolidate OK
 M18: evolve OK
+M18.1: approval-gate OK
+M18.2: held-out OK
 L2.0: vmxroot OK                 # x86_64: real proof on the nested-VMX lane, else "(vmx unavailable, skipped)"; aarch64 prints "(x86-only, n/a on aarch64)"
 L2.0: el2 OK                     # aarch64: genuine EL2 world-switch under TCG; x86_64 prints "(aarch64-only, n/a on x86_64)"
+M19: virtio OK                   # the LAST cumulative marker: the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
 ```
 
 Each line is a hard `grep` target in the per-arch run script; a missing or
@@ -261,6 +278,32 @@ Two machine-checked guarantees back the chain:
   frozen-kernel boundary a proof and not a hope: M18's self-improvement safety
   **reduces to** this M11 invariant (the held-out evaluators are simply objects
   no agent's handle table can ever name).
+- **Encoder/parser proof (Kani).** The silicon-unsafe **value computation** that
+  feeds `tb-hal`'s MMIO / VMCS / page-table writes — entangled bit-algebra that a
+  wrong constant turns into a silent VM-entry failure — was extracted into a NEW
+  pure `crates/tb-encode` (`no_std`, `#![forbid(unsafe_code)]`, host-buildable;
+  `tb-hal` now CALLS it, the `vmwrite`/`read_volatile`/asm staying behind) and is
+  machine-proven by **Kani**: **11 `#[kani::proof]` harnesses** cover the
+  control-MSR adjust-legality gate (force all allowed-0 bits, clear all
+  non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition), the CR0/CR4
+  fixed-bit clamp, the page-table / EPT entry encoders (address + flags preserved,
+  level index < 512, EPTP well-formed), the 16-byte IPC frame round-trip + total
+  fail-closed decode of untrusted bytes, and a bounded no-alloc ring. The
+  `.github/workflows/kani.yml` `prove-encode` job runs `cargo kani -p tb-encode`
+  and **fails closed** unless every harness verifies, then emits
+  `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
+  `prove-caps` job in the same workflow; neither can break the other.)
+- **Tier-0 UB gate (Miri).** `cargo miri test -p tb-caps-core -p tb-encode`
+  interprets the EXACT pure host-runnable leaf crates the kernel runs (the same
+  code Kani verifies — **zero model drift**) under the MIR interpreter, checking
+  every path for undefined behaviour (OOB, use-after-free, uninit reads, invalid
+  enum/bool, misalignment, integer overflow, strict-provenance) — especially the
+  `tb-encode` `MessageFrame::decode` untrusted-byte parser and the `tb-caps-core`
+  `CapTable` mint/dup/narrow/transfer/revoke sequences. `tb-hal` + the `kernel`
+  are **excluded** (inline asm + the `os=none` target the MIR interpreter cannot
+  execute; the gate is `-p`, never `--workspace`). Fail-closed: any UB or failing
+  test makes the run exit non-zero before `T0: miri OK` echoes
+  (`.github/workflows/miri.yml`).
 - **Framekernel invariant.** All `unsafe` + asm is confined to `crates/tb-hal`.
   The `kernel` crate contains **zero `unsafe {}` blocks** (it is not crate-level
   `#![forbid(unsafe_code)]` only because `#[unsafe(no_mangle)]` on `rust_main` is
@@ -268,14 +311,16 @@ Two machine-checked guarantees back the chain:
   leaves — `tb-caps-core` and `tb-hal`'s `caps.rs`/`mem.rs`/`ipc.rs`/`blocks.rs`/
   `infer.rs` (plus `heap.rs`/`pmm.rs`) — are literally `#![forbid(unsafe_code)]`.
 
-Four CI lanes guard the tree:
+Six CI lanes guard the tree:
 
 | Lane | Workflow | What it proves |
 |---|---|---|
-| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..L2.0) |
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M19) |
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
-| **kani** | `kani.yml` | the M11 rights-subset proof → `M11: caps-subset PROVEN` |
+| **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 11 harnesses) |
+| **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
 
 ## 3. Development pipeline
 
