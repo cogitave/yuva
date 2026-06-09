@@ -2704,6 +2704,85 @@ pub fn el2_nested_guest_selftest() -> NestedGuestProof {
 }
 
 // ===========================================================================
+// aL2.5: EL2 vGIC virtual-interrupt injection + WFI scheduler-hook self-test
+// facade — the SIXTH L2 rung, built ON TOP of L2.0's resident EL2 monitor.
+//
+// The proof is a closed round-trip in which the monitor SOFTWARE-INJECTS a
+// virtual interrupt into a guest that PARKS on WFI: the guest enables its OWN
+// GICV virtual CPU interface, parks on WFI (the canonical scheduler yield
+// point); the WFI traps to EL2 (HCR_EL2.TWI) where the monitor writes a PENDING
+// vIRQ into GICH_LR0 (via the Kani-proven `tb_encode::el2_trap::gich_lr_encode`)
+// and resumes the guest past the WFI; with HCR_EL2.IMO routing the VIRQ to EL1 +
+// the guest's GICV_CTLR.En + PSTATE.I clear, the guest immediately takes the
+// vIRQ at its OWN EL1 IRQ vector, reads GICV_IAR == the injected vINTID, sets a
+// sentinel, and writes GICV_EOIR. The verdict requires the CONJUNCTION of the
+// guest-side magic AND the monitor-side independent confirmation (the WFI park
+// was observed AND GICH_ELRSR0 shows LR0 retired — a fact the guest cannot fake
+// by merely writing a magic). The window is torn down (HCR_EL2 baseline,
+// GICH_HCR.En=0, GICH_LR0 zeroed) BEFORE the monitor unwinds, and the facade
+// restores the kernel's VBAR_EL1 (the EL1-side teardown — the guest installed
+// its OWN vGIC vectors) so the kernel resumes on its OWN exception table (zero
+// regression — M19 still prints after). ALL the new asm/unsafe is confined to
+// tb-hal's arch/aarch64/{el2,el2vgic,el2_vgic_vectors}.rs (the GICH_LR encoder
+// in tb-encode is `forbid(unsafe_code)` + Kani-proven), so this crate stays
+// unsafe-free and the kernel only branches on a closed enum. On x86_64 (no EL2)
+// it is N/A — mirroring the `NestedGuestProof` block above.
+// ===========================================================================
+
+/// aL2.5 EL2 vGIC virtual-interrupt-injection self-test outcome (returned to the
+/// kernel for marker rendering). A SIBLING of [`NestedGuestProof`]/[`ExitsProof`]:
+/// the proof is a closed round-trip in which the monitor SOFTWARE-INJECTS a
+/// virtual interrupt into a guest that PARKS on WFI and the guest takes + acks
+/// the vIRQ via its GICV virtual CPU interface, rather than the two-stage /
+/// trap-and-emulate rungs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VgicProof {
+    /// This arch has no EL2 / GIC virtualization (x86_64): the (deferred) APIC
+    /// virtualization / posted-interrupt path would be its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// vGIC window is never armed — a graceful green skip (mirrors
+    /// [`NestedGuestProof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean vGIC injection proof (the WFI park was not observed,
+    /// the guest presented the wrong magic, the injected list register never
+    /// retired, the board exposed no list registers, or the WFI re-looped);
+    /// `code` is the nonzero diagnostic (surfaced honestly as a red marker
+    /// WITHOUT a "vgic OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the vGIC injection round-trip closed — the guest parked on WFI,
+    /// the monitor injected a pending vIRQ via GICH_LR0 and resumed it, the guest
+    /// took the vIRQ at its OWN EL1 IRQ vector and acked + EOIed it via GICV, AND
+    /// the monitor independently confirmed the injected list register retired
+    /// (GICH_ELRSR0 — a fact the guest cannot fake). `vintid` is the injected +
+    /// acknowledged virtual interrupt ID.
+    Proven {
+        /// The injected + acknowledged virtual interrupt ID (vINTID).
+        vintid: u64,
+    },
+}
+
+/// aL2.5: run the EL2 vGIC virtual-interrupt-injection self-test (aarch64), or
+/// report [`VgicProof::NotApplicable`] on x86_64. See [`VgicProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_vgic_selftest() -> VgicProof {
+    arch::el2_vgic_selftest()
+}
+
+/// aL2.5: x86_64 has no EL2 / GIC virtualization — the (deferred) APIC-
+/// virtualization / posted-interrupt path would be this arch's realization of
+/// the rung, so this reports [`VgicProof::NotApplicable`] (the kernel prints the
+/// n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_vgic_selftest() -> VgicProof {
+    VgicProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //
