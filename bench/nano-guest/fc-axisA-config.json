@@ -3,6 +3,7 @@
     "kernel_image_path": "NANO_GUEST_ELF_PATH",
     "boot_args": ""
   },
+  "drives": [],
   "machine-config": {
     "vcpu_count": 1,
     "mem_size_mib": 256,

@@ -88,6 +88,8 @@ pvh_start:
     mov     dx, 0x3f8           // COM1 THR (the 16550 both VMMs wire to stdout)
     mov     al, 0x41            // sentinel byte 'A' (== the existing FC bench)
     out     dx, al              // -> host reads first stdout byte = t_signal
+    mov     al, 0x0a            // newline: flush the host's line-buffered serial
+    out     dx, al              // (a lone byte never flushes FC's stdout; \n does)
 .Lpvh_park:
     hlt
     jmp     .Lpvh_park
@@ -110,6 +112,8 @@ tb_start:
     mov     dx, 0x3f8           // COM1 THR — SAME fair event as the PVH path
     mov     al, 0x41            // sentinel byte 'A', observed identically to FC
     out     dx, al              // -> host reads first stdout byte = t_signal
+    mov     al, 0x0a            // newline: same flush as the PVH path (dx still 0x3f8)
+    out     dx, al              // symmetric guest output across both VMMs
     mov     dx, 0x510           // tb-vmm BootReady PIO (native --report-spawn)
     xor     al, al              // value ignored by the BootReady device
     out     dx, al              // latch tb-vmm's in-process spawn->ready Instant

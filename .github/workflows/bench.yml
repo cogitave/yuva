@@ -167,10 +167,16 @@ jobs:
           : > tbvmm-axisA-host-ns.txt
           : > tbvmm-axisA-native-ns.txt
           for i in $(seq 1 "$BENCH_ITERS"); do
-            rm -f "tbvmm-axisA-out-$i.log"
+            rm -f "tbvmm-axisA-out-$i.log" "tbvmm-axisA-err-$i.log"
             t0=$(date +%s%N)
+            # Split stderr from stdout + gate on the guest's 'A' sentinel — the
+            # SAME treatment as the FC Axis-A step so the cross-VMM ratio is
+            # measured identically on both sides. tb-vmm's --report-spawn line
+            # ("spawn-ready-ns=") also goes to stdout, AFTER the guest's "A\n"
+            # (the nano-guest writes COM1 before latching 0x510), so the first
+            # stdout byte is the guest sentinel and the native grep still works.
             ( timeout 10 "$TBVMM" --kernel "$NG" --report-spawn --timeout-secs 5 \
-                > "tbvmm-axisA-out-$i.log" 2>&1 & echo $! > "tbvmm-axisA-$i.pid" )
+                > "tbvmm-axisA-out-$i.log" 2> "tbvmm-axisA-err-$i.log" & echo $! > "tbvmm-axisA-$i.pid" )
             # Poll for the first COM1 byte (stdout log becoming non-empty), SAME
             # loop bound + sleep as the FC step so the constant poll overhead
             # cancels in the ratio.
@@ -180,13 +186,18 @@ jobs:
             done
             t1=$(date +%s%N)
             kill -9 "$(cat "tbvmm-axisA-$i.pid")" 2>/dev/null || true
-            if [ -s "tbvmm-axisA-out-$i.log" ]; then
+            if [ "$(head -c1 "tbvmm-axisA-out-$i.log" 2>/dev/null)" = "A" ]; then
               echo $(( t1 - t0 )) >> tbvmm-axisA-host-ns.txt
             fi
             # Native in-process clock (informational cross-check column).
             ns=$(grep -oE "spawn-ready-ns=[0-9]+" "tbvmm-axisA-out-$i.log" | head -1 | cut -d= -f2 || true)
             [ -n "$ns" ] && echo "$ns" >> tbvmm-axisA-native-ns.txt
           done
+          if [ ! -s tbvmm-axisA-host-ns.txt ]; then
+            echo "::warning::Axis-A tb-vmm host-poll captured 0 samples — stdout hexdump + stderr below"
+            head -c 80 tbvmm-axisA-out-1.log 2>/dev/null | od -c | head -4 || true
+            head -c 600 tbvmm-axisA-err-1.log 2>/dev/null || true; echo
+          fi
           echo "Axis-A tb-vmm host samples: $(wc -l < tbvmm-axisA-host-ns.txt) ; native samples: $(wc -l < tbvmm-axisA-native-ns.txt)"
 
       # ----------------------------------------------------------------------
@@ -284,41 +295,37 @@ jobs:
           cat fc-axisA-config.json
           : > fc-axisA-ns.txt
           for i in $(seq 1 "$BENCH_ITERS"); do
-            rm -f "fc-axisA-out-$i.log"
+            rm -f "fc-axisA-out-$i.log" "fc-axisA-err-$i.log"
             t0=$(date +%s%N)
+            # Split FC's own logs (stderr) from the guest serial console (stdout)
+            # so the poll catches the nano-guest's sentinel byte, NOT FC's
+            # "Running Firecracker" banner. The nano-guest emits "A\n"; the
+            # trailing \n flushes FC's line-buffered stdout (a lone byte never
+            # surfaces).
             ( timeout 30 firecracker --no-api --config-file "$(pwd)/fc-axisA-config.json" \
-                > "fc-axisA-out-$i.log" 2>&1 & echo $! > "fc-axisA-$i.pid" )
+                > "fc-axisA-out-$i.log" 2> "fc-axisA-err-$i.log" & echo $! > "fc-axisA-$i.pid" )
             for _ in $(seq 1 30000); do
               if [ -s "fc-axisA-out-$i.log" ]; then break; fi
               sleep 0.0005 2>/dev/null || true
             done
             t1=$(date +%s%N)
             kill -9 "$(cat "fc-axisA-$i.pid")" 2>/dev/null || true
-            if [ -s "fc-axisA-out-$i.log" ]; then
+            # Record ONLY a real guest boot: stdout's first byte must be the
+            # sentinel 'A' (0x41). A failed/aborted boot (e.g. a config error)
+            # leaves stdout empty — its diagnostics went to stderr — so it adds
+            # no bogus sample (the previous bug counted FC's own log as a boot).
+            if [ "$(head -c1 "fc-axisA-out-$i.log" 2>/dev/null)" = "A" ]; then
               echo $(( t1 - t0 )) >> fc-axisA-ns.txt
             fi
           done
           echo "Axis-A FC samples: $(wc -l < fc-axisA-ns.txt)"
-          # ---- DIAGNOSTIC (temporary): the Axis-A FC numbers were invalid (FC
-          # emitted "Failed to build MicroVM from Json" — it never booted the
-          # nano-guest; the poll caught FC's own stdout log, not the guest's
-          # sentinel). Dump the COMPLETE error + a CONTROL booting the FULL
-          # release kernel so we learn whether the failure is nano-guest-specific
-          # or TABOS-PVH-wide. Removed once FC boots the nano-guest. ----
-          echo "=== FULL first FC Axis-A nano-guest log (complete config-build error) ==="
-          cat fc-axisA-out-1.log 2>/dev/null || true; echo
-          echo "=== nano-guest ELF program headers + notes FC was given ==="
-          { readelf -ln nano-guest.elf || llvm-readelf -ln nano-guest.elf; } 2>/dev/null | head -50 || true
-          echo "=== CONTROL: can FC boot the FULL release tabos-kernel via PVH? ==="
-          KREL="target/x86_64-tabos-none/release/tabos-kernel"
-          if [ -f "$KREL" ]; then
-            sed "s#NANO_GUEST_ELF_PATH#$(pwd)/${KREL}#" bench/nano-guest/fc-axisA-config.json > fc-ctl-config.json
-            ( timeout 15 firecracker --no-api --config-file "$(pwd)/fc-ctl-config.json" > fc-ctl.log 2>&1 & echo $! > fc-ctl.pid )
-            sleep 4; kill -9 "$(cat fc-ctl.pid)" 2>/dev/null || true
-            echo "--- full-kernel FC control log (first 1800 bytes) ---"
-            head -c 1800 fc-ctl.log 2>/dev/null || true; echo
-          else
-            echo "(release kernel not found at $KREL)"
+          # If FC produced no valid sample, surface its first stderr (the real
+          # reason) + a hexdump of stdout so a regression is diagnosable instead
+          # of silently reporting zero.
+          if [ ! -s fc-axisA-ns.txt ]; then
+            echo "::warning::Axis-A Firecracker booted the nano-guest 0/${BENCH_ITERS} times — diagnostics below"
+            echo "--- fc-axisA-err-1.log (FC's own log/error) ---"; head -c 1400 fc-axisA-err-1.log 2>/dev/null || true; echo
+            echo "--- fc-axisA-out-1.log (guest stdout — should begin with 'A') ---"; head -c 80 fc-axisA-out-1.log 2>/dev/null | od -c | head -4 || true
           fi
 
       # ----------------------------------------------------------------------
