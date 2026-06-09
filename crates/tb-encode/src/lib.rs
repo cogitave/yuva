@@ -56,13 +56,7 @@
 //!    `SYSREG_ISS_SYS_MASK` / `SYS_CONTEXTIDR_EL1`) and the Data-Abort MMIO ISS
 //!    (`dabt_iss_isv/sas/sse/srt/sf/ar` + `dabt_access_size_bytes` /
 //!    `dabt_is_emulatable`), the bit extraction the trap-and-emulate handler
-//!    decodes the trapped MSR/MRS and the MMIO LDR/STR transfer register with;
-//!    plus the aL2.5 GICv2 GICH_LRn list-register encoder (`gich_lr_encode` +
-//!    `lr_state`/`lr_virtid`/`lr_is_retired` + `gich_hcr`/`vtr_list_regs` and
-//!    the `GICH_LR_STATE_*` / field-shift constants) -- the pure value the EL2
-//!    monitor stores into GICH_LR0 to SOFTWARE-INJECT a virtual interrupt
-//!    (vINTID/pINTID/state/priority/group/HW/EOI) and the readback decode the
-//!    done-side LR-retired completion check reads.
+//!    decodes the trapped MSR/MRS and the MMIO LDR/STR transfer register with.
 //!
 //! ## Verification
 //!

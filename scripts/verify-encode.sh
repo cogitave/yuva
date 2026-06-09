@@ -29,15 +29,10 @@ set -euo pipefail
 # + aL2.4 guest-S1-enable x1: sctlr_el1_guest_enable -- proving the guest's
 # SCTLR_EL1.M|C|I enable word sets EXACTLY bits {0,2,12}, preserves all other
 # baseline bits, and is idempotent (the "S1 after S2" step the aL2.4 guest runs
-# under our stage-2) + aL2.5 GICH_LR encoder x1: gich_lr_encode_roundtrip --
-# proving the GICv2 GICH_LRn list-register encoder round-trips every vINTID/
-# pINTID/state/priority/group/HW/EOI field via independent literal shifts, sets
-# NO bit outside the documented GICH_LR_MASK (no field bleed), and that
-# lr_is_retired/vtr_list_regs decode correctly (the SW-injected virtual-interrupt
-# value the EL2 monitor stores into GICH_LR0). -- one per syndrome family /
-# encoder, each proving totality AND round-trip correctness).
+# under our stage-2). -- one per syndrome family / encoder, each proving totality
+# AND round-trip correctness).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=25
+EXPECTED_HARNESSES=24
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

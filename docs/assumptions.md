@@ -54,61 +54,11 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   EXACTLY bits {0,2,12} = `M|C|I`, preserves every other baseline bit, and is
   idempotent — the load-bearing "S1-after-S2" step the aL2.4 guest runs to bring
   its first stage up UNDER our second stage, pinned to a machine-checked invariant
-  rather than a hand-written asm immediate). aL2.5 adds ONE more —
-  `kani_gich_lr_encode_roundtrip` (the GICv2 `GICH_LRn` list-register encoder:
-  `gich_lr_encode(vintid,pintid,state,priority,group,hw,eoi)` packs each field into
-  its documented slice — round-trip-recovered via INDEPENDENT literal Arm-ARM
-  shifts — with NO bit set outside the QEMU `GICH_LR_MASK` and the bit-19
-  PhysicalID/EOI mux honored, the pure value the EL2 monitor stores into `GICH_LR0`
-  to SOFTWARE-INJECT a virtual interrupt, pinned so a field-bleed typo in the
-  injected LR is a proof failure not a silently-dropped vIRQ). The `prove-encode`
-  CI lane fails closed on a pinned **`EXPECTED_HARNESSES = 25`** (the 15 pre-L2.1
-  harnesses + the 5 L2.1 lemmas + the 1 L2.2 classifier lemma + the 2 L2.3
-  ISS-decoder lemmas + the 1 aL2.4 SCTLR-enable lemma + the 1 aL2.5 GICH_LR
-  encoder lemma), so a silently deleted, renamed, or vacuous harness reddens the
-  lane.
-
-- **The aL2.5 vGIC injection glue + the IMO/TWI window + the GICH/GICV MMIO
-  (silicon-unsafe, OUTSIDE the proof boundary).** The
-  `tb-hal/arch/aarch64/{el2,el2vgic,el2_vgic_vectors}.rs` glue that arms the vGIC
-  window (`msr HCR_EL2 = RW|IMO|TWI`, so the GIC virtual interface's VIRQ line
-  reaches EL1 AND the guest's `WFI` traps), enables the virtual CPU interface
-  (`GICH_HCR.En`), SOFTWARE-INJECTS a pending virtual interrupt by storing
-  `gich_lr_encode(...)` into the `GICH_LR0` MMIO register (`0x0803_0100`), resumes
-  the guest past the trapped `WFI` (`ELR_EL2 += 4`), and confirms completion by
-  reading `GICH_ELRSR0` (LR0 went empty) — is silicon-unsafe and outside the proof
-  boundary. The PURE value computation (the GICH_LRn field packing) IS inside the
-  boundary: `tb_encode::el2_trap::gich_lr_encode` is `#![forbid(unsafe_code)]` and
-  Kani-proven (`kani_gich_lr_encode_roundtrip` — field round-trip via independent
-  literal shifts, no-field-bleed against the QEMU `GICH_LR_MASK`, mirroring
-  `gic_internal.h` `REG32(GICH_LR0,0x100)` byte-for-byte including the bit-19
-  PhysicalID/EOI mux), so the silicon `write_volatile` next to the just-computed
-  value is byte-identical to the proven leaf. The glue is exercised end-to-end by
-  the `L2.5: vgic OK` boot self-test, fail-closed (family `0x0761_*`): the verdict
-  requires the CONJUNCTION of the guest magic `0x761` (the guest's EL1 IRQ handler
-  fired, read `GICV_IAR` == the injected vINTID, set the sentinel, wrote
-  `GICV_EOIR`) AND the monitor-side independent confirmation (the `WFI` park was
-  observed AND `GICH_ELRSR0` shows LR0 retired — a fact the guest cannot fake by
-  writing a magic). **NEW RESIDUAL ASSUMPTION (the I-unmasked window):** unlike
-  every other rung (which erets the guest with `SPSR = 0x3C5`, PSTATE.I MASKED),
-  aL2.5 MUST eret with `SPSR = 0x345` (PSTATE.I UNMASKED) so the injected VIRQ is
-  actually taken — a copy-paste of `0x3C5` would silently never deliver it and the
-  guest would re-park forever. This is pinned by a `const _: () = assert!(...)`
-  that the I bit (SPSR bit 7) is clear, so a typo is a build error, not a 90s
-  timeout. Teardown-first discipline (the L2.1 rule, here load-bearing): `hvc #11`
-  clears `HCR_EL2` to the boot baseline (RW only — TWI/IMO off, else the kernel's
-  own `halt()` `WFI` would trap to EL2 outside any window, an instant regression)
-  and `GICH_HCR.En=0` + zeroes `GICH_LR0` (no stale vIRQ leaks) as its FIRST
-  action, before the verdict + unwind; the marker discipline catches a miss
-  (`M19: virtio OK` must still print after `L2.5: vgic OK`). MMIO-ordering caveat
-  (carried from aL2.1/aL2.3): the EL2 GICH writes run with `SCTLR_EL2.M=0`
-  (Device/non-cacheable, correct for MMIO) with a `dsb ish` + `isb` between the
-  `GICH_LR0` store and the `eret` so the GIC virtualization hardware observes the
-  pending LR before the guest runs (reusing `stage2.rs`'s `dsb_ish_pub`/`isb_pub`).
-  Feasibility note: QEMU's GICv2 virt CPU-interface + `gic_update_virt` LR
-  injection is byte-identical between v6.2.0 (the dev host) and v8.2.2 (the CI
-  runner) and the self-test is CI-green under pure TCG in BOTH (verified locally
-  under qemu-6.2 AND under qemu-8.2.2 in Docker).
+  rather than a hand-written asm immediate). The `prove-encode` CI lane fails
+  closed on a pinned **`EXPECTED_HARNESSES = 24`** (the 15 pre-L2.1 harnesses +
+  the 5 L2.1 lemmas + the 1 L2.2 classifier lemma + the 2 L2.3 ISS-decoder lemmas +
+  the 1 aL2.4 SCTLR-enable lemma), so a silently deleted, renamed, or vacuous
+  harness reddens the lane.
 
 - **The aL2.4 nested-guest glue + the EL1-side teardown (silicon-unsafe, OUTSIDE
   the proof boundary; a GENUINELY-NEW teardown surface vs aL2.0..aL2.3).** The
