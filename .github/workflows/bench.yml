@@ -177,16 +177,18 @@ jobs:
             # stdout byte is the guest sentinel and the native grep still works.
             ( timeout 10 "$TBVMM" --kernel "$NG" --report-spawn --timeout-secs 5 \
                 > "tbvmm-axisA-out-$i.log" 2> "tbvmm-axisA-err-$i.log" & echo $! > "tbvmm-axisA-$i.pid" )
-            # Poll for the first COM1 byte (stdout log becoming non-empty), SAME
-            # loop bound + sleep as the FC step so the constant poll overhead
-            # cancels in the ratio.
-            for _ in $(seq 1 30000); do
-              if [ -s "tbvmm-axisA-out-$i.log" ]; then break; fi
+            PID=$(cat "tbvmm-axisA-$i.pid")
+            # Poll until the guest's standalone "A" line appears OR tb-vmm exits
+            # OR a ~6s cap — the SAME method + bound as the FC step so the
+            # constant poll overhead cancels in the cross-VMM ratio.
+            for _ in $(seq 1 12000); do
+              grep -qx A "tbvmm-axisA-out-$i.log" 2>/dev/null && break
+              kill -0 "$PID" 2>/dev/null || break
               sleep 0.0005 2>/dev/null || true
             done
             t1=$(date +%s%N)
-            kill -9 "$(cat "tbvmm-axisA-$i.pid")" 2>/dev/null || true
-            if [ "$(head -c1 "tbvmm-axisA-out-$i.log" 2>/dev/null)" = "A" ]; then
+            kill -9 "$PID" 2>/dev/null || true
+            if grep -qx A "tbvmm-axisA-out-$i.log" 2>/dev/null; then
               echo $(( t1 - t0 )) >> tbvmm-axisA-host-ns.txt
             fi
             # Native in-process clock (informational cross-check column).
@@ -290,36 +292,34 @@ jobs:
         run: |
           set -o pipefail
           NG="$(pwd)/nano-guest.elf"
-          # Build the PVH config from the committed template. The `logger`
-          # log_path redirects FC's OWN structured logs (the "Running
-          # Firecracker" banner etc.) to a file, so stdout carries ONLY the
-          # guest's serial console — the nano-guest's "A\n" is then the first
-          # byte on stdout, which is the event we time + gate on.
-          sed -e "s#NANO_GUEST_ELF_PATH#${NG}#" -e "s#FC_LOG_PATH#$(pwd)/fc-axisA-fc.log#" \
-            bench/nano-guest/fc-axisA-config.json > fc-axisA-config.json
+          # Build the PVH config (boot-source + empty drives). FC auto-selects
+          # PVH from the nano-guest's .note.Xen. FC writes its OWN banner to
+          # stdout, so we do NOT gate on the first byte — we wait for the guest's
+          # "A\n" to appear as its OWN line (grep -qx A), which FC's banner lines
+          # ("2026-..Running Firecracker..") never match. Robust to the banner,
+          # no logger needed (FC's logger requires a pre-existing pipe/file).
+          sed "s#NANO_GUEST_ELF_PATH#${NG}#" bench/nano-guest/fc-axisA-config.json > fc-axisA-config.json
           cat fc-axisA-config.json
           : > fc-axisA-ns.txt
           for i in $(seq 1 "$BENCH_ITERS"); do
             rm -f "fc-axisA-out-$i.log" "fc-axisA-err-$i.log"
             t0=$(date +%s%N)
-            # Split FC's own logs (stderr) from the guest serial console (stdout)
-            # so the poll catches the nano-guest's sentinel byte, NOT FC's
-            # "Running Firecracker" banner. The nano-guest emits "A\n"; the
-            # trailing \n flushes FC's line-buffered stdout (a lone byte never
-            # surfaces).
             ( timeout 30 firecracker --no-api --config-file "$(pwd)/fc-axisA-config.json" \
                 > "fc-axisA-out-$i.log" 2> "fc-axisA-err-$i.log" & echo $! > "fc-axisA-$i.pid" )
-            for _ in $(seq 1 30000); do
-              if [ -s "fc-axisA-out-$i.log" ]; then break; fi
+            PID=$(cat "fc-axisA-$i.pid")
+            # Poll until the guest's standalone "A" line appears OR FC exits (a
+            # failed boot) OR a ~6s cap — so a non-booting FC cannot stall the
+            # loop. Same bound + method as the tb-vmm Axis-A step (fair ratio).
+            for _ in $(seq 1 12000); do
+              grep -qx A "fc-axisA-out-$i.log" 2>/dev/null && break
+              kill -0 "$PID" 2>/dev/null || break
               sleep 0.0005 2>/dev/null || true
             done
             t1=$(date +%s%N)
-            kill -9 "$(cat "fc-axisA-$i.pid")" 2>/dev/null || true
-            # Record ONLY a real guest boot: stdout's first byte must be the
-            # sentinel 'A' (0x41). A failed/aborted boot (e.g. a config error)
-            # leaves stdout empty — its diagnostics went to stderr — so it adds
-            # no bogus sample (the previous bug counted FC's own log as a boot).
-            if [ "$(head -c1 "fc-axisA-out-$i.log" 2>/dev/null)" = "A" ]; then
+            kill -9 "$PID" 2>/dev/null || true
+            # Record ONLY a real guest boot: the guest's "A\n" line is present
+            # (FC's banner is on stdout too but never matches an exact "A" line).
+            if grep -qx A "fc-axisA-out-$i.log" 2>/dev/null; then
               echo $(( t1 - t0 )) >> fc-axisA-ns.txt
             fi
           done
