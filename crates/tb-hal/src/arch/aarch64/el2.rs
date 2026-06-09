@@ -53,11 +53,14 @@ use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use tb_encode::el2_trap::{
-    classify_exit, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, hpfar_fault_ipa,
-    ExitClass, EC_DABT_LOW, EC_IABT_LOW, EL1_SYNC_SPX_OFFSET,
+    classify_exit, dabt_access_size_bytes, dabt_is_emulatable, dabt_iss_sf, dabt_iss_srt,
+    dabt_iss_sse, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, esr_wnr, hpfar_fault_ipa,
+    sysreg_iss_is_read, sysreg_iss_rt, ExitClass, EC_DABT_LOW, EC_IABT_LOW, EL1_SYNC_SPX_OFFSET,
+    SYSREG_ISS_SYS_MASK, SYS_CONTEXTIDR_EL1,
 };
 
 use super::exits::{EXIT_UNDEF_BIT, EXIT_WFX_BIT};
+use super::el2mmio::{TRAP_MMIO_RD_BIT, TRAP_MMIO_WR_BIT, TRAP_SYSREG_BIT};
 
 // ===========================================================================
 // Load-bearing constants (Tier-1: locked by const-asserts; mirror boot.rs).
@@ -194,6 +197,75 @@ const _: () = assert!(esr_inject_undef() == 0x0200_0000);
 const _: () = assert!(EXIT_WFX_BIT == 1 && EXIT_UNDEF_BIT == 2);
 
 // ===========================================================================
+// L2.3 trap-and-emulate constants (the fourth L2 rung; the two new HVC
+// immediates that bookend the trap window + the SYSREG/MMIO magics + FAIL codes).
+// ===========================================================================
+
+/// L2.3: the kernel's trap-and-emulate bootstrap HVC immediate (`hvc #6`) --
+/// "arm the trap window (HCR_EL2 = RW|VM|TVM + program stage-2) and eret into the
+/// L2.3 guest stub".
+const HVC_TRAP_ARM: u64 = 6;
+/// L2.3: the guest's trap-and-emulate done HVC immediate (`hvc #7`) -- "round-trip
+/// complete; tear the window DOWN (HCR=RW only), then verify the served bits +
+/// the recorded sysreg value + the device shadow + the guest magic and unwind".
+/// Teardown is the FIRST action (leaving VM=1/TVM armed would abort/mis-trap the
+/// kernel -- the L2.1/L2.2 teardown-first discipline).
+const HVC_TRAP_DONE: u64 = 7;
+
+/// L2.3: the magic the guest writes to `CONTEXTIDR_EL1` (the TVM trigger). The
+/// SYSREG emulate path captures it from `frame.gpr[Rt]` and records it; the done
+/// verdict checks the recorded value == this. `0x5103` fits a single MOVZ.
+const SYSREG_EMU_VAL: u64 = 0x5103;
+/// L2.3: the magic the guest STORES to the device IPA (the MMIO write trigger).
+/// The MMIO write path routes it through `device_mmio(write)`; the done verdict
+/// checks the device shadow == this AND that the guest's own LDR read it back.
+/// `0x0D51` fits a single MOVZ.
+const MMIO_VAL: u64 = 0x0D51;
+/// L2.3: the guest's "good" outcome magic in x0 (set iff its `cmp x6,x5` proved
+/// the MMIO read delivered the device value into the SRT register). `0xD23` fits
+/// a single MOVZ; a `0xBAD` instead means the read path returned the wrong value.
+const TRAP_GUEST_MAGIC: u64 = 0xD23;
+
+// L2.3 FAIL codes (distinct nonzero; any -> `TrapProof::Faulted` -> red marker,
+// rendered WITHOUT an "el2-trap OK" substring so the run-script grep stays
+// fail-closed). The `0x0D23` tag echoes the guest magic family.
+/// The SYSREG arm never fired (the trapped `msr contextidr_el1` was not emulated).
+const FAIL_TRAP_SYSREG_MISS: u64 = 0x0000_0D23_0000_0001;
+/// The MMIO WRITE arm never fired (the guest STR to the device IPA was not emulated).
+const FAIL_TRAP_MMIO_WR_MISS: u64 = 0x0000_0D23_0000_0002;
+/// The MMIO READ arm never fired (the guest LDR from the device IPA was not emulated).
+const FAIL_TRAP_MMIO_RD_MISS: u64 = 0x0000_0D23_0000_0003;
+/// The recorded sysreg-emulated value did not match `SYSREG_EMU_VAL` (the SYSREG
+/// path captured the wrong GPR / decoded the wrong Rt).
+const FAIL_TRAP_SYSREG_VAL: u64 = 0x0000_0D23_0000_0004;
+/// The device shadow did not match `MMIO_VAL` (the MMIO write path stored the
+/// wrong value / decoded the wrong SRT / size).
+const FAIL_TRAP_MMIO_VAL: u64 = 0x0000_0D23_0000_0005;
+/// The guest presented the wrong magic at done (its own `cmp x6,x5` failed -- the
+/// MMIO read did not deliver the device value into the SRT register).
+const FAIL_TRAP_BAD_MAGIC: u64 = 0x0000_0D23_0000_0006;
+/// A trapped SYS64 that was NOT the expected CONTEXTIDR_EL1 write (TVM over-trap,
+/// or a stray sysreg access while the window was armed -- fail-closed, never a
+/// silent emulate).
+const FAIL_TRAP_BAD_SYSREG: u64 = 0x0000_0D23_0000_0007;
+/// A data abort that was NOT emulatable (ISV=0 / S1PTW=1 -- TABOS has no
+/// instruction decoder, so it fails closed, the KVM `KVM_EXIT_ARM_NISV` analog).
+const FAIL_TRAP_MMIO_NISV: u64 = 0x0000_0D23_0000_0008;
+/// A data abort at an IPA that was not the expected device IPA (an unexpected
+/// stage-2 fault while the trap window was armed).
+const FAIL_TRAP_BAD_IPA: u64 = 0x0000_0D23_0000_0009;
+/// Could not build the device stage-2 tables at EL1 (physical-frame OOM).
+const FAIL_TRAP_BUILD: u64 = 0x0000_0D23_0000_000A;
+
+// Tier-1 compile-time locks on the L2.3 dispatch constants (a drift is a build
+// error). The SYS64 trigger key + the magics are imported/locked from the proven
+// decoder crate, so the kernel-side dispatch can never diverge from the harnesses.
+const _: () = assert!(HVC_TRAP_ARM == 6 && HVC_TRAP_DONE == 7);
+const _: () = assert!(SYS_CONTEXTIDR_EL1 == 0x32_3400);
+const _: () = assert!(SYSREG_EMU_VAL == 0x5103 && MMIO_VAL == 0x0D51 && TRAP_GUEST_MAGIC == 0xD23);
+const _: () = assert!(TRAP_SYSREG_BIT == 1 && TRAP_MMIO_WR_BIT == 2 && TRAP_MMIO_RD_BIT == 4);
+
+// ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
 // ===========================================================================
 
@@ -300,10 +372,19 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
     // old `ec != EC_HVC64 -> FAIL_BAD_EC` path did (so M0..M19 + L2.0/L2.1 are
     // byte-for-byte unchanged: those runs only ever take HVC64 / DABT / IABT here).
     match classify_exit(esr) {
-        // L2.1: a stage-2 abort from a LOWER EL, routed through the SAME 0x400
-        // vector as an HVC. ONLY occurs while HCR_EL2.VM=1 (the L2.1 window) --
-        // VM=0 for the whole M0..M18 + L2.0/L2.2 run -- so it never collides.
-        ExitClass::StageTwoAbort => aarch64_el2_stage2_abort(frame, esr),
+        // A stage-2 abort from a LOWER EL, routed through the SAME 0x400 vector
+        // as an HVC. ONLY occurs while HCR_EL2.VM=1 (an L2.1 OR L2.3 window) --
+        // VM=0 for the whole M0..M18 + L2.0/L2.2 run -- so it never collides. The
+        // two windows are mutually-exclusive armed-flags: when the L2.3 trap
+        // window is armed it is an MMIO device-IPA fault -> trap-and-EMULATE (the
+        // device seam + ELR ADVANCE), routed BEFORE the L2.1 demand path so the
+        // device IPA never reaches the demand-map (it stays unmapped per access).
+        ExitClass::StageTwoAbort => {
+            if super::el2mmio::armed() {
+                el2_mmio_emulate(frame, esr);
+            }
+            aarch64_el2_stage2_abort(frame, esr)
+        }
         // L2.2: a trapped WFI/WFE (only while HCR_EL2.TWI|TWE armed). RESUME the
         // guest one insn PAST the WFx (the `kvm_incr_pc` that closes
         // `kvm_handle_wfx`), recording the arm fired; outside the window it is
@@ -330,9 +411,19 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             }
             el2_return_to_kernel(FAIL_BAD_EC, esr);
         }
-        // No SMC/SYS64 emulation path exists in TABOS yet -- surface them honestly
-        // as a fail rather than silently passing (the fail-closed table discipline).
-        ExitClass::Smc | ExitClass::Sys64 => el2_return_to_kernel(FAIL_BAD_EC, esr),
+        // L2.3: a trapped MSR/MRS (HCR_EL2.TVM, EC 0x18). Inside the trap window
+        // it is the guest's `msr contextidr_el1` trigger -> trap-and-EMULATE
+        // (record the source GPR + ELR ADVANCE); outside the window it is
+        // unexpected -> fail closed (no general sysreg-emulation path exists).
+        ExitClass::Sys64 => {
+            if super::el2mmio::armed() {
+                el2_sysreg_emulate(frame, esr);
+            }
+            el2_return_to_kernel(FAIL_BAD_EC, esr);
+        }
+        // No SMC emulation path exists in TABOS yet -- surface it honestly as a
+        // fail rather than silently passing (the fail-closed table discipline).
+        ExitClass::Smc => el2_return_to_kernel(FAIL_BAD_EC, esr),
         // An HVC64 -- fall through to the immediate dispatch below (UNCHANGED).
         ExitClass::Hvc => {}
     }
@@ -484,11 +575,214 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             };
             el2_return_to_kernel(outcome, served);
         }
+        HVC_TRAP_ARM => {
+            // imm == 6: the kernel's L2.3 bootstrap. The trap context rides the
+            // frame: x0 = device stage-2 root PA, x1 = VTCR, x2 = VTTBR, x3 = stub
+            // entry, x4 = device IPA. Record the device IPA + reset the served
+            // mask, arm HCR_EL2 = RW|VM|TVM (so the device IPA stage-2-faults AND
+            // EL1 VM-control sysreg writes trap), and `eret` INTO the L2.3 guest
+            // stub. Leave this frame (B0 == __el2_stack_top - 0x110) resident
+            // (SP_EL2 reset to it) so the guest's sysreg/MMIO traps + the `hvc #7`
+            // stack below it and the done unwind hits B0.
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[0..4] were framed by SAVE_CONTEXT_EL2 and carry the HVC #6 args.
+            let (root, vtcr_v, vttbr_v, stub, dev_ipa) = unsafe {
+                (
+                    (*frame).gpr[0],
+                    (*frame).gpr[1],
+                    (*frame).gpr[2],
+                    (*frame).gpr[3],
+                    (*frame).gpr[4],
+                )
+            };
+            let _ = root; // the root is already baked into vttbr_v (compute_vttbr)
+            super::el2mmio::set_armed(true);
+            super::el2mmio::reset_context(dev_ipa);
+            super::el2mmio::arm_trap_el2(vtcr_v, vttbr_v);
+            // SAFETY: reset SP_EL2 = &B0, program ELR_EL2/SPSR_EL2 for an EL1h
+            // entry at the identity-mapped L2.3 stub, `eret`. `noreturn`: control
+            // leaves EL2 for the guest (now with VM+TVM trapping) and re-enters
+            // only via the sysreg/MMIO traps or the guest's `hvc #7`.
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    options(noreturn),
+                );
+            }
+        }
+        HVC_TRAP_DONE => {
+            // imm == 7: the guest's L2.3 done HVC. TEARDOWN IS THE FIRST ACTION
+            // (leaving HCR_EL2.VM=1 would instantly abort the kernel; leaving TVM
+            // armed would trap the kernel's own later VM-control sysreg writes).
+            // Then verify ALL THREE arms fired (SYSREG emulate, MMIO write, MMIO
+            // read) AND the recorded sysreg value == SYSREG_EMU_VAL AND the device
+            // shadow == MMIO_VAL AND the guest magic == TRAP_GUEST_MAGIC, and unwind
+            // to the kernel through the resident B0 (== __el2_stack_top - 0x110).
+            super::el2mmio::disarm_trap_el2();
+            super::el2mmio::set_armed(false);
+            // SAFETY: `frame` is the done-HVC frame on the monitor stack; `gpr[0]`
+            // is the guest magic (good iff its own `cmp x6,x5` matched).
+            let magic = unsafe { (*frame).gpr[0] };
+            let served = super::el2mmio::served();
+            let sysreg_val = super::el2mmio::recorded_sysreg_value();
+            let device_val = super::el2mmio::device_shadow();
+            let outcome = if served & TRAP_SYSREG_BIT == 0 {
+                FAIL_TRAP_SYSREG_MISS
+            } else if served & TRAP_MMIO_WR_BIT == 0 {
+                FAIL_TRAP_MMIO_WR_MISS
+            } else if served & TRAP_MMIO_RD_BIT == 0 {
+                FAIL_TRAP_MMIO_RD_MISS
+            } else if sysreg_val != SYSREG_EMU_VAL {
+                FAIL_TRAP_SYSREG_VAL
+            } else if device_val != MMIO_VAL {
+                FAIL_TRAP_MMIO_VAL
+            } else if magic != TRAP_GUEST_MAGIC {
+                FAIL_TRAP_BAD_MAGIC
+            } else {
+                0
+            };
+            el2_return_to_kernel(outcome, served);
+        }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
             el2_return_to_kernel(FAIL_BAD_IMM, other);
         }
     }
+}
+
+// ===========================================================================
+// L2.3: trap-and-EMULATE a guest MSR/MRS (HCR_EL2.TVM, EC 0x18 SYS64). The
+// SYSREG arm of the trap-and-emulate table. The KVM `kvm_handle_sys_reg` analog:
+// decode WHICH sysreg from the ISS, EMULATE (here: record the source GPR value,
+// the real CONTEXTIDR_EL1 is NEVER written), then ADVANCE ELR past the trapped
+// MSR (+4, an AArch64 MSR is always 32-bit) and `eret`-resume -- exactly KVM's
+// trailing `kvm_incr_pc`. Never returns: it reuses `el2_abort_retry` to resume.
+// ===========================================================================
+// (a) PRE : entered at EL2h from the `Sys64` arm with the trap window armed;
+//           `frame` = the trap frame, `esr` = ESR_EL2 (EC 0x18, the SYS64 ISS).
+//           POST: never returns -- resumes the guest PAST the MSR (it never
+//           re-executes) or unwinds to the kernel on a fail. (b) ABI: plain fn.
+// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "L2.3: el2-trap OK".
+/// Decode + emulate one trapped MSR. Requires it be a WRITE to the expected TVM
+/// trigger (CONTEXTIDR_EL1); records the source GPR value, advances ELR, resumes.
+/// Any other trapped sysreg / a READ is FAIL (fail-closed, never a silent emulate).
+fn el2_sysreg_emulate(frame: *mut Frame, esr: u64) -> ! {
+    // The trap MUST be a WRITE (MSR) to the expected TVM trigger register. A READ
+    // (MRS) or any other sysreg under TVM over-trap is fail-closed (risk #3).
+    if (esr & SYSREG_ISS_SYS_MASK) != SYS_CONTEXTIDR_EL1 || sysreg_iss_is_read(esr) {
+        super::el2mmio::disarm_trap_el2();
+        el2_return_to_kernel(FAIL_TRAP_BAD_SYSREG, esr);
+    }
+    // The source GPR is ESR.ISS.Rt; read the value the guest moved to the sysreg.
+    let rt = sysreg_iss_rt(esr) as usize;
+    // SAFETY: `frame` is the SYS64 trap frame on the single-accessor monitor
+    // stack; `gpr` (offset 0x00) was framed by SAVE_CONTEXT_EL2. `rt < 32` (a
+    // 5-bit ISS field, proven by `kani_sysreg_iss_decode_total`), and `gpr` holds
+    // x0..x30 (indices 0..=30); the ARMv8 GPR encoding 31 means XZR (reads 0),
+    // which we map to a 0 source rather than an OOB index.
+    let value = if rt < 31 {
+        unsafe { (*frame).gpr[rt] }
+    } else {
+        0 // x31 == XZR: an MSR from the zero register writes 0
+    };
+    // EMULATE: record the value (the real CONTEXTIDR_EL1 is NEVER written -- we
+    // advance past the MSR, so trap-and-emulate needs no save/restore), set the
+    // served bit, advance ELR past the 32-bit MSR, and resume.
+    super::el2mmio::record_sysreg_value(value);
+    super::el2mmio::set_trap_served(TRAP_SYSREG_BIT);
+    // SAFETY: `frame.elr` (offset 0xF8) is the faulting PC; +4 (the MSR is a
+    // 32-bit insn, ESR.IL==1) so the restore-and-eret resumes PAST the MSR.
+    unsafe { (*frame).elr += 4 };
+    el2_abort_retry(frame);
+}
+
+// ===========================================================================
+// L2.3: trap-and-EMULATE a guest MMIO LDR/STR to the unmapped device IPA
+// (HCR_EL2.VM, EC 0x24 DABT). The MMIO arm of the trap-and-emulate table. The
+// KVM `io_mem_abort` + `kvm_handle_mmio_return` analog: require ISV (else
+// FAIL_MMIO_NISV, KVM's `!kvm_vcpu_dabt_isvalid` early-out), decode is_write /
+// size / SRT from the DABT ISS, route the access through the `device_mmio` seam
+// (write the SRT on a read, sf/sse-adjusted), then ADVANCE ELR past the trapped
+// LDR/STR and `eret`-resume. Never returns: it reuses `el2_abort_retry`.
+// ===========================================================================
+// (a) PRE : entered at EL2h from the `StageTwoAbort` arm with the trap window
+//           armed; `frame` = the abort frame, `esr` = ESR_EL2 (EC 0x24 DABT ISS).
+//           POST: never returns -- resumes the guest PAST the LDR/STR or unwinds
+//           on a fail. (b) ABI: plain fn, all asm via `el2_abort_retry`.
+// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "L2.3: el2-trap OK".
+/// Decode + emulate one MMIO data abort: gate on `dabt_is_emulatable` (ISV=1 &&
+/// !S1PTW) and the expected device IPA, route through `device_mmio`, advance ELR.
+fn el2_mmio_emulate(frame: *mut Frame, esr: u64) -> ! {
+    // The fault IPA (HPFAR_EL2) must be EXACTLY the expected device IPA. An
+    // unexpected stage-2 fault while armed is fail-closed.
+    let hpfar = super::stage2::read_hpfar_el2();
+    let fault_ipa = hpfar_fault_ipa(hpfar);
+    let dev_ipa = super::el2mmio::device_ipa();
+    if fault_ipa != dev_ipa {
+        super::el2mmio::disarm_trap_el2();
+        el2_return_to_kernel(FAIL_TRAP_BAD_IPA, fault_ipa);
+    }
+    // The abort MUST be emulatable: ISV=1 (a single-GP LDR/STR TABOS can decode)
+    // and S1PTW=0. Else fail closed (the KVM `KVM_EXIT_ARM_NISV` early-out --
+    // TABOS has no instruction decoder, so it NEVER blind-decodes).
+    if !dabt_is_emulatable(esr) {
+        super::el2mmio::disarm_trap_el2();
+        el2_return_to_kernel(FAIL_TRAP_MMIO_NISV, esr);
+    }
+    let is_write = esr_wnr(esr) == 1;
+    let size = dabt_access_size_bytes(esr);
+    let srt = dabt_iss_srt(esr) as usize;
+    if is_write {
+        // WRITE (STR): read the source value from gpr[SRT] and route it through
+        // the device seam, then record the write arm fired.
+        // SAFETY: `frame.gpr` (offset 0x00) holds x0..x30; `srt < 32` (a 5-bit
+        // ISS field, proven by `kani_dabt_iss_decode_total`). srt==31 == XZR -> 0.
+        let value = if srt < 31 {
+            unsafe { (*frame).gpr[srt] }
+        } else {
+            0
+        };
+        super::el2mmio::device_mmio(dev_ipa, true, size, value);
+        super::el2mmio::set_trap_served(TRAP_MMIO_WR_BIT);
+    } else {
+        // READ (LDR): get the value from the device seam, sf/sse-adjust it, and
+        // write it into gpr[SRT] (the `kvm_handle_mmio_return` discipline), then
+        // record the read arm fired. XZR (SRT==31) discards the result.
+        let mut value = super::el2mmio::device_mmio(dev_ipa, false, size, 0);
+        // 32-bit transfer (SF==0): mask the result to 32 bits.
+        if dabt_iss_sf(esr) == 0 {
+            value &= 0xFFFF_FFFF;
+        }
+        // Sign-extend a sub-register load when SSE==1 && size < 8 (the load was
+        // narrower than the register width).
+        if dabt_iss_sse(esr) == 1 && size < 8 {
+            let bits = (size * 8) as u32;
+            // Sign-extend `value` from `bits` to 64 (or to 32 then zero-extended
+            // when SF==0 -- which the `& 0xFFFF_FFFF` above already applied).
+            let shift = 64 - bits;
+            value = (((value << shift) as i64) >> shift) as u64;
+            if dabt_iss_sf(esr) == 0 {
+                value &= 0xFFFF_FFFF;
+            }
+        }
+        if srt < 31 {
+            // SAFETY: as the write path; a single in-frame store of the SRT GPR.
+            unsafe { (*frame).gpr[srt] = value };
+        }
+        super::el2mmio::set_trap_served(TRAP_MMIO_RD_BIT);
+    }
+    // ADVANCE ELR past the 32-bit LDR/STR (ESR.IL==1) and resume -- the guest
+    // never re-executes the access (the OPPOSITE of the L2.1 demand-retry).
+    // SAFETY: `frame.elr` (offset 0xF8) is the faulting PC; +4 resumes PAST it.
+    unsafe { (*frame).elr += 4 };
+    el2_abort_retry(frame);
 }
 
 // ===========================================================================
@@ -1049,5 +1343,135 @@ pub fn el2_exits_selftest() -> crate::ExitsProof {
         ExitsProof::Proven { served }
     } else {
         ExitsProof::Faulted { code }
+    }
+}
+
+// ===========================================================================
+// L2.3: the EL1 guest stub that exercises BOTH trap-and-emulate paths.
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #6` handler's `eret`, executing at EL1h
+//           (SPSR_EL2 = 0x3C5) under the kernel's live stage-1 MMU AND the armed
+//           trap window (HCR_EL2.VM=1 + TVM=1). Its VA == PA: identity-mapped,
+//           EL1-executable kernel `.text` in the RAM gigabyte (GiB1, which the
+//           device stage-2 identity-maps, so the fetch + stack never S1PTW-fault).
+//           POST: (A) `msr contextidr_el1` traps EC 0x18 SYS64 -> the SYSREG
+//           emulate path records x3 + advances ELR past the MSR; (B) `str x5,[x4]`
+//           to the device IPA stage-2-faults -> the MMIO write path stores x5 in
+//           the device shadow + advances ELR; (C) `ldr x6,[x4]` faults -> the
+//           MMIO read path returns the device value into x6 + advances ELR. The
+//           stub's own `cmp x6,x5` proves the read delivered the device value;
+//           then `hvc #7` closes (the monitor tears the window down + unwinds,
+//           never returns here).
+// (b) ABI : `#[unsafe(naked)]` -- PC-relative / immediate only (valid at its
+//           identity VA), NO stack (SP_EL1 untouched). A SINGLE-GPR LDR/STR (no
+//           LDP/STP, no writeback, no SIMD) so QEMU TCG sets ISV=1 (the decodable
+//           form). The device VA `0x1_C000_0000` (== stage2.rs `DEVICE_IPA`) is
+//           materialised MOVZ+MOVK; the magics fit single MOVZ.
+// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "L2.3: el2-trap OK".
+/// The L2.3 guest: write the SYSREG magic to CONTEXTIDR_EL1 (TVM trap -> emulate),
+/// STORE the MMIO magic to the device IPA (DABT -> emulate write), LOAD it back
+/// (DABT -> emulate read -> SRT), prove the read value, then `hvc #7` to close.
+#[unsafe(naked)]
+extern "C" fn el2_trap_guest_stub() -> ! {
+    naked_asm!(
+        // (A) SYSREG trap-and-emulate (HCR_EL2.TVM):
+        "movz x3, #0x5103",            // SYSREG_EMU_VAL magic (single MOVZ)
+        "msr  contextidr_el1, x3",     // EC 0x18 SYS64 trap -> emulate(record x3) -> ELR+=4
+        // (B) MMIO emulate (stage-2 device IPA):
+        "movz x4, #0xC000, lsl #16",   // x4 = 0x0000_0000_C000_0000
+        "movk x4, #0x0001, lsl #32",   // x4 = 0x0000_0001_C000_0000 == DEVICE_IPA
+        "movz x5, #0x0D51",            // MMIO_VAL magic
+        "str  x5, [x4]",               // DABT ISV=1 WnR=1 -> device_mmio(write x5) -> ELR+=4
+        "ldr  x6, [x4]",               // DABT ISV=1 WnR=0 -> device_mmio(read)->x6 -> ELR+=4
+        // GUEST-side proof that the read-emulation wrote the DEVICE value into SRT:
+        "mov  x0, #0xD23",             // L2.3 guest magic (good)
+        "cmp  x6, x5",
+        "b.eq 1f",
+        "mov  x0, #0xBAD",             // x6 != written magic -> wrong magic -> FAIL
+        "1:",
+        "hvc  #7",                     // done: teardown + verify + unwind
+        "2:",
+        "b 2b",                        // unreachable: the monitor unwinds, never here
+    )
+}
+
+// ===========================================================================
+// L2.3: the safe facade: el2_trap_selftest() -> TrapProof.
+// ===========================================================================
+// (a) PRE : called once from the kernel at the L2.3 slot (right after L2.2,
+//           before M19), at EL1h, with the resident monitor armed
+//           (BOOTED_AT_EL2 == 1). POST: built the device stage-2 + spliced the
+//           stage-1 device block AT EL1, issued ONE `HVC #6`, drove the
+//           arm -> SYSREG-trap+emulate -> MMIO-write-emulate -> MMIO-read-emulate
+//           -> `hvc #7` -> TEARDOWN -> unwind round-trip, and returns the outcome
+//           enum. The kernel resumes here at EL1 with the trap window fully torn
+//           down (HCR back to RW baseline). Graceful skip when not booted at EL2.
+// (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `el2mmio.rs` /
+//           `stage2.rs`, so the `#![forbid(unsafe_code)]` kernel only branches on
+//           the returned `TrapProof`.
+// (c) TEST: scripts/run-aarch64.sh -- "L2.3: el2-trap OK" iff this returns `Proven`.
+/// Drive the EL1->EL2(arm)->EL1-guest->EL2(SYSREG emulate)->EL1-guest->EL2(MMIO
+/// write)->EL1-guest->EL2(MMIO read)->EL1-guest->EL2(done+teardown)->EL1
+/// trap-and-emulate round-trip and report the outcome. `Unavailable` if we did
+/// not boot at EL2 (a green skip); `Proven{served}` on a closed round-trip that
+/// fired ALL THREE arms (SYSREG + MMIO write + MMIO read); `Faulted{code}` on any
+/// monitor-reported fault.
+pub fn el2_trap_selftest() -> crate::TrapProof {
+    use crate::TrapProof;
+
+    // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
+    if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
+        return TrapProof::Unavailable;
+    }
+
+    // Build the device stage-2 regime AT EL1 (GiB0+GiB1 identity, the device IPA
+    // L1[7] left UNMAPPED so it stage-2-faults). On physical-frame OOM, surface a
+    // Faulted code honestly (a red marker, never a faked OK).
+    let root = match super::stage2::build_device_stage2() {
+        Some(r) => r,
+        None => return TrapProof::Faulted { code: FAIL_TRAP_BUILD },
+    };
+    // Splice the stage-1 identity block at L1[7] so the guest VA DEVICE_IPA
+    // produces IPA DEVICE_IPA (which the device stage-2 then faults). Its stage-1
+    // walk touches only the L1 root (in GiB1, stage-2-covered), so it never
+    // S1PTW-faults.
+    super::stage2::install_stage1_device_block();
+
+    let vtcr_v = super::stage2::compute_vtcr();
+    let vttbr_v = super::stage2::compute_vttbr(root);
+    let stub = el2_trap_guest_stub as *const () as u64;
+    let dev_ipa = super::stage2::DEVICE_IPA;
+
+    // Mask EL1 IRQs across the round-trip (the guest also runs DAIF-masked).
+    let daif = super::timer::local_irq_save();
+
+    let code: u64;
+    let served: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #6`, programs VTCR/VTTBR and
+    // sets HCR.VM=1|TVM=1, then erets into the EL1 trap stub. The stub's `msr
+    // contextidr_el1` traps -> SYSREG emulate (record + advance); its `str`/`ldr`
+    // to the device IPA stage-2-fault -> MMIO write/read emulate (device seam +
+    // advance); its `hvc #7` TEARS the window DOWN (HCR=RW) FIRST and unwinds here
+    // with x0 = outcome, x1 = served, every other kernel register restored from
+    // B0. The result arrives in registers -- nothing here touches the EL2 stack.
+    // x0..x4 carry the in-args; clobber_abi("C") covers the rest.
+    unsafe {
+        asm!(
+            "hvc #6",
+            inout("x0") root => code,
+            inout("x1") vtcr_v => served,
+            in("x2") vttbr_v,
+            in("x3") stub,
+            in("x4") dev_ipa,
+            clobber_abi("C"),
+        );
+    }
+
+    super::timer::local_irq_restore(daif);
+
+    if code == 0 {
+        TrapProof::Proven { served }
+    } else {
+        TrapProof::Faulted { code }
     }
 }

@@ -3425,6 +3425,42 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- L2.3: EL2 trap-and-emulate -- the aarch64 trap-and-EMULATE rung (the
+    // SYSREG + MMIO-abort emulate primitive), the FOURTH L2 rung built ON TOP of
+    // L2.0's resident EL2 monitor. Inside a short self-test window the monitor
+    // traps a guest sysreg WRITE (HCR_EL2.TVM, the `msr contextidr_el1` trigger)
+    // and a guest MMIO LDR/STR to an unmapped device IPA (HCR_EL2.VM), DECODES
+    // each via the pure Kani-proven el2_trap ISS decoders, EMULATES it (records
+    // the sysreg value; routes the MMIO access through the device_mmio callback
+    // SEAM -- the split-VMM upcall point), and ADVANCES ELR_EL2 past the trapped
+    // instruction (the OPPOSITE of L2.1's demand-retry, exactly KVM's
+    // kvm_incr_pc). The window is torn down (HCR back to RW baseline) BEFORE the
+    // monitor unwinds, so the kernel resumes here cleanly (zero regression). ALL
+    // the new asm/unsafe is confined to tb-hal's arch/aarch64/{el2mmio,el2,
+    // stage2}.rs, so this crate stays unsafe-free; the kernel only branches on
+    // TrapProof. On x86_64 there is no EL2, so it reports the n/a path. DoD:
+    // "L2.3: el2-trap OK".
+    match tb_hal::el2_trap_selftest() {
+        tb_hal::TrapProof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.3: el2-trap OK\n"); // <-- the L2.3 aarch64 DoD marker
+        }
+        tb_hal::TrapProof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no window armed.
+            tb_hal::serial_write_str("L2.3: el2-trap OK (no EL2, skipped)\n");
+        }
+        tb_hal::TrapProof::NotApplicable => {
+            // x86_64: no EL2 -- the vmxroot block above is this arch's rung.
+            tb_hal::serial_write_str("L2.3: el2-trap OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::TrapProof::Faulted { code } => {
+            // Booted at EL2 but the trap round-trip faulted -- surfaced honestly,
+            // with NO 'el2-trap OK' substring, so the run-script grep fails (red).
+            tb_hal::serial_write_str("L2.3: el2-trap FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     // --- M19: poll-based virtio-mmio virtio-rng -- the kernel's FIRST real
     // device I/O, the new cumulative boot tail. A MODERN (Version=2) virtio-rng
     // (DeviceID 4) driven over ONE virtqueue: a hard-coded slot scan, the

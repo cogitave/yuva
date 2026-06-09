@@ -50,7 +50,13 @@
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
-//!    the stage-2 demand-fault handler classifies aborts with (total, no panic).
+//!    the stage-2 demand-fault handler classifies aborts with (total, no panic);
+//!    plus the L2.3 TRAP-and-EMULATE ISS decoders -- the SYS64 sysreg ISS
+//!    (`sysreg_iss_op0/op1/op2/crn/crm/rt/is_read` + `sysreg_iss_sys_val` /
+//!    `SYSREG_ISS_SYS_MASK` / `SYS_CONTEXTIDR_EL1`) and the Data-Abort MMIO ISS
+//!    (`dabt_iss_isv/sas/sse/srt/sf/ar` + `dabt_access_size_bytes` /
+//!    `dabt_is_emulatable`), the bit extraction the trap-and-emulate handler
+//!    decodes the trapped MSR/MRS and the MMIO LDR/STR transfer register with.
 //!
 //! ## Verification
 //!

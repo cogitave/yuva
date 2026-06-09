@@ -2538,6 +2538,75 @@ pub fn el2_exits_selftest() -> ExitsProof {
 }
 
 // ===========================================================================
+// L2.3: EL2 trap-and-emulate self-test facade — the aarch64 trap-and-EMULATE
+// rung (the SYSREG + MMIO-abort emulate primitive), the FOURTH L2 rung built ON
+// TOP of L2.0's resident EL2 monitor.
+//
+// Inside a short self-test window the monitor traps a guest sysreg WRITE
+// (HCR_EL2.TVM, the `msr contextidr_el1` trigger) and a guest MMIO LDR/STR to an
+// unmapped device IPA (HCR_EL2.VM), DECODES each via the pure Kani-proven
+// `el2_trap` ISS decoders, EMULATES it (records the sysreg value; routes the
+// MMIO access through the `device_mmio` callback SEAM — the split-VMM upcall
+// point), and ADVANCES ELR_EL2 past the trapped instruction (the OPPOSITE of
+// L2.1's demand-retry, exactly KVM's `kvm_incr_pc`). The verdict requires ALL
+// THREE arms (SYSREG emulate + MMIO write + MMIO read) AND the recorded values
+// to round-trip. ALL the silicon-unsafe/asm is confined to
+// `arch/aarch64/{el2mmio,el2,stage2}.rs` (the window is OFF for the whole
+// M0..M19 + L2.0/L2.1/L2.2 run and torn down before this returns — zero
+// regression), so this crate stays unsafe-free and the kernel only branches on a
+// closed enum. On x86_64 (no EL2) it is N/A — mirroring the `ExitsProof` block.
+// ===========================================================================
+
+/// L2.3 EL2 trap-and-emulate self-test outcome (returned to the kernel for marker
+/// rendering). A SIBLING of [`El2Proof`]/[`Stage2Proof`]/[`ExitsProof`]: the proof
+/// is a closed round-trip that trap-and-EMULATES THREE accesses (a sysreg WRITE,
+/// an MMIO WRITE, an MMIO READ), advancing ELR past each rather than re-executing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapProof {
+    /// This arch has no EL2 trap-and-emulate seam (x86_64): the VMX
+    /// trap-and-emulate path is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// trap window is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean trap-and-emulate (an arm missed, a decoded value was
+    /// wrong, the SYS64 was not the expected trigger, or the MMIO abort was
+    /// non-decodable ISV=0); `code` is the nonzero diagnostic (surfaced honestly
+    /// as a red marker WITHOUT an "el2-trap OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the trap-and-emulate round-trip closed — the SYS64 sysreg WRITE
+    /// was decoded + emulated, the MMIO WRITE was routed through the device seam,
+    /// and the MMIO READ returned the device value into the transfer register
+    /// (the guest's own compare confirmed it). `served` is the EL2 served mask
+    /// (`SYSREG|MMIO_WR|MMIO_RD` bits, == `0b111`).
+    Proven {
+        /// The served-arm bitmask the monitor accumulated (`SYSREG(1) |
+        /// MMIO_WR(2) | MMIO_RD(4)`).
+        served: u64,
+    },
+}
+
+/// L2.3: run the EL2 trap-and-emulate self-test (aarch64), or report
+/// [`TrapProof::NotApplicable`] on x86_64. See [`TrapProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_trap_selftest() -> TrapProof {
+    arch::el2_trap_selftest()
+}
+
+/// L2.3: x86_64 has no EL2 trap-and-emulate seam — the VMX trap-and-emulate path
+/// is this arch's realization of the rung, so this reports
+/// [`TrapProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_trap_selftest() -> TrapProof {
+    TrapProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //

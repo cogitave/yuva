@@ -44,10 +44,25 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   `classify_exit`: the six MUST ECs map to their named arms and EVERY other EC
   maps to the fail-closed `Undef`/inject-UNDEF default, the
   `arm_exit_handlers[0..EC_MAX]=kvm_handle_unknown_ec` discipline machine-checked,
-  plus the injected-UNDEF syndrome encoder `esr_inject_undef`). The `prove-encode`
-  CI lane fails closed on a pinned **`EXPECTED_HARNESSES = 21`** (the 15 pre-L2.1
-  harnesses + the 5 L2.1 lemmas + this 1 L2.2 classifier lemma), so a silently
+  plus the injected-UNDEF syndrome encoder `esr_inject_undef`). L2.3 adds TWO more
+  — `kani_sysreg_iss_decode_total` and `kani_dabt_iss_decode_total` (the SYS64
+  MSR/MRS ISS decoders and the Data-Abort MMIO ISS decoders, each TOTAL over every
+  64-bit `ESR` AND round-trip-correct against an independent literal-Arm-ARM-shift
+  reference, the trap-and-emulate decode the aL2.3 handler classifies sysreg/MMIO
+  accesses with). The `prove-encode` CI lane fails closed on a pinned
+  **`EXPECTED_HARNESSES = 23`** (the 15 pre-L2.1 harnesses + the 5 L2.1 lemmas +
+  the 1 L2.2 classifier lemma + the 2 L2.3 ISS-decoder lemmas), so a silently
   deleted, renamed, or vacuous harness reddens the lane.
+
+- **The L2.3 trap-and-emulate glue (silicon-unsafe, OUTSIDE the proof boundary).**
+  The `tb-hal/arch/aarch64/{el2mmio,el2,stage2}.rs` glue that arms the trap window
+  (`msr HCR_EL2 = RW|VM|TVM`), decodes a trapped sysreg WRITE / MMIO LDR-STR via
+  the proven ISS decoders, routes the MMIO access through the `device_mmio`
+  callback SEAM (the split-VMM EXIT-UPCALL point), and ADVANCES `ELR_EL2 += 4` past
+  each trapped instruction (`kvm_incr_pc`/`kvm_handle_mmio_return`, the OPPOSITE of
+  the L2.1 demand-retry) is silicon-unsafe and outside the proof boundary — it is
+  exercised end-to-end by the `L2.3: el2-trap OK` boot self-test (all three arms
+  must fire and the values round-trip), fail-closed (ISV=0 aborts -> `FAIL_MMIO_NISV`).
 
 - **The L2.2 exit-dispatch glue (silicon-unsafe, OUTSIDE the proof boundary).**
   The `tb-hal/arch/aarch64/{exits,exits_vectors,el2}.rs` glue that arms the exit

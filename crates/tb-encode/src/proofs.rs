@@ -27,8 +27,11 @@
 //! would turn it FAILED, so the suite is provably non-vacuous.
 
 use crate::el2_trap::{
-    classify_exit, esr_dfsc, esr_ec, esr_inject_undef, esr_is_translation_fault, esr_s1ptw,
-    esr_wnr, hpfar_fault_ipa, ExitClass, EC_DABT_LOW, EC_HVC64, EC_IABT_LOW,
+    classify_exit, dabt_access_size_bytes, dabt_iss_isv, dabt_iss_sas, dabt_iss_srt, dabt_iss_sse,
+    dabt_iss_sf, esr_dfsc, esr_ec, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, esr_wnr,
+    hpfar_fault_ipa, sysreg_iss_crm, sysreg_iss_crn, sysreg_iss_is_read, sysreg_iss_op0,
+    sysreg_iss_op1, sysreg_iss_op2, sysreg_iss_rt, sysreg_iss_sys_val, ExitClass, EC_DABT_LOW,
+    EC_HVC64, EC_IABT_LOW, SYSREG_ISS_SYS_MASK,
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
@@ -615,4 +618,102 @@ fn kani_exit_classifier_total() {
     // The injected UNKNOWN syndrome decodes back to EC=0x00 with IL set.
     assert_eq!(esr_inject_undef(), (0x00u64 << 26) | (1u64 << 25));
     assert_eq!(esr_ec(esr_inject_undef()), 0x00);
+}
+
+// ===========================================================================
+// L2.3: the trap-and-emulate ISS decoders (`el2_trap` SYS64 + DABT MMIO ISS).
+// One harness per syndrome FAMILY, each proving TOTALITY (bounded, no panic)
+// AND round-trip CORRECTNESS against an INDEPENDENT literal-Arm-ARM-shift
+// reference -- the one-harness-per-decoder-family pattern of
+// `kani_esr_decode_total` / `kani_exit_classifier_total`.
+// ===========================================================================
+
+/// `ESR.ISS` SYS64 (MSR/MRS) decoding is TOTAL: for EVERY u64 ESR each field
+/// decodes without panic into its bounded range (op0<4, op2<8, op1<8, crn<16,
+/// rt<32, crm<16, is_read a bool). CORRECTNESS: pack symbolic op0/op1/op2/crn/
+/// crm/rt/dir via INDEPENDENT literal Arm-ARM shifts and assert every decoder
+/// recovers its field, plus `(iss & SYSREG_ISS_SYS_MASK) == sysreg_iss_sys_val(...)`.
+///
+/// NEGATIVE CONTROL (non-tautological, literal shifts vs the fns under test):
+/// if `sysreg_iss_op1` masked at shift `[15:13]` instead of `[16:14]` it would
+/// alias CRn bit[13]; the op1-recovery equality FAILS for any op1 with bit2 set.
+/// The reference shifts are the literal 20/17/14/10/5/1/0, never routed through
+/// the fns under test (so the two sides cannot move together).
+#[kani::proof]
+fn kani_sysreg_iss_decode_total() {
+    let esr: u64 = kani::any();
+    // TOTALITY: every decoder is bounded over the full input space (no panic).
+    assert!(sysreg_iss_op0(esr) < 4);
+    assert!(sysreg_iss_op2(esr) < 8);
+    assert!(sysreg_iss_op1(esr) < 8);
+    assert!(sysreg_iss_crn(esr) < 16);
+    assert!(sysreg_iss_rt(esr) < 32);
+    assert!(sysreg_iss_crm(esr) < 16);
+    let _ = sysreg_iss_is_read(esr); // a bool by construction -- cannot panic
+
+    // CORRECTNESS: pack each field from symbolic, bounded sources via the LITERAL
+    // Arm-ARM ISS shifts (20/17/14/10/5/1/0), then assert the decoders recover them.
+    let op0: u64 = kani::any();
+    kani::assume(op0 < 4);
+    let op2: u64 = kani::any();
+    kani::assume(op2 < 8);
+    let op1: u64 = kani::any();
+    kani::assume(op1 < 8);
+    let crn: u64 = kani::any();
+    kani::assume(crn < 16);
+    let rt: u64 = kani::any();
+    kani::assume(rt < 32);
+    let crm: u64 = kani::any();
+    kani::assume(crm < 16);
+    let dir: u64 = kani::any();
+    kani::assume(dir < 2);
+    // INDEPENDENT literal-shift reference (NOT via the fns under test).
+    let iss = (op0 << 20) | (op2 << 17) | (op1 << 14) | (crn << 10) | (rt << 5) | (crm << 1) | dir;
+    assert_eq!(sysreg_iss_op0(iss), op0);
+    assert_eq!(sysreg_iss_op2(iss), op2);
+    assert_eq!(sysreg_iss_op1(iss), op1);
+    assert_eq!(sysreg_iss_crn(iss), crn);
+    assert_eq!(sysreg_iss_rt(iss), rt);
+    assert_eq!(sysreg_iss_crm(iss), crm);
+    assert_eq!(sysreg_iss_is_read(iss), dir != 0);
+    // The Rt/direction-independent SYS key matches the packer over the masked ISS.
+    assert_eq!(iss & SYSREG_ISS_SYS_MASK, sysreg_iss_sys_val(op0, op1, op2, crn, crm));
+}
+
+/// `ESR.ISS` Data-Abort (MMIO) decoding is TOTAL: for EVERY u64 ESR the single-bit
+/// fields (isv/sse/sf) are `< 2`, sas `< 4`, srt `< 32`, and `dabt_access_size_bytes`
+/// is in `{1,2,4,8}` (no shift-overflow). CORRECTNESS: an INDEPENDENT literal match
+/// of the access size and a packed-then-recovered symbolic SRT.
+///
+/// NEGATIVE CONTROL: masking SRT with `0xF` (4 bits) instead of `0x1F` drops
+/// x16..x31, so the srt-recovery FAILS for srt == 0x1F (x31); equivalently a
+/// `1 << ((esr>>21)&3)` (SSE-aliased) size impl disagrees with the literal-shift
+/// `size_ref`. The reference uses raw `(esr>>22)&3` / `(esr>>16)&0x1F`, never the
+/// fns under test (no tautology).
+#[kani::proof]
+fn kani_dabt_iss_decode_total() {
+    let esr: u64 = kani::any();
+    // TOTALITY over the full input space (no panic, no shift-overflow).
+    assert!(dabt_iss_isv(esr) < 2);
+    assert!(dabt_iss_sse(esr) < 2);
+    assert!(dabt_iss_sf(esr) < 2);
+    assert!(dabt_iss_sas(esr) < 4);
+    assert!(dabt_iss_srt(esr) < 32);
+    let sz = dabt_access_size_bytes(esr);
+    assert!(sz == 1 || sz == 2 || sz == 4 || sz == 8);
+
+    // CORRECTNESS: an INDEPENDENT literal match of the access size from raw SAS.
+    let size_ref = match (esr >> 22) & 3 {
+        0 => 1u64,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    assert_eq!(dabt_access_size_bytes(esr), size_ref);
+    // And a packed-then-recovered symbolic SRT over the FULL 5-bit field.
+    let srt: u64 = kani::any();
+    kani::assume(srt < 32);
+    let iss = (1u64 << 24) | (srt << 16);
+    assert_eq!(dabt_iss_srt(iss), srt);
+    assert_eq!(dabt_iss_isv(iss), 1);
 }

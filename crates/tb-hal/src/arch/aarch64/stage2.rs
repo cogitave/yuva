@@ -223,6 +223,16 @@ fn isb() {
     unsafe { asm!("isb", options(nostack, preserves_flags)) }
 }
 
+/// EL2: `dsb ish` exposed for the L2.3 arm/disarm glue in [`super::el2mmio`]
+/// (the trap-and-emulate window reuses this module's stage-2 barrier dance).
+pub(super) fn dsb_ish_pub() {
+    dsb_ish();
+}
+/// EL2: `isb` exposed for the L2.3 arm/disarm glue in [`super::el2mmio`].
+pub(super) fn isb_pub() {
+    isb();
+}
+
 // ===========================================================================
 // Stage-2 TLBI (EL2-only). First-fault demand maps never need a TLBI (invalid
 // entries are not cached -- the same rule mmu.rs's first map relies on); these
@@ -377,6 +387,90 @@ pub(super) fn install_stage1_hole_block() {
     // single previously-INVALID slot with a valid 1 GiB Normal block whose output
     // (`HOLE_IPA`) is 1 GiB-aligned, then publish before any access through it.
     unsafe { write_volatile(l1.add(idx), make_entry(HOLE_IPA, STAGE1_BLOCK_NORMAL)) }
+    dsb_ishst();
+    isb();
+}
+
+// ===========================================================================
+// L2.3: the device-IPA stage-2 regime (a sibling of the L2.1 hole regime).
+//
+// The L2.3 MMIO path reuses the SAME GiB0+GiB1 identity stage-2 (so the stub
+// fetch + stack never S1PTW-fault), but instead of a deliberate RAM hole it
+// leaves a vacant DEVICE gigabyte UNMAPPED so a guest LDR/STR to it stage-2-
+// faults -> DABT -> the trap-and-emulate handler routes it through the device
+// seam (NO demand-map, NO stage-2 leaf splice -- the device IPA stays unmapped
+// for every access, the OPPOSITE of the L2.1 demand-fill).
+// ===========================================================================
+
+/// The L2.3 DEVICE IPA: a vacant high IPA gigabyte distinct from [`HOLE_IPA`].
+/// `0x1_C000_0000` is stage-2 `L1[7]` (IPA `7 * 1 GiB`) -- and is ALSO the
+/// kernel's stage-1 `L1[7]`, which is free (stage-1 uses L1[0..1]=identity,
+/// L1[2]=M3, L1[3]=M4, L1[4]=heap, L1[5]=L2.1 hole, L1[6]=M10). DISTINCT from
+/// [`HOLE_IPA`] (`L1[5]`) so the L2.1 demand-map path never fires for it. The
+/// self-test installs a stage-1 identity block here so the guest VA
+/// `0x1_C000_0000` produces IPA `0x1_C000_0000`, which then stage-2-faults.
+pub(super) const DEVICE_IPA: u64 = 0x1_C000_0000;
+
+// Lock the device IPA against the L1 layout (a collision is a build error).
+const _: () = assert!(DEVICE_IPA >> SHIFT_1G == 7); // L1[7] -- the free device gigabyte
+const _: () = assert!(DEVICE_IPA & (GIB - 1) == 0); // 1 GiB-aligned (stage-1 block base)
+const _: () = assert!(DEVICE_IPA != HOLE_IPA); // never the L2.1 demand-map IPA
+
+/// EL1: build the L2.3 device stage-2 regime and return the L1 root PA (or `None`
+/// on physical-frame OOM). Identity-maps GiB0 (Device) + GiB1 (Normal-WB) as
+/// 2 MiB blocks EXACTLY as [`build_identity_stage2`] does -- so the stub fetch +
+/// stack + the live stage-1 table frames are covered -- but installs NO L1[7]
+/// device path: the device gigabyte is left INVALID, so the guest's MMIO access
+/// stage-2-faults and the trap-and-emulate handler services it via the device
+/// seam (it never demand-maps the device IPA, unlike the L2.1 hole).
+pub(super) fn build_device_stage2() -> Option<u64> {
+    let root = frame_alloc_zeroed()?;
+    let l2_gib0 = frame_alloc_zeroed()?;
+    let l2_gib1 = frame_alloc_zeroed()?;
+
+    // GiB0: 512 x 2 MiB Device blocks (the MMIO gigabyte, incl. the UART).
+    let mut i = 0usize;
+    while i < 512 {
+        let pa = GIB0_DEVICE_BASE + (i as u64) * BLOCK_2M;
+        s2_set(l2_gib0, i, s2_leaf_2mib(pa, S2_MEMATTR_DEVICE));
+        i += 1;
+    }
+    // GiB1: 512 x 2 MiB Normal-WB blocks (RAM: stub code, stack, the live
+    // stage-1 table frames -- so the guest's own stage-1 walk never S1PTW-faults).
+    i = 0;
+    while i < 512 {
+        let pa = GIB1_RAM_BASE + (i as u64) * BLOCK_2M;
+        s2_set(l2_gib1, i, s2_leaf_2mib(pa, S2_MEMATTR_NORMAL_WB));
+        i += 1;
+    }
+
+    // L1 root: [0] -> GiB0 table, [1] -> GiB1 table. EVERY other L1 slot --
+    // INCLUDING L1[7] (DEVICE_IPA) -- stays INVALID, so the guest's MMIO access
+    // to DEVICE_IPA stage-2-faults (the emulate trigger; never demand-mapped).
+    s2_set(root, level_index(GIB0_DEVICE_BASE, SHIFT_1G), s2_table(l2_gib0));
+    s2_set(root, level_index(GIB1_RAM_BASE, SHIFT_1G), s2_table(l2_gib1));
+
+    // Publish the whole hierarchy to the (EL1 + EL2) stage-2 walker.
+    dsb_ishst();
+    isb();
+    Some(root)
+}
+
+/// EL1: splice a stage-1 1 GiB identity block at `L1[7]` of the LIVE `TTBR0_EL1`
+/// so the guest VA [`DEVICE_IPA`] produces IPA `DEVICE_IPA` (which stage-2 then
+/// faults). A sibling of [`install_stage1_hole_block`] at a distinct L1 slot. The
+/// stage-1 walk for this VA touches only the L1 root (in GiB1, stage-2-covered),
+/// so it never S1PTW-faults. No TLBI: `L1[7]` was INVALID (a first map). Left
+/// installed after the round-trip -- harmless (the kernel never touches that VA
+/// again; stage-2 is torn down so it is plain stage-1 to unbacked PA thereafter).
+pub(super) fn install_stage1_device_block() {
+    let l1 = super::mmu::current_root() as *mut u64;
+    let idx = level_index(DEVICE_IPA, SHIFT_1G); // 7
+    // SAFETY: `current_root()` returns the live `TTBR0_EL1` L1 base PA (BADDR
+    // masked), an identity-mapped 512-entry table; `idx == 7 < 512`. We write a
+    // single previously-INVALID slot with a valid 1 GiB Normal block whose output
+    // (`DEVICE_IPA`) is 1 GiB-aligned, then publish before any access through it.
+    unsafe { write_volatile(l1.add(idx), make_entry(DEVICE_IPA, STAGE1_BLOCK_NORMAL)) }
     dsb_ishst();
     isb();
 }

@@ -87,6 +87,16 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.2: el2-exits OK' missing" >&2
         exit 1
     fi
+    # L2.3: the EL2 trap-and-emulate proof must ALSO print (the EL2 monitor arms
+    # the trap window, the guest's `msr contextidr_el1` write traps + is emulated,
+    # its STR/LDR to the unmapped device IPA trap + route through the device_mmio
+    # seam, ELR is advanced past each trapped instruction, and the window is torn
+    # down before unwinding). Assert it directly so the el2 -> stage2 -> el2-exits
+    # -> el2-trap -> virtio order is fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.3: el2-trap OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.3: el2-trap OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then

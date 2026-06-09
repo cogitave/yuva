@@ -30,6 +30,7 @@
 mod boot; // _start; EL-aware bring-up + nVHE EL2-monitor install; arms VBAR_EL1.
 mod el2; // L2.0: resident nVHE EL2 monitor (HVC handler) + el2_selftest() facade.
 mod el2_vectors; // L2.0: VBAR_EL2 table + EL2 save path; pure `global_asm!` module.
+mod el2mmio; // L2.3: trap-and-emulate arming (HCR.VM|TVM) + the MMIO device seam + served cell.
 mod exits; // L2.2: EL2 exit-dispatch arming (HCR.TWI|TWE + CPTR.TFP) + served-mask cell.
 mod exits_vectors; // L2.2: __l2_guest_vectors EL1 table (inject-UNDEF target); pure asm.
 mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
@@ -46,6 +47,7 @@ mod virtio; // M19: poll-based modern virtio-mmio virtio-rng (the kernel's FIRST
 
 pub use el2::el2_selftest; // L2.0: the safe EL2 world-switch self-test facade.
 pub use el2::el2_exits_selftest; // L2.2: the safe EL2 exit-dispatch self-test facade.
+pub use el2::el2_trap_selftest; // L2.3: the safe trap-and-emulate self-test facade.
 pub use el2::stage2_selftest; // L2.1: the safe stage-2 demand-translation self-test facade.
 pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
 pub use mmu::{

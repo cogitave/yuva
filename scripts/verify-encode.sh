@@ -24,9 +24,11 @@ set -euo pipefail
 # memscore recall-ranking-math x4: log2_fixed/ln_fixed/bla_raw panic-free+bounded
 # and minmax-in-[0,SCALE] + L2.1 aarch64 stage-2/el2_trap encoders x5:
 # s2_leaf_wellformed, s2_table_and_vttbr, vtcr_wellformed, esr_decode_total,
-# hpfar_fault_ipa + L2.2 el2-exits classifier x1: exit_classifier_total).
+# hpfar_fault_ipa + L2.2 el2-exits classifier x1: exit_classifier_total + L2.3
+# trap-and-emulate ISS decoders x2: sysreg_iss_decode_total, dabt_iss_decode_total
+# -- one per syndrome family, each proving totality AND round-trip correctness).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=21
+EXPECTED_HARNESSES=23
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

@@ -209,12 +209,227 @@ pub const fn esr_inject_undef() -> u64 {
     (EC_UNKNOWN << 26) | ESR_ELx_IL
 }
 
+// ===========================================================================
+// L2.3: TRAP-and-EMULATE ISS decoders (SYS64 sysreg + Data-Abort MMIO).
+//
+// Two new syndrome families, both PURE + TOTAL (const, never panic) bit
+// extraction over `ESR_EL2.ISS[24:0]`, exactly the family of the existing
+// `esr_ec`/`esr_wnr`/`esr_s1ptw` decoders. They underpin the aL2.3 trap-and-
+// emulate handler: when a guest MSR/MRS traps (EC 0x18 SYS64) or a guest LDR/STR
+// to an unmapped device IPA aborts (EC 0x24 DABT_LOW), the monitor decodes which
+// sysreg / which transfer register from the raw syndrome here, emulates the
+// access, then ADVANCES ELR_EL2 past the trapped instruction (the OPPOSITE of
+// the L2.1 demand-retry).
+//
+// Bit layouts are IDENTICAL in Linux `esr.h` (ESR_ELx_SYS64_ISS_* / the DABT
+// fields) and QEMU `syndrome.h` (FIELD(SYSREG_ISS,...) / FIELD(DABORT_ISS,...)),
+// cross-checked against KVM `kvm_emulate.h`. All sit inside ISS[24:0], disjoint
+// from EC[31:26]/IL[25], so (like `esr_ec`) the decoders take the raw 64-bit ESR.
+// ===========================================================================
+
+// -- SYS64 (MSR/MRS/SYS) trap ISS ------------------------------------------------
+// ISS layout for an AArch64 MSR/MRS/SYS trap (EC 0x18), bits within [24:0]:
+//   [21:20] Op0, [19:17] Op2, [16:14] Op1, [13:10] CRn, [9:5] Rt,
+//   [4:1] CRm, [0] Direction (1 = READ/MRS, 0 = WRITE/MSR); [24:22] RES0.
+
+/// `ESR.ISS.Op0` of a trapped MSR/MRS -- bits `[21:20]`. Always `< 4`.
+#[inline]
+pub const fn sysreg_iss_op0(esr: u64) -> u64 {
+    (esr >> 20) & 0x3
+}
+/// `ESR.ISS.Op2` of a trapped MSR/MRS -- bits `[19:17]`. Always `< 8`.
+#[inline]
+pub const fn sysreg_iss_op2(esr: u64) -> u64 {
+    (esr >> 17) & 0x7
+}
+/// `ESR.ISS.Op1` of a trapped MSR/MRS -- bits `[16:14]`. Always `< 8`.
+#[inline]
+pub const fn sysreg_iss_op1(esr: u64) -> u64 {
+    (esr >> 14) & 0x7
+}
+/// `ESR.ISS.CRn` of a trapped MSR/MRS -- bits `[13:10]`. Always `< 16`.
+#[inline]
+pub const fn sysreg_iss_crn(esr: u64) -> u64 {
+    (esr >> 10) & 0xF
+}
+/// `ESR.ISS.Rt` of a trapped MSR/MRS -- bits `[9:5]`, the GPR moved to/from the
+/// sysreg (the value source for a WRITE, the destination for a READ). `< 32`.
+#[inline]
+pub const fn sysreg_iss_rt(esr: u64) -> u64 {
+    (esr >> 5) & 0x1F
+}
+/// `ESR.ISS.CRm` of a trapped MSR/MRS -- bits `[4:1]`. Always `< 16`.
+#[inline]
+pub const fn sysreg_iss_crm(esr: u64) -> u64 {
+    (esr >> 1) & 0xF
+}
+/// `ESR.ISS.Direction` of a trapped MSR/MRS -- bit `[0]`: `true` == a READ (MRS),
+/// `false` == a WRITE (MSR). The L2.3 TVM trigger is a WRITE (so this is `false`).
+#[inline]
+pub const fn sysreg_iss_is_read(esr: u64) -> bool {
+    (esr & 1) != 0
+}
+
+/// Pack the Rt/Direction-INDEPENDENT sysreg KEY (op0/op1/op2/crn/crm only) into
+/// the same `[21:1]` layout the ISS uses -- a faithful clone of `esr.h`
+/// `ESR_ELx_SYS64_ISS_SYS_VAL`. The handler compares `(esr & SYSREG_ISS_SYS_MASK)`
+/// against this to identify WHICH sysreg was trapped, ignoring the GPR + direction.
+#[inline]
+pub const fn sysreg_iss_sys_val(op0: u64, op1: u64, op2: u64, crn: u64, crm: u64) -> u64 {
+    (op0 << 20) | (op2 << 17) | (op1 << 14) | (crn << 10) | (crm << 1)
+}
+
+/// The mask selecting the op0/op1/op2/crn/crm KEY bits of the ISS (everything
+/// `sysreg_iss_sys_val` populates -- NOT Rt and NOT the direction bit). AND an
+/// ISS with this to get the register identity independent of the GPR/direction.
+pub const SYSREG_ISS_SYS_MASK: u64 =
+    (0x3 << 20) | (0x7 << 17) | (0x7 << 14) | (0xF << 10) | (0xF << 1);
+
+/// The TVM-trapped trigger register `CONTEXTIDR_EL1` (op0=3, op1=0, CRn=13,
+/// CRm=0, op2=1) as a `sysreg_iss_sys_val` key == `0x32_3400`. The canonical KVM
+/// `HCR_EL2.TVM` example: side-effect-free under a flat identity stage-1, and
+/// trap-and-emulate means the real register is NEVER written.
+pub const SYS_CONTEXTIDR_EL1: u64 = sysreg_iss_sys_val(3, 0, 1, 13, 0);
+
+// -- Data-Abort (MMIO) ISS -------------------------------------------------------
+// ISS layout for a Data Abort with a valid syndrome (EC 0x24), bits in [24:0]:
+//   [24] ISV (syndrome valid), [23:22] SAS (access size), [21] SSE (sign-extend),
+//   [20:16] SRT (transfer GPR), [15] SF (64-bit transfer), [14] AR (acq/rel),
+//   [7] S1PTW (via `esr_s1ptw`), [6] WnR (via `esr_wnr`), [5:0] DFSC.
+
+/// `ESR.ISS.ISV` -- syndrome-valid, bit `[24]` (`1` => SAS/SSE/SRT/SF/AR are
+/// meaningful). `0` for complex/SIMD/pair/writeback accesses TABOS cannot decode.
+#[inline]
+pub const fn dabt_iss_isv(esr: u64) -> u64 {
+    (esr >> 24) & 1
+}
+/// `ESR.ISS.SAS` -- access size, bits `[23:22]` (`00`=byte, `01`=half, `10`=word,
+/// `11`=dword). Always `< 4`.
+#[inline]
+pub const fn dabt_iss_sas(esr: u64) -> u64 {
+    (esr >> 22) & 0x3
+}
+/// `ESR.ISS.SSE` -- sign-extend, bit `[21]` (`1` => a load narrower than the reg
+/// width is sign-extended). Always `0` or `1`.
+#[inline]
+pub const fn dabt_iss_sse(esr: u64) -> u64 {
+    (esr >> 21) & 1
+}
+/// `ESR.ISS.SRT` -- the transfer GPR (Rt), bits `[20:16]`: the write source / the
+/// load destination. Always `< 32` (the FULL 5-bit field -- masking `0xF` would
+/// drop x16..x31, the negative control).
+#[inline]
+pub const fn dabt_iss_srt(esr: u64) -> u64 {
+    (esr >> 16) & 0x1F
+}
+/// `ESR.ISS.SF` -- bit `[15]` (`1` => a 64-bit register transfer, `0` => 32-bit).
+/// Always `0` or `1`. On a read the handler masks the result to 32 bits when 0.
+#[inline]
+pub const fn dabt_iss_sf(esr: u64) -> u64 {
+    (esr >> 15) & 1
+}
+/// `ESR.ISS.AR` -- acquire/release, bit `[14]`. Always `0` or `1`.
+#[inline]
+pub const fn dabt_iss_ar(esr: u64) -> u64 {
+    (esr >> 14) & 1
+}
+
+/// The access size in BYTES == `1 << SAS` (KVM `kvm_vcpu_dabt_get_as`): one of
+/// `1`/`2`/`4`/`8`. Total (the `1u64 << SAS` shift can never overflow: SAS < 4).
+#[inline]
+pub const fn dabt_access_size_bytes(esr: u64) -> u64 {
+    1u64 << dabt_iss_sas(esr)
+}
+
+/// Whether a Data Abort is EMULATABLE by the MMIO seam: `ISV == 1` (a single-GP
+/// load/store TABOS can decode) AND `S1PTW == 0` (the access itself faulted, not
+/// the stage-1 walk). Fail-closed otherwise -- mirrors KVM `io_mem_abort`'s
+/// `!kvm_vcpu_dabt_isvalid -> KVM_EXIT_ARM_NISV` early-out (TABOS has no
+/// instruction decoder, so an ISV=0 abort must FAIL, never blind-decode).
+#[inline]
+pub const fn dabt_is_emulatable(esr: u64) -> bool {
+    dabt_iss_isv(esr) != 0 && esr_s1ptw(esr) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn make_esr(ec: u64, dfsc: u64, wnr: u64, s1ptw: u64) -> u64 {
         (ec << 26) | (s1ptw << 7) | (wnr << 6) | (dfsc & 0x3F)
+    }
+
+    fn make_sysreg_iss(op0: u64, op1: u64, op2: u64, crn: u64, crm: u64, rt: u64, dir: u64) -> u64 {
+        (EC_SYS64 << 26)
+            | (op0 << 20)
+            | (op2 << 17)
+            | (op1 << 14)
+            | (crn << 10)
+            | (rt << 5)
+            | (crm << 1)
+            | dir
+    }
+
+    #[test]
+    fn sysreg_iss_fields_decode_and_round_trip() {
+        // CONTEXTIDR_EL1 write (op0=3,op1=0,op2=1,CRn=13,CRm=0), Rt=x3, dir=write.
+        let iss = make_sysreg_iss(3, 0, 1, 13, 0, 3, 0);
+        assert_eq!(sysreg_iss_op0(iss), 3);
+        assert_eq!(sysreg_iss_op1(iss), 0);
+        assert_eq!(sysreg_iss_op2(iss), 1);
+        assert_eq!(sysreg_iss_crn(iss), 13);
+        assert_eq!(sysreg_iss_crm(iss), 0);
+        assert_eq!(sysreg_iss_rt(iss), 3);
+        assert!(!sysreg_iss_is_read(iss)); // a WRITE (MSR)
+        assert_eq!(iss & SYSREG_ISS_SYS_MASK, SYS_CONTEXTIDR_EL1);
+        assert_eq!(SYS_CONTEXTIDR_EL1, 0x32_3400);
+    }
+
+    #[test]
+    fn sysreg_iss_sys_mask_excludes_rt_and_direction() {
+        // Two ISS for the SAME register but different Rt/direction match the key.
+        let a = make_sysreg_iss(3, 0, 1, 13, 0, 3, 0);
+        let b = make_sysreg_iss(3, 0, 1, 13, 0, 30, 1);
+        assert_eq!(a & SYSREG_ISS_SYS_MASK, b & SYSREG_ISS_SYS_MASK);
+        assert!(sysreg_iss_is_read(b)); // a READ (MRS)
+    }
+
+    #[test]
+    fn dabt_iss_fields_and_size() {
+        // ISV=1, SAS=11 (dword), SSE=0, SRT=6, SF=1, AR=0, WnR=0 (read).
+        let iss = (EC_DABT_LOW << 26)
+            | (1 << 24)
+            | (0b11 << 22)
+            | (6 << 16)
+            | (1 << 15)
+            | DFSC_TRANSLATION_L0;
+        assert_eq!(dabt_iss_isv(iss), 1);
+        assert_eq!(dabt_iss_sas(iss), 0b11);
+        assert_eq!(dabt_iss_sse(iss), 0);
+        assert_eq!(dabt_iss_srt(iss), 6);
+        assert_eq!(dabt_iss_sf(iss), 1);
+        assert_eq!(dabt_access_size_bytes(iss), 8);
+        assert_eq!(esr_wnr(iss), 0);
+        assert!(dabt_is_emulatable(iss));
+    }
+
+    #[test]
+    fn dabt_access_sizes_cover_all_four() {
+        for (sas, bytes) in [(0u64, 1u64), (1, 2), (2, 4), (3, 8)] {
+            let iss = (1 << 24) | (sas << 22);
+            assert_eq!(dabt_access_size_bytes(iss), bytes);
+        }
+    }
+
+    #[test]
+    fn dabt_isv0_or_s1ptw_is_not_emulatable() {
+        // ISV=0 -> not emulatable (no decoder).
+        assert!(!dabt_is_emulatable((0 << 24) | (0b10 << 22)));
+        // ISV=1 but S1PTW=1 -> not emulatable (the wrong thing faulted).
+        assert!(!dabt_is_emulatable((1 << 24) | (1 << 7)));
+        // The full 5-bit SRT recovers x31 (the 0xF-mask negative control).
+        let iss = (1 << 24) | (0x1F << 16);
+        assert_eq!(dabt_iss_srt(iss), 0x1F);
     }
 
     #[test]
