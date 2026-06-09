@@ -31,6 +31,8 @@ mod boot; // _start; EL-aware bring-up + nVHE EL2-monitor install; arms VBAR_EL1
 mod el2; // L2.0: resident nVHE EL2 monitor (HVC handler) + el2_selftest() facade.
 mod el2_nested_vectors; // aL2.4: __l2_nested_guest_vectors EL1 table (guest's OWN brk target); pure asm.
 mod el2_vectors; // L2.0: VBAR_EL2 table + EL2 save path; pure `global_asm!` module.
+mod el2_vgic_vectors; // aL2.5: __l2_vgic_guest_vectors EL1 table (the injected vIRQ's GICV ack/EOI handler); pure asm.
+mod el2vgic; // aL2.5: vGIC virtual-interrupt injection arming (HCR.IMO|TWI + GICH_HCR.En + GICH_LR0) + armed/park cell.
 mod el2mmio; // L2.3: trap-and-emulate arming (HCR.VM|TVM) + the MMIO device seam + served cell.
 mod exits; // L2.2: EL2 exit-dispatch arming (HCR.TWI|TWE + CPTR.TFP) + served-mask cell.
 mod exits_vectors; // L2.2: __l2_guest_vectors EL1 table (inject-UNDEF target); pure asm.
@@ -51,6 +53,7 @@ pub use el2::el2_exits_selftest; // L2.2: the safe EL2 exit-dispatch self-test f
 pub use el2::el2_trap_selftest; // L2.3: the safe trap-and-emulate self-test facade.
 pub use el2::stage2_selftest; // L2.1: the safe stage-2 demand-translation self-test facade.
 pub use el2::el2_nested_guest_selftest; // aL2.4: the safe nested-guest (two-stage) self-test facade.
+pub use el2::el2_vgic_selftest; // aL2.5: the safe vGIC virtual-interrupt-injection self-test facade.
 pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
@@ -115,6 +118,28 @@ pub fn install_traps() {
 // (b) ABI : `wfi` clobbers nothing, touches no memory/stack, preserves NZCV.
 // (c) TEST: scripts/run-aarch64.sh -- the kernel reaches here after printing
 //           "M1: traps OK"; the runner times out and asserts the marker.
+/// Exit QEMU with code 0 via AArch64 semihosting (HLT #0xF000, SYS_EXIT).
+/// The boot harnesses pass -semihosting, so after the final cumulative
+/// marker the kernel exits QEMU instead of parking to the wall-clock
+/// ceiling: a CI timeout now always means a genuinely stuck boot, never
+/// "healthy but slower than the ceiling" (the aL2.4/aL2.5 revert class).
+/// Returns only if semihosting is unavailable (caller falls to halt()).
+pub fn qemu_exit_success() {
+    // SYS_EXIT: x1 -> two-word block { reason, subcode }; QEMU exits with
+    // subcode when reason == ADP_Stopped_ApplicationExit (0x20026).
+    let block: [u64; 2] = [0x0002_0026, 0];
+    // SAFETY: one HLT #0xF000 with x0/x1 per the Arm semihosting spec;
+    // QEMU intercepts it at translation time when -semihosting is on.
+    unsafe {
+        core::arch::asm!(
+            "hlt #0xF000",
+            in("x0") 0x18u64,
+            in("x1") block.as_ptr(),
+            options(nostack),
+        );
+    }
+}
+
 /// Halt the current vCPU forever (low-power wait loop).
 pub fn halt() -> ! {
     loop {

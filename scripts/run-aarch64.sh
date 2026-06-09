@@ -82,6 +82,7 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -nic none \
         -global virtio-mmio.force-legacy=false \
         -device virtio-rng-device \
+        -semihosting \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
 QEMU_RC=$?
@@ -146,17 +147,29 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.4: el2-guest OK' missing" >&2
         exit 1
     fi
+    # aL2.5: the vGIC virtual-interrupt injection + WFI scheduler-hook proof must
+    # ALSO print (the monitor arms HCR_EL2.IMO|TWI, the guest enables its GICV
+    # CPU interface + parks on WFI, the WFI traps to EL2 where the monitor injects
+    # a pending vIRQ via GICH_LR0 and resumes the guest, the guest takes the vIRQ
+    # at its EL1 IRQ vector, reads GICV_IAR == the vINTID, sets a sentinel, writes
+    # GICV_EOIR, and the monitor confirms the LR retired via GICH_ELRSR0 before
+    # tearing the window down). Assert it directly so the el2 -> ... -> el2-guest
+    # -> vgic -> virtio order is fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.5: vgic OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.5: vgic OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 
 echo "[run-aarch64] FAIL -- marker '${MARKER}' not seen" >&2
-echo "[run-aarch64]   (qemu exit=${QEMU_RC}; the kernel halts in wfi, so a" >&2
+echo "[run-aarch64]   (qemu exit=${QEMU_RC}; the kernel exits qemu via semihosting after the final marker; a" >&2
 echo "[run-aarch64]    ${TIMEOUT_SECS}s timeout/exit=124 is expected -- the grep is the verdict)" >&2
 exit 1
