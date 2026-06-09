@@ -1,0 +1,45 @@
+# Axis-A nano-guest — a standalone, no_std/no_main artifact whose ONLY job is to
+# emit one serial sentinel byte and halt, booted by BOTH Firecracker (PVH) and
+# tb-vmm (tb-boot v0) from one binary so the spawn->first-byte delta is pure
+# VMM-spawn overhead (docs/BENCHMARKS.md axis A).
+#
+# This is its OWN nested workspace (like tb-vmm), DELIBERATELY excluded from the
+# root TABOS workspace, so:
+#   * the root no_std kernel workspace and this bench artifact keep separate
+#     Cargo.lock files and never cross-contaminate build-std settings;
+#   * this crate may use hand assembly + a custom linker script freely — it is
+#     NOT the `kernel`/`tb-hal` crate, so the framekernel invariant (kernel
+#     crate has zero real `unsafe{}`) is untouched.
+#
+# Built by CI with the SAME nightly toolchain the kernel uses:
+#   cargo +nightly build --release \
+#     -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
+#     -Zjson-target-spec --target ../../targets/x86_64-tabos-none.json
+# The machine code is bench/nano-guest/nano-guest.S (the single source of truth),
+# embedded via global_asm!(include_str!()). The local clang/ld.lld path
+# (build.sh) assembles that SAME file for well-formedness checks + Strategy B.
+
+[workspace]
+
+[package]
+name = "nano-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "nano-guest"
+path = "src/main.rs"
+
+# panic = abort: no unwinder for a none-class freestanding target. The custom
+# target spec already sets panic-strategy=abort, but pinning it keeps the binary
+# consistent regardless of how it is invoked.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+# Keep the image tiny + deterministic. (LTO over a single asm-only crate is a
+# no-op but harmless and matches the kernel release profile.)
+lto = true

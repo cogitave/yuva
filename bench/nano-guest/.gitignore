@@ -1,0 +1,6 @@
+# Build outputs — the nano-guest ELF + intermediates are produced by CI / build.sh
+# and are not committed (the SOURCE is nano-guest.S + nano-guest.ld).
+/target
+/nano-guest.elf
+/nano-guest.o
+/.localbuild/
