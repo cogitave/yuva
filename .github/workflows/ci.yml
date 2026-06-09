@@ -73,4 +73,15 @@ jobs:
       # The run script boots the freshly built ELF under QEMU (TCG), greps the
       # serial log for the milestone DoD marker, and exits 0 only on a hit.
       - name: Boot under QEMU and assert milestone marker
+        # TCG on a contended GitHub runner can take ~15s just to reach
+        # rust_main; the kernel then prints the whole M0..M19 self-test chain in
+        # a fraction of a second and parks, so QEMU runs to this wall-clock
+        # ceiling either way. A 15s ceiling left no headroom and produced
+        # intermittent rc=124 startup-race failures (qemu killed before the
+        # final marker ever printed -- not a real boot fault). 40s gives ample
+        # room for a slow start plus the full chain. The fast KVM boot lanes
+        # (microvm-kvm.yml / vmm-boot.yml) are separate workflows and keep their
+        # own shorter timeouts, so they pay no idle cost from this.
+        env:
+          QEMU_TIMEOUT: 40
         run: bash ${{ matrix.run }}
