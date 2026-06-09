@@ -210,6 +210,38 @@ pub const fn esr_inject_undef() -> u64 {
 }
 
 // ===========================================================================
+// aL2.4: the guest's SCTLR_EL1 first-stage ENABLE word -- the load-bearing
+// "S1 after S2" step (KVM nvhe/switch.c: "S2 is configured and enabled. We can
+// now restore the guest's S1 configuration: SCTLR, and only then TCR"). The
+// aL2.4 guest runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1; the single
+// instant it turns its first stage ON is `msr sctlr_el1, <baseline | M|C|I>`.
+// This pins THAT word -- exactly bits {0,2,12} OR-set, every other baseline bit
+// (RES1 / EE / SA / WXN ...) preserved -- to a machine-checked invariant rather
+// than a hand-written constant, so a typo in the stub's enable mask is a proof
+// failure, not a silent boot hang.
+// ===========================================================================
+
+/// `SCTLR_EL1.M`, bit 0: stage-1 MMU enable for EL1&0 (Arm ARM D19.2 SCTLR_EL1).
+pub const SCTLR_EL1_M: u64 = 1 << 0;
+/// `SCTLR_EL1.C`, bit 2: data / unified cache enable.
+pub const SCTLR_EL1_C: u64 = 1 << 2;
+/// `SCTLR_EL1.I`, bit 12: instruction cache enable.
+pub const SCTLR_EL1_I: u64 = 1 << 12;
+/// The exact bitmask the guest OR-sets to bring its first stage up: M|C|I.
+pub const SCTLR_EL1_GUEST_ENABLE_BITS: u64 = SCTLR_EL1_M | SCTLR_EL1_C | SCTLR_EL1_I;
+
+/// Compose the guest's first-stage ENABLE word from its current `SCTLR_EL1`
+/// baseline: OR-set `M|C|I` (bits 0, 2, 12) and touch nothing else. A pure
+/// projection -- the guest reads its baseline `SCTLR_EL1` (carrying the RES1 /
+/// EE / SA / WXN bits the reset/drop established), passes it here, and `msr`s the
+/// result to flip its stage-1 ON. Mirrors `tb-hal::mmu`'s `sctlr_el1_set_bits`,
+/// which RMW-ORs the SAME bits for the kernel's own M3 bring-up.
+#[inline]
+pub const fn sctlr_el1_guest_enable(baseline: u64) -> u64 {
+    baseline | SCTLR_EL1_GUEST_ENABLE_BITS
+}
+
+// ===========================================================================
 // L2.3: TRAP-and-EMULATE ISS decoders (SYS64 sysreg + Data-Abort MMIO).
 //
 // Two new syndrome families, both PURE + TOTAL (const, never panic) bit
@@ -522,5 +554,31 @@ mod tests {
         assert_eq!(esr_ec(esr), EC_UNKNOWN); // decodes back to EC 0x00
         assert_eq!(esr & ESR_ELx_IL, ESR_ELx_IL); // IL set (32-bit trapped insn)
         assert_eq!(EL1_SYNC_SPX_OFFSET, 0x200); // Current-EL SPx Sync vector slot
+    }
+
+    #[test]
+    fn sctlr_el1_guest_enable_sets_mci_and_preserves_baseline() {
+        // The three enable bits are exactly {0, 2, 12}.
+        assert_eq!(SCTLR_EL1_GUEST_ENABLE_BITS, (1 << 0) | (1 << 2) | (1 << 12));
+        assert_eq!(SCTLR_EL1_GUEST_ENABLE_BITS, 0x1005);
+        // From a zero baseline the result IS the enable mask.
+        assert_eq!(sctlr_el1_guest_enable(0), SCTLR_EL1_GUEST_ENABLE_BITS);
+        // A representative SCTLR_EL1 reset/drop baseline (RES1 bits 11/20/22/23/28/29
+        // set, SA1 bit 4, plus a stray EE bit 25) is preserved bit-for-bit while M|C|I
+        // are forced on.
+        let baseline = (1u64 << 4) | (1 << 11) | (1 << 20) | (1 << 22) | (1 << 23)
+            | (1 << 25) | (1 << 28) | (1 << 29);
+        let enabled = sctlr_el1_guest_enable(baseline);
+        assert_eq!(enabled & SCTLR_EL1_M, SCTLR_EL1_M);
+        assert_eq!(enabled & SCTLR_EL1_C, SCTLR_EL1_C);
+        assert_eq!(enabled & SCTLR_EL1_I, SCTLR_EL1_I);
+        // Every baseline bit survives, and ONLY the enable bits were added.
+        assert_eq!(enabled & baseline, baseline);
+        assert_eq!(
+            enabled & !SCTLR_EL1_GUEST_ENABLE_BITS,
+            baseline & !SCTLR_EL1_GUEST_ENABLE_BITS
+        );
+        // Idempotent: enabling an already-enabled word is a no-op.
+        assert_eq!(sctlr_el1_guest_enable(enabled), enabled);
     }
 }

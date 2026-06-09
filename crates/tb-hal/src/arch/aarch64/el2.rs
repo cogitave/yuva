@@ -55,8 +55,8 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use tb_encode::el2_trap::{
     classify_exit, dabt_access_size_bytes, dabt_is_emulatable, dabt_iss_sf, dabt_iss_srt,
     dabt_iss_sse, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, esr_wnr, hpfar_fault_ipa,
-    sysreg_iss_is_read, sysreg_iss_rt, ExitClass, EC_DABT_LOW, EC_IABT_LOW, EL1_SYNC_SPX_OFFSET,
-    SYSREG_ISS_SYS_MASK, SYS_CONTEXTIDR_EL1,
+    sctlr_el1_guest_enable, sysreg_iss_is_read, sysreg_iss_rt, ExitClass, EC_DABT_LOW, EC_IABT_LOW,
+    EL1_SYNC_SPX_OFFSET, SCTLR_EL1_GUEST_ENABLE_BITS, SYSREG_ISS_SYS_MASK, SYS_CONTEXTIDR_EL1,
 };
 
 use super::exits::{EXIT_UNDEF_BIT, EXIT_WFX_BIT};
@@ -265,6 +265,134 @@ const _: () = assert!(HVC_TRAP_ARM == 6 && HVC_TRAP_DONE == 7);
 const _: () = assert!(SYS_CONTEXTIDR_EL1 == 0x32_3400);
 const _: () = assert!(SYSREG_EMU_VAL == 0x5103 && MMIO_VAL == 0x0D51 && TRAP_GUEST_MAGIC == 0xD23);
 const _: () = assert!(TRAP_SYSREG_BIT == 1 && TRAP_MMIO_WR_BIT == 2 && TRAP_MMIO_RD_BIT == 4);
+
+// ===========================================================================
+// aL2.4 NESTED-GUEST constants (the fifth L2 rung: a REAL minimal TABOS guest
+// that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU live -- a
+// GENUINE two-stage walk -- and takes its OWN EL1 exception, then HVCs done).
+// ===========================================================================
+
+/// aL2.4: the kernel's nested-guest bootstrap HVC immediate (`hvc #8`) -- "arm
+/// the GiB0+GiB1 identity stage-2 (program VTCR/VTTBR + HCR.VM=1) and eret into
+/// the aL2.4 guest stub". The guest then BUILDS its own stage-1 in the
+/// frame_alloc'd frames handed across the frame (x4/x5/x6) and enables it.
+const HVC_NESTED_GUEST_ARM: u64 = 8;
+/// aL2.4: the guest's nested-guest done HVC immediate (`hvc #9`) -- "round-trip
+/// complete; tear stage-2 DOWN, then verify the two-stage magic + the EL1 trap
+/// + the EL2-side alias readback, and unwind". The stage-2 teardown is the FIRST
+/// action on this branch (the L2.1/L2.2/L2.3 teardown-first discipline:
+/// returning to EL1 with HCR.VM=1 still set instantly aborts the kernel).
+const HVC_NESTED_GUEST_DONE: u64 = 9;
+
+/// aL2.4: the magic the guest presents in x0 -- `0x2E5` ("2 stagES") -- set ONLY
+/// when BOTH (1) its post-`SCTLR_EL1.M=1` load reads back the sentinel it stored
+/// through the GENUINELY two-stage-translated VA AND (2) its own EL1 `brk` trap
+/// was taken (x28 == NESTED_TRAP_TAKEN). A single MOVZ. The conjunction is the
+/// two-stage proof: the readback cannot succeed unless the guest's stage-1 (that
+/// it just built) AND our stage-2 both resolved the same physical cell.
+const NESTED_GUEST_MAGIC: u64 = 0x2E5;
+/// aL2.4: the "trap taken" sentinel the guest's OWN EL1 brk vector sets into x28
+/// (must match `el2_nested_vectors.rs`). The guest checks `x28 == this` before
+/// presenting `NESTED_GUEST_MAGIC`; equal to the magic by design (one MOVZ each).
+const NESTED_TRAP_TAKEN: u64 = 0x2E5;
+
+/// aL2.4: the guest's chosen first-stage target VA -- `0x2_0000_0000` (8 GiB,
+/// stage-1 `L1[8]`). DELIBERATELY distinct from every identity-mapped region
+/// (the kernel's stage-1 maps L1[0..7] only -- see stage2.rs), so this VA has NO
+/// flat meaning: it is reachable ONLY through the stage-1 the guest itself
+/// builds. Under T0SZ=25 (39-bit VA) `L1[8]` is a valid root index (< 512).
+const NESTED_GUEST_VA: u64 = 0x2_0000_0000;
+/// aL2.4: the sentinel the guest STORES through `NESTED_GUEST_VA` and reads back
+/// (the load-bearing two-stage readback). The EL2 monitor independently reads it
+/// through the identity IPA alias at done. `0xB22B` fits a single MOVZ.
+const NESTED_SENTINEL: u64 = 0xB22B;
+
+/// aL2.4: stage-1 descriptors the guest writes into its OWN frame_alloc'd tables
+/// (mirrored BYTE-FOR-BYTE from `mmu.rs`'s M3 builder so the demonstration reuses
+/// real kernel stage-1 primitives, not a toy encoding).
+/// Table descriptor (L1/L2 -> next-level table): bits[1:0] = 0b11.
+const NESTED_DESC_TABLE: u64 = 0b11;
+/// 4 KiB Normal-WB page leaf at L3: page(0b11) | AF(1<<10) | SH inner(0b11<<8) |
+/// AttrIndx1(Normal, 1<<2) == 0x707 (mmu.rs `PAGE_NORMAL`). EL1 RW (AP=0b00).
+const NESTED_PAGE_NORMAL: u64 = 0b11 | (1 << 10) | (0b11 << 8) | (1 << 2);
+/// 1 GiB Device block leaf at L1: block(0b01) | AF | SH | attr0 == 0x701
+/// (mmu.rs `BLOCK_DEVICE`). The guest identity-maps GiB0 (incl. its own UART)
+/// at `L1[0]` so its code/stack fetch survives `SCTLR_EL1.M=1`.
+const NESTED_BLOCK_DEVICE: u64 = 0b01 | (1 << 10) | (0b11 << 8);
+/// 1 GiB Normal-WB block leaf at L1: block(0b01) | AF | SH | attr1 == 0x705
+/// (mmu.rs `BLOCK_NORMAL`). The guest identity-maps GiB1 (RAM: its `.text`,
+/// stack, and its OWN frame_alloc'd stage-1 tables) at `L1[1]`.
+const NESTED_BLOCK_NORMAL: u64 = 0b01 | (1 << 10) | (0b11 << 8) | (1 << 2);
+/// aL2.4: the guest's MAIR_EL1 -- mirrored byte-for-byte from `mmu.rs` MAIR_VALUE
+/// (attr0 = 0x00 Device-nGnRnE, attr1 = 0xFF Normal WB RA/WA).
+const NESTED_MAIR_EL1: u64 = 0x00 | (0xFF << 8);
+/// aL2.4: the guest's TCR_EL1 -- mirrored byte-for-byte from `mmu.rs` TCR_VALUE
+/// (T0SZ=25 39-bit VA, 4 KiB granule, inner-WBWA cacheable walks, IPS 40-bit,
+/// TTBR1 walks disabled). Computes to 0x2_0099_3519.
+const NESTED_TCR_EL1: u64 = 25
+    | (0b01 << 8)
+    | (0b01 << 10)
+    | (0b11 << 12)
+    | (0b00 << 14)
+    | (25 << 16)
+    | (1 << 23)
+    | (0b010 << 32);
+
+// aL2.4 FAIL codes (distinct nonzero; any -> `NestedGuestProof::Faulted` -> red
+// marker, rendered WITHOUT an "el2-guest OK" substring so the run grep is
+// fail-closed). Family 0x02E5_....
+/// Could not build the stage-2 / frame_alloc the guest stage-1 + scratch frames
+/// at EL1 (physical-frame OOM).
+const FAIL_NG_BUILD: u64 = 0x0000_02E5_0000_0001;
+/// The guest's OWN stage-1 walk faulted stage-2 (`ESR_EL2.ISS` S1PTW=1): the
+/// GiB0/GiB1 identity stage-2 failed to cover a live guest stage-1 table frame.
+const FAIL_NG_S1PTW: u64 = 0x0000_02E5_0000_0002;
+/// The EL2-side identity-alias readback of the sentinel was wrong -- the
+/// two-stage walk did not land the store at PA==IPA (the check the guest cannot
+/// fake; an independent EL2 corroboration of the guest's own readback).
+const FAIL_NG_READBACK: u64 = 0x0000_02E5_0000_0003;
+/// The guest presented the wrong x0 magic (its own post-SCTLR.M readback failed,
+/// or its EL1 trap was not taken).
+const FAIL_NG_BAD_MAGIC: u64 = 0x0000_02E5_0000_0004;
+/// An unexpected stage-2 abort under the live guest stage-1 that was neither the
+/// S1PTW case nor a translation fault at a covered IPA (fail-closed).
+const FAIL_NG_BAD_IPA: u64 = 0x0000_02E5_0000_0005;
+
+// Tier-1 compile-time locks on the aL2.4 dispatch constants (a drift is a build
+// error). The MAIR/TCR geometry is mirrored byte-for-byte from mmu.rs and locked
+// here; the SCTLR M|C|I enable bits are imported from the Kani-proven encoder
+// (`sctlr_el1_guest_enable`), so the guest's S1-enable can never diverge from the
+// harness (`kani_sctlr_el1_guest_enable`).
+const _: () = assert!(HVC_NESTED_GUEST_ARM == 8 && HVC_NESTED_GUEST_DONE == 9);
+const _: () = assert!(NESTED_GUEST_MAGIC == 0x2E5 && NESTED_TRAP_TAKEN == 0x2E5);
+const _: () = assert!(NESTED_MAIR_EL1 == super::mmu::mmu_mair_value());
+const _: () = assert!(NESTED_TCR_EL1 == super::mmu::mmu_tcr_value());
+const _: () = assert!(NESTED_TCR_EL1 == 0x2_0099_3519);
+const _: () = assert!(NESTED_PAGE_NORMAL == 0x707);
+const _: () = assert!(SCTLR_EL1_GUEST_ENABLE_BITS == (1 << 0) | (1 << 2) | (1 << 12));
+// Lock the guest's S1-enable mask to the Kani-proven `sctlr_el1_guest_enable`
+// (proved in `kani_sctlr_el1_guest_enable`): the stub's `orr ...,#0x1005` mask
+// IS `sctlr_el1_guest_enable(0)`, so the asm enable bits can never diverge from
+// the harness. A compile-time evaluation pins the function into this build.
+const _: () = assert!(sctlr_el1_guest_enable(0) == 0x1005);
+const _: () = assert!(sctlr_el1_guest_enable(0) == SCTLR_EL1_GUEST_ENABLE_BITS);
+const _: () = assert!((NESTED_GUEST_VA >> 30) & 0x1FF == 8); // stage-1 L1[8]
+const _: () = assert!(NESTED_GUEST_VA & 0xFFF == 0); // page-aligned target
+// Lock the descriptor immediates the guest stub materialises in asm to the named
+// mmu.rs-mirrored constants (the stub writes 0x3/0x701/0x705/0x707 directly; a
+// drift between those literals and these consts would silently mis-map the
+// guest's stage-1, so pin them at compile time).
+const _: () = assert!(NESTED_DESC_TABLE == 0x3);
+const _: () = assert!(NESTED_BLOCK_DEVICE == 0x701);
+const _: () = assert!(NESTED_BLOCK_NORMAL == 0x705);
+const _: () = assert!(NESTED_PAGE_NORMAL == 0x707);
+// The aL2.4 FAIL codes are distinct nonzero (a collision would mis-render the
+// verdict). FAIL_NG_BAD_IPA is reserved for an unexpected stage-2 abort under the
+// live guest stage-1 (v1 has full identity coverage so it is unreachable, but the
+// code stays defined + distinct so a future demand sub-proof can route to it).
+const _: () = assert!(FAIL_NG_BUILD != 0 && FAIL_NG_S1PTW != 0 && FAIL_NG_READBACK != 0);
+const _: () = assert!(FAIL_NG_BAD_MAGIC != 0 && FAIL_NG_BAD_IPA != 0);
+const _: () = assert!(FAIL_NG_BUILD != FAIL_NG_BAD_IPA && FAIL_NG_S1PTW != FAIL_NG_BAD_IPA);
 
 // ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
@@ -650,6 +778,93 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
                 0
             };
             el2_return_to_kernel(outcome, served);
+        }
+        HVC_NESTED_GUEST_ARM => {
+            // imm == 8: the kernel's aL2.4 bootstrap. The nested-guest context
+            // rides the frame: x0 = stage-2 root PA, x1 = VTCR, x2 = VTTBR,
+            // x3 = stub entry, x4 = guest stage-1 L1 root PA, x5 = guest L2 PA,
+            // x6 = guest L3 PA, x7 = scratch IPA (== PA, in GiB1). Stash {root,
+            // scratch, scratch} for the done readback, arm the GiB0+GiB1 identity
+            // stage-2 (HCR.VM=1) -- so EVERY EL1&0 access incl. the guest's OWN
+            // stage-1 walk (S1PTW) is stage-2-translated -- and `eret` INTO the
+            // aL2.4 guest stub WITH x4..x7 placed into the guest's registers (the
+            // guest needs the runtime-allocated frame PAs it cannot materialise
+            // as immediates). Leave this frame (B0 == __el2_stack_top - 0x110)
+            // resident (SP_EL2 reset to it) so the guest's `hvc #9` stacks below
+            // it and the done unwind hits B0.
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[0..7] were framed by SAVE_CONTEXT_EL2 and carry the HVC #8 args.
+            let (root, vtcr_v, vttbr_v, stub, gl1, gl2, gl3, scratch) = unsafe {
+                (
+                    (*frame).gpr[0],
+                    (*frame).gpr[1],
+                    (*frame).gpr[2],
+                    (*frame).gpr[3],
+                    (*frame).gpr[4],
+                    (*frame).gpr[5],
+                    (*frame).gpr[6],
+                    (*frame).gpr[7],
+                )
+            };
+            // Stash {root, scratch, scratch}: cell[1]=demand carries the scratch
+            // PA the done handler reads back through the identity alias, cell[2]=
+            // expect carries the scratch IPA (== scratch PA, the identity stage-2).
+            super::stage2::set_s2_context(root, scratch, scratch);
+            super::stage2::arm_stage2_el2(vtcr_v, vttbr_v);
+            // SAFETY: reset SP_EL2 = &B0, place the four runtime PAs into x4..x7,
+            // program ELR_EL2/SPSR_EL2 for an EL1h entry at the identity-mapped
+            // aL2.4 stub, `eret`. `noreturn`: control leaves EL2 for the guest
+            // (now under stage-2, S1 still OFF) and re-enters only via the guest's
+            // own stage-2 abort (fail-closed) or its `hvc #9`.
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    // Place the four runtime PAs DIRECTLY into the guest's x4..x7
+                    // (explicit-register inputs -- no scratch `mov`, no output
+                    // operand which `noreturn` forbids). The guest reads them on
+                    // entry to build its OWN stage-1.
+                    in("x4") gl1,
+                    in("x5") gl2,
+                    in("x6") gl3,
+                    in("x7") scratch,
+                    options(noreturn),
+                );
+            }
+        }
+        HVC_NESTED_GUEST_DONE => {
+            // imm == 9: the guest's aL2.4 done HVC. TEARDOWN IS THE FIRST ACTION
+            // (returning to EL1 with HCR.VM=1 still set instantly aborts the
+            // kernel -- its RAM is not stage-2-mapped). The guest mutated its OWN
+            // TTBR0_EL1/TCR_EL1/MAIR_EL1/SCTLR_EL1/VBAR_EL1; the FACADE restores
+            // the kernel's saved values after this unwind (the EL1-side teardown).
+            super::stage2::disarm_stage2_el2();
+            // `frame` == &B1; read the guest magic (0x2E5 iff its two-stage
+            // readback succeeded AND its EL1 brk trap was taken). Then independently
+            // read the sentinel back from EL2 through the scratch IDENTITY alias
+            // (PA == IPA under the identity stage-2) -- a check the guest cannot
+            // fake, proving the store landed at the two-stage-resolved PA.
+            // SAFETY: `frame` == &B1 on the monitor stack; `gpr[0]` is the magic.
+            let magic = unsafe { (*frame).gpr[0] };
+            let scratch = super::stage2::s2_demand();
+            // SAFETY: EL2, MMU off (flat). `scratch` is the identity PA of the M6
+            // frame the facade allocated in GiB1; an aligned volatile load reads
+            // the cell the guest stored its sentinel into via the two-stage walk.
+            let alias = unsafe { core::ptr::read_volatile(scratch as *const u64) };
+            let outcome = if alias != NESTED_SENTINEL {
+                FAIL_NG_READBACK
+            } else if magic != NESTED_GUEST_MAGIC {
+                FAIL_NG_BAD_MAGIC
+            } else {
+                0
+            };
+            el2_return_to_kernel(outcome, magic);
         }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
@@ -1486,5 +1701,359 @@ pub fn el2_trap_selftest() -> crate::TrapProof {
         TrapProof::Proven { served }
     } else {
         TrapProof::Faulted { code }
+    }
+}
+
+// ===========================================================================
+// aL2.4: EL1 privileged-register helpers for the nested-guest facade (asm
+// confined here). The facade SAVES the kernel's stage-1 sysregs BEFORE the
+// round-trip (the guest mutates them) and RESTORES them AFTER (the EL1-side
+// teardown -- the one genuinely-new teardown surface vs aL2.0..aL2.3).
+// ===========================================================================
+
+/// EL1: read `TTBR0_EL1` (the kernel's live stage-1 root). Side-effect-free.
+fn read_ttbr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: TTBR0_EL1 is EL1-readable; `mrs` has no memory/stack effect.
+    unsafe {
+        asm!("mrs {v}, ttbr0_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: read `TCR_EL1`. Side-effect-free.
+fn read_tcr_el1() -> u64 {
+    let v: u64;
+    // SAFETY: TCR_EL1 is EL1-readable; side-effect-free.
+    unsafe {
+        asm!("mrs {v}, tcr_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: read `MAIR_EL1`. Side-effect-free.
+fn read_mair_el1() -> u64 {
+    let v: u64;
+    // SAFETY: MAIR_EL1 is EL1-readable; side-effect-free.
+    unsafe {
+        asm!("mrs {v}, mair_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: read `SCTLR_EL1`. Side-effect-free.
+fn read_sctlr_el1() -> u64 {
+    let v: u64;
+    // SAFETY: SCTLR_EL1 is EL1-readable; side-effect-free.
+    unsafe {
+        asm!("mrs {v}, sctlr_el1", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// EL1: RESTORE the kernel's stage-1 regime after the guest mutated it -- write
+/// `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`/`SCTLR_EL1`/`VBAR_EL1` back to the saved
+/// values, then `isb` + a full local TLB/I-cache invalidate so the kernel
+/// resumes on its OWN stage-1 with no stale guest translation surviving. This is
+/// the aL2.4 EL1-side teardown (the guest never left EL1's sysregs as it found
+/// them, unlike aL2.0..aL2.3). Mirrors `mmu.rs`'s cold-entry hygiene.
+fn restore_kernel_stage1(mair: u64, tcr: u64, ttbr0: u64, sctlr: u64, vbar: u64) {
+    // SAFETY: EL1. We write the kernel's OWN previously-saved stage-1 sysregs
+    // (read moments earlier from these same registers), `isb`-synchronize, flush
+    // the local EL1 TLB + I-cache (the guest's TTBR0/ASID-0 entries are now
+    // stale), and `isb` so the very next kernel access translates under the
+    // restored stage-1. No memory operands; not `nomem` (a translation-context
+    // switch). The order (MAIR/TCR before TTBR0/SCTLR) mirrors `mmu_init`.
+    unsafe {
+        asm!(
+            "msr mair_el1,  {mair}",
+            "msr tcr_el1,   {tcr}",
+            "msr ttbr0_el1, {ttbr0}",
+            "msr vbar_el1,  {vbar}",
+            "msr sctlr_el1, {sctlr}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "ic iallu",
+            "dsb nsh",
+            "isb",
+            mair  = in(reg) mair,
+            tcr   = in(reg) tcr,
+            ttbr0 = in(reg) ttbr0,
+            vbar  = in(reg) vbar,
+            sctlr = in(reg) sctlr,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// EL1: compute `&__l2_nested_guest_vectors` (the aL2.4 guest EL1 vector table in
+/// `el2_nested_vectors.rs`) PC-relative -- no memory access.
+fn l2_nested_guest_vectors_addr() -> u64 {
+    let v: u64;
+    // SAFETY: `adrp`/`add :lo12:` form the address of the linker-kept symbol with
+    // no memory access; NZCV preserved.
+    unsafe {
+        asm!(
+            "adrp {v}, __l2_nested_guest_vectors",
+            "add  {v}, {v}, :lo12:__l2_nested_guest_vectors",
+            v = out(reg) v,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    v
+}
+
+// ===========================================================================
+// aL2.4: the EL1 nested guest -- a REAL minimal TABOS guest that, UNDER our EL2
+// stage-2 (HCR_EL2.VM=1), BUILDS its OWN stage-1 in the frame_alloc'd frames
+// handed in x4(L1)/x5(L2)/x6(L3)/x7(scratch IPA), ENABLES it (SCTLR_EL1.M=1),
+// and stores+reads back a sentinel through a VA that has NO flat meaning -- a
+// GENUINE two-stage walk (guest VA -> guest stage-1 -> IPA -> our stage-2 -> PA).
+// Then it installs its OWN VBAR_EL1 and takes its OWN EL1 `brk` exception (an
+// EL1->EL1 trap, NOT an EL2 exit), and HVCs done. The magic 0x2E5 is set ONLY on
+// the path where BOTH the post-SCTLR.M readback matched AND the EL1 trap fired.
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #8` arm's `eret`, executing at EL1h
+//           (SPSR_EL2 = 0x3C5) under the kernel's stage-1 (HCR_EL2.VM=1 stage-2)
+//           with SCTLR_EL1.M still 0 (the guest enables its OWN first stage). Its
+//           VA == PA: identity-mapped, EL1-executable kernel `.text` in GiB1,
+//           which the stage-2 identity covers (the fetch never S1PTW-faults).
+//           x4=guest L1 PA, x5=guest L2 PA, x6=guest L3 PA, x7=scratch IPA.
+//           POST: `hvc #9` (the monitor tears stage-2 down + verifies; never
+//           returns here).
+// (b) ABI : `#[unsafe(naked)]` -- a register-only sequence (writes the already-
+//           allocated table frames, msr's its sysregs, store/load through the
+//           translated VA, brk, hvc). Uses NO new stack frame (SP_EL1 is the
+//           guest's own SP, untouched). Builds its stage-1 with the EXACT mmu.rs
+//           descriptors (NESTED_* consts, locked against drift). It reuses the
+//           Kani-proven M|C|I enable mask (SCTLR_EL1_GUEST_ENABLE_BITS).
+// (c) TEST: scripts/run-aarch64.sh -- the two-stage round-trip prints
+//           "L2.4: el2-guest OK".
+/// The aL2.4 nested guest: build a 3-level stage-1 (identity GiB0+GiB1 so its own
+/// fetch/stack/tables resolve, PLUS NESTED_GUEST_VA -> scratch), enable it, store
+/// NESTED_SENTINEL through the translated VA + read it back, install its own
+/// VBAR_EL1 + take a `brk` EL1 trap, then present 0x2E5 (iff both) and `hvc #9`.
+#[unsafe(naked)]
+extern "C" fn el2_nested_guest_stub() -> ! {
+    naked_asm!(
+        // -- (1) BUILD the guest's OWN stage-1 in x4(L1)/x5(L2)/x6(L3) ----------
+        // L1[0] = GiB0 Device identity block (output PA 0): covers the UART so
+        // the guest's serial-adjacent code + Device space resolve under S1.
+        "movz x9, #0x701",             // NESTED_BLOCK_DEVICE
+        "str  x9, [x4]",               // L1[0]
+        // L1[1] = GiB1 Normal-WB identity block (output PA 0x4000_0000): covers
+        // the guest's .text, stack, and its own L1/L2/L3 table frames.
+        "movz x9, #0x4000, lsl #16",   // 0x4000_0000
+        "movz x10, #0x705",            // NESTED_BLOCK_NORMAL
+        "orr  x9, x9, x10",
+        "str  x9, [x4, #8]",           // L1[1]
+        // L1[8] -> L2 table (NESTED_GUEST_VA == 0x2_0000_0000 => L1 index 8).
+        "orr  x9, x5, #0x3",           // x5 (L2 PA, 4K-aligned) | DESC_TABLE
+        "str  x9, [x4, #64]",          // L1[8] (8 * 8 bytes)
+        // L2[0] -> L3 table (VA L2 index 0).
+        "orr  x9, x6, #0x3",           // x6 (L3 PA) | DESC_TABLE
+        "str  x9, [x5]",               // L2[0]
+        // L3[0] = scratch 4 KiB Normal-WB page leaf (VA L3 index 0).
+        "movz x9, #0x707",             // NESTED_PAGE_NORMAL
+        "orr  x9, x7, x9",             // x7 (scratch PA) | PAGE_NORMAL
+        "str  x9, [x6]",               // L3[0]
+        // Publish the whole stage-1 hierarchy to the (EL1 + stage-2) walker.
+        "dsb  ishst",
+        "isb",
+        // -- (2) PROGRAM the guest's translation regime (MAIR/TTBR0/TCR) --------
+        "movz x9, #0xFF00",            // NESTED_MAIR_EL1 = 0x00 | (0xFF<<8)
+        "msr  mair_el1, x9",
+        "msr  ttbr0_el1, x4",          // TTBR0_EL1 = the guest's OWN L1 root PA
+        "movz x9, #0x3519",            // NESTED_TCR_EL1 = 0x2_0099_3519
+        "movk x9, #0x0099, lsl #16",
+        "movk x9, #0x0002, lsl #32",
+        "msr  tcr_el1, x9",
+        "dsb  ishst",
+        "isb",
+        // Cold-entry hygiene before the first translated access (mmu.rs parity):
+        // TLB + I-cache contents are stale w.r.t. the new regime.
+        "tlbi vmalle1",
+        "dsb  nsh",
+        "ic   iallu",
+        "dsb  nsh",
+        "isb",
+        // -- (3) ENABLE the guest's FIRST STAGE (the "S1 after S2" step) --------
+        // SCTLR_EL1 |= M|C|I (the Kani-proven sctlr_el1_guest_enable mask 0x1005),
+        // read-modify-write preserving every other (RES1/EE/...) bit. From the
+        // `isb` onward EVERY guest access is a FULL two-stage walk.
+        "mrs  x9, sctlr_el1",
+        "movz x10, #0x1005",           // SCTLR_EL1_GUEST_ENABLE_BITS (M|C|I)
+        "orr  x9, x9, x10",
+        "msr  sctlr_el1, x9",
+        "isb",
+        // -- (4) THE TWO-STAGE STORE+READBACK (the genuine-two-stage gate) ------
+        // x10 = NESTED_GUEST_VA (0x2_0000_0000); x9 = NESTED_SENTINEL (0xB22B).
+        // VA has NO flat meaning -- reachable ONLY via the stage-1 just built. The
+        // store walks VA->(guest S1)->IPA->(our S2)->PA; the load reads it back.
+        "movz x10, #0x0002, lsl #32",  // NESTED_GUEST_VA
+        "movz x9,  #0xB22B",           // NESTED_SENTINEL
+        "str  x9, [x10]",              // two-stage STORE through the translated VA
+        "ldr  x11, [x10]",             // two-stage LOAD back
+        "mov  x0, #0xBAD",             // assume FAIL until both gates pass
+        "cmp  x11, x9",                // did the readback match the sentinel?
+        "b.ne 1f",                     // no -> leave x0 = 0xBAD
+        // -- (5) THE GUEST'S OWN EL1 EXCEPTION (the M1 analog, no EL2 exit) -----
+        // Install the guest's OWN VBAR_EL1, clear the trap-taken sentinel, then
+        // `brk #0`: it vectors to VBAR_EL1+0x200 (Current-EL-SPx Sync) INSIDE the
+        // guest, whose handler sets x28 = NESTED_TRAP_TAKEN and returns.
+        "adrp x12, __l2_nested_guest_vectors",
+        "add  x12, x12, :lo12:__l2_nested_guest_vectors",
+        "msr  vbar_el1, x12",
+        "isb",
+        "movz x28, #0",                // clear the trap-taken sentinel
+        "brk  #0",                     // EL1->EL1 trap -> guest vector sets x28
+        // -- (6) VERDICT: magic 0x2E5 iff readback matched AND the trap fired ---
+        "movz x9, #0x2E5",             // NESTED_TRAP_TAKEN expected in x28
+        "cmp  x28, x9",
+        "b.ne 1f",                     // trap not taken -> leave x0 = 0xBAD
+        "movz x0, #0x2E5",             // NESTED_GUEST_MAGIC -- BOTH gates passed
+        "1:",
+        "hvc  #9",                     // done: teardown + verify + unwind
+        "2:",
+        "b 2b",                        // unreachable: the monitor unwinds, never here
+    )
+}
+
+// ===========================================================================
+// aL2.4: the safe facade: el2_nested_guest_selftest() -> NestedGuestProof.
+// ===========================================================================
+// (a) PRE : called once from the kernel at the L2.4 slot (right after L2.3,
+//           before M19), at EL1h, with the resident monitor armed
+//           (BOOTED_AT_EL2 == 1). POST: built the GiB0+GiB1 identity stage-2 +
+//           frame_alloc'd the guest's stage-1 L1/L2/L3 frames + a scratch frame
+//           AT EL1, SAVED the kernel's MAIR/TCR/TTBR0/SCTLR/VBAR_EL1, issued ONE
+//           `HVC #8`, drove the arm -> guest-builds-S1 -> SCTLR.M -> two-stage
+//           store/load -> guest EL1 brk -> `hvc #9` -> TEARDOWN -> unwind
+//           round-trip, RESTORED the kernel's stage-1 sysregs, and returns the
+//           outcome enum. The kernel resumes here at EL1 with stage-2 torn down
+//           AND its OWN stage-1 intact. Graceful skip when not booted at EL2.
+// (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `stage2.rs` /
+//           `el2_nested_vectors.rs`, so the `#![forbid(unsafe_code)]` kernel only
+//           branches on the returned `NestedGuestProof`.
+// (c) TEST: scripts/run-aarch64.sh -- "L2.4: el2-guest OK" iff `Proven`.
+/// Drive the EL1->EL2(arm)->EL1-guest(builds + enables its OWN stage-1 under our
+/// stage-2, two-stage store/load, takes its OWN EL1 trap)->EL2(done+teardown)->
+/// EL1 nested-guest round-trip and report the outcome. `Unavailable` if we did
+/// not boot at EL2 (a green skip); `Proven{magic}` on a closed two-stage
+/// round-trip; `Faulted{code}` on any monitor-reported fault.
+pub fn el2_nested_guest_selftest() -> crate::NestedGuestProof {
+    use crate::NestedGuestProof;
+
+    // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
+    if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
+        return NestedGuestProof::Unavailable;
+    }
+
+    // Build the GiB0+GiB1 identity stage-2 (reused verbatim from L2.1 -- it
+    // covers the guest fetch/stack, its OWN stage-1 table frames so the S1PTW
+    // never faults, AND the scratch IPA). On OOM, surface Faulted honestly.
+    let root = match super::stage2::build_identity_stage2() {
+        Some(r) => r,
+        None => return NestedGuestProof::Faulted { code: FAIL_NG_BUILD },
+    };
+    // frame_alloc the guest's OWN stage-1 L1/L2/L3 frames + a scratch RAM frame,
+    // all in GiB1 (so the stage-2 identity covers them -- no S1PTW self-fault).
+    // The guest only WRITES these already-allocated frames (the no-EL2-allocation
+    // rule, extended to the guest: it never calls frame_alloc at runtime).
+    let gl1 = match super::stage2::prep_zeroed_frame() {
+        Some(f) => f,
+        None => return NestedGuestProof::Faulted { code: FAIL_NG_BUILD },
+    };
+    let gl2 = match super::stage2::prep_zeroed_frame() {
+        Some(f) => f,
+        None => return NestedGuestProof::Faulted { code: FAIL_NG_BUILD },
+    };
+    let gl3 = match super::stage2::prep_zeroed_frame() {
+        Some(f) => f,
+        None => return NestedGuestProof::Faulted { code: FAIL_NG_BUILD },
+    };
+    let scratch = match super::stage2::prep_zeroed_frame() {
+        Some(f) => f,
+        None => return NestedGuestProof::Faulted { code: FAIL_NG_BUILD },
+    };
+    // Risk #2: assert every guest stage-1 frame + the scratch is in GiB1
+    // [0x4000_0000, 0x8000_0000), so the stage-2 identity covers it and the
+    // guest's own stage-1 walk (S1PTW) can never fault. (frame_alloc only hands
+    // out GiB1 RAM frames; this is a belt-and-suspenders fail-closed check.)
+    for pa in [gl1, gl2, gl3, scratch] {
+        if !(0x4000_0000..0x8000_0000).contains(&pa) {
+            return NestedGuestProof::Faulted { code: FAIL_NG_S1PTW };
+        }
+    }
+
+    let vtcr_v = super::stage2::compute_vtcr();
+    let vttbr_v = super::stage2::compute_vttbr(root);
+    let stub = el2_nested_guest_stub as *const () as u64;
+
+    // PROVE the tb-boot guest-boot handoff block is well-formed (the documented
+    // seam the deferred full-kernel-as-guest rung will consume): the EL1h /
+    // PSTATE=0x3c5 + X0=info* register-file contract the EL2 monitor will splice.
+    // The minimal guest does not consume TbBootInfo yet, so we only assert the
+    // block is well-formed here (a host-testable invariant, no /dev/kvm).
+    debug_assert_eq!(
+        tb_boot::aarch64::AARCH64_PSTATE_EL1H_DAIF,
+        SPSR_EL1H_DAIF,
+        "tb-boot EL1h PSTATE must match the monitor's eret SPSR_EL2"
+    );
+
+    // SAVE the kernel's OWN stage-1 sysregs BEFORE the round-trip: the guest
+    // mutates TTBR0_EL1/TCR_EL1/MAIR_EL1/SCTLR_EL1/VBAR_EL1, so the facade must
+    // restore them after (the aL2.4 EL1-side teardown -- the new surface).
+    let saved_ttbr0 = read_ttbr0_el1();
+    let saved_tcr = read_tcr_el1();
+    let saved_mair = read_mair_el1();
+    let saved_sctlr = read_sctlr_el1();
+    let saved_vbar = read_vbar_el1();
+    let _ = l2_nested_guest_vectors_addr(); // keep the vector symbol referenced
+
+    // Mask EL1 IRQs across the whole window (the guest runs DAIF-masked too).
+    let daif = super::timer::local_irq_save();
+
+    let outcome: u64;
+    let magic: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #8`, programs VTCR/VTTBR and
+    // sets HCR.VM=1, then erets into the EL1 nested guest with x4..x7 carrying the
+    // pre-allocated frame PAs. The guest builds + enables its OWN stage-1, does
+    // the two-stage store/load, takes its OWN EL1 brk trap, and `hvc #9`s -- the
+    // monitor TEARS stage-2 DOWN (HCR.VM=0) FIRST, reads the sentinel back through
+    // the identity alias, and unwinds here with x0 = outcome, x1 = guest magic,
+    // every other kernel register restored from B0. The result arrives in
+    // registers -- nothing here touches the EL2 stack. x0..x7 carry the in-args;
+    // clobber_abi("C") covers the rest.
+    unsafe {
+        asm!(
+            "hvc #8",
+            inout("x0") root => outcome,
+            inout("x1") vtcr_v => magic,
+            in("x2") vttbr_v,
+            in("x3") stub,
+            in("x4") gl1,
+            in("x5") gl2,
+            in("x6") gl3,
+            in("x7") scratch,
+            clobber_abi("C"),
+        );
+    }
+
+    // EL1-side teardown: the guest left TTBR0_EL1/TCR_EL1/MAIR_EL1/SCTLR_EL1/
+    // VBAR_EL1 pointing at its OWN regime; restore the kernel's saved values +
+    // flush so M19 (and the rest of the kernel) resumes on its OWN stage-1. This
+    // is the genuinely-new teardown step vs aL2.0..aL2.3 (where the guest never
+    // touched EL1 sysregs). The marker discipline catches a miss: M19 must still
+    // print AFTER L2.4.
+    restore_kernel_stage1(saved_mair, saved_tcr, saved_ttbr0, saved_sctlr, saved_vbar);
+
+    super::timer::local_irq_restore(daif);
+
+    if outcome == 0 {
+        NestedGuestProof::Proven { magic }
+    } else {
+        NestedGuestProof::Faulted { code: outcome }
     }
 }

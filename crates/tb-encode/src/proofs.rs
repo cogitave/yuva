@@ -30,8 +30,8 @@ use crate::el2_trap::{
     classify_exit, dabt_access_size_bytes, dabt_iss_isv, dabt_iss_sas, dabt_iss_srt, dabt_iss_sse,
     dabt_iss_sf, esr_dfsc, esr_ec, esr_inject_undef, esr_is_translation_fault, esr_s1ptw, esr_wnr,
     hpfar_fault_ipa, sysreg_iss_crm, sysreg_iss_crn, sysreg_iss_is_read, sysreg_iss_op0,
-    sysreg_iss_op1, sysreg_iss_op2, sysreg_iss_rt, sysreg_iss_sys_val, ExitClass, EC_DABT_LOW,
-    EC_HVC64, EC_IABT_LOW, SYSREG_ISS_SYS_MASK,
+    sctlr_el1_guest_enable, sysreg_iss_op1, sysreg_iss_op2, sysreg_iss_rt, sysreg_iss_sys_val,
+    ExitClass, EC_DABT_LOW, EC_HVC64, EC_IABT_LOW, SCTLR_EL1_GUEST_ENABLE_BITS, SYSREG_ISS_SYS_MASK,
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
@@ -716,4 +716,37 @@ fn kani_dabt_iss_decode_total() {
     let iss = (1u64 << 24) | (srt << 16);
     assert_eq!(dabt_iss_srt(iss), srt);
     assert_eq!(dabt_iss_isv(iss), 1);
+}
+
+// ===========================================================================
+// aL2.4: the guest's SCTLR_EL1 first-stage ENABLE word -- the "S1 after S2" step.
+// ===========================================================================
+
+/// `sctlr_el1_guest_enable` OR-sets EXACTLY bits {0,2,12} (M|C|I) and preserves
+/// every other baseline bit, for ALL `baseline:u64` -- and is idempotent. This
+/// pins the single instant the aL2.4 guest brings its first stage up under our
+/// second stage (KVM nvhe/switch.c "S2 ... enabled ... now restore the guest's
+/// S1 ... SCTLR") to a machine-checked invariant.
+///
+/// NEGATIVE CONTROL: an enable that ANDed (`baseline & BITS`) instead of ORed
+/// would clear the baseline RES1/EE bits and make the preservation assert FAIL;
+/// a wrong bit (e.g. `1<<13` instead of `1<<12`) would make the M|C|I asserts
+/// FAIL.
+#[kani::proof]
+fn kani_sctlr_el1_guest_enable() {
+    let baseline: u64 = kani::any();
+    let r = sctlr_el1_guest_enable(baseline);
+    // (a) The three enable bits {0,2,12} are set.
+    assert_eq!(r & SCTLR_EL1_GUEST_ENABLE_BITS, SCTLR_EL1_GUEST_ENABLE_BITS);
+    assert_eq!(SCTLR_EL1_GUEST_ENABLE_BITS, (1 << 0) | (1 << 2) | (1 << 12));
+    // (b) Every baseline bit OUTSIDE the enable mask is preserved bit-for-bit
+    //     (no clobber of RES1 / EE / SA / WXN ...).
+    assert_eq!(
+        r & !SCTLR_EL1_GUEST_ENABLE_BITS,
+        baseline & !SCTLR_EL1_GUEST_ENABLE_BITS
+    );
+    // And every baseline bit survives (it is a pure OR-projection).
+    assert_eq!(r & baseline, baseline);
+    // (c) Idempotent: re-enabling an already-enabled word is a no-op.
+    assert_eq!(sctlr_el1_guest_enable(r), r);
 }
