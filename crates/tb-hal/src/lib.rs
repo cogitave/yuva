@@ -79,6 +79,19 @@ pub fn qemu_exit_success() {
     arch::qemu_exit_success()
 }
 
+/// Diagnostic: the EL the aarch64 `_start` entered at (0xFF = not via `_start`).
+#[cfg(target_arch = "aarch64")]
+pub fn boot_entry_el() -> u8 {
+    arch::boot_entry_el()
+}
+
+/// Diagnostic: 1 iff the aarch64 boot entered EL2 and installed the monitor.
+#[cfg(target_arch = "aarch64")]
+pub fn booted_at_el2() -> u8 {
+    arch::booted_at_el2()
+}
+
+
 /// Halt the (single) vCPU forever. Never returns.
 ///
 /// * x86_64: masked `cli; hlt` spin.

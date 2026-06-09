@@ -302,6 +302,18 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("hello from rust_main\n");
+    // DIAG: surface the boot-entry EL + monitor flag as the second serial
+    // line, so any runner where the EL2 track silently skips is immediately
+    // diagnosable from the log (entry-el=0x2 el2=0x1 is the real-EL2 path).
+    #[cfg(target_arch = "aarch64")]
+    {
+        tb_hal::serial_write_str("boot: entry-el=");
+        write_hex_u64(tb_hal::boot_entry_el() as u64);
+        tb_hal::serial_write_str(" el2=");
+        write_hex_u64(tb_hal::booted_at_el2() as u64);
+        tb_hal::serial_write_byte(b"
+"[0]);
+    }
 
     // Clean guest-only BOOT-TO-READY figure: `rust_main` entry -> serial up
     // (M0 done), BEFORE any M1.. self-test runs. This is the unikernel-class

@@ -151,3 +151,14 @@ pub fn halt() -> ! {
         }
     }
 }
+
+/// Diagnostic: the EL `_start` entered at (CurrentEL[3:2]; 0xFF = entry did
+/// not pass through `_start`, e.g. the tb-vmm `_tb_start` path).
+pub fn boot_entry_el() -> u8 {
+    boot::BOOT_ENTRY_EL.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Diagnostic: 1 iff the boot path entered at EL2 and installed the monitor.
+pub fn booted_at_el2() -> u8 {
+    el2::BOOTED_AT_EL2.load(core::sync::atomic::Ordering::Acquire)
+}
