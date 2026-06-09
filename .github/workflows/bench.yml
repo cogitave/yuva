@@ -290,8 +290,13 @@ jobs:
         run: |
           set -o pipefail
           NG="$(pwd)/nano-guest.elf"
-          # Build the PVH config from the committed template (only a boot-source).
-          sed "s#NANO_GUEST_ELF_PATH#${NG}#" bench/nano-guest/fc-axisA-config.json > fc-axisA-config.json
+          # Build the PVH config from the committed template. The `logger`
+          # log_path redirects FC's OWN structured logs (the "Running
+          # Firecracker" banner etc.) to a file, so stdout carries ONLY the
+          # guest's serial console — the nano-guest's "A\n" is then the first
+          # byte on stdout, which is the event we time + gate on.
+          sed -e "s#NANO_GUEST_ELF_PATH#${NG}#" -e "s#FC_LOG_PATH#$(pwd)/fc-axisA-fc.log#" \
+            bench/nano-guest/fc-axisA-config.json > fc-axisA-config.json
           cat fc-axisA-config.json
           : > fc-axisA-ns.txt
           for i in $(seq 1 "$BENCH_ITERS"); do
@@ -324,8 +329,10 @@ jobs:
           # of silently reporting zero.
           if [ ! -s fc-axisA-ns.txt ]; then
             echo "::warning::Axis-A Firecracker booted the nano-guest 0/${BENCH_ITERS} times — diagnostics below"
-            echo "--- fc-axisA-err-1.log (FC's own log/error) ---"; head -c 1400 fc-axisA-err-1.log 2>/dev/null || true; echo
-            echo "--- fc-axisA-out-1.log (guest stdout — should begin with 'A') ---"; head -c 80 fc-axisA-out-1.log 2>/dev/null | od -c | head -4 || true
+            echo "--- fc-axisA-fc.log (FC's own structured log, banner moved here) ---"; head -c 2000 fc-axisA-fc.log 2>/dev/null || true; echo
+            echo "--- fc-axisA-err-1.log (FC stderr) ---"; head -c 800 fc-axisA-err-1.log 2>/dev/null || true; echo
+            echo "--- fc-axisA-out-1.log FULL guest stdout (does 'A' appear => did the guest run?) ---"
+            cat fc-axisA-out-1.log 2>/dev/null | head -c 600 | od -c | head -10 || true
           fi
 
       # ----------------------------------------------------------------------
