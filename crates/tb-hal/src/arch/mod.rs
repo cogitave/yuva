@@ -75,8 +75,8 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::{
     address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe,
-    copy_from_user, copy_to_user, ctx_switch, current_root, el2_exits_selftest, el2_selftest,
-    el2_trap_selftest, halt,
+    copy_from_user, copy_to_user, ctx_switch, current_root, el2_exits_selftest,
+    el2_nested_guest_selftest, el2_selftest, el2_trap_selftest, halt,
     heap_window, install_traps, local_irq_restore, local_irq_save, m3_test_va_intact,
     map_heap_frames, map_in_root, map_user_in_root, mmu_init, mmu_selftest,
     pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,

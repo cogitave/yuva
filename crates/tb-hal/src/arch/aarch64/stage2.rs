@@ -358,6 +358,18 @@ pub(super) fn build_identity_stage2() -> Option<u64> {
     Some(root)
 }
 
+/// aL2.4: `frame_alloc` one all-zeroed 4 KiB frame in the identity-mapped RAM
+/// gigabyte and publish it. Used by the nested-guest facade for the guest's OWN
+/// stage-1 L1/L2/L3 table frames (the guest WRITES them at EL1) + the scratch
+/// frame it stores the two-stage sentinel into. A thin public wrapper over the
+/// module-private [`frame_alloc_zeroed`] so `el2.rs`'s facade can pre-allocate
+/// without minting a second allocator path. Returns the PA, or `None` on OOM.
+pub(super) fn prep_zeroed_frame() -> Option<u64> {
+    let f = frame_alloc_zeroed()?;
+    dsb_ishst();
+    Some(f)
+}
+
 /// EL1: `frame_alloc` the demand frame, seed word 0 (read by the guest after the
 /// demand map), and publish. Returns its PA, or `None` on OOM.
 pub(super) fn prep_demand_frame() -> Option<u64> {
