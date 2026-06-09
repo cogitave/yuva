@@ -209,7 +209,7 @@ jobs:
                 n=NR
                 med = (n%2) ? a[int(n/2)+1] : int((a[n/2]+a[n/2+1])/2)
                 p99i = int(n*0.99); if (p99i < 1) p99i=1; if (p99i > n) p99i=n
-                printf "%d %d %d %d", med, a[p99i], a[1], n
+                printf "%d %d %d %d\n", med, a[p99i], a[1], n
               }'
           }
           ms() { # ns -> ms with 3 decimals, or NA
@@ -227,6 +227,10 @@ jobs:
           if [ "$BRC_DEC" != "NA" ] && [ "$TSC_DEC" != "NA" ] && [ "$TSC_DEC" -gt 0 ]; then
             B_MS=$(awk -v c="$BRC_DEC" -v hz="$TSC_DEC" 'BEGIN{printf "%.4f", (c/hz)*1000}')
           fi
+          # When the runner exposes no CPUID-0x15 TSC base (TSC_DEC=0, common on a
+          # nested-virt KVM runner), report the RAW cycle count rather than losing
+          # the figure to "NA ms" -- the ms needs a leaf-0x15 host (bare metal).
+          if [ "$B_MS" != "NA" ]; then B_CELL="${B_MS} ms"; else B_CELL="${BRC_DEC} cyc (no leaf-0x15 TSC)"; fi
 
           # Axis A headline ratio: FC spawn / tb-vmm spawn on the SAME runner.
           RATIO="NA"
@@ -244,7 +248,7 @@ jobs:
             echo "|---|---|---|---:|---:|---:|---:|"
             echo "| **A** VMM-spawn | host spawn → guest-ready (apples-to-apples) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
             echo "| **A** VMM-spawn | host spawn → first guest serial byte | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
-            echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | TABOS | ${B_MS} ms | — | — | 1 |"
+            echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | TABOS | ${B_CELL} | — | — | 1 |"
             echo "| **C** end-to-end | spawn → first serial byte (REAL Linux kernel boots) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
             echo ""
             echo "**Headline (the ONLY fair cross-system claim):** on this same runner, tb-vmm spawn→ready is **${RATIO}** vs Firecracker spawn→first-serial-byte (axis A median)."
