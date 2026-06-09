@@ -1,0 +1,25 @@
+# Cargo build config for the Axis-A nano-guest (its own nested workspace).
+#
+# When CI runs `cargo +nightly build` from THIS directory with
+# `--target ../../targets/x86_64-tabos-none.json`, Cargo matches the
+# `[target.x86_64-tabos-none]` table below by the JSON file-name stem and links
+# with `nano-guest.ld` (the minimal dual-note PVH+tb-boot layout at 1 MiB).
+#
+# Unlike the root .cargo/config.toml, build-std flags are bundled into the
+# `nbuild` alias here so a bare `cargo build` (host triple) is never forced into
+# build-std. CI calls `cargo nbuild --release` (single source of truth for the
+# flags), exactly mirroring the kernel's `cargo kbuild`.
+
+[alias]
+# Build the no_std/no_main nano-guest for the custom none-class target spec.
+# -Zbuild-std=core recompiles core (no precompiled std exists for the none-class
+# triple; the nano-guest needs no alloc); -Zbuild-std-features pulls in
+# compiler_builtins' mem* intrinsics; -Zjson-target-spec accepts the .json spec.
+# Append --release as needed:  cargo nbuild --release
+nbuild = "build -Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec --target ../../targets/x86_64-tabos-none.json"
+
+# x86_64 nano-guest: rust-lld (ld.lld) consumes `-T<script>`; the script keeps
+# both boot notes and places .text at 0x0010_0000. Matched by the JSON target
+# file-name stem (Cargo custom-JSON-target matching rule).
+[target.x86_64-tabos-none]
+rustflags = ["-C", "link-arg=-Tnano-guest.ld"]

@@ -6,10 +6,16 @@
 # headline — FC's ~125 ms is mostly a real Linux kernel boot; the only fair claim
 # on the same runner is axis A (VMM-spawn) and the tb-vmm/FC RATIO.
 #
-# Three axes (docs/BENCHMARKS.md §1-§3):
-#   A = VMM-spawn: tb-vmm spawn->guest-ready (the 0x510 boot-ready PIO write)
-#       vs FC spawn->first guest serial byte. Apples-to-apples: both are the
-#       host-observed VMM/host spawn floor. THIS is the fair, comparable axis.
+# Axes (docs/BENCHMARKS.md §1-§3):
+#   A = VMM-spawn (the TRUE apples-to-apples): BOTH VMMs boot ONE common
+#       dual-note PVH+tb-boot nano-guest (bench/nano-guest) whose only work is
+#       one COM1 byte + halt; host spawn->first-serial-byte for both (same
+#       date+poll method). The tb-vmm/FC RATIO on this one binary is the fair
+#       cross-system claim. tb-vmm's native 0x510 clock is an informational
+#       cross-check, never the ratio source.
+#   A' = different-guests (SUPPLEMENTARY, kept for context, NOT apples-to-apples):
+#       tb-vmm spawn->guest-ready booting the FULL TABOS kernel (0x510) vs FC
+#       spawn->first-byte booting a REAL Linux kernel. Two different guests.
 #   B = guest-only boot: TABOS in-guest `boot-ready-cycles` (rust_main entry ->
 #       serial-ready, BEFORE the self-test) / its MEASURED `tsc-base-hz` base.
 #       VMM-independent; the unikernel-class figure. NOT comparable to FC's
@@ -87,6 +93,31 @@ jobs:
         run: cd tb-vmm && cargo build --release
 
       # ----------------------------------------------------------------------
+      # NEW Axis-A (the TRUE apples-to-apples): build the common dual-note
+      # PVH+tb-boot nano-guest ONE binary that BOTH VMMs boot. Built via
+      # clang + ld.lld (the deterministic path, immune to the repo-root
+      # .cargo/config.toml linker-script inheritance); ubuntu-latest ships both.
+      # The equivalent nightly `cargo nbuild` crate (bench/nano-guest) embeds the
+      # SAME nano-guest.S, kept as a compile check.
+      # ----------------------------------------------------------------------
+      - name: Build Axis-A nano-guest (common dual-note PVH + tb-boot ELF)
+        if: env.KVM_OK == '1'
+        run: |
+          set -euo pipefail
+          command -v clang  >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
+          command -v ld.lld >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends lld
+          bash bench/nano-guest/build.sh "$(pwd)/nano-guest.elf"
+          echo "nano-guest size: $(wc -c < nano-guest.elf) bytes"
+          # Well-formedness gate: both boot notes must be present (Firecracker's
+          # Xen PHYS32_ENTRY type 18 + tb-vmm's TABOS type 0x54420001), else the
+          # apples-to-apples premise is broken. Use llvm-readelf from llvm-tools.
+          READELF=$(command -v llvm-readelf || command -v readelf)
+          "$READELF" -n nano-guest.elf | tee nano-guest-notes.txt
+          grep -qiE "Xen"   nano-guest-notes.txt || { echo "::error::nano-guest missing .note.Xen (PVH)"; exit 1; }
+          grep -qiE "TABOS" nano-guest-notes.txt || { echo "::error::nano-guest missing .note.TABOS (tb-boot)"; exit 1; }
+          grep -qiE "0x54420001" nano-guest-notes.txt || { echo "::error::nano-guest TABOS note type wrong"; exit 1; }
+
+      # ----------------------------------------------------------------------
       # Axis A + B: run tb-vmm --report-spawn N times. Each run emits, on the
       # SAME boot:
       #   * spawn-ready-ns=..  (host spawn->guest-ready 0x510 write; axis A)
@@ -115,6 +146,61 @@ jobs:
           echo "TBVMM_BRC=${BRC:-}" >> "$GITHUB_ENV"
           echo "TBVMM_TSC=${TSC:-}" >> "$GITHUB_ENV"
           echo "tb-vmm spawn samples: $(wc -l < tbvmm-spawn-ns.txt) ; boot-ready-cycles=${BRC:-NA} tsc-base-hz=${TSC:-NA}"
+
+      # ----------------------------------------------------------------------
+      # NEW Axis-A — tb-vmm boots the COMMON nano-guest N times. Two clocks per
+      # boot, both recorded:
+      #   (a) HOST spawn->first-COM1-byte: t0=date just before `tb-vmm ... &`,
+      #       poll its stdout log until non-empty (the nano-guest's `out 0x3f8`),
+      #       t1=date. IDENTICAL method + tool to the FC Axis-A step, so the
+      #       cross-VMM RATIO is computed from this column only (fair).
+      #   (b) NATIVE spawn-ready-ns= from --report-spawn (the in-process 0x510
+      #       clock the nano-guest also latches): a higher-fidelity cross-check,
+      #       NEVER the ratio source (FC has no 0x510 equivalent).
+      # ----------------------------------------------------------------------
+      - name: Bench Axis-A tb-vmm (common nano-guest, N=30)
+        if: env.KVM_OK == '1'
+        run: |
+          set -o pipefail
+          TBVMM=tb-vmm/target/release/tb-vmm
+          NG="$(pwd)/nano-guest.elf"
+          : > tbvmm-axisA-host-ns.txt
+          : > tbvmm-axisA-native-ns.txt
+          for i in $(seq 1 "$BENCH_ITERS"); do
+            rm -f "tbvmm-axisA-out-$i.log" "tbvmm-axisA-err-$i.log"
+            t0=$(date +%s%N)
+            # Split stderr from stdout + gate on the guest's 'A' sentinel — the
+            # SAME treatment as the FC Axis-A step so the cross-VMM ratio is
+            # measured identically on both sides. tb-vmm's --report-spawn line
+            # ("spawn-ready-ns=") also goes to stdout, AFTER the guest's "A\n"
+            # (the nano-guest writes COM1 before latching 0x510), so the first
+            # stdout byte is the guest sentinel and the native grep still works.
+            ( timeout 10 "$TBVMM" --kernel "$NG" --report-spawn --timeout-secs 5 \
+                > "tbvmm-axisA-out-$i.log" 2> "tbvmm-axisA-err-$i.log" & echo $! > "tbvmm-axisA-$i.pid" )
+            PID=$(cat "tbvmm-axisA-$i.pid")
+            # Poll until the guest's standalone "A" line appears OR tb-vmm exits
+            # OR a ~6s cap — the SAME method + bound as the FC step so the
+            # constant poll overhead cancels in the cross-VMM ratio.
+            for _ in $(seq 1 12000); do
+              grep -qx A "tbvmm-axisA-out-$i.log" 2>/dev/null && break
+              kill -0 "$PID" 2>/dev/null || break
+              sleep 0.0005 2>/dev/null || true
+            done
+            t1=$(date +%s%N)
+            kill -9 "$PID" 2>/dev/null || true
+            if grep -qx A "tbvmm-axisA-out-$i.log" 2>/dev/null; then
+              echo $(( t1 - t0 )) >> tbvmm-axisA-host-ns.txt
+            fi
+            # Native in-process clock (informational cross-check column).
+            ns=$(grep -oE "spawn-ready-ns=[0-9]+" "tbvmm-axisA-out-$i.log" | head -1 | cut -d= -f2 || true)
+            [ -n "$ns" ] && echo "$ns" >> tbvmm-axisA-native-ns.txt
+          done
+          if [ ! -s tbvmm-axisA-host-ns.txt ]; then
+            echo "::warning::Axis-A tb-vmm host-poll captured 0 samples — stdout hexdump + stderr below"
+            head -c 80 tbvmm-axisA-out-1.log 2>/dev/null | od -c | head -4 || true
+            head -c 600 tbvmm-axisA-err-1.log 2>/dev/null || true; echo
+          fi
+          echo "Axis-A tb-vmm host samples: $(wc -l < tbvmm-axisA-host-ns.txt) ; native samples: $(wc -l < tbvmm-axisA-native-ns.txt)"
 
       # ----------------------------------------------------------------------
       # Axis C: install the PINNED Firecracker release + a minimal CI guest
@@ -194,6 +280,115 @@ jobs:
           echo "FC spawn samples: $(wc -l < fc-spawn-ns.txt)"
 
       # ----------------------------------------------------------------------
+      # NEW Axis-A — Firecracker boots the SAME common nano-guest N times. FC
+      # auto-selects PVH from the nano-guest's `.note.Xen` PHYS32_ENTRY note (no
+      # config flag); the PVH config has ONLY a boot-source (no drives/net/vsock)
+      # and empty boot_args. SAME date+poll spawn->first-COM1-byte method as the
+      # tb-vmm Axis-A step, so the cross-VMM ratio is apples-to-apples on one
+      # binary. Reuses the firecracker installed by the Axis-C step above.
+      # ----------------------------------------------------------------------
+      - name: Bench Axis-A Firecracker (common nano-guest, N=30)
+        if: env.KVM_OK == '1'
+        run: |
+          set -o pipefail
+          NG="$(pwd)/nano-guest.elf"
+          # Build the PVH config (boot-source + empty drives). FC auto-selects
+          # PVH from the nano-guest's .note.Xen. FC writes its OWN banner to
+          # stdout, so we do NOT gate on the first byte — we wait for the guest's
+          # "A\n" to appear as its OWN line (grep -qx A), which FC's banner lines
+          # ("2026-..Running Firecracker..") never match. Robust to the banner,
+          # no logger needed (FC's logger requires a pre-existing pipe/file).
+          sed "s#NANO_GUEST_ELF_PATH#${NG}#" bench/nano-guest/fc-axisA-config.json > fc-axisA-config.json
+          cat fc-axisA-config.json
+          : > fc-axisA-ns.txt
+          for i in $(seq 1 "$BENCH_ITERS"); do
+            rm -f "fc-axisA-out-$i.log" "fc-axisA-err-$i.log"
+            t0=$(date +%s%N)
+            ( timeout 30 firecracker --no-api --config-file "$(pwd)/fc-axisA-config.json" \
+                > "fc-axisA-out-$i.log" 2> "fc-axisA-err-$i.log" & echo $! > "fc-axisA-$i.pid" )
+            PID=$(cat "fc-axisA-$i.pid")
+            # Poll until the guest's standalone "A" line appears OR FC exits (a
+            # failed boot) OR a ~6s cap — so a non-booting FC cannot stall the
+            # loop. Same bound + method as the tb-vmm Axis-A step (fair ratio).
+            for _ in $(seq 1 12000); do
+              grep -qx A "fc-axisA-out-$i.log" 2>/dev/null && break
+              kill -0 "$PID" 2>/dev/null || break
+              sleep 0.0005 2>/dev/null || true
+            done
+            t1=$(date +%s%N)
+            kill -9 "$PID" 2>/dev/null || true
+            # Record ONLY a real guest boot: the guest's "A\n" line is present
+            # (FC's banner is on stdout too but never matches an exact "A" line).
+            if grep -qx A "fc-axisA-out-$i.log" 2>/dev/null; then
+              echo $(( t1 - t0 )) >> fc-axisA-ns.txt
+            fi
+          done
+          echo "Axis-A FC samples: $(wc -l < fc-axisA-ns.txt)"
+          # If FC produced no valid sample, surface its first stderr (the real
+          # reason) + a hexdump of stdout so a regression is diagnosable instead
+          # of silently reporting zero.
+          if [ ! -s fc-axisA-ns.txt ]; then
+            echo "::warning::Axis-A Firecracker booted the nano-guest 0/${BENCH_ITERS} times — diagnostics below"
+            echo "--- fc-axisA-fc.log (FC's own structured log, banner moved here) ---"; head -c 2000 fc-axisA-fc.log 2>/dev/null || true; echo
+            echo "--- fc-axisA-err-1.log (FC stderr) ---"; head -c 800 fc-axisA-err-1.log 2>/dev/null || true; echo
+            echo "--- fc-axisA-out-1.log FULL guest stdout (does 'A' appear => did the guest run?) ---"
+            cat fc-axisA-out-1.log 2>/dev/null | head -c 600 | od -c | head -10 || true
+          fi
+
+      # ----------------------------------------------------------------------
+      # Emit the NEW Axis-A table (common nano-guest) + the AXISA-RESULT line,
+      # BEFORE the existing per-axis table. Reuses the same stat_ns/ms helpers.
+      # ----------------------------------------------------------------------
+      - name: Emit Axis-A (common nano-guest) table + AXISA-RESULT
+        if: env.KVM_OK == '1'
+        run: |
+          stat_ns() {  # prints "median p99 min n" (ns) for a file of ns samples
+            local f="$1"
+            if [ ! -s "$f" ]; then echo "NA NA NA 0"; return; fi
+            sort -n "$f" | awk '
+              { a[NR]=$1 } END {
+                n=NR
+                med = (n%2) ? a[int(n/2)+1] : int((a[n/2]+a[n/2+1])/2)
+                p99i = int(n*0.99); if (p99i < 1) p99i=1; if (p99i > n) p99i=n
+                printf "%d %d %d %d\n", med, a[p99i], a[1], n
+              }'
+          }
+          ms() { if [ "$1" = "NA" ]; then echo "NA"; else awk -v v="$1" 'BEGIN{printf "%.3f", v/1e6}'; fi; }
+
+          read TV_MED TV_P99 TV_MIN TV_N < <(stat_ns tbvmm-axisA-host-ns.txt)
+          read FC_MED FC_P99 FC_MIN FC_N < <(stat_ns fc-axisA-ns.txt)
+          read NV_MED NV_P99 NV_MIN NV_N < <(stat_ns tbvmm-axisA-native-ns.txt)
+
+          RATIO="NA"
+          if [ "$TV_MED" != "NA" ] && [ "$FC_MED" != "NA" ] && [ "$TV_MED" -gt 0 ]; then
+            RATIO=$(awk -v fc="$FC_MED" -v tv="$TV_MED" 'BEGIN{printf "%.1fx", fc/tv}')
+          fi
+
+          # Scrapeable stdout line (mirrors the existing BENCH-RESULT line) so
+          # `gh run view --log` + any dashboard scraper picks it up.
+          echo "AXISA-RESULT | guest=common-nano-pvh tbvmm-median=$(ms $TV_MED)ms p99=$(ms $TV_P99)ms fc-median=$(ms $FC_MED)ms p99=$(ms $FC_P99)ms ratio=$RATIO n=$TV_N tbvmm-native-median=$(ms $NV_MED)ms"
+          {
+            echo "## Axis-A — PURE VMM-spawn (ONE common dual-note nano-guest, the TRUE apples-to-apples)"
+            echo ""
+            echo "Both VMMs boot the **identical** ~4.8 KiB dual-note PVH+tb-boot nano-guest, whose only work is one COM1 (\`0x3f8\`) sentinel byte then halt. The host-timed \`spawn → first serial byte\` delta is therefore pure VMM-spawn overhead (KVM open + VM create + irqchip + guest-RAM memslots + vCPU create + sregs/regs setup + first-exit dispatch), modulo the irreducible 32-bit-PVH vs 64-bit-long-mode entry floor (one I/O write each)."
+            echo ""
+            echo "| System | guest | median | p99 | min | n |"
+            echo "|---|---|---:|---:|---:|---:|"
+            echo "| **tb-vmm** | common nano-guest (tb-boot v0) | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
+            echo "| **Firecracker** | common nano-guest (PVH) | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
+            echo ""
+            echo "**Headline (the ONLY fair cross-system claim):** on this same runner, booting the SAME binary, tb-vmm spawn→first-byte is **${RATIO}** vs Firecracker (Axis-A median, host date+poll for both)."
+            echo ""
+            echo "Cross-check (informational, NOT the ratio source): tb-vmm's native in-process \`--report-spawn\` 0x510 clock median = **$(ms $NV_MED) ms** (n=$NV_N). It is below the host-polled number by a roughly constant poll overhead that is the same for FC, so the ratio is stable. Firecracker has no 0x510 equivalent, so the ratio is computed from the host date+poll column for BOTH."
+            echo ""
+            echo "### Honesty guardrails"
+            echo "- **Absolute ms are runner-relative** (nested-virt shared GitHub runner); only the **tb-vmm/FC ratio on the same runner** is the fair claim."
+            echo "- This is the TRUE apples-to-apples Axis-A: ONE common nano-guest, ~zero identical work. **Never** a \"0.5 ms vs 103/125 ms\" headline — that is Firecracker booting a real Linux kernel (Axis-C, a DIFFERENT guest OS), not VMM spawn."
+            echo "- We do **not** claim to beat the shared KVM floor (world-switch, EPT, vCPU bring-up are host-KVM-bound and inherited by any guest); Axis-A measures the userspace-VMM spawn path on top of it."
+            echo "- nano-guest is built ONE binary (Strategy A); see bench/nano-guest/README.md for the verified dual-note layout + the Strategy-B fallback."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
       # Compute median / p99 / min for each series + emit the honest per-axis
       # comparison table to the step summary, with the runner-relative caveat,
       # the tb-vmm/FC ratio headline, and the forbidden-claim note.
@@ -243,18 +438,20 @@ jobs:
           # the plain run log), so the result is visible from `gh run view --log`.
           echo "BENCH-RESULT | axisA tb-vmm-median=$(ms $TV_MED)ms p99=$(ms $TV_P99)ms fc-median=$(ms $FC_MED)ms p99=$(ms $FC_P99)ms ratio=$RATIO (n=$TV_N) | axisB boot-ready-cycles=$BRC_DEC tsc-base-hz=$TSC_DEC B_MS=$B_MS"
           {
-            echo "## TABOS vs Firecracker boot bench (same KVM runner)"
+            echo "## TABOS vs Firecracker boot bench (same KVM runner) — supplementary axes"
+            echo ""
+            echo "> The TRUE apples-to-apples VMM-spawn comparison is **Axis-A (common nano-guest)** in the table ABOVE (one binary, both VMMs). The rows here are SUPPLEMENTARY: the old \"Axis-A′\" compares DIFFERENT guests (tb-vmm boots the full TABOS kernel vs Firecracker boots a real Linux kernel) and is kept only as the end-to-end / guest-only context — it is NOT the apples-to-apples VMM-spawn number."
             echo ""
             echo "Runner CPU: \`$CPU\` · Firecracker \`$FC_VER\` (CI guest \`$FC_CI_VERSION\`) · iters/axis: \`$BENCH_ITERS\`"
             echo ""
             echo "| Axis | What it measures | System | median | p99 | min | n |"
             echo "|---|---|---|---:|---:|---:|---:|"
-            echo "| **A** VMM-spawn | host spawn → guest-ready (apples-to-apples) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
-            echo "| **A** VMM-spawn | host spawn → first guest serial byte | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
+            echo "| **A′** different-guests | host spawn → guest-ready, booting the FULL TABOS kernel (0x510) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
+            echo "| **A′** different-guests | host spawn → first serial byte, booting a REAL Linux kernel (= Axis C) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
             echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | TABOS | ${B_CELL} | — | — | 1 |"
             echo "| **C** end-to-end | spawn → first serial byte (REAL Linux kernel boots) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
             echo ""
-            echo "**Headline (the ONLY fair cross-system claim):** on this same runner, tb-vmm spawn→ready is **${RATIO}** vs Firecracker spawn→first-serial-byte (axis A median)."
+            echo "**A′ note (NOT apples-to-apples):** these two rows boot DIFFERENT guests, so their ratio (${RATIO}) is a full-stack/end-to-end contrast, not VMM spawn. For the fair VMM-spawn ratio on ONE common binary see the Axis-A table above."
             echo ""
             echo "Axis B detail: \`boot-ready-cycles=${BRC_HEX:-NA}\` (= ${BRC_DEC} cycles) ÷ measured \`tsc-base-hz=${TSC_HEX:-NA}\` (= ${TSC_DEC} Hz) ≈ **${B_MS} ms** — the VMM-independent, unikernel-class figure (NOT comparable to axis C ms)."
             echo ""
