@@ -423,8 +423,8 @@ mod tests {
 
     #[test]
     fn dabt_isv0_or_s1ptw_is_not_emulatable() {
-        // ISV=0 -> not emulatable (no decoder).
-        assert!(!dabt_is_emulatable((0 << 24) | (0b10 << 22)));
+        // ISV=0 (bit24 clear) -> not emulatable (no decoder); SAS=word is ignored.
+        assert!(!dabt_is_emulatable(0b10 << 22));
         // ISV=1 but S1PTW=1 -> not emulatable (the wrong thing faulted).
         assert!(!dabt_is_emulatable((1 << 24) | (1 << 7)));
         // The full 5-bit SRT recovers x31 (the 0xF-mask negative control).
