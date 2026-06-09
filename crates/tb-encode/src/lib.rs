@@ -42,6 +42,15 @@
 //!    Activation `bla_raw` that drives recall + the M17 FORGET sweep, the
 //!    `minmax` score normalizer, and the M18 frozen-evaluator `skill_transform`
 //!    -- panic/overflow-freedom + bounds proven over UNTRUSTED memory metadata.
+//!  * [`stage2`] -- the L2.1 aarch64 second-stage (stage-2) descriptor + control
+//!    algebra: the `s2_leaf_2mib`/`s2_leaf_4k`/`s2_table` VMSAv8-64 stage-2 entry
+//!    encoders (S2AP=RW, MemAttr Normal-WB, mandatory AF, block/page/table low
+//!    bits, address via the shared `make_entry`) plus the `vtcr`/`vttbr` packers
+//!    -- the ARM analog of the EPT encoders, proven well-formed.
+//!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
+//!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
+//!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
+//!    the stage-2 demand-fault handler classifies aborts with (total, no panic).
 //!
 //! ## Verification
 //!
@@ -51,10 +60,12 @@
 //! identity, total/fail-closed decoding, and the page-table/EPT entry bit
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
+pub mod el2_trap;
 pub mod ipc_frame;
 pub mod memscore;
 pub mod paging;
 pub mod route;
+pub mod stage2;
 pub mod vmx;
 
 // The Kani proof harnesses. Gated on `cfg(kani)` (set ONLY under `cargo kani`)

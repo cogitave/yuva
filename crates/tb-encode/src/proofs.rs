@@ -26,12 +26,20 @@
 //! Each harness carries a NEGATIVE-CONTROL note: the concrete code break that
 //! would turn it FAILED, so the suite is provably non-vacuous.
 
+use crate::el2_trap::{
+    esr_dfsc, esr_ec, esr_is_translation_fault, esr_s1ptw, esr_wnr, hpfar_fault_ipa, EC_DABT_LOW,
+    EC_HVC64, EC_IABT_LOW,
+};
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
 use crate::paging::{
     entry_addr, ept_leaf_2mib, ept_nonleaf, eptp, level_index, make_entry, ENTRIES,
     ENTRY_ADDR_MASK, EPT_MAPS_PAGE, EPT_MEMTYPE_WB, EPT_RWX, EPT_WALK_LEN_MINUS_1, SHIFT_1G,
     SHIFT_2M, SHIFT_4K, SHIFT_512G,
+};
+use crate::stage2::{
+    s2_leaf_2mib, s2_leaf_4k, s2_table, vtcr, vttbr, vttbr_baddr, S2AP_RW, S2_AF, S2_DESC_BLOCK,
+    S2_DESC_PAGE, S2_DESC_TABLE, VTCR_RES1, VTTBR_VMID_SHIFT,
 };
 use crate::vmx::{adjust, clamp_fixed, decode_tss_base};
 
@@ -387,4 +395,183 @@ fn kani_minmax_in_scale_range() {
     let r = minmax(&vals, i);
     assert!(r >= 0);
     assert!(r <= 1000); // SCALE
+}
+
+// ===========================================================================
+// L2.1: aarch64 stage-2 descriptor + control-register encoders (`stage2.rs`).
+//
+// The ARM second-stage analog of the EPT proofs above: each asserts only
+// UNCONDITIONALLY-TRUE, bounded well-formedness over a documented reachable
+// envelope (memattr a 4-bit field, page-aligned addresses, T0SZ/SL0/PS in their
+// legal field widths, VMID 16-bit), so the lane can never trip the #49
+// over-quantification trap. Cloned from the `kani_ept_*` style.
+// ===========================================================================
+
+/// A stage-2 2 MiB block leaf is well-formed: S2AP=RW set, the MemAttr field in
+/// `[5:2]` equals the input, AF set, the block low bits (`0b01`), and the
+/// (2 MiB-aligned) address preserved. The 4 KiB-page variant carries the page
+/// low bits (`0b11`) instead. The exact stage-2 twin of `kani_ept_leaf_wellformed`.
+///
+/// DOMAIN: `pa` 2 MiB-aligned and within the `[47:12]` field; `memattr` a 4-bit
+/// MemAttr value in `[5:2]` (every caller passes `S2_MEMATTR_NORMAL_WB` or
+/// `S2_MEMATTR_DEVICE`, both `<= 0xF<<2`), so the attribute bits never overlap
+/// the address field.
+///
+/// NEGATIVE CONTROL: dropping `S2_AF` from `s2_leaf_2mib` makes the `e & S2_AF`
+/// assert FAIL -- the cleared-Access-Flag abort-on-first-access bug (TABOS
+/// installs no AF-fault handler, so a leaf without AF faults the guest's load).
+#[kani::proof]
+fn kani_s2_leaf_wellformed() {
+    let pa: u64 = kani::any();
+    kani::assume(pa & 0x1F_FFFF == 0); // 2 MiB aligned
+    kani::assume(pa <= ENTRY_ADDR_MASK); // fits the [47:12] address field
+    let memattr_idx: u64 = kani::any();
+    kani::assume(memattr_idx < 16); // a valid 4-bit MemAttr value
+    let memattr = memattr_idx << 2; // shifted into the [5:2] field
+
+    let blk = s2_leaf_2mib(pa, memattr);
+    assert_eq!(blk & S2AP_RW, S2AP_RW); // read/write
+    assert_eq!((blk >> 2) & 0xF, memattr_idx); // MemAttr == input
+    assert!(blk & S2_AF != 0); // AF mandatory (the abort-on-first-access guard)
+    assert_eq!(blk & 0b11, S2_DESC_BLOCK); // block leaf low bits
+    assert_eq!(blk & ENTRY_ADDR_MASK, pa); // address preserved
+
+    // The 4 KiB page variant carries the same attrs but page low bits (0b11).
+    let pg = s2_leaf_4k(pa, memattr);
+    assert_eq!(pg & 0b11, S2_DESC_PAGE);
+    assert!(pg & S2_AF != 0);
+    assert_eq!(pg & ENTRY_ADDR_MASK, pa);
+}
+
+/// A stage-2 table descriptor is `child | 0b11` with the child address intact,
+/// and `VTTBR_EL2` packs the VMID into `[63:48]` WITHOUT colliding the BADDR
+/// (`[47:12]`) field -- the two are bit-disjoint. The stage-2 twin of
+/// `kani_ept_nonleaf_and_eptp`.
+///
+/// DOMAIN: `child`/`root` 4 KiB-aligned; `vmid` a 16-bit value (the widest
+/// FEAT_VMID16 VMID -- ARMv8.0's 8-bit VMID is a strict subset).
+///
+/// NEGATIVE CONTROL: packing the VMID as `vmid << 47` (one bit low) would set
+/// BADDR bit[47] for any odd VMID, so `vttbr_baddr(vt) == root` would FAIL (the
+/// VMID bleeding into the root-address field).
+#[kani::proof]
+fn kani_s2_table_and_vttbr() {
+    let child: u64 = kani::any();
+    kani::assume(child & 0xFFF == 0); // 4 KiB-aligned table frame
+    let t = s2_table(child);
+    assert_eq!(t & 0b11, S2_DESC_TABLE);
+    assert_eq!(t & ENTRY_ADDR_MASK, child & ENTRY_ADDR_MASK);
+
+    let root: u64 = kani::any();
+    kani::assume(root & 0xFFF == 0);
+    let vmid: u64 = kani::any();
+    kani::assume(vmid < (1u64 << 16)); // 16-bit VMID envelope
+    let vt = vttbr(root, vmid);
+    assert_eq!((vt >> VTTBR_VMID_SHIFT) & 0xFFFF, vmid); // VMID in [63:48]
+    assert_eq!(vttbr_baddr(vt), root & ENTRY_ADDR_MASK); // BADDR preserved
+    // BADDR and VMID fields are structurally disjoint -- the VMID never overlaps
+    // the address field (the negative control's `vmid << 47` would break this).
+    assert_eq!(ENTRY_ADDR_MASK & (0xFFFFu64 << VTTBR_VMID_SHIFT), 0);
+}
+
+/// `VTCR_EL2` packs each field into its own slice -- T0SZ `[5:0]`, SL0 `[7:6]`,
+/// TG0 `[15:14]`, PS `[18:16]` -- with RES1 bit[31] set and NO field overlap.
+/// The ARM twin of the EPTP walk-length proof: a wrong SL0 for the chosen T0SZ
+/// is the classic stage-2 off-by-one walk-length bug, fenced here.
+///
+/// DOMAIN: each field bounded to its real width (T0SZ 6-bit, SL0/TG0 2-bit, PS
+/// 3-bit, the cacheability fields 2-bit) -- the reachable VTCR programming space.
+///
+/// NEGATIVE CONTROL: shifting SL0 into bits `[5:4]` instead of `[7:6]` would
+/// collide the top of T0SZ, so `v & 0x3F == t0sz` (T0SZ readback) would FAIL.
+#[kani::proof]
+fn kani_vtcr_wellformed() {
+    let t0sz: u64 = kani::any();
+    kani::assume(t0sz < (1 << 6));
+    let sl0: u64 = kani::any();
+    kani::assume(sl0 < (1 << 2));
+    let tg0: u64 = kani::any();
+    kani::assume(tg0 < (1 << 2));
+    let ps: u64 = kani::any();
+    kani::assume(ps < (1 << 3));
+    let sh0: u64 = kani::any();
+    kani::assume(sh0 < (1 << 2));
+    let orgn0: u64 = kani::any();
+    kani::assume(orgn0 < (1 << 2));
+    let irgn0: u64 = kani::any();
+    kani::assume(irgn0 < (1 << 2));
+
+    let v = vtcr(t0sz, sl0, tg0, ps, sh0, orgn0, irgn0);
+    assert_eq!(v & 0x3F, t0sz); // T0SZ  [5:0]
+    assert_eq!((v >> 6) & 0x3, sl0); // SL0   [7:6]  (the walk-length field)
+    assert_eq!((v >> 8) & 0x3, irgn0); // IRGN0 [9:8]
+    assert_eq!((v >> 10) & 0x3, orgn0); // ORGN0 [11:10]
+    assert_eq!((v >> 12) & 0x3, sh0); // SH0   [13:12]
+    assert_eq!((v >> 14) & 0x3, tg0); // TG0   [15:14]
+    assert_eq!((v >> 16) & 0x7, ps); // PS    [18:16]
+    assert!(v & VTCR_RES1 != 0); // RES1  bit[31]
+}
+
+/// `ESR_EL2` decoding is TOTAL: for EVERY 32-bit syndrome, EC/DFSC/WnR/S1PTW
+/// decode without panic into their bounded ranges, and the translation-fault
+/// classification is EXACT (true iff the full 6-bit DFSC is `0x04..=0x07`). The
+/// three dispatch EC constants are distinct. Clone of `kani_ipc_frame_decode_total`
+/// + `kani_level_index_bounds`.
+///
+/// NEGATIVE CONTROL: masking DFSC with `0x1F` instead of `0x3F` (in `esr_dfsc`)
+/// would mis-class a fault like `0x27` (DFSC bit[5] set, low bits `0b0111`) as a
+/// level-3 translation fault, so the `esr_is_translation_fault == (ref in 4..=7)`
+/// equality (with `ref` computed from the full `& 0x3F`) would FAIL.
+#[kani::proof]
+fn kani_esr_decode_total() {
+    let esr: u64 = kani::any();
+    let ec = esr_ec(esr);
+    let dfsc = esr_dfsc(esr);
+    let wnr = esr_wnr(esr);
+    let s1ptw = esr_s1ptw(esr);
+    assert!(ec < 64); // EC is a 6-bit field
+    assert!(dfsc < 64); // DFSC is the full 6-bit field
+    assert!(wnr < 2); // single bit
+    assert!(s1ptw < 2); // single bit
+
+    // Translation-fault classification is exact against an INDEPENDENT 6-bit
+    // re-derivation taken DIRECTLY from the raw syndrome (`esr & 0x3F`), NOT via
+    // `esr_dfsc` (the fn under test). Deriving the reference through `esr_dfsc`
+    // would move both sides of the equality together (tautological); inlining
+    // the `& 0x3F` mask here makes the negative control real -- an `esr_dfsc`
+    // `0x1F`-masking bug makes `esr_is_translation_fault` (which routes through
+    // `esr_dfsc`) disagree with this reference on e.g. `0x27`, reddening the lane.
+    let ref_dfsc = esr & 0x3F;
+    let ref_is_xlat = ref_dfsc >= 0x04 && ref_dfsc <= 0x07;
+    assert_eq!(esr_is_translation_fault(esr), ref_is_xlat);
+
+    // The three dispatch classes are distinct (the handler routes on them).
+    assert!(EC_HVC64 != EC_DABT_LOW);
+    assert!(EC_DABT_LOW != EC_IABT_LOW);
+    assert!(EC_HVC64 != EC_IABT_LOW);
+}
+
+/// `hpfar_fault_ipa` is page-aligned (low 12 bits 0) for ALL inputs and, over
+/// the reachable HPFAR domain, lands within the 52-bit PA space. The faulting
+/// IPA the demand-map handler splices a leaf for can therefore never be
+/// mis-aligned or out of range.
+///
+/// DOMAIN: `hpfar < 2^44` -- FIPA occupies `HPFAR[43:4]`, bits above are RES0,
+/// so a real HPFAR readback is always within this bound; it keeps `(hpfar &
+/// !0xF) << 8 < 2^52`. The page-alignment half holds for EVERY u64 with no
+/// assumption.
+///
+/// NEGATIVE CONTROL: `(hpfar & !0xF) << 4` (instead of `<< 8`) would leave the
+/// extracted bits in `[11:8]`, so the `ipa & 0xFFF == 0` page-alignment assert
+/// would FAIL -- the IPA mislocated by a factor of 16.
+#[kani::proof]
+fn kani_hpfar_fault_ipa() {
+    let hpfar: u64 = kani::any();
+    // Page-alignment is unconditional over the full input space.
+    assert_eq!(hpfar_fault_ipa(hpfar) & 0xFFF, 0);
+
+    // Within the reachable FIPA field, the IPA fits the 52-bit PA space.
+    kani::assume(hpfar < (1u64 << 44));
+    let ipa = hpfar_fault_ipa(hpfar);
+    assert!(ipa < (1u64 << 52));
 }

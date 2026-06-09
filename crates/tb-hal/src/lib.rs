@@ -2401,6 +2401,73 @@ pub fn el2_selftest() -> El2Proof {
 }
 
 // ===========================================================================
+// L2.1: stage-2 demand-translation self-test facade (the aarch64 analog of x86
+// EPT-violation handling — the SECOND L2 sovereignty rung, one EL down from the
+// stage-1 MMU and built ON TOP of L2.0's resident EL2 monitor).
+//
+// Where L2.0 proved TABOS *is* the hypervisor (a real EL1<->EL2 world-switch),
+// L2.1 proves the R/W second-stage leaf is THE isolation primitive: inside a
+// short self-test window the EL2 monitor arms stage-2 (HCR_EL2.VM=1) over a
+// table that identity-maps everything the guest needs to RUN but leaves ONE IPA
+// gigabyte a deliberate HOLE; the EL1 guest stub touches it, faults to EL2 as a
+// stage-2 translation fault, the monitor reads HPFAR_EL2, demand-maps a leaf,
+// and ERETs WITHOUT advancing ELR so the guest re-executes the load and closes
+// the round-trip — the citable ARM equivalent of the x86 `touch-unmapped-GPA ->
+// reason-48 -> map -> INVEPT -> resume` loop. ALL the silicon-unsafe/asm is
+// confined to `arch/aarch64/{stage2,el2,el2_vectors}.rs` (stage-2 is OFF for the
+// whole M0..M18 + L2.0 run and torn down before this returns — zero regression),
+// so this crate stays unsafe-free and the kernel only branches on a closed enum.
+// On x86_64 (no EL2/stage-2) it is N/A — mirroring the `El2Proof` block one rung
+// up, with the stage-2 demand path standing in for VMX's nested-guest exit.
+// ===========================================================================
+
+/// L2.1 stage-2 demand-translation self-test outcome (returned to the kernel for
+/// marker rendering). A SIBLING of [`El2Proof`] (not an overload): the proof is a
+/// closed demand-fault round-trip (`fault -> demand-map -> ERET-retry`) rather
+/// than a trap-and-emulate HVC exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage2Proof {
+    /// This arch has no EL2/stage-2 (x86_64): VMX-root + EPT is its analog.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so
+    /// stage-2 is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean demand-translation (build OOM, S1PTW, the wrong fault
+    /// IPA, a non-translation abort, a missing pre-built table, a bad magic, or
+    /// an unserved fault); `code` is the nonzero diagnostic (surfaced honestly as
+    /// a red marker WITHOUT a "stage2 OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the EL1-guest stage-2 abort was caught, demand-mapped, and the
+    /// retried load succeeded — the demand-translation round-trip closed.
+    /// `fault_ipa` is the faulting Intermediate Physical Address the monitor read
+    /// from `HPFAR_EL2` (the deliberate hole, `0x1_4000_0000`).
+    Proven {
+        /// The demand-faulted IPA the stage-2 leaf was spliced for.
+        fault_ipa: u64,
+    },
+}
+
+/// L2.1: run the stage-2 demand-translation self-test (aarch64), or report
+/// [`Stage2Proof::NotApplicable`] on x86_64. See [`Stage2Proof`].
+#[cfg(target_arch = "aarch64")]
+pub fn stage2_selftest() -> Stage2Proof {
+    arch::stage2_selftest()
+}
+
+/// L2.1: x86_64 has no EL2/stage-2 — the VMX-root + EPT path (see
+/// [`vmx_selftest`]) is this arch's realization of the rung, so this reports
+/// [`Stage2Proof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn stage2_selftest() -> Stage2Proof {
+    Stage2Proof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //

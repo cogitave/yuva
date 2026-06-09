@@ -70,13 +70,21 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.0: el2 OK' missing" >&2
         exit 1
     fi
+    # L2.1: the stage-2 demand-translation proof must ALSO print (the EL2 monitor
+    # arms stage-2, the EL1 guest faults the deliberate IPA hole, the monitor
+    # demand-maps + ERET-retries, and tears stage-2 down before unwinding). Assert
+    # it directly so the el2 -> stage2 -> virtio order is fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.1: stage2 OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.1: stage2 OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

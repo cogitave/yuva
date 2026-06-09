@@ -55,14 +55,17 @@ jobs:
   # Task #49 encoder proof gate. Machine-proves the PURE silicon-adjacent
   # encoders/validators -- the VMX control-MSR adjust legality gate (the #1 cause
   # of silent VM-entry failure), the CR0/CR4 fixed-bit clamp, the TSS-base decode,
-  # the page-table/EPT entry encoders, and the 16-byte IPC frame codec + bounded
-  # ring -- over the host-verifiable `tb-encode` crate (the SAME pure code tb-hal
-  # CALLS to feed its VMX/EPT/MMU asm, byte-identically). A SECOND, INDEPENDENT
-  # job so it neither shares state with nor can break the M11 `prove-caps` lane
-  # above. Runs `cargo kani -p tb-encode` (NEVER --workspace -- that would drag
-  # tb-hal's inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO
-  # failures AND that SUCCESSFUL == the pinned EXPECTED_HARNESSES before emitting
-  # the DoD marker `V1: kani-encoders OK` (fail-closed).
+  # the page-table/EPT entry encoders, the 16-byte IPC frame codec + bounded ring,
+  # and (L2.1) the aarch64 stage-2 descriptor + VTCR/VTTBR packers + the
+  # ESR_EL2/HPFAR_EL2 trap decoders -- over the host-verifiable `tb-encode` crate
+  # (the SAME pure code tb-hal CALLS to feed its VMX/EPT/MMU/stage-2 asm,
+  # byte-identically). A SECOND, INDEPENDENT job so it neither shares state with
+  # nor can break the M11 `prove-caps` lane above. Runs `cargo kani -p tb-encode`
+  # (NEVER --workspace -- that would drag tb-hal's inline asm into CBMC), then
+  # scripts/verify-encode.sh asserts ZERO failures AND that SUCCESSFUL == the
+  # pinned EXPECTED_HARNESSES (currently 20: the 15 original + the 5 L2.1 stage-2/
+  # el2_trap harnesses; bump in LOCKSTEP with scripts/verify-encode.sh) before
+  # emitting the DoD marker `V1: kani-encoders OK` (fail-closed).
   prove-encode:
     name: "prove #49 encoders (Kani)"
     runs-on: ubuntu-latest

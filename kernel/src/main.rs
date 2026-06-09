@@ -3355,6 +3355,41 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- L2.1: stage-2 demand-translation -- the aarch64 analog of x86 EPT-
+    // violation handling, the SECOND L2 rung built ON TOP of L2.0's resident EL2
+    // monitor. Inside a short self-test window the monitor arms stage-2
+    // (HCR_EL2.VM=1) over a table that identity-maps everything the guest needs
+    // to RUN but leaves ONE IPA gigabyte a deliberate HOLE; the EL1 guest stub
+    // touches it, faults to EL2 as a stage-2 translation fault, the monitor reads
+    // HPFAR_EL2, splices a stage-2 leaf, and ERETs WITHOUT advancing ELR so the
+    // guest re-executes the load and closes the round-trip -- the citable ARM
+    // equivalent of the x86 'touch unmapped GPA -> reason-48 -> map -> INVEPT ->
+    // resume' loop. Stage-2 is torn down (HCR.VM=0) BEFORE the monitor unwinds,
+    // so the kernel resumes here cleanly (zero regression). ALL the new asm/unsafe
+    // is confined to tb-hal's arch/aarch64/{stage2,el2,el2_vectors}.rs, so this
+    // crate stays unsafe-free; the kernel only branches on Stage2Proof. On x86_64
+    // there is no EL2/stage-2, so it reports the n/a path. DoD: "L2.1: stage2 OK".
+    match tb_hal::stage2_selftest() {
+        tb_hal::Stage2Proof::Proven { .. } => {
+            tb_hal::serial_write_str("L2.1: stage2 OK\n"); // <-- the L2.1 aarch64 DoD marker
+        }
+        tb_hal::Stage2Proof::Unavailable => {
+            // Not booted at EL2 (plain `virt`): graceful green skip, no stage-2 armed.
+            tb_hal::serial_write_str("L2.1: stage2 OK (no EL2, skipped)\n");
+        }
+        tb_hal::Stage2Proof::NotApplicable => {
+            // x86_64: no EL2/stage-2 -- the vmxroot block above is this arch's rung.
+            tb_hal::serial_write_str("L2.1: stage2 OK (aarch64-only, n/a on x86_64)\n");
+        }
+        tb_hal::Stage2Proof::Faulted { code } => {
+            // Booted at EL2 but the demand round-trip faulted -- surfaced honestly,
+            // with NO 'stage2 OK' substring, so the run-script grep fails (red).
+            tb_hal::serial_write_str("L2.1: stage2 FAIL code=");
+            write_hex_u64(code);
+            tb_hal::serial_write_byte(b'\n');
+        }
+    }
+
     // --- M19: poll-based virtio-mmio virtio-rng -- the kernel's FIRST real
     // device I/O, the new cumulative boot tail. A MODERN (Version=2) virtio-rng
     // (DeviceID 4) driven over ONE virtqueue: a hard-coded slot scan, the
