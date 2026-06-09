@@ -1,0 +1,76 @@
+# TABOS static-lint gate (Clippy).
+#
+# Runs Clippy with `-D warnings` over the PURE, host-buildable,
+# `#![forbid(unsafe_code)]` leaf crates -- `tb-caps-core` (the Rights algebra +
+# the generation-checked `CapTable<O>`), `tb-encode` (the VMX / paging / EPT
+# encoders, the IPC `MessageFrame` codec, the `model:` route parser, and the M13
+# `memscore` ranking math), and `tb-boot` (the boot-handoff ABI). These are the
+# SAME crates the Kani proofs (kani.yml) and the Miri Tier-0 UB gate (miri.yml)
+# cover -- the security-critical, formally-verified leaves -- so keeping them
+# lint-clean is the cheapest line of defense, caught before a reviewer ever sees
+# the diff.
+#
+# Scope note: this gate deliberately does NOT lint the bare-metal kernel or
+# `tb-hal`. Those target the custom `*-tabos-none` specs and need `-Zbuild-std`
+# (plus they carry the deliberately-unconfined silicon `unsafe`), so a
+# kernel-wide Clippy pass is a separate, larger effort. `-p <crate>` (never
+# `--workspace`) keeps this lane fast, host-native, and free of build-std.
+#
+# HARD GATE: any Clippy warning (promoted to an error by `-D warnings`) fails the
+# job; only a fully clean run reaches the marker `S0: clippy OK`. Advisory
+# (required-style) until the maintainer promotes it in branch protection --
+# exactly like kani.yml / miri.yml.
+
+name: clippy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy-leaf-crates:
+    name: "Static-lint gate (Clippy)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A nightly that ships clippy. dtolnay/rust-toolchain@nightly + the
+      # requested component resolves the most recent nightly DATE carrying it,
+      # then we pin that resolved toolchain via RUSTUP_TOOLCHAIN so the repo's
+      # bare-`nightly` rust-toolchain.toml cannot override it back to a possibly
+      # clippy-less latest nightly (same robustness as miri.yml).
+      - name: Install nightly + clippy
+        id: toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + git + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # THE HARD GATE. Clippy lints the lib AND test targets (`--all-targets`) of
+      # the three pure leaf crates; `-D warnings` turns any lint into a build
+      # error, so the job fails on the first finding. Only a clean run echoes the
+      # marker.
+      - name: Clippy gate over tb-caps-core + tb-encode + tb-boot
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: |
+          cargo clippy -p tb-caps-core -p tb-encode -p tb-boot --all-targets -- -D warnings
+          echo "S0: clippy OK"

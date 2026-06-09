@@ -573,7 +573,7 @@ mod tests {
         // 'T''B' occupy the top half of the type word.
         assert_eq!(
             (TB_NOTE_TYPE_ENTRY64 >> 16) as u16,
-            u16::from_be_bytes([b'T', b'B'])
+            u16::from_be_bytes(*b"TB")
         );
     }
 

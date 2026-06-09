@@ -350,7 +350,7 @@ mod tests {
         assert!(h.boot_info_addr + TbBootInfo::SIZE as u64 <= AARCH64_IMAGE_LMA);
         let regions_end = AARCH64_MEM_REGIONS_ADDR + regions.len() as u64 * TbMemRegion::SIZE as u64;
         assert!(regions_end <= AARCH64_CMDLINE_ADDR);
-        assert!(AARCH64_CMDLINE_ADDR + cmdline.len() as u64 + 1 <= AARCH64_IMAGE_LMA);
+        assert!(AARCH64_CMDLINE_ADDR + (cmdline.len() as u64) < AARCH64_IMAGE_LMA);
     }
 
     #[test]

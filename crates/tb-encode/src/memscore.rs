@@ -22,7 +22,7 @@
 //! concrete monotonicity/correctness vectors and the `prove-encode` Kani lane
 //! proves panic/overflow-freedom + result bounds over UNTRUSTED memory metadata
 //! -- exactly the `vmx` / `paging` / `ipc_frame` / `route` precedent. `#![no_std]`
-//! + `#![forbid(unsafe_code)]` (inherited from the crate root): pure integer
+//! and `#![forbid(unsafe_code)]` (inherited from the crate root): pure integer
 //! arithmetic, zero alloc, zero deps.
 //!
 //! ## Reachable-input envelope (a SOUNDNESS note, read before extending a proof)
