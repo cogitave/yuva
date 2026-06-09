@@ -251,9 +251,10 @@ const FAIL_TRAP_BAD_SYSREG: u64 = 0x0000_0D23_0000_0007;
 /// A data abort that was NOT emulatable (ISV=0 / S1PTW=1 -- TABOS has no
 /// instruction decoder, so it fails closed, the KVM `KVM_EXIT_ARM_NISV` analog).
 const FAIL_TRAP_MMIO_NISV: u64 = 0x0000_0D23_0000_0008;
-/// A data abort at an IPA that was not the expected device IPA (an unexpected
-/// stage-2 fault while the trap window was armed).
-const FAIL_TRAP_BAD_IPA: u64 = 0x0000_0D23_0000_0009;
+// 0x0000_0D23_0000_0009 (was FAIL_TRAP_BAD_IPA) is retired: a data abort at a
+// NON-device IPA is no longer a failure -- `el2_mmio_emulate` now DEFERS it to
+// the L2.1 stage-2 demand handler (IPA is the ground-truth window discriminator),
+// so a bad/stale armed flag can never mis-route an L2.1 fault into a trap fail.
 /// Could not build the device stage-2 tables at EL1 (physical-frame OOM).
 const FAIL_TRAP_BUILD: u64 = 0x0000_0D23_0000_000A;
 
@@ -726,8 +727,20 @@ fn el2_mmio_emulate(frame: *mut Frame, esr: u64) -> ! {
     let fault_ipa = hpfar_fault_ipa(hpfar);
     let dev_ipa = super::el2mmio::device_ipa();
     if fault_ipa != dev_ipa {
-        super::el2mmio::disarm_trap_el2();
-        el2_return_to_kernel(FAIL_TRAP_BAD_IPA, fault_ipa);
+        // The faulting IPA is NOT our emulated device window, so this is not an
+        // MMIO access to handle here. The StageTwoAbort dispatch keys on the
+        // el2mmio armed FLAG, but a flag is not a reliable window discriminator at
+        // every guest-RAM init state: if it reads stale-nonzero (observed only on
+        // some QEMU builds where the zero-init monitor static is not coherent at
+        // L2.1 time -- TCG's no-cache model hides it on most), an L2.1 hole fault
+        // can land here. The faulting IPA from HPFAR_EL2 is the GROUND TRUTH, so
+        // DEFER a non-device fault to the L2.1 stage-2 demand-fault handler rather
+        // than failing closed -- which makes L2.1 immune to a spuriously-armed
+        // el2mmio flag. During the genuine L2.3 window the device stage-2
+        // identity-maps all of GiB0+GiB1, so NO non-device fault is ever taken
+        // here (the only fault is the device IPA == dev_ipa); this branch is the
+        // L2.1-mis-route guard only.
+        aarch64_el2_stage2_abort(frame, esr);
     }
     // The abort MUST be emulatable: ISV=1 (a single-GP LDR/STR TABOS can decode)
     // and S1PTW=0. Else fail closed (the KVM `KVM_EXIT_ARM_NISV` early-out --
