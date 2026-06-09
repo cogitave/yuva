@@ -330,43 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn handoff_is_the_block_the_el2_monitor_splices_for_al2_4() {
-        // aL2.4 bridge: the (deferred) full-kernel-as-guest rung will have the
-        // EL2 monitor splice `build_handoff`'s register file into the guest
-        // frame's gpr[0]/elr/spsr instead of KVM_SET_ONE_REG. This host-testable
-        // assertion freezes the EXACT contract the monitor must honour:
-        //   * X0 = TbBootInfo* (the guest's `_tb_start` boot-info pointer),
-        //   * X1=X2=X3 = 0 (the rest of the `_tb_start` arg file is clear),
-        //   * PC = the EL1 entry (-> the monitor's ELR_EL2),
-        //   * PSTATE = 0x3c5 EL1h+DAIF (-> the monitor's SPSR_EL2; IDENTICAL to
-        //     the in-repo el2.rs `SPSR_EL1H_DAIF` the aL2.0..aL2.4 erets use).
-        let mut ram = ram();
-        let regions = [TbMemRegion::new(0x4000_0000, 0x0800_0000, MemKind::Ram)];
-        let entry = 0x4008_0000u64;
-        let h = build_handoff(&mut ram, &regions, b"", entry).unwrap();
-
-        // The six RegWrites the monitor splices, by SEMANTIC role.
-        let x0 = h.regs.iter().find(|r| r.id == AARCH64_REG_X0).unwrap();
-        let x1 = h.regs.iter().find(|r| r.id == AARCH64_REG_X1).unwrap();
-        let x2 = h.regs.iter().find(|r| r.id == AARCH64_REG_X2).unwrap();
-        let x3 = h.regs.iter().find(|r| r.id == AARCH64_REG_X3).unwrap();
-        let pc = h.regs.iter().find(|r| r.id == AARCH64_REG_PC).unwrap();
-        let pstate = h.regs.iter().find(|r| r.id == AARCH64_REG_PSTATE).unwrap();
-
-        // X0 = TbBootInfo* -> the guest frame's gpr[0]; the rest of the arg file clear.
-        assert_eq!(x0.value, h.boot_info_addr, "X0 must be the TbBootInfo pointer");
-        assert_eq!(x0.value, AARCH64_BOOT_INFO_ADDR);
-        assert_eq!((x1.value, x2.value, x3.value), (0, 0, 0), "X1..X3 must be 0");
-        // PC -> ELR_EL2; PSTATE -> SPSR_EL2 == the el2.rs eret SPSR (EL1h+DAIF).
-        assert_eq!(pc.value, entry, "PC must be the EL1 _tb_start entry");
-        assert_eq!(pstate.value, AARCH64_PSTATE_EL1H_DAIF, "PSTATE must be EL1h+DAIF");
-        assert_eq!(pstate.value, 0x3c5, "the EL2 monitor's SPSR_EL2 contract is 0x3c5");
-        // Exactly six register writes -- nothing else is spliced.
-        assert_eq!(h.regs.len(), AARCH64_HANDOFF_REG_COUNT);
-        assert_eq!(AARCH64_HANDOFF_REG_COUNT, 6);
-    }
-
-    #[test]
     fn reg_id_constants_match_kvm_arm64_one_reg_table() {
         assert_eq!(KVM_REG_ARM_CORE_BASE, 0x6030_0000_0010_0000);
         assert_eq!(AARCH64_REG_X0, 0x6030_0000_0010_0000);

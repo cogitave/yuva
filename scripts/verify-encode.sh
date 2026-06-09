@@ -26,13 +26,9 @@ set -euo pipefail
 # s2_leaf_wellformed, s2_table_and_vttbr, vtcr_wellformed, esr_decode_total,
 # hpfar_fault_ipa + L2.2 el2-exits classifier x1: exit_classifier_total + L2.3
 # trap-and-emulate ISS decoders x2: sysreg_iss_decode_total, dabt_iss_decode_total
-# + aL2.4 guest-S1-enable x1: sctlr_el1_guest_enable -- proving the guest's
-# SCTLR_EL1.M|C|I enable word sets EXACTLY bits {0,2,12}, preserves all other
-# baseline bits, and is idempotent (the "S1 after S2" step the aL2.4 guest runs
-# under our stage-2). -- one per syndrome family / encoder, each proving totality
-# AND round-trip correctness).
+# -- one per syndrome family, each proving totality AND round-trip correctness).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=24
+EXPECTED_HARNESSES=23
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

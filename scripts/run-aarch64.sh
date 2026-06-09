@@ -97,24 +97,13 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.3: el2-trap OK' missing" >&2
         exit 1
     fi
-    # aL2.4: the EL2 nested-guest (GENUINE two-stage) proof must ALSO print (the
-    # monitor arms the GiB0+GiB1 identity stage-2, the EL1 guest BUILDS + ENABLES
-    # its OWN stage-1 under our stage-2, stores+reads back a sentinel through a VA
-    # with no flat meaning -- a genuine VA->IPA->PA two-stage walk -- takes its OWN
-    # EL1 brk trap, and the monitor tears stage-2 down + restores the kernel's
-    # stage-1 sysregs before unwinding). Assert it directly so the el2 -> stage2 ->
-    # el2-exits -> el2-trap -> el2-guest -> virtio order is fail-closed + traceable.
-    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.4: el2-guest OK'; then
-        echo "[run-aarch64] FAIL -- final marker present but 'L2.4: el2-guest OK' missing" >&2
-        exit 1
-    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

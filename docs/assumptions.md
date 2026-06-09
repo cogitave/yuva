@@ -49,41 +49,10 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   MSR/MRS ISS decoders and the Data-Abort MMIO ISS decoders, each TOTAL over every
   64-bit `ESR` AND round-trip-correct against an independent literal-Arm-ARM-shift
   reference, the trap-and-emulate decode the aL2.3 handler classifies sysreg/MMIO
-  accesses with). aL2.4 adds ONE more — `kani_sctlr_el1_guest_enable` (the guest's
-  `SCTLR_EL1` first-stage ENABLE word: `sctlr_el1_guest_enable(baseline)` OR-sets
-  EXACTLY bits {0,2,12} = `M|C|I`, preserves every other baseline bit, and is
-  idempotent — the load-bearing "S1-after-S2" step the aL2.4 guest runs to bring
-  its first stage up UNDER our second stage, pinned to a machine-checked invariant
-  rather than a hand-written asm immediate). The `prove-encode` CI lane fails
-  closed on a pinned **`EXPECTED_HARNESSES = 24`** (the 15 pre-L2.1 harnesses +
-  the 5 L2.1 lemmas + the 1 L2.2 classifier lemma + the 2 L2.3 ISS-decoder lemmas +
-  the 1 aL2.4 SCTLR-enable lemma), so a silently deleted, renamed, or vacuous
-  harness reddens the lane.
-
-- **The aL2.4 nested-guest glue + the EL1-side teardown (silicon-unsafe, OUTSIDE
-  the proof boundary; a GENUINELY-NEW teardown surface vs aL2.0..aL2.3).** The
-  `tb-hal/arch/aarch64/{el2,el2_nested_vectors,stage2}.rs` glue that arms the
-  GiB0+GiB1 identity stage-2 (`HCR_EL2.VM=1`), erets into a minimal guest that
-  BUILDS + ENABLES its OWN stage-1 (reusing the proven `make_entry`/`level_index`
-  encoders + the byte-for-byte mmu.rs MAIR/TCR geometry, locked by const-asserts),
-  performs a GENUINE two-stage store/load through a VA with no flat meaning, and
-  takes its OWN EL1 `brk` exception, is silicon-unsafe and outside the proof
-  boundary — exercised end-to-end by the `L2.4: el2-guest OK` boot self-test
-  (the guest magic `0x2E5` requires BOTH the two-stage readback AND the EL1 trap,
-  with an INDEPENDENT EL2-side identity-alias readback the guest cannot fake;
-  fail-closed family `0x02E5_*`). **NEW RESIDUAL ASSUMPTION:** unlike aL2.0..aL2.3
-  (where the guest never touched EL1 sysregs), the aL2.4 guest MUTATES its OWN
-  `TTBR0_EL1`/`TCR_EL1`/`MAIR_EL1`/`SCTLR_EL1`/`VBAR_EL1`. The facade SAVES these
-  five sysregs before `hvc #8` and RESTORES them after the round-trip (plus an
-  `isb` + local `TLBI VMALLE1`/`IC IALLU`), so the kernel resumes on its OWN
-  stage-1 with no stale guest translation surviving — the EL1-side teardown, the
-  one genuinely-new teardown step. The marker discipline catches a miss: `M19:
-  virtio OK` must still print AFTER `L2.4: el2-guest OK` (proving clean kernel
-  resume, the same teardown-proof aL2.1 uses). Cache-coherency caveat (carried
-  from aL2.0/aL2.1): the EL2-side identity-alias readback (EL2 `SCTLR_EL2.M=0`,
-  non-cacheable) reads RAM the guest wrote cacheable; coherent under TCG (no cache
-  model), and the load-bearing verdict is the GUEST's own readback (x0=0x2E5), with
-  the EL2 alias readback as secondary corroboration only.
+  accesses with). The `prove-encode` CI lane fails closed on a pinned
+  **`EXPECTED_HARNESSES = 23`** (the 15 pre-L2.1 harnesses + the 5 L2.1 lemmas +
+  the 1 L2.2 classifier lemma + the 2 L2.3 ISS-decoder lemmas), so a silently
+  deleted, renamed, or vacuous harness reddens the lane.
 
 - **The L2.3 trap-and-emulate glue (silicon-unsafe, OUTSIDE the proof boundary).**
   The `tb-hal/arch/aarch64/{el2mmio,el2,stage2}.rs` glue that arms the trap window

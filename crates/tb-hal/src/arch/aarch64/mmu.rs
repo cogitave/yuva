@@ -164,21 +164,6 @@ const TCR_VALUE: u64 = 25 // T0SZ, bits[5:0]: 64 - 25 = 39-bit VA, 3 levels @ 4 
     | (1 << 23) // EPD1  = disable TTBR1_EL1 walks
     | (0b010 << 32); // IPS = 40-bit PA (ID_AA64MMFR0.PARange encoding 0b010)
 
-/// aL2.4: expose `MAIR_VALUE` so `el2.rs`'s nested-guest const-assert can lock
-/// the guest's mirrored `MAIR_EL1` to the kernel's M3 value byte-for-byte (the
-/// guest reuses the REAL kernel stage-1 geometry, not a toy copy). A `const fn`,
-/// so the check runs at compile time and a drift is a build error.
-pub(super) const fn mmu_mair_value() -> u64 {
-    MAIR_VALUE
-}
-
-/// aL2.4: expose `TCR_VALUE` so `el2.rs`'s nested-guest const-assert can lock the
-/// guest's mirrored `TCR_EL1` to the kernel's M3 value byte-for-byte. See
-/// [`mmu_mair_value`].
-pub(super) const fn mmu_tcr_value() -> u64 {
-    TCR_VALUE
-}
-
 /// SCTLR_EL1.M, bit 0: stage-1 MMU enable for EL1&0.
 const SCTLR_M: u64 = 1 << 0;
 /// SCTLR_EL1.C, bit 2: data / unified cache enable.

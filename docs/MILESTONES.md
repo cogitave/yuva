@@ -253,7 +253,6 @@ L2.0: el2 OK                     # aarch64: genuine EL2 world-switch under TCG; 
 L2.1: stage2 OK                  # aarch64: genuine stage-2 demand-translation round-trip under TCG; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.2: el2-exits OK               # aarch64: genuine ESR_EL2.EC exit-dispatch round-trip under TCG (WFx-resume + fail-closed inject-UNDEF default, classify_exit Kani-proven); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.3: el2-trap OK                # aarch64: genuine trap-and-EMULATE round-trip under TCG (HCR_EL2.TVM sysreg-write trap + HCR_EL2.VM MMIO device-IPA abort, SYS64/DABT ISS decoders Kani-proven, routed through the device_mmio SEAM, ELR_EL2 advanced +4 past each trapped insn); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
-L2.4: el2-guest OK               # aarch64: a REAL minimal TABOS guest at EL1 under our EL2 stage-2 with its OWN stage-1 MMU live -- a GENUINE two-stage walk (VA->guest-S1->IPA->our-S2->PA), the guest's own stage-1 walk itself S1PTW-re-translated; the guest BUILDS+ENABLES its stage-1 (reusing the proven make_entry/level_index + mmu.rs MAIR/TCR geometry; SCTLR_EL1.M via the Kani-proven sctlr_el1_guest_enable), stores+reads back a sentinel through a no-flat-meaning VA, AND takes its OWN EL1 brk trap (EL1->EL1, not an EL2 exit); magic 0x2E5 needs BOTH, with an independent EL2-side identity-alias readback the guest cannot fake; HVC#9 tears stage-2 down FIRST + the facade restores the kernel's TTBR0/TCR/MAIR/SCTLR/VBAR_EL1 (the new EL1-side teardown) so M19 resumes clean; the LITERAL full-kernel-as-guest is deferred to aL2.4b; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 M19: virtio OK                   # the LAST cumulative marker: the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
 ```
 
@@ -307,10 +306,9 @@ Two machine-checked guarantees back the chain:
   `0x16` HVC64) and the faulting IPA (`kani_esr_decode_total`,
   `kani_hpfar_fault_ipa`). The `.github/workflows/kani.yml` `prove-encode` job
   runs `cargo kani -p tb-encode` and **fails closed** unless every harness
-  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 24`
-  (`scripts/verify-encode.sh`, bumped from 15 in lockstep across the L2.1–L2.4
-  rungs: +5 stage-2/ESR, +1 exit-classifier, +2 sysreg/DABT ISS, +1 SCTLR_EL1),
-  then emits `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
+  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 20`
+  (`scripts/verify-encode.sh`, bumped from 15 in lockstep with the five new
+  lemmas), then emits `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
   `prove-caps` job in the same workflow; neither can break the other.)
 - **Tier-0 UB gate (Miri).** `cargo miri test -p tb-caps-core -p tb-encode`
   interprets the EXACT pure host-runnable leaf crates the kernel runs (the same
@@ -338,7 +336,7 @@ Six CI lanes guard the tree:
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
-| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 24 harnesses) |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 20 harnesses) |
 | **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
 
 ## 3. Development pipeline
