@@ -53,6 +53,19 @@ use tb_encode::kancell::{
 // byte-identical to a host-verified model. Structural tamper-evidence only (NOT
 // cryptographic -- proposal §2).
 use tb_encode::prov::{self, ProvEntry, PROV_HASH_LEN};
+// M23: the verified EXPERIENCE CODEC leaf -- the fixed-width injective
+// `ExperienceRecord` encoder (`exp::canon`), the fixed-capacity drop-oldest in-RAM
+// replay ring (`exp::ExpRing`), the bit-exact dormant-shadow replay
+// (`exp::replay_shadow`), and the SEPARATE per-agent `xp_head` fold over the
+// canonical bytes (REUSING the M22 `prov` fold via `exp::xp_append`, NOT a new
+// fold). `tb-hal` CALLS these next to the M17 forget/recall decision sites, exactly
+// as it calls `kan_score`/`bla_raw`/`prov::append`; the math (canon-injectivity /
+// replay-determinism / ring totality / fold tamper-sensitivity / schema-stability)
+// is Kani-proven in `tb-encode::exp`. The learned cell stays DORMANT
+// (`KAN_ACTIVE == false`): the shadow is logged ONLY, never changing a demote, so
+// the live forget/demote decision is BYTE-IDENTICAL to M22's. Strictly downstream /
+// observational -- no perturbation of `clock`/finsts/the M22 `chain_head`.
+use tb_encode::exp::{self, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN};
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
 const SCALE: i64 = 1000;
@@ -78,6 +91,46 @@ const PROV_SCRATCH: usize = 256;
 /// record's id). Bounds the `PROV_SCRATCH` sizing above.
 #[allow(dead_code)]
 const PROV_SCRATCH_PARENTS: usize = 4;
+
+// --- M23 experience-codec constants (the verified Monitor/log layer) ----------
+//
+// A SEPARATE per-agent `xp_head` + a fixed-capacity drop-oldest in-RAM `xp_ring`
+// (proposal §4) -- ALONGSIDE, never inside, the M22 `chain_head` (so M22 stays
+// byte-identical). At each M17 forget/recall decision the seam records an injective
+// `ExperienceRecord` (the features it ALREADY computes + the heuristic action + the
+// COUNTERFACTUAL `kan_score` the DORMANT cell would produce) and folds it into
+// `xp_head` via the REUSED M22 fold. The learned cell stays DORMANT (`KAN_ACTIVE`
+// untouched=false); the live demote is byte-identical to M22's.
+
+/// Fixed experience-ring capacity (drop-oldest FIFO). Bounds the in-RAM log this
+/// milestone (durable spill to M20 is M24 -- NOT touched here). Sized so the boot
+/// self-test's >=3 forget + >=1 recall records fit with headroom; on overflow the
+/// oldest row is dropped (the recency bias is NAMED in proposal §8). No alloc: the
+/// ring is a fixed `[[u8; EXP_CANON_LEN]; XP_CAP]` POD inside the substrate.
+const XP_CAP: usize = 64;
+
+/// The concrete experience ring type the substrate embeds: `XP_CAP` rows of
+/// `EXP_CANON_LEN` canonical bytes each (the Kani-proven fixed-capacity ring).
+type ExpRing = exp::ExpRing<XP_CAP, EXP_CANON_LEN>;
+
+/// The dormant comparator's flag/bias terms fed to the COUNTERFACTUAL `kan_score`
+/// shadow -- identical to the M21 dormant seam (`KAN_FLAG_TERMS`/`KAN_BIAS`, both
+/// `0`). Kept named here so the shadow evaluation provably uses the SAME terms the
+/// (dead) M21 active branch would, so a recorded feats row replays bit-exactly.
+const XP_SHADOW_FLAG_TERMS: i32 = KAN_FLAG_TERMS;
+const XP_SHADOW_BIAS: i32 = KAN_BIAS;
+
+/// M23 [`ExperienceRecord::action_taken`] codes (proposal §3): the heuristic action
+/// the deterministic logging policy actually served at the decision site.
+const XP_ACTION_KEEP: u8 = 0;
+const XP_ACTION_DEMOTE: u8 = 1;
+const XP_ACTION_TOUCH: u8 = 2;
+
+/// M23 [`ExperienceRecord::envelope_verdict`] codes: whether the heuristic safety
+/// envelope marked the record demotable (`safe_to_demote`) at the decision site.
+const XP_ENV_PINNED: u8 = 0;
+const XP_ENV_DEMOTABLE: u8 = 1;
+const XP_ENV_TOUCH: u8 = 2;
 
 // --- M17 sleep-time consolidation / reflection / forgetting constants ---------
 // All fixed-point integer (deterministic / replayable), beside SCALE/TOKEN_QUOTA.
@@ -755,6 +808,185 @@ pub(crate) fn prov_selftest() -> crate::ProvProof {
     }
 }
 
+// --- M23: the verified experience-codec self-test (the marker body) ----------
+
+/// The number of real records the M23 round-trip writes before forcing a sweep.
+const EXP_SELFTEST_WRITES: u64 = 3;
+
+/// M23: run the per-agent EXPERIENCE-CODEC round-trip self-test and report a
+/// [`crate::ExpProof`]. 100% SAFE, no device, no scheduler -- pure value computation
+/// over the Kani-proven `tb_encode::exp` leaf and the real [`MemSubstrate`]
+/// forget/recall path.
+///
+/// It SEEDS a deterministic memory-pressure scenario that forces >= 1
+/// envelope-clearing forget iteration (so `records >= 3`): write
+/// `EXP_SELFTEST_WRITES` (>=3) low-importance records, advance the clock well past
+/// `MIN_AGE`, and run the ACTUAL M17 [`MemSubstrate::forget_sweep`] -- each examined
+/// record past the grace window records an OBSERVATIONAL `FORGET_DECISION` into the
+/// SEPARATE `xp_head` + ring (the `kan_score` shadow evaluated as a counterfactual,
+/// `KAN_ACTIVE` untouched). Then drive >= 1 [`MemSubstrate::recall`] to record a
+/// `RECALL_TOUCH`. It proves: (a) the independently re-folded committed record ids
+/// equal the running `xp_head` AND a genuine inclusion proof verifies; (b) a recorded
+/// `feats` row REPLAYED through the dormant `kan_score` reproduces the logged
+/// `kan_score_shadow` BIT-IDENTICALLY; (c) heuristic-decision FAITHFULNESS: a recorded
+/// `FORGET_DECISION`'s `action_taken`/`envelope_verdict` re-derive from the live
+/// record's envelope; (d) a single-byte tamper of a COMMITTED record's canonical
+/// bytes is CAUGHT (head-mismatch AND inclusion-fail); and reports `kan_active`
+/// (asserted `false` on the decision path -- the shadow changed ZERO demotes). The
+/// marker is withheld unless every leg holds.
+pub(crate) fn exp_selftest() -> crate::ExpProof {
+    let fail = |head: u64, records: u64| crate::ExpProof {
+        clean_ok: false,
+        inclusion_ok: false,
+        replay_bitexact: false,
+        heuristic_faithful: false,
+        tamper_caught: false,
+        kan_active: KAN_ACTIVE,
+        head,
+        records,
+    };
+
+    // (seed) A fresh RAM-backed substrate; write N >= 3 low-importance records (each
+    // envelope-eligible to demote) so the forced sweep below produces forget-decisions.
+    let mut sub = MemSubstrate::new();
+    let mut w = 0u64;
+    while w < EXP_SELFTEST_WRITES {
+        let key = 0x00E_4000 + w; // a distinct known token per write
+        // importance 1 (< IMP_PIN), so the heuristic envelope marks it demotable.
+        if sub.write(0, key, 0xEEE_0000 + w, 1).is_none() {
+            return fail(0, 0);
+        }
+        w += 1;
+    }
+
+    // Drive >= 1 recall FIRST, while the records are still HOT (recall filters demoted
+    // tiers, so a recall after the sweep would find no candidate). The recall ranks
+    // the first written token; a hit records a RECALL_TOUCH (the censoring access
+    // event proposal §4 calls load-bearing) into the SAME experience log.
+    let _ = sub.recall(0x00E_4000, 0, 1, 0);
+
+    // THEN force >= 1 envelope-clearing forget iteration: advance the clock well past
+    // MIN_AGE so the aged, low-importance, default-utility records clear the envelope.
+    // Each examined record records an observational FORGET_DECISION.
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let _demoted = sub.forget_sweep();
+
+    let committed = sub.xp_head();
+    let ids = sub.xp_ids().to_vec();
+    let nrec = ids.len();
+    // We must have at least the >=3 forget-decisions (the recall touch is a bonus).
+    if nrec < EXP_SELFTEST_WRITES as usize {
+        return fail(exp::xp_head_witness(committed), nrec as u64);
+    }
+
+    // (a) CLEAN: independently re-fold the committed record ids and confirm the head;
+    //     a genuine inclusion proof for the FIRST committed record verifies.
+    let leaf = ids[0];
+    let siblings: Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+    let clean_ok = exp::xp_recompute(leaf, &siblings) == committed;
+    let inclusion_ok = exp::xp_verify_inclusion(leaf, &siblings, committed);
+
+    // (b) REPLAY-BITEXACT (the headline): decode a recorded FORGET_DECISION ring row,
+    //     replay its feats through the dormant kan_score, and require bit-identity to
+    //     the logged kan_score_shadow. Scan the ring for the first forget-decision.
+    //     Also confirm BOTH a forget-decision AND a recall-touch were recorded (the
+    //     DoD: >=3 forget-decisions at the M17 site + >=1 recall-touch).
+    let mut replay_bitexact = false;
+    let mut heuristic_faithful = false;
+    let mut saw_forget = false;
+    let mut saw_touch = false;
+    let ring_len = sub.xp_ring_len();
+    {
+        let mut s = 0usize;
+        while s < ring_len {
+            if let Some(row) = sub.xp_ring_row(s) {
+                if let Some(rec) = exp::decode(&row) {
+                    if rec.kind == exp::kind::FORGET_DECISION {
+                        saw_forget = true;
+                    } else if rec.kind == exp::kind::RECALL_TOUCH {
+                        saw_touch = true;
+                    }
+                }
+            }
+            s += 1;
+        }
+    }
+    let mut i = 0usize;
+    while i < ring_len {
+        if let Some(row) = sub.xp_ring_row(i) {
+            if let Some(rec) = exp::decode(&row) {
+                if rec.kind == exp::kind::FORGET_DECISION {
+                    // REPLAY: the SAME kan_score over the SAME feats + dormant terms.
+                    let replayed = exp::replay_shadow(
+                        &KAN_TABLE,
+                        &rec.feats,
+                        XP_SHADOW_FLAG_TERMS,
+                        XP_SHADOW_BIAS,
+                    );
+                    replay_bitexact = replayed == rec.kan_score_shadow;
+
+                    // (c) HEURISTIC FAITHFULNESS: re-derive the envelope verdict from
+                    //     the live record (looked up by decision_id) and confirm the
+                    //     recorded action/verdict agree. Every seeded record is aged +
+                    //     low-importance + default-utility, so safe_to_demote is true ->
+                    //     the recorded action must be DEMOTE and verdict DEMOTABLE.
+                    for r in sub.t3.records.iter() {
+                        if r.id == rec.decision_id {
+                            let age = sub.clock.saturating_sub(r.t_created);
+                            let bla = bla_raw(r.count, age);
+                            let util = (r.c_succ as i64 + 1) * SCALE / (r.c_use as i64 + 2);
+                            let safe = bla < THETA_DEMOTE
+                                && (r.importance as i64) < IMP_PIN
+                                && util < UTIL_PIN;
+                            let exp_action =
+                                if safe { XP_ACTION_DEMOTE } else { XP_ACTION_KEEP };
+                            let exp_verdict =
+                                if safe { XP_ENV_DEMOTABLE } else { XP_ENV_PINNED };
+                            heuristic_faithful = rec.action_taken == exp_action
+                                && rec.envelope_verdict == exp_verdict;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // (d) TAMPER: faithfully reconstruct the FIRST committed record's bytes from the
+    //     ring row, confirm prov_hash(canon) == ids[0] (so the tamper hits a REAL
+    //     committed record), flip one byte, and require BOTH head-mismatch AND
+    //     inclusion-fail. The first committed record is the first ring row (the ring
+    //     has not yet wrapped: 3 forget-decisions + 1 touch << XP_CAP).
+    let mut tamper_caught = false;
+    if let Some(row0) = sub.xp_ring_row(0) {
+        let leaf0 = exp::xp_hash(&row0);
+        if leaf0 == ids[0] {
+            let mut tampered = row0;
+            tampered[0] ^= 0x01; // perturb a real field byte (decision_id low byte)
+            let bad_leaf = exp::xp_hash(&tampered);
+            let head_mismatch = exp::xp_recompute(bad_leaf, &siblings) != committed;
+            let inclusion_failed =
+                !exp::xp_verify_inclusion(bad_leaf, &siblings, committed);
+            tamper_caught = bad_leaf != ids[0] && head_mismatch && inclusion_failed;
+        }
+    }
+
+    crate::ExpProof {
+        // The clean-log leg ALSO requires both record kinds present (the DoD's
+        // >=1 forget-decision at the M17 site AND >=1 recall-touch).
+        clean_ok: clean_ok && saw_forget && saw_touch,
+        inclusion_ok,
+        replay_bitexact,
+        heuristic_faithful,
+        tamper_caught,
+        kan_active: KAN_ACTIVE,
+        head: exp::xp_head_witness(committed),
+        records: nrec as u64,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.
@@ -1080,6 +1312,26 @@ pub(crate) struct MemSubstrate {
     /// keeps it bounded by the same `TOKEN_QUOTA` write-amplification cap the tiers
     /// share (an unbounded ledger would defeat the space-bank). Small + heap-`Vec`.
     ledger_ids: Vec<[u8; PROV_HASH_LEN]>,
+    /// M23: the SEPARATE per-agent EXPERIENCE-LOG head -- a 256-bit running fold over
+    /// every recorded [`ExperienceRecord`]'s canonical bytes, ALONGSIDE (never inside)
+    /// the M22 [`chain_head`](Self::chain_head). Genesis is all-zero; each
+    /// [`MemSubstrate::xp_record`] folds the new record's structural digest into it
+    /// via the REUSED M22 `tb_encode::prov` fold (`exp::xp_append`). The head makes
+    /// the experience log TAMPER-EVIDENT (any single-byte mutation to a committed
+    /// record invalidates the recomputed head) -- proven by the boot `exp_selftest`.
+    /// Kept IN-RAM this milestone (durable spill is M24); it does NOT touch the M22
+    /// head, so M22's persist/prov witnesses stay byte-identical.
+    xp_head: [u8; PROV_HASH_LEN],
+    /// M23: the fixed-capacity, drop-oldest in-RAM experience RING -- the bounded
+    /// window of recorded canonical bytes the boot self-test replays over (Lin 1992 /
+    /// Mnih DQN). A fixed `[[u8; EXP_CANON_LEN]; XP_CAP]` POD (NO alloc, NO panic at
+    /// capacity -- the Kani-proven [`exp::ExpRing`]); on full the oldest row is
+    /// dropped (the recency bias is NAMED in proposal §8).
+    xp_ring: ExpRing,
+    /// M23: the committed experience-record ids in append order (the per-agent
+    /// experience chain), for the boot self-test's genuine inclusion proofs. Bounded
+    /// by the same write-amplification discipline; small + heap-`Vec`.
+    xp_ids: Vec<[u8; PROV_HASH_LEN]>,
 }
 
 impl MemSubstrate {
@@ -1124,6 +1376,11 @@ impl MemSubstrate {
             // M22: genesis ledger head (all-zero) + an empty per-agent chain.
             chain_head: [0u8; PROV_HASH_LEN],
             ledger_ids: Vec::new(),
+            // M23: genesis experience head (all-zero), an empty fixed-capacity ring,
+            // and an empty per-agent experience chain -- SEPARATE from the M22 head.
+            xp_head: [0u8; PROV_HASH_LEN],
+            xp_ring: ExpRing::new(),
+            xp_ids: Vec::new(),
         }
     }
 
@@ -1190,6 +1447,63 @@ impl MemSubstrate {
     #[allow(dead_code)]
     pub(crate) fn ledger_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
         &self.ledger_ids
+    }
+
+    /// M23: record ONE [`ExperienceRecord`] into the SEPARATE per-agent experience
+    /// log -- encode via the Kani-proven `exp::canon`, fold the canonical bytes into
+    /// [`xp_head`](Self::xp_head) via the REUSED M22 fold (`exp::xp_append`), push the
+    /// row into the fixed-capacity drop-oldest [`xp_ring`](Self::xp_ring), and remember
+    /// the id. FAIL-SOFT (the caller uses `let _ =`): a scratch overflow (unreachable
+    /// for the fixed-width record) leaves the head un-advanced rather than panicking or
+    /// blocking the sweep. Strictly downstream/observational: it touches NO
+    /// `clock`/finsts/M22-head state, so the live M17 decision + the M22 ledger are
+    /// byte-identical. Returns the new record's 256-bit id, or `None` on overflow.
+    fn xp_record(&mut self, rec: &ExperienceRecord) -> Option<[u8; PROV_HASH_LEN]> {
+        // Encode once into a fixed-width row (the record is fixed-width, so canon
+        // never truncates into a full-size buffer); the SAME bytes are folded into the
+        // head AND pushed into the ring (the boot self-test replays the ring rows
+        // against the head). The fold is the REUSED M22 leaf: hash the canonical bytes
+        // to a 256-bit id (`exp::xp_hash` == `prov::prov_hash`) then fold it into the
+        // running head (`exp::xp_chain_mix` == `prov::chain_mix`) -- NO new fold math.
+        let mut row = [0u8; EXP_CANON_LEN];
+        let n = exp::canon(rec, &mut row);
+        if n == 0 {
+            return None; // fail-soft: too-small buffer (unreachable) -- no head advance
+        }
+        let id = exp::xp_hash(&row);
+        self.xp_head = exp::xp_chain_mix(self.xp_head, id);
+        // Push the canonical row into the fixed-capacity ring (drop-oldest on full).
+        let _ = self.xp_ring.push(&row);
+        self.xp_ids.push(id);
+        Some(id)
+    }
+
+    /// M23: the current per-agent experience-log head (the running fold).
+    #[allow(dead_code)]
+    pub(crate) fn xp_head(&self) -> [u8; PROV_HASH_LEN] {
+        self.xp_head
+    }
+
+    /// M23: the committed experience-record ids in append order (read-only borrow).
+    /// The boot `exp_selftest` builds genuine inclusion proofs from this slice.
+    #[allow(dead_code)]
+    pub(crate) fn xp_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
+        &self.xp_ids
+    }
+
+    /// M23: read the `i`-th live experience-ring row (FIFO order; `0` == oldest), or
+    /// `None` if out of range. The boot `exp_selftest` REPLAYS the recorded feats from
+    /// these rows through the dormant `kan_score` and checks bit-identity to the logged
+    /// `kan_score_shadow`.
+    #[allow(dead_code)]
+    pub(crate) fn xp_ring_row(&self, i: usize) -> Option<[u8; EXP_CANON_LEN]> {
+        self.xp_ring.get(i).copied()
+    }
+
+    /// M23: the number of live experience-ring rows.
+    #[allow(dead_code)]
+    pub(crate) fn xp_ring_len(&self) -> usize {
+        self.xp_ring.len()
     }
 
     /// `tb_mem_write`: the Mem0 four-op write vocabulary. Returns the affected
@@ -1399,6 +1713,40 @@ impl MemSubstrate {
             value: wid,
         });
         self.finsts.push(wid, self.clock);
+        // M23: record a RECALL_TOUCH observation (proposal §4) -- a CENSORING access
+        // event referencing the touched record's id. Touches are the events that
+        // confound the naive regret proxy (recall filters demoted tiers), so logging
+        // them is load-bearing for M24's identifiability. The shadow score is still
+        // evaluated UNCONDITIONALLY over the touched record's quantized feats (the
+        // counterfactual the dormant cell would produce on a touch), `KAN_ACTIVE`
+        // untouched. Strictly downstream: this touches NO clock/finsts/M22-head state
+        // (it runs AFTER finsts.push, BEFORE the clock tick, and only folds xp_head).
+        {
+            let (touch_age, touch_count) = {
+                let r = &self.t3.records[widx];
+                (self.clock.saturating_sub(r.t_created), r.count)
+            };
+            let feats: [i32; KAN_FEATURES] = [
+                exp::quantize_feature(touch_age as i64),
+                exp::quantize_feature(touch_count as i64),
+                0,
+                0,
+            ];
+            let shadow = kan_score(&KAN_TABLE, &feats, XP_SHADOW_FLAG_TERMS, XP_SHADOW_BIAS);
+            let touch = ExperienceRecord {
+                decision_id: wid,
+                kind: exp::kind::RECALL_TOUCH,
+                feats,
+                envelope_verdict: XP_ENV_TOUCH,
+                action_taken: XP_ACTION_TOUCH,
+                kan_score_shadow: shadow,
+                logging_propensity_q: exp::PROPENSITY_DETERMINISTIC_Q,
+                logging_policy_kind: exp::policy_kind::DETERMINISTIC,
+                outcome: OutcomeLabel::Unset,
+                margin_q: 0,
+            };
+            let _ = self.xp_record(&touch);
+        }
         self.clock = self.clock.wrapping_add(1);
         Some(wid)
     }
@@ -1598,6 +1946,14 @@ impl MemSubstrate {
         let mut idx = start;
         let mut n = 0u64;
         for _ in 0..budget {
+            // M23: alongside the live decision, capture an OBSERVATIONAL
+            // ExperienceRecord for every record the sweep EXAMINES past the grace
+            // window (a real M17 forget-decision). The features are the SAME the M21
+            // dormant path quantizes; the `kan_score` shadow is evaluated
+            // UNCONDITIONALLY (counterfactual) even though `KAN_ACTIVE == false`, so
+            // the live demote stays byte-identical. Built inside the borrow scope, then
+            // recorded AFTER the borrow ends (strictly downstream).
+            let mut xp_obs: Option<ExperienceRecord> = None;
             let demote = {
                 let r = &self.t3.records[idx];
                 if r.t_invalid != 0 || r.tier != TIER_HOT {
@@ -1617,6 +1973,43 @@ impl MemSubstrate {
                         // this already-safe set, never widen it.
                         let safe_to_demote =
                             bla < THETA_DEMOTE && (r.importance as i64) < IMP_PIN && util < UTIL_PIN;
+                        // The SAME feats the M21 dormant path quantizes (recency/age,
+                        // access-frequency, + two reserved), onto the EXACT kancell grid so
+                        // the shadow is bit-exactly reconstructible (proposal §3). Built here
+                        // (inside the borrow) so the recorded context matches the live decision.
+                        let feats: [i32; KAN_FEATURES] = [
+                            exp::quantize_feature(age as i64),
+                            exp::quantize_feature(r.count as i64),
+                            0,
+                            0,
+                        ];
+                        // M23 COUNTERFACTUAL SHADOW: evaluate the dormant cell's would-be
+                        // score UNCONDITIONALLY (logged only, never on the live path). This
+                        // is the SAME `kan_score` over the SAME feats the M21 active branch
+                        // would use, so a recorded feats row REPLAYS to this value bit-exactly.
+                        let shadow =
+                            kan_score(&KAN_TABLE, &feats, XP_SHADOW_FLAG_TERMS, XP_SHADOW_BIAS);
+                        // The heuristic action the deterministic logging policy actually serves.
+                        let action = if safe_to_demote { XP_ACTION_DEMOTE } else { XP_ACTION_KEEP };
+                        let verdict = if safe_to_demote { XP_ENV_DEMOTABLE } else { XP_ENV_PINNED };
+                        // The behavior margin: how far BLA sat below/above the demote floor
+                        // (saturated into i16) -- cheap insurance for a later IPS/DR estimator.
+                        let margin = (bla - THETA_DEMOTE).clamp(i16::MIN as i64, i16::MAX as i64)
+                            as i16;
+                        xp_obs = Some(ExperienceRecord {
+                            decision_id: r.id,
+                            kind: exp::kind::FORGET_DECISION,
+                            feats,
+                            envelope_verdict: verdict,
+                            action_taken: action,
+                            kan_score_shadow: shadow,
+                            // RESERVED this milestone (degenerate sentinel + deterministic
+                            // policy + present-Unset outcome -- the schema-stability fields).
+                            logging_propensity_q: exp::PROPENSITY_DETERMINISTIC_Q,
+                            logging_policy_kind: exp::policy_kind::DETERMINISTIC,
+                            outcome: OutcomeLabel::Unset,
+                            margin_q: margin,
+                        });
                         // M21 DORMANT seam: when (and ONLY when) the spline is ACTIVE, a
                         // record that has CLEARED every envelope guard is additionally ranked
                         // by the verified additive-policy leaf -- the bounded `kan_score`
@@ -1627,12 +2020,8 @@ impl MemSubstrate {
                         // `KAN_ACTIVE` is `false` this milestone, so this branch is NEVER
                         // taken and the decision is byte-identical to the pre-M21 heuristic.
                         if KAN_ACTIVE && safe_to_demote {
-                            // Pre-quantize the record's continuous features onto the canonical
-                            // kancell grid, score, and re-threshold. (Dead this milestone.)
-                            let feats: [i32; KAN_FEATURES] =
-                                [age.min(1024) as i32, (r.count.min(1024)) as i32, 0, 0];
-                            let score = kan_score(&KAN_TABLE, &feats, KAN_FLAG_TERMS, KAN_BIAS);
-                            safe_to_demote && score < THETA_DEMOTE
+                            // Re-threshold the SAME shadow score. (Dead this milestone.)
+                            safe_to_demote && shadow < THETA_DEMOTE
                         } else {
                             // DORMANT (and the active-but-ineligible case): the heuristic floor
                             // decides, exactly as the pre-M21 chain did.
@@ -1641,6 +2030,11 @@ impl MemSubstrate {
                     }
                 }
             };
+            // M23: fold the observed forget-decision into the SEPARATE xp_head + ring
+            // (fail-soft, never panics/blocks). Strictly downstream of the live demote.
+            if let Some(rec) = xp_obs {
+                let _ = self.xp_record(&rec);
+            }
             if demote {
                 // Capture the demoted record's identity BEFORE the borrow ends, so
                 // the M22 tombstone records WHAT was forgotten (token + tier).

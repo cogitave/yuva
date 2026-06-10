@@ -3971,6 +3971,85 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M22: provenance OK\n");
     }
 
+    // ---- M23: verified EXPERIENCE CODEC + counterfactual shadow-recording -------
+    // The verified Monitor/log layer of the learning loop. At each M17 forget/recall
+    // decision the OS records an injective ExperienceRecord (the features it ALREADY
+    // computes + the heuristic action + the COUNTERFACTUAL `kan_score` the DORMANT
+    // cell would produce + RESERVED-but-unset propensity/outcome fields) into a
+    // fixed-capacity drop-oldest ring folded into a SEPARATE per-agent `xp_head`
+    // (REUSING the M22 fold -- the M22 `chain_head` is UNTOUCHED, so M22's
+    // persist/prov witnesses stay byte-identical). The learned cell stays DORMANT
+    // (`KAN_ACTIVE == false`): the shadow is logged ONLY, never changing a demote, so
+    // the live forget/demote decision is BYTE-IDENTICAL to M22's. The boot self-test
+    // SEEDS a memory-pressure scenario that forces >=3 forget-decisions + >=1
+    // recall-touch, then proves (a) the clean `xp_head` matches the committed head +
+    // a genuine inclusion proof, (b) a recorded feats row REPLAYED through the dormant
+    // `kan_score` reproduces `kan_score_shadow` BIT-IDENTICALLY, (c) heuristic-
+    // decision faithfulness, (d) a single-byte tamper of a committed record is caught.
+    // ALL value computation is the host-verifiable, Kani-proven `tb_encode::exp`
+    // (no_std, forbid(unsafe), NO float); this kernel stays zero-unsafe and only
+    // branches on the returned `ExpProof` bools. M23 claims ONLY replay-determinism +
+    // structural tamper-evidence -- NOT policy validity (the deterministic logging
+    // policy gives degenerate propensity; validity is M24's burden, the exogenous
+    // human-operator oracle is M25's). The honesty token
+    // `oracle=DECLARED-PROXY-DEFERRED-M24` is machine-emitted so the marker
+    // MECHANICALLY cannot overclaim. DoD: "M23: experience OK".
+    {
+        let xp = tb_hal::exp_selftest();
+        // FAIL-CLOSED: the clean log must verify (recompute==head) AND a genuine
+        // inclusion proof must verify AND a recorded feats row must replay BIT-EXACTLY
+        // AND the heuristic action must be faithfully recorded AND the injected tamper
+        // must be caught AND the learned cell must be DORMANT (kan_active==false -- the
+        // shadow changed zero demotes). Any false withholds the marker (renders a FAIL
+        // line with NO 'experience OK' substring) and exits red NOW (the #65 idiom).
+        if !xp.clean_ok
+            || !xp.inclusion_ok
+            || !xp.replay_bitexact
+            || !xp.heuristic_faithful
+            || !xp.tamper_caught
+            || xp.kan_active
+        {
+            tb_hal::serial_write_str("M23: experience FAIL clean=");
+            write_hex_u64(xp.clean_ok as u64);
+            tb_hal::serial_write_str(" inclusion=");
+            write_hex_u64(xp.inclusion_ok as u64);
+            tb_hal::serial_write_str(" replay-bitexact=");
+            write_hex_u64(xp.replay_bitexact as u64);
+            tb_hal::serial_write_str(" heuristic-faithful=");
+            write_hex_u64(xp.heuristic_faithful as u64);
+            tb_hal::serial_write_str(" tamper-caught=");
+            write_hex_u64(xp.tamper_caught as u64);
+            tb_hal::serial_write_str(" kan-active=");
+            write_hex_u64(xp.kan_active as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the
+        // run-scripts positively require): the codec/fold/replay/tamper verifiers
+        // provably RAN at boot over real forget-decisions + a recall-touch. The
+        // `oracle=` token is a LITERAL honesty string -- the marker mechanically
+        // cannot claim validity the deterministic stream cannot support.
+        tb_hal::serial_write_str("exp: head=");
+        write_hex_u64(xp.head);
+        tb_hal::serial_write_str(" records=");
+        write_hex_u64(xp.records);
+        tb_hal::serial_write_str(" replay-bitexact=");
+        write_hex_u64(xp.replay_bitexact as u64);
+        tb_hal::serial_write_str(" tamper-caught=");
+        write_hex_u64(xp.tamper_caught as u64);
+        tb_hal::serial_write_str(" kan_active=");
+        write_hex_u64(xp.kan_active as u64);
+        tb_hal::serial_write_str(" oracle=DECLARED-PROXY-DEFERRED-M24\n");
+        // The marker -- emitted ONLY when the clean head matches, the inclusion proof
+        // verifies, a recorded row replays bit-exactly, the heuristic action was
+        // faithfully recorded, AND the injected tamper was caught. The log is IN-RAM
+        // (durable spill is M24), so there is NO '(no log, skipped)' variant -- a skip
+        // is never legitimate (the run-scripts reject one). The marker uses ONLY
+        // recorded / replay-deterministic / tamper-evident terminology (no
+        // validated/evaluated -- the deterministic-logging honesty discipline).
+        tb_hal::serial_write_str("M23: experience OK\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();

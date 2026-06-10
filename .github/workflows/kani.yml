@@ -63,7 +63,7 @@ jobs:
   # nor can break the M11 `prove-caps` lane above. Runs `cargo kani -p tb-encode`
   # (NEVER --workspace -- that would drag tb-hal's inline asm into CBMC), then
   # scripts/verify-encode.sh asserts ZERO failures AND that SUCCESSFUL == the
-  # pinned EXPECTED_HARNESSES (currently 46: the 15 original + the 5 L2.1 stage-2/
+  # pinned EXPECTED_HARNESSES (currently 52: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -78,8 +78,15 @@ jobs:
   # kani_kan_envelope_no_widening + the 6 M22 prov verified provenance-ledger
   # harnesses: kani_prov_canon_injective (the load-bearing canon totality+injectivity
   # proof) / kani_prov_hash_total / kani_prov_chain_mix_tamper / kani_prov_inclusion_sound
-  # / kani_prov_canon_roundtrip / kani_prov_head_deterministic; bump in LOCKSTEP with
-  # scripts/verify-encode.sh) before emitting the DoD marker `V1: kani-encoders OK`
+  # / kani_prov_canon_roundtrip / kani_prov_head_deterministic + the 6 M23 exp verified
+  # experience-codec harnesses: kani_exp_canon_injective (the load-bearing fixed-width
+  # canon totality+injectivity proof, incl the reserved propensity + present-Unset
+  # outcome tag) / kani_exp_replay_determinism (a recorded feats row replays through the
+  # dormant kan_score to kan_score_shadow BIT-IDENTICALLY, feats bounded to the kancell
+  # clamp range) / kani_exp_ring_total / kani_exp_fold_tamper (reusing the M22 fold) /
+  # kani_exp_canon_roundtrip / kani_exp_schema_stability (Unset+sentinel has identical
+  # length+offsets to a populated record -- M24 cannot shift the fold); bump in LOCKSTEP
+  # with scripts/verify-encode.sh) before emitting the DoD marker `V1: kani-encoders OK`
   # (fail-closed).
   prove-encode:
     name: "prove #49 encoders (Kani)"

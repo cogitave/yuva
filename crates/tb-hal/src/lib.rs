@@ -3362,3 +3362,71 @@ pub struct ProvProof {
 pub fn prov_selftest() -> ProvProof {
     mem::prov_selftest()
 }
+
+// ===========================================================================
+// M23: verified EXPERIENCE-CODEC self-test facade. A SEPARATE per-agent, fixed-
+// capacity, tamper-evident EXPERIENCE LOG over the M17 forget/recall decisions:
+// at each decision the OS records an injective ExperienceRecord (the features it
+// ALREADY computes + the heuristic action + the COUNTERFACTUAL kan_score the
+// DORMANT cell would produce + RESERVED-but-unset propensity/outcome fields) into a
+// fixed-capacity drop-oldest ring folded into a SEPARATE per-agent `xp_head`
+// (REUSING the M22 fold -- the M22 `chain_head` is UNTOUCHED, so M22's persist/prov
+// witnesses stay byte-identical). The learned cell stays DORMANT (`KAN_ACTIVE ==
+// false`): the shadow is logged ONLY, never changing a demote, so the live
+// forget/demote decision is BYTE-IDENTICAL to M22's. The boot self-test seeds a
+// memory-pressure scenario that forces >=3 forget-decisions + >=1 recall-touch,
+// then proves replay-determinism (a recorded feats row replays through kan_score to
+// the logged shadow BIT-IDENTICALLY) + structural tamper-evidence + heuristic
+// faithfulness. M23 claims ONLY replay-determinism + structural tamper-evidence --
+// NOT policy validity (deterministic logging -> degenerate propensity; validity is
+// M24's burden, the exogenous human-operator oracle is M25's). The math is the
+// Kani-proven `tb_encode::exp`; the verdict is a pure-data struct the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`ProvProof`]).
+// ===========================================================================
+
+/// M23 experience-codec self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ProvProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpProof {
+    /// The CLEAN experience log verified: the independently re-folded committed
+    /// record ids equal the running `xp_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for a known committed record verified `== true`
+    /// against the clean `xp_head`. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// REPLAY-DETERMINISM (the headline): a recorded `feats` row replayed through the
+    /// dormant `kan_score` reproduced the logged `kan_score_shadow` BIT-IDENTICALLY.
+    /// The kernel requires this (rendered `replay-bitexact=0x1`).
+    pub replay_bitexact: bool,
+    /// HEURISTIC FAITHFULNESS: a recorded `FORGET_DECISION`'s `action_taken` /
+    /// `envelope_verdict` re-derive from the live record's heuristic envelope. The
+    /// kernel requires this (the log faithfully recorded the action actually served).
+    pub heuristic_faithful: bool,
+    /// A single-byte tamper of a COMMITTED record's canonical bytes was caught on
+    /// BOTH legs (head-mismatch AND inclusion-fail). The kernel requires this -- the
+    /// load-bearing structural tamper-evidence claim (rendered `tamper-caught=0x1`).
+    pub tamper_caught: bool,
+    /// Whether the learned cell is on the decision path. `false` this milestone (the
+    /// shadow is logged only, never changing a demote -- the live decision is
+    /// byte-identical to M22's). The run-scripts REQUIRE `kan_active=0` for this lane.
+    pub kan_active: bool,
+    /// A u64 WITNESS folded from the 32-byte committed `xp_head` (every head byte
+    /// contributes), rendered as `head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of committed experience records (the >=3 forget-decisions plus any
+    /// recall-touch), rendered as `records=<n>`.
+    pub records: u64,
+}
+
+/// M23: run the experience-codec round-trip self-test (both arches) and report the
+/// outcome. See [`ExpProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::exp` leaf and the real `mem::MemSubstrate` forget/recall path --
+/// seeds a memory-pressure scenario that forces >=3 forget-decisions + >=1
+/// recall-touch into a SEPARATE per-agent `xp_head` (the M22 head untouched),
+/// replays a recorded feats row through the dormant `kan_score` to prove bit-exact
+/// determinism, and injects a single-byte tamper into a committed record's canonical
+/// bytes; touches NO device and NO scheduler. `KAN_ACTIVE` stays `false` (the shadow
+/// changes zero demotes).
+pub fn exp_selftest() -> ExpProof {
+    mem::exp_selftest()
+}
