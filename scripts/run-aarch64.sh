@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M23: experience OK"
+MARKER="M24: bakeoff OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -233,6 +233,38 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M23 marker/witness carries a 'validated'/'evaluated' overclaim -- M23 records + replay-determines, it does NOT validate any policy (proposal §6 terminology discipline)" >&2
         exit 1
     fi
+    # M23 is no longer the top-level grep (M24 displaced it as the cumulative tail);
+    # assert it directly so the M23 -> M24 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M23: experience OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M23: experience OK' missing (M23 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M24 SOUNDNESS (anti-hollow-pass, the aL2.5/M20/M21/M22/M23 substring lesson): the
+    # 'M24: bakeoff OK' marker must be backed by the REAL bake-off witness -- the gate
+    # machinery (label + estimator + in-RAM replay + the envelope re-assertion) provably
+    # RAN. POSITIVELY require the witness 'bakeoff: vlo_kan=0x.. vhi_heur=0x.. margin=0x..
+    # ... cleared=0x.. ... no-float=1 envelope-no-widening=1' (so a marker printed WITHOUT
+    # running the estimator/gate FAILS). no-float=1 AND envelope-no-widening=1 are required.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'bakeoff: vlo_kan=0x[0-9a-fA-F]+ vhi_heur=0x[0-9a-fA-F]+ margin=0x[0-9a-fA-F]+ .*no-float=1 envelope-no-widening=1'; then
+        echo "[run-aarch64] FAIL -- M24 marker present but the real bake-off witness 'bakeoff: vlo_kan=.. vhi_heur=.. margin=.. .. no-float=1 envelope-no-widening=1' was NOT seen (hollow M24 pass)" >&2
+        exit 1
+    fi
+    # M24 DORMANCY (proposal §6/§7): on the (necessarily SYNTHETIC) traces this milestone
+    # the gate does NOT clear -- 'M24: bakeoff OK (gate-not-met)' (the cell stays DORMANT)
+    # is the DESIGNED, CORRECT outcome (the M21 '(heuristic floor, gate-not-met)' idiom).
+    # This lane does NOT assert an ACTIVE cell, so it ACCEPTS the dormant gate-not-met /
+    # gate-not-evaluable variants. A 'gate-cleared' here would mean the cell flipped ACTIVE
+    # on a synthetic trace -- which this milestone forbids, so reject it.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M24: bakeoff OK (gate-cleared)'; then
+        echo "[run-aarch64] FAIL -- M24 gate CLEARED on a synthetic trace (cell flipped ACTIVE) -- this milestone the gate must REFUSE (gate-not-met); a real activation awaits M25's human oracle" >&2
+        exit 1
+    fi
+    # TERMINOLOGY DISCIPLINE (proposal §6/§7): M24 lower-bounds + honestly REFUSES, it
+    # does NOT validate an activation. Reject any 'validated'/'evaluated' near the marker.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M24:|bakeoff:)' | grep -qE -- 'validated|evaluated'; then
+        echo "[run-aarch64] FAIL -- M24 marker/witness carries a 'validated'/'evaluated' overclaim -- M24 lower-bounds + honestly REFUSES, it does NOT validate any activation (proposal §6/§7 terminology discipline)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -346,7 +378,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (gate-not-met expected; and 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

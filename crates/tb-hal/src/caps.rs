@@ -1130,8 +1130,14 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
                 None => return SysReturn::err(SysStatus::Stale),
             };
             match obj.kind {
+                // M24: the read path records the UNFILTERED RECALL_TOUCH (the survival-
+                // label signal, proposal §2.3) -- `read_touch` is the byte-identical
+                // twin of `read` that also folds a touch into the SEPARATE xp log
+                // (NO clock/finsts/M22-head mutation), so the returned value is
+                // unchanged and M22's witnesses stay byte-identical. `borrow_mut`
+                // mirrors the M_MEM_RECALL/M_MEM_WRITE dispatch arms.
                 ObjKind::MemoryHome => match &obj.mem {
-                    Some(cell) => match cell.borrow().read(args.args[0]) {
+                    Some(cell) => match cell.borrow_mut().read_touch(args.args[0]) {
                         Some(v) => SysReturn::ok(v),
                         None => SysReturn::err(SysStatus::BadCap),
                     },

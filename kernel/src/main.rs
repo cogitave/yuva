@@ -4050,6 +4050,91 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M23: experience OK\n");
     }
 
+    // ---- M24: the HONEST ACTIVATION GATE (the honest #72 resolution) ------------
+    // M24 closes the learning loop HONESTLY: (1) shielded epsilon-greedy exploration
+    // restores statistical OVERLAP the M23 deterministic logging policy lacks (inside
+    // the frozen M17 envelope, populating the M23-reserved propensity field); (2) a
+    // deterministic 3-way RIGHT-CENSORED survival label measured on the UNFILTERED
+    // read()-touch path (the recall-tier collider named, not silently handled); (3) a
+    // partial-identification (Manski + Lipschitz-smoothness + empirical-Bernstein)
+    // LOWER-BOUND estimator; (4) a conjunctive ONE-SHOT HCPI activation gate. The cell
+    // flips ACTIVE only if `V_lower(kancell) - V_upper(heuristic) >= MARGIN` over a
+    // distribution-shifted held-out split AND the re-asserted envelope-no-widening
+    // proof. Because the traces are necessarily SYNTHETIC this milestone, the gate
+    // does NOT clear -> 'M24: bakeoff OK (gate-not-met)' (the cell stays DORMANT) is
+    // the DESIGNED, CORRECT outcome (the M21 idiom -- an honest gate that REFUSES is a
+    // success). ALL value computation is the host-verifiable, Kani-proven
+    // `tb_encode::explore` + `tb_encode::bakeoff` (no_std, forbid(unsafe), NO float);
+    // this kernel stays zero-unsafe and only branches on the returned `BakeoffProof`
+    // enum. The experience is kept IN-RAM (durable spill deferred -- the gate runs on
+    // the in-RAM accumulated experience), so M20's two-phase commit + persist_selftest
+    // stay byte-identical. DoD: "M24: bakeoff OK".
+    {
+        let bo = tb_hal::bakeoff_selftest();
+        // Render the witness fields + the marker. FAIL-CLOSED: only the Failed arm
+        // withholds the marker + exits red (the machinery did not execute a required
+        // stage). The NotMet / NotEvaluable arms are FIRST-CLASS successes this
+        // milestone (an honest gate that refuses), so they print the marker (with the
+        // honest suffix). The Cleared arm is the (counterfactual) activation -- not
+        // reached on synthetic traces, but rendered honestly if it ever is.
+        match bo {
+            tb_hal::BakeoffProof::Failed { stage } => {
+                tb_hal::serial_write_str("M24: bakeoff FAIL stage=");
+                write_hex_u64(stage as u64);
+                tb_hal::serial_write_byte(b'\n');
+                tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+            }
+            tb_hal::BakeoffProof::Cleared {
+                vlo_kan,
+                vhi_heur,
+                margin,
+            } => {
+                // The (counterfactual this milestone) activation: the gate cleared.
+                // KAN_ACTIVE is still a const false (a real activation awaits M25's
+                // human oracle), so this is reported honestly, not acted on. The
+                // run-scripts ACCEPT only the dormant gate-not-met this milestone, so a
+                // cleared verdict here would be flagged by the lane asserting dormancy.
+                bakeoff_witness(vlo_kan, vhi_heur, margin, 1, 0, 0, 0, 0);
+                tb_hal::serial_write_str("M24: bakeoff OK (gate-cleared)\n");
+            }
+            tb_hal::BakeoffProof::NotMet {
+                vlo_kan,
+                vhi_heur,
+                margin,
+                resolved,
+                censored,
+                overlap_mass,
+                no_overlap,
+            } => {
+                // THE DESIGNED, CORRECT OUTCOME: the machinery executed (label +
+                // estimator + gate + in-RAM replay), the gate was EVALUABLE, but the
+                // margin was not met on the synthetic traces -> the cell stays DORMANT.
+                bakeoff_witness(
+                    vlo_kan,
+                    vhi_heur,
+                    margin,
+                    0,
+                    resolved,
+                    censored,
+                    overlap_mass,
+                    no_overlap,
+                );
+                tb_hal::serial_write_str("M24: bakeoff OK (gate-not-met)\n");
+            }
+            tb_hal::BakeoffProof::NotEvaluable {
+                resolved,
+                overlap_mass,
+            } => {
+                // Too few resolved pairs / near-zero overlap: the gate is not EVALUABLE
+                // (distinct from a genuine refusal). Still a first-class honest outcome.
+                bakeoff_witness(0, 0, 0, 0, resolved, 0, overlap_mass, 0);
+                tb_hal::serial_write_str(
+                    "M24: bakeoff OK (gate-not-evaluable: insufficient resolved support)\n",
+                );
+            }
+        }
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();
@@ -4377,6 +4462,45 @@ fn write_hex_u64(value: u64) {
         tb_hal::serial_write_byte(c);
         shift -= 4;
     }
+}
+
+/// M24: render the bake-off witness line (proposal §6, printed BEFORE the marker,
+/// fail-closed, positively required by the run-scripts). The `confound=`/`estimator=`
+/// tokens are LITERAL honesty strings -- the marker mechanically cannot overclaim. The
+/// `no-float=1` + `envelope-no-widening=1` tokens are required by the run-scripts. The
+/// signed `vlo_kan`/`vhi_heur`/`margin` are rendered as two's-complement hex (the
+/// witness is a deterministic non-vacuity proof, not a decoded value). `cleared=0` is
+/// the synthetic-trace outcome (the cell stays DORMANT). Pure safe Rust.
+#[allow(clippy::too_many_arguments)]
+fn bakeoff_witness(
+    vlo_kan: i64,
+    vhi_heur: i64,
+    margin: i64,
+    cleared: u64,
+    resolved: u64,
+    censored: u64,
+    overlap_mass: u64,
+    no_overlap: u64,
+) {
+    tb_hal::serial_write_str("bakeoff: vlo_kan=");
+    write_hex_u64(vlo_kan as u64);
+    tb_hal::serial_write_str(" vhi_heur=");
+    write_hex_u64(vhi_heur as u64);
+    tb_hal::serial_write_str(" margin=");
+    write_hex_u64(margin as u64);
+    tb_hal::serial_write_str(" overlap-restored-eps=");
+    write_hex_u64(overlap_mass);
+    tb_hal::serial_write_str(" resolved=");
+    write_hex_u64(resolved);
+    tb_hal::serial_write_str(" censored=");
+    write_hex_u64(censored);
+    tb_hal::serial_write_str(" no-overlap-mass=");
+    write_hex_u64(no_overlap);
+    tb_hal::serial_write_str(" cleared=");
+    write_hex_u64(cleared);
+    tb_hal::serial_write_str(
+        " confound=RECALL-CENSORS-COLD-NAMED estimator=MANSKI+SMOOTHNESS-LP no-float=1 envelope-no-widening=1\n",
+    );
 }
 
 /// Minimal `core::fmt::Write` sink over the serial console, used ONLY by the

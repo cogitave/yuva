@@ -3430,3 +3430,100 @@ pub struct ExpProof {
 pub fn exp_selftest() -> ExpProof {
     mem::exp_selftest()
 }
+
+// ===========================================================================
+// M24: the verified HONEST ACTIVATION GATE self-test facade. The honest
+// resolution of the M21 activation gate (#72): shielded epsilon-greedy
+// exploration (restores statistical overlap, populating the M23-reserved
+// propensity field) + a deterministic 3-way right-censored survival label + a
+// partial-identification (Manski + Lipschitz-smoothness) lower-bound estimator +
+// an empirical-Bernstein HCPI lower-bound activation gate. `KAN_ACTIVE` flips
+// `false -> true` ONLY if the conjunctive one-shot gate clears (`V_lower(kancell)
+// - V_upper(heuristic) >= MARGIN` over a distribution-shifted held-out split AND
+// the re-asserted envelope-no-widening proof). On the (necessarily SYNTHETIC)
+// traces this milestone the gate WILL NOT clear -- `gate-not-met` (the cell stays
+// DORMANT) is the DESIGNED, CORRECT outcome (the M21 idiom -- an honest gate that
+// REFUSES is a success, not a failure). The math is the Kani-proven
+// `tb_encode::explore` + `tb_encode::bakeoff`; the verdict is a pure-data enum the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`ExpProof`]). The
+// experience stays IN-RAM this milestone (durable spill deferred -- see the M24
+// proposal §3 / the self-test note): the gate self-test runs on the in-RAM
+// accumulated experience, so M20's two-phase commit + persist_selftest stay
+// byte-identical.
+// ===========================================================================
+
+/// M24 honest-gate bake-off self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ExpProof`]. The witness
+/// fields (`vlo_kan`/`vhi_heur`/`margin`/...) are POSITIVELY required on the boot
+/// witness line so the marker mechanically cannot claim an activation the lower
+/// bound does not support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BakeoffProof {
+    /// THE (counterfactual this milestone) ACTIVATION: the conjunctive one-shot gate
+    /// CLEARED -- the cell's worst-case value `vlo_kan` beat the heuristic's best-case
+    /// value `vhi_heur` by at least `margin` over a sufficiently-supported, overlap-
+    /// restored held-out split, AND the envelope-no-widening proof re-asserted. NOT
+    /// reached on synthetic traces (the cell would flip ACTIVE -- a real activation
+    /// awaits M25's human oracle).
+    Cleared {
+        /// The integer lower bound on the kancell policy's value (`V_lower`).
+        vlo_kan: i64,
+        /// The integer upper bound on the heuristic floor's value (`V_upper`).
+        vhi_heur: i64,
+        /// The cleared margin (`vlo_kan - vhi_heur`).
+        margin: i64,
+    },
+    /// THE DESIGNED, CORRECT OUTCOME this milestone: the machinery executed (label +
+    /// estimator + gate + the in-RAM replay) and the gate was EVALUABLE but the margin
+    /// was NOT met on the (synthetic) traces -- the cell stays DORMANT. The honest M21
+    /// `(heuristic floor, gate-not-met)` idiom. Carries the witness so the boot line
+    /// proves the gate actually RAN (anti-hollow-pass).
+    NotMet {
+        /// The integer lower bound on the kancell policy's value (`V_lower`).
+        vlo_kan: i64,
+        /// The integer upper bound on the heuristic floor's value (`V_upper`).
+        vhi_heur: i64,
+        /// The (negative or sub-margin) gap (`vlo_kan - vhi_heur`).
+        margin: i64,
+        /// The count of RESOLVED (non-censored) labeled pairs the gate evaluated over.
+        resolved: u64,
+        /// The count of CENSORED (open-window, excluded) labeled pairs.
+        censored: u64,
+        /// The summed soft-greedy exploration mass (overlap-restored, SCALE==1000).
+        overlap_mass: u64,
+        /// The Manski no-overlap mass fraction (decisions epsilon could not explore).
+        no_overlap: u64,
+    },
+    /// Too few RESOLVED non-censored pairs / near-zero overlap mass: the gate is not
+    /// EVALUABLE (the eligibility pre-gate failed -- distinct from a genuine refusal).
+    NotEvaluable {
+        /// The count of RESOLVED labeled pairs (below the eligibility floor).
+        resolved: u64,
+        /// The summed soft-greedy exploration mass (below the eligibility floor).
+        overlap_mass: u64,
+    },
+    /// The self-test did NOT execute a required stage (seed/label/replay/gate). `stage`
+    /// localises the failure. The kernel renders this WITHOUT a "bakeoff OK" substring
+    /// (fail-closed: the marker is withheld), so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (0x1 seed, 0x2 replay/label, 0x3 envelope
+        /// re-assertion, 0x4 estimator/gate, 0x5 dormant-invariant violated).
+        stage: u32,
+    },
+}
+
+/// M24: run the honest-gate bake-off self-test (both arches) over the in-RAM
+/// accumulated experience and report the outcome. See [`BakeoffProof`]. Pure value
+/// computation over the Kani-proven `tb_encode::explore` + `tb_encode::bakeoff`
+/// leaves and the real `mem::MemSubstrate` forget/read-touch path -- seeds a
+/// shielded-epsilon-greedy labeled stream (stamping the M23-reserved propensity
+/// field), drives unfiltered `read_touch` to attach the deterministic 3-way survival
+/// label, replays the in-RAM stream through the frozen-heuristic AND dormant
+/// `kan_score` over an M18.2-style shifted split, computes `V_lower(kancell)` /
+/// `V_upper(heuristic)`, evaluates the conjunctive one-shot gate, and re-asserts the
+/// envelope-no-widening proof; touches NO device and NO scheduler. On synthetic
+/// traces the gate does NOT clear -> [`BakeoffProof::NotMet`] (the cell stays DORMANT)
+/// -- the designed, correct outcome. `KAN_ACTIVE` stays `false`.
+pub fn bakeoff_selftest() -> BakeoffProof {
+    mem::bakeoff_selftest()
+}
