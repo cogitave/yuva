@@ -51,10 +51,23 @@ fi
 # future CI log came from. Cheap, always emitted, never gates the verdict.
 echo "[run-aarch64] qemu: $(${QEMU} --version | head -1)"
 
-# -M virt,virtualization=on,gic-version=2 : QEMU AArch64 'virt'; virtualization=on
-#                    exposes EL2 so the vCPU enters at EL2h (the L2.0 nVHE EL2
-#                    monitor installs there, then drops to EL1 for M0..M18);
-#                    gic-version=2 pins the GICv2 GICD/GICC MMIO M8 hard-codes.
+# -M virt,virtualization=on,gic-version=2,iommu=smmuv3 : QEMU AArch64 'virt';
+#                    virtualization=on exposes EL2 so the vCPU enters at EL2h (the
+#                    L2.0 nVHE EL2 monitor installs there, then drops to EL1 for
+#                    M0..M18); gic-version=2 pins the GICv2 GICD/GICC MMIO M8
+#                    hard-codes; iommu=smmuv3 instantiates the Arm SMMUv3 as the
+#                    PCIe-root-complex IOMMU at MMIO 0x0905_0000 (the aL2.6 rung).
+#                    STAGE-2 SMMUv3 support (the Mostafa series) landed in QEMU 9.0
+#                    (2024), NOT 8.1: BOTH local qemu-6.2 AND the current CI image
+#                    (tabos-qemu8 = 8.2.2) advertise S1P=1 but IDR0.S2P=0, so L2.6
+#                    correctly hits the green '(no stage-2 SMMU, skipped)'
+#                    Unavailable path on both today. When the CI QEMU is bumped to
+#                    >= 9.0 the Proven 'L2.6: smmu OK' (table-programming accepted)
+#                    runs for real with NO kernel change (the IDR0.S2P gate flips).
+#                    The iommu= is an orthogonal machine property; virtualization=on
+#                    + gic-version=2 + iommu=smmuv3 coexist, and M0..M19 +
+#                    L2.0..L2.5 pass unchanged with the SMMU present (S1-only here,
+#                    and disabled-until-L2.6 in any case).
 # -cpu cortex-a72  : real A72 (pure ARMv8.0 -> guaranteed nVHE, E2H RES0). With
 #                    virtualization=on, guest entry = EL2h, MMU off, DAIF masked,
 #                    x0=FDT; without it the vCPU enters at EL1h (green skip path).
@@ -73,7 +86,7 @@ echo "[run-aarch64] qemu: $(${QEMU} --version | head -1)"
 set +e
 OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     "${QEMU}" \
-        -M virt,virtualization=on,gic-version=2 \
+        -M virt,virtualization=on,gic-version=2,iommu=smmuv3 \
         -cpu cortex-a72 \
         -m 128M \
         -accel tcg,thread=single \
@@ -159,6 +172,22 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.5: vgic OK' missing" >&2
         exit 1
     fi
+    # aL2.6: the SMMUv3 stage-2 DMA-isolation table-programming proof must ALSO
+    # print (the EL1 kernel probes IDR0.S2P, builds a 1-entry stream table + a
+    # stage-2-only STE whose S2TTB/S2VMID/VTCR point at the SAME stage-2 root the
+    # CPU uses, programs STRTAB_BASE/CMDQ_BASE/CR0, pushes CMD_CFGI_STE + CMD_SYNC,
+    # observes the SYNC drain with GERROR clean + no C_BAD_STE event, then tears
+    # the SMMU down before M19). The 'L2.6: smmu OK' substring matches BOTH the
+    # Proven marker (qemu>=8.1, stage-2 SMMUv3 present) AND the green
+    # '(no SMMU, skipped)' skip (local qemu-6.2 / no iommu=smmuv3) -- a FAIL renders
+    # 'L2.6: smmu FAIL ...' with NO 'smmu OK' substring, so this grep fails closed.
+    # Assert it directly so the el2 -> ... -> vgic -> smmu -> virtio order is
+    # fail-closed + traceable. (qemu>=8.1 required for the stage-2 Proven path;
+    # older QEMU correctly takes the green skip via the IDR0.S2P Unavailable gate.)
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.6: smmu OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.6: smmu OK' missing" >&2
+        exit 1
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
@@ -187,7 +216,19 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.0: el2 OK (no EL2, skipped)"; then
         echo "::warning::aarch64 EL2 track ran in SKIP mode (kernel did not boot at EL2) -- the L2.0..L2.5 proofs were NOT exercised on this runner; see the boot: entry-el= serial line"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'M14.2: blocking-recv OK')"
+    # LOUD when the aL2.6 SMMU rung degrades to its green skip (no stage-2 SMMU:
+    # open-bus IDR0, or IDR0.S2P==0 on an S1-only SMMU): the lane stays green (the
+    # cumulative chain still proves M0..M19, the STE/command encoders are
+    # Kani-proven in the prove-encode lane) but the GitHub UI shows a warning so
+    # reduced IOMMU proof coverage is never invisible. NOTE: stage-2 SMMUv3 support
+    # landed in QEMU 9.0 (the Mostafa series, 2024), NOT 8.1 -- the current CI image
+    # (tabos-qemu8 = 8.2.2) advertises S1P=1 but S2P=0, so it takes this honest skip
+    # until the CI QEMU is bumped to >= 9.0, at which point the Proven path (the
+    # table-programming acceptance) runs for real. Local qemu-6.2 also skips here.
+    if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
+        echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
+    fi
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

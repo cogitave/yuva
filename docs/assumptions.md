@@ -61,12 +61,19 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   shifts — with NO bit set outside the QEMU `GICH_LR_MASK` and the bit-19
   PhysicalID/EOI mux honored, the pure value the EL2 monitor stores into `GICH_LR0`
   to SOFTWARE-INJECT a virtual interrupt, pinned so a field-bleed typo in the
-  injected LR is a proof failure not a silently-dropped vIRQ). The `prove-encode`
-  CI lane fails closed on a pinned **`EXPECTED_HARNESSES = 25`** (the 15 pre-L2.1
-  harnesses + the 5 L2.1 lemmas + the 1 L2.2 classifier lemma + the 2 L2.3
-  ISS-decoder lemmas + the 1 aL2.4 SCTLR-enable lemma + the 1 aL2.5 GICH_LR
-  encoder lemma), so a silently deleted, renamed, or vacuous harness reddens the
-  lane.
+  injected LR is a proof failure not a silently-dropped vIRQ). aL2.6 adds THREE
+  more — `kani_ste_s2_roundtrip` (the stage-2-only SMMUv3 STE: `Config==0b110`,
+  every `S2VMID`/`VTCR`/`S2TTB` field round-trip-recovered via INDEPENDENT shifts
+  with no bit bleed, the stage-2-only dwords zero), `kani_ste_vtcr_matches_cpu_
+  stage2` (THE LEMMA: the STE `VTCR` projection is BIT-IDENTICAL to `VTCR_EL2[18:0]`
+  — the SMMU stage-2 geometry IS the CPU stage-2 geometry), and
+  `kani_smmu_cmd_encode_total` (`CFGI_STE`/`TLBI_S12_VMALL`/`CMD_SYNC` place the
+  right opcode + operands for all inputs). The `prove-encode` CI lane fails closed
+  on a pinned **`EXPECTED_HARNESSES = 28`** (the 15 pre-L2.1 harnesses + the 5
+  L2.1 lemmas + the 1 L2.2 classifier lemma + the 2 L2.3 ISS-decoder lemmas + the
+  1 aL2.4 SCTLR-enable lemma + the 1 aL2.5 GICH_LR encoder lemma + the 3 aL2.6
+  SMMUv3 STE/command-queue lemmas), so a silently deleted, renamed, or vacuous
+  harness reddens the lane.
 
 - **The aL2.5 vGIC injection glue + the IMO/TWI window + the GICH/GICV MMIO
   (silicon-unsafe, OUTSIDE the proof boundary).** The
@@ -264,25 +271,53 @@ validate on a real core with caches enabled; (2) bring the EL2 monitor up with i
 own MMU + cacheable stage-2 mappings so the EL1/EL2 attribute mismatch disappears.
 This is the same residual L2.0 already carries for its shared monitor state.
 
-### A3. SMMU / IOMMU DMA-confinement (a later rung)
+### A3. SMMU / IOMMU DMA-confinement (the silicon-gated half of aL2.6)
 
-**Assumed.** That nothing performs DMA. The L2.1 CPU-side stage-2 confines every
-EL1&0 *CPU* access (including the guest's own stage-1 walk), but a DMA-capable
-device bypasses the CPU MMU and stage-2 entirely — so a passed-through device's
-DMA could read or write all of TABOS+agent memory. The smoke runs device-less, so
-this is vacuously satisfied today.
+**Partly discharged (table-programming), residual narrowed.** The L2.1 CPU-side
+stage-2 confines every EL1&0 *CPU* access (including the guest's own stage-1
+walk), but a DMA-capable device bypasses the CPU MMU and stage-2 entirely — so a
+passed-through device's DMA could read or write all of TABOS+agent memory. Rung
+**aL2.6 `smmu OK`** now discharges the *table-programming* half of this obligation:
+the EL1 kernel probes `SMMU_IDR0.S2P`, builds a 1-entry linear stream table + one
+**stage-2-only** Stream Table Entry (`Config==0b110`) whose `S2TTB`/`S2VMID`/`VTCR`
+point at the **SAME** stage-2 L1 root the CPU uses (the STE `VTCR` is the
+Kani-proven bit-projection of the CPU's `VTCR_EL2` — `tb_encode::smmuv3::
+ste_vtcr_from_vtcr_el2`, so the SMMU stage-2 tables ARE the CPU stage-2 tables),
+programs `STRTAB_BASE`/`CMDQ_BASE`/`EVENTQ_BASE`/`CR0`, pushes
+`CMD_CFGI_STE`+`CMD_SYNC`, and observes the SYNC drain with `GERROR` clean and no
+`C_BAD_STE` event — i.e. **the SMMU ACCEPTED the well-formed stage-2 STE**.
 
-**Sound under TCG now because** the L2.0/L2.1 self-tests pass through no device and
-grant no DMA; the IPA space the guest sees is purely CPU-translated. The pKVM/AVF
-security model makes the same scoping explicit — stage-2 confidentiality+integrity
-is enforced by the EL2-owned tables, with DMA confinement a separate obligation [6].
+**What aL2.6 PROVES vs what it does NOT.** The marker `L2.6: smmu OK` asserts
+ONLY *"the stage-2 STE is well-formed AND the SMMU accepted it (CFGI_STE synced,
+no GERROR/C_BAD_STE)"* — the IOMMU twin of `L2.1 stage2 OK`. It does **NOT** assert
+the actual DMA-isolation *guarantee*: that a rogue/buggy physical device is
+**BLOCKED** from reaching memory outside its grant. **That needs REAL SILICON**
+(the §6 two-tier-test hole, the same residual the x86 VT-d/L2.8 path carries): QEMU
+emulation cannot prove isolation against silicon errata, ATS/PRI corner cases,
+peer-to-peer DMA bypass, or a non-ACS-clean topology. Under pure TCG there is no
+real DMA engine to confine, no bus-mastering races, no IMPLEMENTATION-DEFINED SMMU
+behavior — so emulation proves the **programming is well-formed and ACCEPTED**,
+never that silicon enforces it. The pKVM/AVF security model makes the same scoping
+explicit — stage-2 confidentiality+integrity is enforced by the EL2/owner-owned
+tables, with the silicon DMA-confinement guarantee a separate obligation [6].
 
-**Path to narrowing.** This is roadmap rung **L2.8** (SMMUv3 stream/context tables
-mirroring each guest's stage-2, from the SAME `tb-encode` second-stage encoder),
-gated behind any device passthrough. The architectural-programming half is
-CI-testable on emulated SMMUv3; the actual DMA-isolation *guarantee* needs a
-real, ACS-clean board — emulation cannot prove isolation (the two-tier test hole
-the roadmap §6 already flags).
+**QEMU-version note (the Proven vs skip gate).** Stage-2 SMMUv3 support (the
+Mostafa series) landed in **QEMU 9.0** (2024), NOT 8.1. So on a QEMU that
+advertises `IDR0.S2P==1` (>= 9.0, verified Proven end-to-end here under
+**qemu-10.0.8**: the STE is accepted, `smmu: stage-2 STE accepted` + `L2.6: smmu
+OK` print) the table-programming proof runs for real under TCG. On the current CI
+image (`tabos-qemu8` = QEMU 8.2.2) and local qemu-6.2 the SMMU advertises `S1P=1`
+but `S2P=0`, so the kernel's `IDR0.S2P` gate takes the **honest GREEN skip**
+(`L2.6: smmu OK (no stage-2 SMMU, skipped)`) — NO stage-2 STE is written to an
+S1-only SMMU. The pure STE/command encoders remain Kani-proven on the host runner
+regardless of the QEMU version (the `prove-encode` lane). When the CI QEMU is
+bumped to >= 9.0 the Proven path runs in CI with **zero kernel change**.
+
+**Path to fully narrowing.** The full DMA-isolation guarantee (and the optional
+behind-SMMU `virtio-*-pci` DMA-translated-through-our-stage-2 observation, a
+PCIe-only stretch arm not wired in the core proof) needs a real, ACS-clean board —
+emulation cannot prove isolation (the two-tier test hole the roadmap §6 flags).
+Roadmap rung **L2.8** is the x86 VT-d sibling of this same split.
 
 ### A4. Secure-boot of the EL2 image
 

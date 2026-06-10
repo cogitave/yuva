@@ -47,6 +47,14 @@
 //!    encoders (S2AP=RW, MemAttr Normal-WB, mandatory AF, block/page/table low
 //!    bits, address via the shared `make_entry`) plus the `vtcr`/`vttbr` packers
 //!    -- the ARM analog of the EPT encoders, proven well-formed.
+//!  * [`smmuv3`] -- the aL2.6 Arm SMMUv3 (IHI 0070) IOMMU algebra: the
+//!    stage-2-only Stream Table Entry packer (`ste_s2` + the `ste_*` accessors,
+//!    `Config==0b110`), the `ste_vtcr_from_vtcr_el2` LEMMA projecting the CPU's
+//!    `VTCR_EL2` into the STE `VTCR` slot (the "SMMU stage-2 IS the CPU stage-2"
+//!    bit-identity), the `cmd_cfgi_ste`/`cmd_tlbi_s12_vmall`/`cmd_sync`
+//!    command-queue encoders, and the `strtab_base`/`strtab_base_cfg`/
+//!    `cmdq_base`/`eventq_base` register packers -- reusing `stage2::vtcr`,
+//!    proven bit-faithful (the IOMMU twin of the stage-2 geometry).
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -77,6 +85,7 @@ pub mod ipc_frame;
 pub mod memscore;
 pub mod paging;
 pub mod route;
+pub mod smmuv3;
 pub mod stage2;
 pub mod vmx;
 

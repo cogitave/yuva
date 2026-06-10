@@ -34,10 +34,17 @@ set -euo pipefail
 # pINTID/state/priority/group/HW/EOI field via independent literal shifts, sets
 # NO bit outside the documented GICH_LR_MASK (no field bleed), and that
 # lr_is_retired/vtr_list_regs decode correctly (the SW-injected virtual-interrupt
-# value the EL2 monitor stores into GICH_LR0). -- one per syndrome family /
-# encoder, each proving totality AND round-trip correctness).
+# value the EL2 monitor stores into GICH_LR0) + aL2.6 SMMUv3 STE/command-queue
+# encoders x3: ste_s2_roundtrip -- the stage-2-only STE (Config==0b110) round-trips
+# every S2VMID/VTCR/S2TTB field via independent shifts with no field bleed and the
+# stage-2-only dwords zero; ste_vtcr_matches_cpu_stage2 -- THE LEMMA: the STE.VTCR
+# projection is bit-identical to VTCR_EL2[18:0] (the SMMU stage-2 IS the CPU
+# stage-2 geometry); smmu_cmd_encode_total -- CFGI_STE/TLBI_S12_VMALL/CMD_SYNC
+# place the right opcode in word0[7:0] + operands in their fields for all inputs.
+# -- one per syndrome family / encoder, each proving totality AND round-trip
+# correctness).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=25
+EXPECTED_HARNESSES=28
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

@@ -3053,6 +3053,100 @@ pub fn el2_vgic_selftest() -> VgicProof {
 }
 
 // ===========================================================================
+// aL2.6: SMMUv3 stage-2 DMA-isolation table-programming self-test facade — the
+// SEVENTH L2 rung, the IOMMU twin of the L2.1 CPU stage-2 demand-translation.
+//
+// Unlike L2.0..L2.5 (which world-switch through the resident EL2 monitor), this
+// rung runs ENTIRELY at EL1: the SMMUv3 is a memory-mapped platform device
+// (QEMU `virt` MMIO base 0x0905_0000, already inside the GiB0 Device-nGnRnE
+// identity gigabyte `mmu_init` covers), programmed directly. The kernel probes
+// SMMU_IDR0.S2P==1 (stage-2 supported), builds a 1-entry LINEAR stream table +
+// ONE stage-2-only STE (Config==0b110) whose S2TTB == the SAME stage-2 L1 root
+// `build_identity_stage2()` produced, S2VMID == the CPU's VMID, and STE.VTCR ==
+// the projection of the CPU's `compute_vtcr()` (via the Kani-proven
+// `tb_encode::smmuv3::ste_vtcr_from_vtcr_el2` LEMMA), programs STRTAB_BASE/_CFG +
+// CMDQ_BASE + EVENTQ_BASE + CR0 (SMMUEN|CMDQEN|EVTQEN), pushes CMD_CFGI_STE +
+// CMD_TLBI_S12_VMALL + CMD_SYNC, and observes the SYNC drain (CMDQ_CONS catches
+// CMDQ_PROD) with GERROR clean (no CMDQ_ERR, no C_BAD_STE in the event queue) —
+// i.e. the SMMU ACCEPTED the STE. This EXECUTES for real under TCG (QEMU walks +
+// accepts the STE) on a QEMU that advertises IDR0.S2P — the IOMMU twin of
+// "stage2 OK", NOT a skip. NOTE: stage-2 SMMUv3 support (the Mostafa series)
+// landed in QEMU 9.0 (2024), NOT 8.1 — QEMU 8.2.2 (the current CI image)
+// advertises S1P=1 but S2P=0, so on it (and on local qemu-6.2) the IDR0.S2P gate
+// takes the honest GREEN skip until the CI QEMU is bumped to >= 9.0, at which
+// point the Proven path runs for real.
+//
+// THE HONEST CLAIM: the marker asserts ONLY "tables programmed + SMMU accepted
+// them (CMD_CFGI_STE synced, no GERROR/C_BAD_STE)". The ACTUAL DMA-isolation
+// GUARANTEE — that a rogue physical device is BLOCKED from memory outside its
+// grant — needs REAL SILICON (declared in assumptions.md, the L2.8/VT-d twin):
+// QEMU emulation cannot prove isolation against silicon errata, ATS/PRI corners,
+// peer-to-peer DMA bypass, or a non-ACS-clean topology. So this proves the
+// PROGRAMMING is well-formed and ACCEPTED, never that silicon enforces it.
+//
+// ALL the SMMU MMIO/asm unsafe is confined to tb-hal's arch/aarch64/smmu.rs (the
+// STE/command-queue value computation in tb-encode::smmuv3 is forbid(unsafe) +
+// Kani-proven), so this crate stays unsafe-free and the kernel only branches on a
+// closed enum. On x86_64 the VT-d/L2.8 path is x86's IOMMU rung, so this reports
+// NotApplicable — mirroring the `VgicProof` block above. The SMMU is left
+// DISABLED (CR0.SMMUEN=0, STE.V cleared) before M19 (teardown-clean), so M19's
+// virtio-mmio path (NOT behind the SMMU) is untouched.
+// ===========================================================================
+
+/// aL2.6 SMMUv3 stage-2 DMA-isolation table-programming self-test outcome
+/// (returned to the kernel for marker rendering). A SIBLING of [`VgicProof`]:
+/// the proof is the SMMU ACCEPTING a well-formed stage-2-only STE that points at
+/// the SAME stage-2 root the CPU uses, rather than a CPU-side world-switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmmuProof {
+    /// This arch has no Arm SMMUv3 (x86_64): the (deferred) Intel VT-d / L2.8
+    /// path would be its IOMMU rung.
+    NotApplicable,
+    /// No stage-2 SMMUv3: SMMU_IDR0 reads open-bus `0xFFFF_FFFF` (booted WITHOUT
+    /// `iommu=smmuv3` — the plain-`virt`/`tb-vmm` lanes) OR the SMMU does NOT
+    /// advertise stage-2 (`IDR0.S2P == 0` — an S1-only SMMU). The latter is the
+    /// case for QEMU older than 9.0: stage-2 SMMUv3 support (the Mostafa series)
+    /// landed in QEMU 9.0 (2024), so QEMU 8.2.2 advertises `S1P=1` but `S2P=0`. A
+    /// GRACEFUL GREEN skip — NO privileged stage-2 STE write is attempted (an
+    /// S1-only SMMU would reject it), so non-stage-2-SMMU boot lanes stay green
+    /// (the IDR0.S2P gate, the IOMMU analog of the `BOOTED_AT_EL2` gate).
+    Unavailable,
+    /// We probed S2P==1 and ran the table-programming round-trip, but it faulted
+    /// instead of a clean acceptance (a frame OOM, CR0ACK never reflected enable,
+    /// the CMD_SYNC never drained before the bounded cap, a GERROR fired, or a
+    /// C_BAD_STE event was recorded); `code` is the nonzero diagnostic (surfaced
+    /// honestly as a red marker WITHOUT a "smmu OK" substring).
+    Faulted {
+        /// The nonzero failure code the SMMU self-test returned.
+        code: u64,
+    },
+    /// THE PROOF: the kernel built + wrote a stage-2-only STE whose geometry IS
+    /// the CPU stage-2 geometry, programmed the SMMU registers, pushed
+    /// CMD_CFGI_STE + CMD_SYNC, observed the SYNC drain with GERROR clean and no
+    /// C_BAD_STE event — i.e. the SMMU ACCEPTED the STE. `stream_id` is the
+    /// programmed StreamID (0 for the single-entry linear stream table).
+    Proven {
+        /// The StreamID the accepted stage-2-only STE was programmed for.
+        stream_id: u32,
+    },
+}
+
+/// aL2.6: run the SMMUv3 stage-2 DMA-isolation table-programming self-test
+/// (aarch64), or report [`SmmuProof::NotApplicable`] on x86_64. See [`SmmuProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn smmu_selftest() -> SmmuProof {
+    arch::smmu_selftest()
+}
+
+/// aL2.6: x86_64 has no Arm SMMUv3 — the (deferred) Intel VT-d / L2.8 path would
+/// be this arch's realization of the IOMMU rung, so this reports
+/// [`SmmuProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn smmu_selftest() -> SmmuProof {
+    SmmuProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //
