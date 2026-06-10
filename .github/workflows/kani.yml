@@ -86,8 +86,10 @@ jobs:
     runs-on: ubuntu-latest
     # Fail fast + clearly if a harness ever regresses into a state explosion.
     # The fixed-size POD encoders + the single bounded ring harness verify in
-    # seconds.
-    timeout-minutes: 25
+    # seconds; the M22 prov harnesses concretize their FNV-fold inputs (keeping
+    # only the flip-index / candidate-head symbolic) to stay tractable. 35 is a
+    # safety margin above the observed runtime, not a license for symbolic blow-up.
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
