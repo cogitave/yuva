@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M24: bakeoff OK'
+MARKER='M25: operator OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -232,7 +232,43 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M24 marker/witness carries a 'validated'/'evaluated' overclaim -- M24 lower-bounds + honestly REFUSES, it does NOT validate any activation (proposal §6/§7 terminology discipline)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (gate-not-met expected; and 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M24 is no longer the top-level grep (M25 displaced it as the cumulative tail);
+  # assert it directly so the M24 -> M25 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M24: bakeoff OK'; then
+    echo ">> FAIL: final marker present but 'M24: bakeoff OK' missing (M24 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M25 SOUNDNESS (anti-hollow-pass, the aL2.5/M20..M24 substring lesson): the
+  # 'M25: operator OK' marker must be backed by the REAL transcript round-trip -- the
+  # transcript is IN-RAM + TX-only (RX/auth is M26), so a skip is NEVER legitimate.
+  # Reject any '(no channel, skipped)' variant, and POSITIVELY require the witness line
+  # 'opframe: tx_head=0x.. frames=0x.. seq_monotone=0x1 intro_bound=0x1 fold-verified=0x1
+  # tamper-caught=0x1 keyed=0 oracle=HUMAN-DEFERRED-M26' (so a marker printed WITHOUT
+  # running the emit/recompute/seq/intro-binding/truncation/tamper verifier FAILS).
+  # seq_monotone=1 AND intro_bound=1 AND fold-verified=1 AND tamper-caught=1 are
+  # required: the seq must be strictly monotone, the INTRO must bind the live M22 head,
+  # the clean fold + inclusion must verify, and the injected tamper + tail-truncation
+  # must be caught. The keyed=0 + oracle=HUMAN-DEFERRED-M26 honesty tokens must be
+  # present so the marker mechanically cannot claim crypto authenticity or that a human
+  # replied (it proves the CHANNEL, not the ORACLE).
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M25: operator OK (no channel, skipped)'; then
+    echo ">> FAIL: M25 ran in SKIP mode (no channel) -- the operator-transcript verifier round-trip was NOT exercised (a skip is never legitimate here -- the transcript is in-RAM)" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'opframe: tx_head=0x[0-9a-fA-F]+ frames=0x[0-9a-fA-F]+ seq_monotone=0x0*1 intro_bound=0x0*1 fold-verified=0x0*1 tamper-caught=0x0*1 keyed=0 oracle=HUMAN-DEFERRED-M26'; then
+    echo ">> FAIL: M25 marker present but the real round-trip witness 'opframe: tx_head=.. frames=.. seq_monotone=0x1 intro_bound=0x1 fold-verified=0x1 tamper-caught=0x1 keyed=0 oracle=HUMAN-DEFERRED-M26' was NOT seen (hollow M25 pass)" >&2
+    exit 1
+  fi
+  # TERMINOLOGY DISCIPLINE (proposal §5): M25 claims ONLY structural tamper-evidence +
+  # truncation/reorder/replay detection + instance binding, NOT crypto authenticity and
+  # NOT that a human replied. Reject any 'validated'/'evaluated' substring on the
+  # opframe: witness or the M25 marker line so the marker can never silently overclaim
+  # (the self-test is self-graded plumbing, not the human oracle).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M25:|opframe:)' | grep -qE -- 'validated|evaluated'; then
+    echo ">> FAIL: M25 marker/witness carries a 'validated'/'evaluated' overclaim -- M25 surfaces + tamper-evidences a transcript, it does NOT validate any policy or prove a human replied (proposal §5 terminology discipline)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

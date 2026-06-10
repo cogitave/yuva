@@ -3527,3 +3527,71 @@ pub enum BakeoffProof {
 pub fn bakeoff_selftest() -> BakeoffProof {
     mem::bakeoff_selftest()
 }
+
+// ===========================================================================
+// M25: the verified OPERATOR-TRANSCRIPT self-test facade. The COMMUNICATION
+// pillar's outbound half + the exogenous-oracle channel: a typed, tamper-
+// evident transcript the OS EMITS over serial to SURFACE what it recorded
+// (M23) and decided (M24) to a human, anchored to the live M22 provenance head
+// ("which instance am I"). TX-only this milestone (the inbound RX + an enrolled
+// operator credential by which a human could COMMAND the M24 gate is M26 -- it
+// fails the no-human CI gate today). The math is the Kani-proven
+// `tb_encode::opframe` (which REUSES the M22 `tb_encode::prov` fold verbatim);
+// the verdict is a pure-data struct the `#![forbid(unsafe_code)]` kernel matches
+// on (mirroring [`ExpProof`]). HONEST: the fold is keyless (structural tamper-
+// EVIDENCE, not authenticity -- `keyed=0`) and the boot self-test's verifier is
+// the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
+// ===========================================================================
+
+/// M25 operator-transcript self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ExpProof`]. The witness
+/// fields are POSITIVELY required on the boot witness line so the marker mechanically
+/// cannot claim a transcript property it did not verify.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpframeProof {
+    /// The CLEAN transcript verified: independently re-folding the committed frame ids
+    /// equals the running `op_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for the genesis frame verified `== true` against the
+    /// clean `op_head`. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// The `seq` is strictly `seqs[i] == i` (no gap / reorder / duplicate / non-zero
+    /// start) -- the strict-monotone reader check. The kernel requires this (rendered
+    /// `seq_monotone=1`).
+    pub seq_monotone: bool,
+    /// The genesis `INTRO` frame's `prev_head` binds the transcript to the LIVE M22
+    /// provenance head ("which instance am I" attestation). The kernel requires this
+    /// (rendered `intro_bound=1`).
+    pub intro_bound: bool,
+    /// The closing `GATE_VERDICT` commits the final `seq`, AND a reader expecting a
+    /// longer transcript (a truncated tail) is REJECTED -- the Ma-Tsudik FssAgg tail-
+    /// truncation guard. The kernel requires this (folded into `tamper-caught=1`).
+    pub truncation_caught: bool,
+    /// A single-byte tamper of a committed frame's canonical bytes was caught on BOTH
+    /// legs (head-mismatch AND inclusion-fail) -- the load-bearing structural tamper-
+    /// evidence claim. The kernel requires this (rendered `tamper-caught=1`).
+    pub tamper_caught: bool,
+    /// A u64 WITNESS folded from the 32-byte committed `op_head` (every head byte
+    /// contributes), rendered as `tx_head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of emitted + committed transcript frames (4: intro/marker/digest/
+    /// gate-verdict), rendered as `frames=<n>`.
+    pub frames: u64,
+}
+
+/// M25: emit a short operator transcript and play the simulated operator-verifier on
+/// it (both arches), reporting the outcome. See [`OpframeProof`]. Pure value
+/// computation over the Kani-proven `tb_encode::opframe` leaf (which REUSES the M22
+/// `tb_encode::prov` fold) and the real `mem::MemSubstrate` M22-head + M23-experience
+/// state -- seeds the M23 memory-pressure scenario for a LIVE M22 head + forget-
+/// decisions, emits INTRO(binds the live head)/MARKER/EXPERIENCE_DIGEST(the most-
+/// borderline M23 record)/GATE_VERDICT(commits the final seq + the honest M24 verdict),
+/// and verifies the clean fold + a genuine inclusion proof + strict-monotone seq +
+/// the INTRO binding + the tail-truncation commit + a single-byte tamper rejection;
+/// touches NO device beyond the serial the kernel renders over, and NO scheduler. The
+/// fold is keyless (tamper-EVIDENCE, not authenticity) and the verifier is the OS's
+/// own plumbing, not a human (the marker's `keyed=0` / `oracle=HUMAN-DEFERRED-M26`
+/// honesty tokens).
+pub fn opframe_selftest() -> OpframeProof {
+    mem::opframe_selftest()
+}

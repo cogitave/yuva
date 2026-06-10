@@ -4135,6 +4135,91 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // ---- M25: verified OPERATOR TRANSCRIPT (the exogenous-oracle channel) --------
+    // The COMMUNICATION pillar's outbound half. M24's honest gate REFUSES to activate
+    // the learned cell because a self-graded loop has no EXOGENOUS oracle; M25 builds
+    // the channel that SURFACES the decisions to a human (the only valid exogenous
+    // oracle -- Christiano RLHF arXiv:1706.03741; Thomas Seldonian Science 2019). The
+    // OS emits a typed, tamper-evident transcript over serial -- INTRO (binds the
+    // genesis to the LIVE M22 provenance head: "which instance am I", RATS RFC 9334),
+    // MARKER, EXPERIENCE_DIGEST (the most-BORDERLINE M23 record, ranked by margin --
+    // Settles active-learning), and a closing GATE_VERDICT (commits the final seq so a
+    // truncated tail is caught -- Ma-Tsudik FssAgg) -- folding each into a running
+    // `op_head` via the REUSED M22 fold, with a STRICTLY-MONOTONE seq folded INTO the
+    // canonical bytes so a reader detects mutation/reorder/drop/truncation. The boot
+    // self-test EMITS the transcript and plays the SIMULATED operator-verifier on it
+    // (recompute the head + a genuine inclusion proof, assert strict-monotone seq, the
+    // INTRO binding, the tail-truncation commit, and a single-byte tamper rejection).
+    // ALL value computation is the host-verifiable, Kani-proven `tb_encode::opframe`
+    // (no_std, forbid(unsafe), NO float; it REUSES the M22 prov fold verbatim); this
+    // kernel stays zero-unsafe and only branches on the returned `OpframeProof` bools.
+    // HONEST: the fold is KEYLESS (structural tamper-EVIDENCE, NOT cryptographic
+    // authenticity -- `keyed=0`) and the verifier is the OS's own plumbing, NOT a human
+    // (`oracle=HUMAN-DEFERRED-M26` -- the inbound RX + an enrolled operator credential
+    // by which a human could COMMAND the M24 gate is M26). The transcript is TX-only +
+    // IN-RAM this milestone, so M20's two-phase commit + the M22/M23 heads stay byte-
+    // identical (the M22 `chain_head` is READ for the binding, never mutated). The
+    // honesty tokens are machine-emitted so the marker mechanically cannot overclaim.
+    // DoD: "M25: operator OK".
+    {
+        let op = tb_hal::opframe_selftest();
+        // FAIL-CLOSED: the clean transcript must verify (recompute==head) AND a genuine
+        // inclusion proof must verify AND the seq must be strictly monotone AND the
+        // INTRO must bind the live M22 head AND the closing GATE_VERDICT must catch a
+        // truncated tail AND the injected single-byte tamper must be caught. Any false
+        // withholds the marker (renders a FAIL line with NO 'operator OK' substring) and
+        // exits red NOW (the #65 fail-closed idiom).
+        if !op.clean_ok
+            || !op.inclusion_ok
+            || !op.seq_monotone
+            || !op.intro_bound
+            || !op.truncation_caught
+            || !op.tamper_caught
+        {
+            tb_hal::serial_write_str("M25: operator FAIL clean=");
+            write_hex_u64(op.clean_ok as u64);
+            tb_hal::serial_write_str(" inclusion=");
+            write_hex_u64(op.inclusion_ok as u64);
+            tb_hal::serial_write_str(" seq-monotone=");
+            write_hex_u64(op.seq_monotone as u64);
+            tb_hal::serial_write_str(" intro-bound=");
+            write_hex_u64(op.intro_bound as u64);
+            tb_hal::serial_write_str(" truncation-caught=");
+            write_hex_u64(op.truncation_caught as u64);
+            tb_hal::serial_write_str(" tamper-caught=");
+            write_hex_u64(op.tamper_caught as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the run-
+        // scripts positively require): the emit + recompute + seq + intro-binding +
+        // truncation + tamper verifiers provably RAN at boot over a real emitted
+        // transcript anchored to the live M22 head. `keyed=0` + `oracle=HUMAN-DEFERRED-
+        // M26` are LITERAL honesty tokens -- the marker mechanically cannot claim crypto
+        // authenticity or that a human replied.
+        tb_hal::serial_write_str("opframe: tx_head=");
+        write_hex_u64(op.head);
+        tb_hal::serial_write_str(" frames=");
+        write_hex_u64(op.frames);
+        tb_hal::serial_write_str(" seq_monotone=");
+        write_hex_u64(op.seq_monotone as u64);
+        tb_hal::serial_write_str(" intro_bound=");
+        write_hex_u64(op.intro_bound as u64);
+        tb_hal::serial_write_str(" fold-verified=");
+        write_hex_u64((op.clean_ok && op.inclusion_ok) as u64);
+        tb_hal::serial_write_str(" tamper-caught=");
+        write_hex_u64((op.tamper_caught && op.truncation_caught) as u64);
+        tb_hal::serial_write_str(" keyed=0 oracle=HUMAN-DEFERRED-M26\n");
+        // The marker -- emitted ONLY when the clean fold + inclusion verify, the seq is
+        // strictly monotone, the INTRO binds the live head, the tail-truncation commit
+        // holds, AND the injected tamper was caught. The transcript is IN-RAM + TX-only
+        // (RX/auth is M26), so there is NO '(no channel, skipped)' variant -- a skip is
+        // never legitimate (the run-scripts reject one). The marker uses ONLY surfaced /
+        // tamper-evident / instance-binding terminology (no validated/evaluated -- the
+        // honest discipline: the channel works, NOT that a policy was validated).
+        tb_hal::serial_write_str("M25: operator OK\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();

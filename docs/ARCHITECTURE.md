@@ -8,11 +8,11 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M22 cumulative tail is below. The authoritative, executable record is the
+M25 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M22: provenance OK` marker, then assert each milestone directly and reject the
+`M25: operator OK` marker, then assert each milestone directly and reject the
 skip/dormant variant while positively requiring its witness line.
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
@@ -96,10 +96,32 @@ skip/dormant variant while positively requiring its witness line.
   `verify_inclusion`); a forget writes a **tombstone** rather than erasing the
   chain. The boot self-test proves any single-byte tamper of a committed entry
   invalidates both the head and its inclusion proof, witnessed by
-  `prov: head=.. entries=.. tamper-caught=1 inclusion=1` — the cumulative-tail
-  marker both run scripts grep for, with no legitimate skip variant. This is
+  `prov: head=.. entries=.. tamper-caught=1 inclusion=1`. This is
   **structural** tamper-evidence (not cryptographic): a crypto hash + signed root
   is a tracked successor.
+- **The learning loop (§7 self-improvement) — M23 → M24 → M25.** On top of the
+  memory substrate the OS now grows a verified, HONEST learning loop. **M23**
+  (`M23: experience OK`) is the Monitor/log layer: each M17 forget/recall decision
+  records an injective `ExperienceRecord` (the features + the heuristic action + the
+  COUNTERFACTUAL `kan_score` the dormant M21 cell WOULD produce) into a ring folded
+  into a SEPARATE `xp_head` (reusing the M22 fold), a recorded row replaying through
+  the dormant scorer BIT-IDENTICALLY — claiming ONLY replay-determinism + tamper-
+  evidence, never validity. **M24** (`M24: bakeoff OK (gate-not-met)`) is the honest
+  activation gate: shielded ε-greedy + a 3-way right-censored survival label + a
+  partial-identification lower bound + a one-shot HCPI gate that, on synthetic data,
+  correctly **REFUSES** (the cell stays dormant — an honest gate that refuses is a
+  success). **M25** (`M25: operator OK`) is the COMMUNICATION pillar's outbound half:
+  a typed, tamper-evident operator TRANSCRIPT the OS emits over serial to SURFACE its
+  decisions to a human exogenous oracle (the only valid source the self-graded gate
+  lacks), anchored to the live M22 provenance head ("which instance am I"), with a
+  strictly-monotone `seq` + a closing `GATE_VERDICT` so a reader detects
+  mutation/reorder/drop/truncation, and a canon-time held-out-leakage guard
+  (Seldonian no-snoop). All four (`prov`/`exp`/`explore`+`bakeoff`/`opframe`) are
+  Kani-proven leaves over the SAME M22 fold; M25 is the cumulative-tail marker both
+  run scripts grep for, witnessed by `opframe: tx_head=.. frames=.. seq_monotone=1
+  intro_bound=1 fold-verified=1 tamper-caught=1 keyed=0 oracle=HUMAN-DEFERRED-M26`
+  (TX-only; structural tamper-evidence + instance binding, NOT crypto authenticity
+  and NOT that a human replied — the inbound RX/auth is the tracked M26 successor).
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the
@@ -123,7 +145,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 11 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 15 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -135,10 +157,16 @@ stage-2 STE + command-queue algebra, with the lemma that the SMMU stage-2 IS the
 CPU stage-2 geometry), `blkfmt` (the **M20** durable-persistence codecs:
 superblock, record frame, sector/extent math), `kancell` (the **M21** verified
 fixed-point additive policy cell — spline totality, in-band score, structural
-monotonicity, envelope-no-widening), and `prov` (the **M22** provenance-ledger
+monotonicity, envelope-no-widening), `prov` (the **M22** provenance-ledger
 math: injective `canon`, structural digest, order-sensitive fold, sound
-inclusion). `scripts/verify-encode.sh` pins **`EXPECTED_HARNESSES=46`** and fails
-closed unless that many harnesses verify and zero fail, then emits
+inclusion), `exp` (the **M23** experience codec: fixed-width injective record +
+ring + replay-determinism, reusing the M22 fold), `explore` + `bakeoff` (the
+**M24** honest-gate math: shielded ε-greedy propensity, the 3-way censored survival
+label, the partial-id lower bound, the one-shot HCPI gate), and `opframe` (the
+**M25** operator-transcript codec: injective length-prefixed frame, the held-out-
+leakage guard, strict-monotone seq, intro-binding, and tail-truncation detection,
+reusing the M22 fold). `scripts/verify-encode.sh` pins **`EXPECTED_HARNESSES=64`**
+and fails closed unless that many harnesses verify and zero fail, then emits
 `V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
 the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
 gate. Kani is installed locally in WSL (`cargo-kani`), so a new/changed harness
@@ -147,7 +175,7 @@ since the `prove-encode` lane has a hard timeout.
 
 *CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
-booting both arches under pure QEMU-TCG to the final `M22: provenance OK` marker
+booting both arches under pure QEMU-TCG to the final `M25: operator OK` marker
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
@@ -157,7 +185,7 @@ KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
 QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
 **kani** (two jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and
-`prove-encode` over `tb-encode` = 46 harnesses); **miri** (the Tier-0 dynamic UB
+`prove-encode` over `tb-encode` = 64 harnesses); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI

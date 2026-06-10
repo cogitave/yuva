@@ -111,6 +111,31 @@
 //!    `KAN_ACTIVE` stays `false` (the shadow changes zero demotes). Claims ONLY
 //!    replay-determinism + structural tamper-evidence -- NOT policy validity
 //!    (deterministic logging -> degenerate propensity; validity is M24's burden).
+//!  * [`opframe`] -- the M25 verified OPERATOR-TRANSCRIPT codec: the typed, fixed-
+//!    header, LENGTH-PREFIXED, injective [`opframe::OpFrame`] encoder (`opframe::canon`
+//!    / `opframe::decode` / `opframe::canon_len` -- magic/ver/kind/sev/partition +
+//!    strictly-monotone `seq` + `t_logical` + `prev_head` + a `payload_len` u32 prefix
+//!    so distinct frames -> distinct bytes; TOTAL + fail-closed on a too-small buffer,
+//!    a bad magic/version/reserved-bit, an out-of-band OTel severity, OR the held-out
+//!    partition) the OS emits over serial to SURFACE what it recorded (M23) + decided
+//!    (M24) to a human exogenous oracle (the COMMUNICATION pillar). The running per-
+//!    instance `op_head` fold REUSES the M22 [`prov`] leaf verbatim (`opframe::
+//!    op_append` / `op_chain_mix` / `op_verify_inclusion` / `op_head_witness` -- NO new
+//!    fold math); `opframe::fold_frame` is the per-frame fold step (fail-closed: a
+//!    rejected/held-out frame never advances the head). `opframe::seq_index_exact`
+//!    is the strict-monotone reader check (catches reorder/gap/dup/middle-truncation),
+//!    `opframe::intro_binds` proves the genesis INTRO binds the transcript to the LIVE
+//!    M22 head (the "which instance am I" attestation -- RATS RFC 9334), and
+//!    `opframe::gate_commits_final_seq` is the closing-frame TAIL-truncation guard
+//!    (Ma-Tsudik FssAgg). THE LEAKAGE GUARD: `opframe::canon` fail-closes on
+//!    [`opframe::partition::SAFETY_HELD_OUT`] so the transcript can NEVER surface a
+//!    sealed-partition record (the Seldonian no-snoop invariant -- Thomas Science
+//!    2019 + Dwork reusable holdout -- encoded in the encoder). `tb-hal` CALLS these
+//!    to emit + self-verify a transcript at boot; the simulated operator-verifier
+//!    recomputes the head, asserts seq-monotone + intro-binding + a single-byte tamper
+//!    is caught. Claims ONLY structural tamper-EVIDENCE + truncation/reorder/replay
+//!    detection (keyed=0, NO forgery-resistance) + instance binding -- NOT crypto
+//!    authenticity, NOT that a human replied (oracle=HUMAN-DEFERRED-M26).
 //!  * [`explore`] -- the M24 SHIELDED EPSILON-GREEDY exploration math: the
 //!    closed-form logging PROPENSITY `explore_propensity_q(eps_num, eps_den, m,
 //!    is_greedy) -> u16` (Open Bandit Pipeline arXiv:2008.07146) M24 stamps into
@@ -175,6 +200,7 @@ pub mod explore;
 pub mod ipc_frame;
 pub mod kancell;
 pub mod memscore;
+pub mod opframe;
 pub mod paging;
 pub mod prov;
 pub mod route;
