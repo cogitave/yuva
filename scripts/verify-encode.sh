@@ -167,8 +167,20 @@ set -euo pipefail
 # prov::chain_mix fold (a SYMBOLIC flip index, concrete record/sibling so the FNV fold stays
 # concrete). PRODUCER-ONLY: the telemetry is recorded + folded, never fed to a policy (the
 # confounding loop is structurally avoided; signal=OBSERVATIONAL-NONCAUSAL).
+# + M27 tpsched verified TWO-VMID TIME-PARTITION-SCHEDULER leaf x5: kani_tpsched_next_slot_roundrobin
+# -- next_slot is TOTAL over ALL usize (fail-closed to 0 for an out-of-range slot), strictly cycles
+# 0->1->0, and NEITHER slot is a fixed point (round-robin LIVENESS -> neither VMID starves);
+# kani_tpsched_frame_conserved -- over a SYMBOLIC FramePlan, frame_total == sum of slot_deadline_delta,
+# every slot's delta is clamped UP to MIN_SLOT_TICKS (no starvation) and <= frame_total (no monopoly),
+# the saturating sum never overflows; kani_tpsched_canon_injective -- the fixed-WIDTH tpsched::canon is
+# TOTAL (fail-closed to 0) AND INJECTIVE (a distinct frame_seq/slot/vmid_from/vmid_to/t_logical encodes
+# to distinct bytes); kani_tpsched_canon_roundtrip -- tpsched::decode(tpsched::canon(rec)) == rec;
+# kani_tpsched_fold_tamper -- a single-byte flip of a committed decision's canonical bytes changes the
+# recomputed sched_head, REUSING the proven M22 prov::chain_mix fold (SYMBOLIC flip index, concrete
+# record/sibling). OBSERVATIONAL not learned (fixed round-robin); NOT real-time / NOT schedulability-
+# proven (realtime=NOT-CLAIMED).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=69
+EXPECTED_HARNESSES=74
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

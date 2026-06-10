@@ -405,6 +405,50 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'L2.6: smmu OK' missing" >&2
         exit 1
     fi
+    # M27a SOUNDNESS (anti-hollow-pass, the aL2.5/L2.6/M20..M26 substring lesson): the
+    # 'M27: sched OK' marker must be backed by the REAL cooperative two-VMID round-trip --
+    # two guest VMIDs are time-partitioned under two stage-2 roots, each yielding with
+    # `hvc #14`, every scheduling DECISION folded into a running provenance head, and the
+    # whole thing runs in its OWN HCR_EL2.VM window (teardown-FIRST). On a runner that
+    # boots at EL2 the round-trip ALWAYS runs (it is self-contained + in-RAM, like the
+    # other EL2 rungs), so the Proven path is expected; the '(no EL2, skipped)' variant is
+    # only legitimate when the kernel did NOT boot at EL2 (already LOUDLY warned via the
+    # L2.0 skip below). POSITIVELY require the witness line 'sched: head=0x.. frames=0x..
+    # vmids=0x2 both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1
+    # frame-conserved=1 timing=COOPERATIVE-HVC-YIELD realtime=NOT-CLAIMED' (so a marker
+    # printed WITHOUT both VMIDs progressing / the round-robin order / the fold + tamper
+    # verifier / the frame-conservation check FAILS). The timing=COOPERATIVE-HVC-YIELD
+    # token must be present (NOT timing=TCG-NON-CYCLE-ACCURATE -- that is M27b's real-timer
+    # claim; M27a must not impersonate it) AND realtime=NOT-CLAIMED must be present so the
+    # marker cannot claim a real-time / schedulability guarantee.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M27: sched OK'; then
+        # The 'L2.0: el2 OK (no EL2, skipped)' lane already warns about a non-EL2 boot; in
+        # that case M27 legitimately prints its '(no EL2, skipped)' variant and the witness
+        # is absent. Only enforce the real witness when the kernel DID boot at EL2.
+        if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M27: sched OK (no EL2, skipped)'; then
+            if ! printf '%s' "${OUTPUT}" | grep -qE -- 'sched: head=0x[0-9a-fA-F]+ frames=0x[0-9a-fA-F]+ vmids=0x2 both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1 frame-conserved=1 timing=COOPERATIVE-HVC-YIELD realtime=NOT-CLAIMED'; then
+                echo "[run-aarch64] FAIL -- M27 marker present but the real round-trip witness 'sched: head=.. frames=.. vmids=0x2 both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1 frame-conserved=1 timing=COOPERATIVE-HVC-YIELD realtime=NOT-CLAIMED' was NOT seen (hollow M27 pass)" >&2
+                exit 1
+            fi
+            # HONESTY DISCIPLINE (M27 plan §4): M27a is the COOPERATIVE (HVC-yield) path; it
+            # must NOT impersonate M27b's real-CNTHP-preemption claim, and it makes NO real-time /
+            # schedulability / WCET guarantee. Reject 'TCG-NON-CYCLE-ACCURATE' (the M27b token) and
+            # any 'validated'/'real-time'/'WCET'/'guaranteed' near the M27 marker/witness.
+            if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M27:|sched:)' | grep -qE -- 'TCG-NON-CYCLE-ACCURATE|validated|real-time|WCET|guaranteed'; then
+                echo "[run-aarch64] FAIL -- M27 marker/witness carries an overclaim ('TCG-NON-CYCLE-ACCURATE' is M27b's real-timer token, or a 'validated'/'real-time'/'WCET'/'guaranteed' claim) -- M27a is the COOPERATIVE HVC-yield path with realtime=NOT-CLAIMED (M27 plan §4 honesty discipline)" >&2
+                exit 1
+            fi
+        fi
+    else
+        echo "[run-aarch64] FAIL -- final marker present but 'M27: sched OK' missing (M27 regressed)" >&2
+        exit 1
+    fi
+    # LOUD when M27 silently degrades to its skip variant (the kernel did not boot at EL2):
+    # the lane stays green (the cumulative chain still proves M0..M26) but the GitHub UI
+    # shows a warning so reduced sovereign-scheduler proof coverage is never invisible.
+    if printf "%s" "${OUTPUT}" | grep -qF -- "M27: sched OK (no EL2, skipped)"; then
+        echo "::warning::aarch64 M27 sovereign-scheduler ran in SKIP mode (kernel did not boot at EL2) -- the cooperative two-VMID time-partition round-trip was NOT exercised on this runner; see the boot: entry-el= serial line"
+    fi
     # M14.2: explicit second assertion for the blocking-recv sub-marker (the
     # final marker already transitively gates it; this is direct traceability).
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M14.2: blocking-recv OK'; then
@@ -445,7 +489,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 
