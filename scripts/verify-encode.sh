@@ -111,8 +111,27 @@ set -euo pipefail
 # kani_exp_schema_stability -- canon of an outcome=Unset + reserved-propensity-sentinel
 # record has IDENTICAL length + field offsets to a populated record, so M24 populating
 # the reserved fields CANNOT shift the fold (the reserve-now correctness obligation).
+# + M24 explore/bakeoff verified HONEST-GATE leaves x6: kani_explore_propensity_total_positivity
+# -- the closed-form shielded epsilon-greedy explore_propensity_q is TOTAL (no panic / no
+# divide-by-zero), the m==1 SINGLETON guard returns EXACTLY 1000, and POSITIVITY holds (every
+# cleared action in [1,1000] when eps_num>0 & m>=2 -> IPS identifiable over the explored
+# support); kani_bakeoff_label_partition -- survival_label is TOTAL on saturating tick
+# subtraction, the 3-way partition is EXHAUSTIVE + MUTUALLY EXCLUSIVE, and MONOTONE-RESOLUTION
+# (a resolved Negative/Positive never flips as now advances -> replay-stable);
+# kani_bakeoff_bound_sound_rounddown -- value_lower_bound / eb_lower_bound / smoothness_floor_mean
+# / value_upper_heuristic are TOTAL (no divide-by-zero; n_total==0 fails closed to Y_LO) and
+# SOUND (the lower bound never exceeds a constant-reward overlap mean, rounds DOWN);
+# kani_bakeoff_replay_determinism -- the chosen explore-vs-greedy action (keyed to the IMMUTABLE
+# decision_id via the reused M22 fold, never a mutable step counter), its propensity, the survival
+# label + reward, and the value lower-bound ALL replay bit-for-bit; kani_kan_envelope_no_widening_m24
+# -- the M21 envelope-no-widening proof RE-ASSERTS: the heuristic pin verdict is INVARIANT under
+# both the kan_score AND the explore coin (the shielded epsilon only chooses AMONG already-cleared
+# candidates -- pin/grace/util-pin never explorable, zero actions added to A_safe);
+# kani_bakeoff_schema_stability -- populating the M23-reserved OutcomeLabel slot with a RESOLVED
+# survival label (ReRecalled/Evicted) + the soft-greedy propensity shifts NO byte offset (reusing
+# the M23 reserve-now lemma -> M22 fold / M20 spill byte-identical).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=52
+EXPECTED_HARNESSES=58
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

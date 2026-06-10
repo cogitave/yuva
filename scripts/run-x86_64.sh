@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M23: experience OK'
+MARKER='M24: bakeoff OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -195,7 +195,44 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M23 marker/witness carries a 'validated'/'evaluated' overclaim -- M23 records + replay-determines, it does NOT validate any policy (proposal §6 terminology discipline)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M23 is no longer the top-level grep (M24 displaced it as the cumulative tail);
+  # assert it directly so the M23 -> M24 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M23: experience OK'; then
+    echo ">> FAIL: final marker present but 'M23: experience OK' missing (M23 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M24 SOUNDNESS (anti-hollow-pass, the aL2.5/M20/M21/M22/M23 substring lesson): the
+  # 'M24: bakeoff OK' marker must be backed by the REAL bake-off witness -- the gate
+  # machinery (label + estimator + in-RAM replay + the envelope re-assertion) provably
+  # RAN. POSITIVELY require the witness line 'bakeoff: vlo_kan=0x.. vhi_heur=0x..
+  # margin=0x.. ... cleared=0x.. ... no-float=1 envelope-no-widening=1' (so a marker
+  # printed WITHOUT running the estimator/gate FAILS). no-float=1 AND
+  # envelope-no-widening=1 are required: the gate path must be float-free and the M21
+  # envelope-no-widening invariant must have re-asserted.
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'bakeoff: vlo_kan=0x[0-9a-fA-F]+ vhi_heur=0x[0-9a-fA-F]+ margin=0x[0-9a-fA-F]+ .*no-float=1 envelope-no-widening=1'; then
+    echo ">> FAIL: M24 marker present but the real bake-off witness 'bakeoff: vlo_kan=.. vhi_heur=.. margin=.. .. no-float=1 envelope-no-widening=1' was NOT seen (hollow M24 pass)" >&2
+    exit 1
+  fi
+  # M24 DORMANCY (proposal §6/§7): on the (necessarily SYNTHETIC) traces this milestone
+  # the gate does NOT clear -- 'M24: bakeoff OK (gate-not-met)' (the cell stays DORMANT)
+  # is the DESIGNED, CORRECT outcome (the M21 '(heuristic floor, gate-not-met)' idiom).
+  # This lane does NOT assert an ACTIVE cell, so it ACCEPTS the dormant gate-not-met /
+  # gate-not-evaluable variants. A 'gate-cleared' verdict here (cleared=0x1) would mean
+  # the cell flipped ACTIVE on a synthetic trace -- which this milestone forbids, so
+  # reject it (the cell must stay dormant until M25's exogenous human oracle).
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M24: bakeoff OK (gate-cleared)'; then
+    echo ">> FAIL: M24 gate CLEARED on a synthetic trace (cell flipped ACTIVE) -- this milestone the gate must REFUSE (gate-not-met); a real activation awaits M25's human oracle" >&2
+    exit 1
+  fi
+  # TERMINOLOGY DISCIPLINE (proposal §6/§7): M24 claims ONLY a partial-identification
+  # LOWER bound + an HONEST refusal, NOT a validated activation. Reject any
+  # 'validated'/'evaluated' substring on the bakeoff: witness or the M24 marker line so
+  # the marker can never silently overclaim (the honest gate REFUSES on synthetic data).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M24:|bakeoff:)' | grep -qE -- 'validated|evaluated'; then
+    echo ">> FAIL: M24 marker/witness carries a 'validated'/'evaluated' overclaim -- M24 lower-bounds + honestly REFUSES, it does NOT validate any activation (proposal §6/§7 terminology discipline)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (gate-not-met expected; and 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

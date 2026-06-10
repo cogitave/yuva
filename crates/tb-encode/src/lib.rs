@@ -111,6 +111,37 @@
 //!    `KAN_ACTIVE` stays `false` (the shadow changes zero demotes). Claims ONLY
 //!    replay-determinism + structural tamper-evidence -- NOT policy validity
 //!    (deterministic logging -> degenerate propensity; validity is M24's burden).
+//!  * [`explore`] -- the M24 SHIELDED EPSILON-GREEDY exploration math: the
+//!    closed-form logging PROPENSITY `explore_propensity_q(eps_num, eps_den, m,
+//!    is_greedy) -> u16` (Open Bandit Pipeline arXiv:2008.07146) M24 stamps into
+//!    the M23-reserved `logging_propensity_q` field. A rational `eps = eps_num/
+//!    eps_den` flips the kancell-greedy-vs-heuristic choice ONLY among the
+//!    already-cleared candidate set the frozen M17 shield emits (Alshiekh
+//!    arXiv:1708.08611), restoring positivity (`pi_b in (0,1)`) so off-policy
+//!    evaluation is identifiable over the explored support. SATURATING integer
+//!    mul/div only -- TOTAL, in `[1, 1000]` for every cleared action when
+//!    `eps_num > 0` and `m >= 1`, with the `m == 1` SINGLETON guard returning
+//!    exactly `1000` (a forced action can never be explored -> routed to the
+//!    partial-id bound). NO float; the explore choice is logged but, with
+//!    `KAN_ACTIVE == false`, NEVER changes the live demote.
+//!  * [`bakeoff`] -- the M24 HONEST-GATE estimator math: the deterministic 3-way
+//!    right-censored survival `survival_label(decision_tick, now_tick,
+//!    first_read_touch_tick, W) -> {Negative, Positive, Censored}` (Liu
+//!    arXiv:2007.15859 forward-reuse-distance / Chapelle KDD'14 delayed-feedback
+//!    censoring -- exhaustive + mutually-exclusive + monotone-resolution over the
+//!    unfiltered-`read()` re-touch path), the Manski + Lipschitz-smoothness
+//!    `value_lower_bound` (Khan-Saveski-Ugander arXiv:2305.11812 -- a closed-form
+//!    nearest-neighbour smoothness sweep over the quantized kancell grid, no
+//!    divide/recursion, SOUND, rounds DOWN), the Maurer-Pontil empirical-Bernstein
+//!    `eb_lower_bound(sum, sum_sq, n, range, delta)` integer LOWER confidence bound
+//!    (arXiv:0907.3740), and the conjunctive ONE-SHOT `gate_clears` HCPI activation
+//!    test (Thomas HCPI ICML'15 / Seldonian Science 2019) -- `V_lower(kancell) -
+//!    V_upper(heuristic) >= MARGIN` over a distribution-shifted held-out split, AND
+//!    the re-asserted M21 envelope-no-widening proof. On synthetic traces the gate
+//!    does NOT clear (`gate-not-met`, the cell stays DORMANT) -- the designed,
+//!    correct outcome. Reuses `kancell` (grid + `kan_score` + `DEMOTE_BAND`),
+//!    `exp::OutcomeLabel`/`policy_kind`, and `memscore::ln_fixed`; NO float, all
+//!    saturating integer, totality/soundness/round-down Kani-proven.
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -136,9 +167,11 @@
 //! identity, total/fail-closed decoding, and the page-table/EPT entry bit
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
+pub mod bakeoff;
 pub mod blkfmt;
 pub mod el2_trap;
 pub mod exp;
+pub mod explore;
 pub mod ipc_frame;
 pub mod kancell;
 pub mod memscore;

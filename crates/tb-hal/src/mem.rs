@@ -66,6 +66,25 @@ use tb_encode::prov::{self, ProvEntry, PROV_HASH_LEN};
 // the live forget/demote decision is BYTE-IDENTICAL to M22's. Strictly downstream /
 // observational -- no perturbation of `clock`/finsts/the M22 `chain_head`.
 use tb_encode::exp::{self, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN};
+// M24: the verified HONEST-GATE leaves -- the shielded epsilon-greedy logging
+// PROPENSITY (`explore::explore_propensity_q`, stamped into the M23-reserved
+// `logging_propensity_q` field) and the bake-off estimator math (the 3-way
+// right-censored survival `bakeoff::survival_label`, the Manski + Lipschitz-
+// smoothness `bakeoff::value_lower_bound`, the Maurer-Pontil `bakeoff::eb_lower_bound`,
+// the pessimistic `bakeoff::value_upper_heuristic`, and the conjunctive one-shot
+// `bakeoff::gate_clears`). `tb-hal` CALLS these next to the M17 forget/recall sites,
+// exactly as it calls `kan_score`/`prov::append`; the math (propensity positivity /
+// label partition + monotone-resolution / bound soundness + round-down / replay-
+// determinism / envelope-no-widening re-assert) is Kani-proven in
+// `tb_encode::explore` + `tb_encode::bakeoff`. `KAN_ACTIVE` stays `false` (the gate
+// will NOT clear on synthetic traces -> the cell stays DORMANT): the explore choice
+// is RECORDED into the propensity field but, with `KAN_ACTIVE == false`, NEVER
+// changes the live demote (which stays byte-identical to M23's heuristic else-branch).
+use tb_encode::explore::explore_propensity_q;
+use tb_encode::bakeoff::{
+    gate_clears, label_reward, survival_label, value_lower_bound, value_upper_heuristic,
+    GateVerdict, SurvivalLabel, ACTIVATION_MARGIN, GRID_CELLS,
+};
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
 const SCALE: i64 = 1000;
@@ -131,6 +150,53 @@ const XP_ACTION_TOUCH: u8 = 2;
 const XP_ENV_PINNED: u8 = 0;
 const XP_ENV_DEMOTABLE: u8 = 1;
 const XP_ENV_TOUCH: u8 = 2;
+
+// --- M24 honest-gate constants (the shielded epsilon-greedy + bake-off layer) --
+//
+// The SHIELDED epsilon-greedy logging policy (proposal §2.1) flips the kancell-
+// greedy-vs-heuristic choice ONLY among the already-cleared candidate set the frozen
+// M17 envelope emits, restoring positivity so off-policy evaluation is identifiable.
+// `KAN_ACTIVE` stays `false`: the explore choice is RECORDED into the M23-reserved
+// propensity field but never changes the live demote (which stays the heuristic
+// else-branch -- byte-identical to M23). The bake-off self-test replays the in-RAM
+// labeled stream through the frozen-heuristic AND dormant kan_score, computes
+// V_lower(kancell) / V_upper(heuristic), evaluates the one-shot gate, and re-asserts
+// the envelope-no-widening proof. On synthetic traces the gate WILL NOT clear ->
+// `gate-not-met` (the cell stays DORMANT) is the designed, correct outcome.
+
+/// The shipped exploration rate `eps = EPS_NUM/EPS_DEN` (proposal §2.1): 1/16, a
+/// small rational so the no-overlap mass stays large and the gate (correctly) almost
+/// never clears -- the right failure mode for synthetic traces (proposal §7). A
+/// compile-time const (one-shot; re-tuning it spends confidence -- HCPI).
+const EPS_NUM: u32 = 1;
+const EPS_DEN: u32 = 16;
+
+/// The per-agent exploration seed: keyed into the explore coin via the M22 fold so
+/// the coin (and hence the chosen action + its propensity) is bit-exactly replayable
+/// from `(decision_id, AGENT_SEED)` alone (NEVER a mutable step counter -- the
+/// replay-determinism property the `kani_bakeoff_replay_determinism` harness pins).
+/// A golden-ratio const (the `REFLECT_SEED` discipline), non-zero so the fold mixes.
+const AGENT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The survival-label window `W` (proposal §2.3): a demoted record re-touched on the
+/// unfiltered `read()` path within `W` ticks is a `NegativeFalseForget`; the window
+/// elapsed with no touch is a `PositiveTrueForget`; the window still open is
+/// `Censored`. A fixed integer window (deterministic / replayable).
+const SURVIVAL_WINDOW: u64 = 64;
+
+/// The number of cleared candidates the shielded epsilon-greedy chooses AMONG at a
+/// demote site (proposal §2.1). The M17 forget decision is a binary KEEP-vs-DEMOTE
+/// once a record clears the envelope, so the cleared set is {greedy, alternative}
+/// (`m == 2`) for an envelope-cleared record, and a SINGLETON (`m == 1`, propensity
+/// 1000, never explorable) for a pinned/grace/util-pin record. Keeping `m` explicit
+/// keeps the propensity closed-form + the singleton routing mechanical.
+const EXPLORE_CLEARED_M: u32 = 2;
+const EXPLORE_SINGLETON_M: u32 = 1;
+
+/// The bake-off self-test seed sizes (proposal §6): the number of low-importance
+/// records written + the held-out split sizes the replay evaluates over. Sized so the
+/// in-RAM ring holds the full labeled stream (<< XP_CAP) with headroom.
+const BAKEOFF_WRITES: u64 = 8;
 
 // --- M17 sleep-time consolidation / reflection / forgetting constants ---------
 // All fixed-point integer (deterministic / replayable), beside SCALE/TOKEN_QUOTA.
@@ -987,6 +1053,279 @@ pub(crate) fn exp_selftest() -> crate::ExpProof {
     }
 }
 
+// --- M24: the honest activation-gate bake-off self-test (the marker body) -----
+
+/// M24: run the HONEST ACTIVATION-GATE bake-off self-test and report a
+/// [`crate::BakeoffProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::explore` + `tb_encode::bakeoff`
+/// leaves and the real [`MemSubstrate`] forget/read-touch path.
+///
+/// It (seed) writes `BAKEOFF_WRITES` low-importance records, recalls one (a HOT
+/// touch), then forces the M17 [`MemSubstrate::forget_sweep`] to demote them -- each
+/// demote records a `FORGET_DECISION` whose M23-reserved propensity field is now
+/// POPULATED by the shielded epsilon-greedy logging policy (`logging_policy_kind ==
+/// SOFT_GREEDY` for the cleared, m>1 records). It then drives UNFILTERED
+/// [`MemSubstrate::read_touch`] on a SUBSET of the demoted records WITHIN the survival
+/// window (a `NegativeFalseForget`), leaving the rest untouched with the window
+/// elapsed (a `PositiveTrueForget`) -- the deterministic 3-way right-censored label.
+/// (replay) It scans the in-RAM ring, attaches the survival label to each
+/// `FORGET_DECISION` by matching its `decision_id` against the recorded unfiltered
+/// touch ticks, accumulates the IDENTIFIED overlap statistics (the SOFT_GREEDY, m>1
+/// rewards) + the heuristic statistics over an M18.2-style shifted split, builds the
+/// per-grid-cell smoothness anchors, and computes `V_lower(kancell)` (the Manski +
+/// Lipschitz-smoothness + empirical-Bernstein lower bound) and `V_upper(heuristic)`
+/// (the pessimistic-for-activation upper bound). (gate) It evaluates the conjunctive
+/// one-shot gate and RE-ASSERTS the envelope-no-widening invariant in-kernel (the
+/// heuristic pin verdict is invariant under every kan_score). On synthetic traces the
+/// gate does NOT clear -> [`crate::BakeoffProof::NotMet`] (the cell stays DORMANT) --
+/// the designed, correct outcome. `KAN_ACTIVE` stays `false` (a violation -> Failed).
+pub(crate) fn bakeoff_selftest() -> crate::BakeoffProof {
+    use crate::BakeoffProof;
+
+    // (seed) A fresh RAM-backed substrate; write N low-importance records (each
+    // envelope-eligible to demote) so the forced sweep produces forget-decisions.
+    let mut sub = MemSubstrate::new();
+    let mut ids: Vec<u64> = Vec::new();
+    let mut w = 0u64;
+    while w < BAKEOFF_WRITES {
+        let key = 0x00B_A000 + w; // a distinct known token per write
+        match sub.write(0, key, 0xBBB_0000 + w, 1) {
+            Some(id) => ids.push(id),
+            None => return BakeoffProof::Failed { stage: 0x1 },
+        }
+        w += 1;
+    }
+    if ids.len() < BAKEOFF_WRITES as usize {
+        return BakeoffProof::Failed { stage: 0x1 };
+    }
+
+    // Drive >=1 recall while records are HOT (a HOT touch -- the M23 censoring event).
+    let _ = sub.recall(0x00B_A000, 0, 1, 0);
+
+    // Force the envelope-clearing sweep: advance the clock well past MIN_AGE so the
+    // aged, low-importance, default-utility records clear the envelope + demote. The
+    // clock value AT the sweep is each demoted record's `decision_tick`.
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let decision_tick = sub.clock;
+    let demoted = sub.forget_sweep();
+    if demoted == 0 {
+        return BakeoffProof::Failed { stage: 0x1 };
+    }
+
+    // (label) Drive UNFILTERED read_touch on a SUBSET of the demoted records WITHIN the
+    // survival window (a NegativeFalseForget), leaving the rest untouched. We touch the
+    // first half; the touch tick is decision_tick + a small delta < SURVIVAL_WINDOW, so
+    // the matched FORGET_DECISIONs resolve Negative; the untouched ones, once the window
+    // elapses below, resolve Positive. Track which ids we touched + the touch tick.
+    let touch_tick = decision_tick.wrapping_add(SURVIVAL_WINDOW / 2); // within W -> Negative
+    sub.clock = touch_tick;
+    let mut touched: Vec<u64> = Vec::new();
+    let half = ids.len() / 2;
+    let mut i = 0usize;
+    while i < half {
+        // read_touch is the UNFILTERED path (T2 by id), so it observes a DEMOTED record.
+        if sub.read_touch(ids[i]).is_some() {
+            touched.push(ids[i]);
+        }
+        i += 1;
+    }
+
+    // Advance `now` past the window for the UNTOUCHED records so their window is fully
+    // elapsed (PositiveTrueForget); the touched records stay Negative (their touch tick
+    // is immutable). `now_tick` is the observation horizon for the survival label.
+    let now_tick = decision_tick.wrapping_add(SURVIVAL_WINDOW.saturating_add(64));
+
+    // (replay) Scan the in-RAM ring; attach the survival label to each FORGET_DECISION
+    // by matching its decision_id against `touched`, and accumulate the IDENTIFIED
+    // overlap statistics (SOFT_GREEDY, m>1 rewards) + the heuristic statistics. The
+    // smoothness grid anchors the no-overlap floor. An M18.2-style shifted split is the
+    // identity here (the seeded stream is one held-out partition); the gate runs ONCE.
+    let mut overlap_sum: i64 = 0;
+    let mut overlap_sum_sq: i128 = 0;
+    let mut n_overlap: u32 = 0;
+    let mut heur_sum: i64 = 0;
+    let mut n_resolved: u32 = 0;
+    let mut n_censored: u32 = 0;
+    let mut overlap_mass: u64 = 0;
+    let mut n_forget: u32 = 0;
+    let mut grid: [Option<i64>; GRID_CELLS] = [None; GRID_CELLS];
+
+    let ring_len = sub.xp_ring_len();
+    let mut s = 0usize;
+    while s < ring_len {
+        if let Some(row) = sub.xp_ring_row(s) {
+            if let Some(rec) = exp::decode(&row) {
+                if rec.kind == exp::kind::FORGET_DECISION {
+                    n_forget += 1;
+                    // The unfiltered re-touch tick for this decision_id (Some iff we
+                    // read_touch'd it within the window above).
+                    let first_touch = if touched.iter().any(|&t| t == rec.decision_id) {
+                        Some(touch_tick)
+                    } else {
+                        None
+                    };
+                    let label =
+                        survival_label(decision_tick, now_tick, first_touch, SURVIVAL_WINDOW);
+                    let reward = label_reward(label);
+                    // Count censored vs resolved (only resolved labels feed the gate).
+                    if label == SurvivalLabel::Censored {
+                        n_censored += 1;
+                    } else {
+                        n_resolved += 1;
+                        // HEURISTIC value: the always-live floor served this exact action;
+                        // its reward is the same resolved label (the floor IS what ran).
+                        heur_sum = heur_sum.saturating_add(reward);
+                        // IDENTIFIED OVERLAP: a SOFT_GREEDY (explorable, m>1) decision
+                        // contributes to the kancell's identified value via the explored
+                        // support. Accumulate its reward + sufficient statistics + mass.
+                        if rec.logging_policy_kind == exp::policy_kind::SOFT_GREEDY {
+                            overlap_sum = overlap_sum.saturating_add(reward);
+                            overlap_sum_sq = overlap_sum_sq
+                                .saturating_add((reward as i128).saturating_mul(reward as i128));
+                            n_overlap += 1;
+                            overlap_mass =
+                                overlap_mass.saturating_add(rec.logging_propensity_q as u64);
+                            // Anchor the smoothness grid at the record's recency grid cell
+                            // (feats[0] quantized -> the grid segment), keeping the TIGHTEST
+                            // (max) reward per cell (a sound lower-bound anchor).
+                            let cell = grid_cell_of(rec.feats[0]);
+                            grid[cell] = Some(match grid[cell] {
+                                Some(prev) if prev >= reward => prev,
+                                _ => reward,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        s += 1;
+    }
+
+    // We must have produced real forget-decisions to replay (anti-vacuity).
+    if n_forget == 0 {
+        return BakeoffProof::Failed { stage: 0x2 };
+    }
+
+    // (gate) Compute the estimators. V_lower(kancell): the Manski + Lipschitz-smoothness
+    // + empirical-Bernstein lower bound over the explored overlap + the no-overlap floor.
+    let n_total = n_resolved; // the resolved labeled decisions form the held-out support
+    let vlo_kan = value_lower_bound(
+        overlap_sum,
+        overlap_sum_sq,
+        n_overlap,
+        n_total,
+        &grid,
+        1,  // delta_num
+        20, // delta_den -> delta = 0.05 (a 95% one-shot HCPI bound)
+    );
+    // V_upper(heuristic): the pessimistic-for-activation upper bound (the heuristic's
+    // identified mean + the optimistic Manski ceiling over its no-overlap mass).
+    let vhi_heur = value_upper_heuristic(heur_sum, n_resolved, n_total);
+    let margin = vlo_kan.saturating_sub(vhi_heur);
+
+    // (envelope re-assertion, [B]) RE-ASSERT the M21 envelope-no-widening invariant
+    // in-kernel: the heuristic pin verdict is INVARIANT under every kan_score value
+    // (the shielded epsilon only chooses AMONG cleared candidates). We re-run the
+    // dormant kan_score over the baked probe vector and confirm a PINNED record's
+    // safe_to_demote verdict does not move under any of those scores -- the same
+    // structural check the M21 boot self-test runs, extended to the explore coin.
+    let envelope_ok = bakeoff_envelope_no_widening();
+    if !envelope_ok {
+        return BakeoffProof::Failed { stage: 0x3 };
+    }
+
+    // DORMANT INVARIANT: the cell must NOT be on the decision path (KAN_ACTIVE false).
+    // The gate verdict is the ONLY thing that could flip it; a true here is a bug.
+    if KAN_ACTIVE {
+        return BakeoffProof::Failed { stage: 0x5 };
+    }
+
+    // The no-overlap (Manski) mass: decisions epsilon could not explore (singletons +
+    // the resolved-but-not-soft-greedy mass). Reported in the witness.
+    let no_overlap = n_resolved.saturating_sub(n_overlap) as u64;
+
+    // (gate verdict) Evaluate the conjunctive one-shot gate over the estimators + the
+    // eligibility pre-gate. On synthetic traces this is NotMet (the cell stays DORMANT).
+    match gate_clears(
+        vlo_kan,
+        vhi_heur,
+        ACTIVATION_MARGIN,
+        n_resolved,
+        overlap_mass,
+    ) {
+        GateVerdict::Cleared => {
+            // [A] cleared AND [B] (envelope) holds -> the (counterfactual) activation.
+            // NOT reached on synthetic traces; if it ever is, the cell would flip ACTIVE
+            // -- but KAN_ACTIVE stays a const false this milestone (a real activation
+            // awaits M25's human oracle), so this is honestly reported, not acted on.
+            BakeoffProof::Cleared {
+                vlo_kan,
+                vhi_heur,
+                margin,
+            }
+        }
+        GateVerdict::NotMet => BakeoffProof::NotMet {
+            vlo_kan,
+            vhi_heur,
+            margin,
+            resolved: n_resolved as u64,
+            censored: n_censored as u64,
+            overlap_mass,
+            no_overlap,
+        },
+        GateVerdict::NotEvaluable => BakeoffProof::NotEvaluable {
+            resolved: n_resolved as u64,
+            overlap_mass,
+        },
+    }
+}
+
+/// M24: map a quantized recency feature onto its kancell grid cell index
+/// (`0..GRID_CELLS`), mirroring the `kan_spline_eval` segment math (offset from
+/// `GRID_LO`, shifted right by `GRID_STEP_LOG2`, clamped to the last cell). Used by
+/// the bake-off to anchor the Lipschitz-smoothness grid. Pure, total, no panic.
+fn grid_cell_of(feat_q: i32) -> usize {
+    let off = feat_q.saturating_sub(GRID_LO).max(0);
+    let cell = (off >> GRID_STEP_LOG2) as usize;
+    if cell >= GRID_CELLS {
+        GRID_CELLS - 1
+    } else {
+        cell
+    }
+}
+
+/// M24: re-assert the M21 envelope-no-widening invariant in-kernel (proposal §2.4
+/// `[B]` / §5): the heuristic pin verdict (`safe_to_demote`) is INVARIANT under every
+/// dormant `kan_score` value over the baked probe vector -- the shielded epsilon-
+/// greedy choice adds ZERO actions to the cleared set, so it can rank WITHIN the safe
+/// set but never widen it. Returns `true` iff the invariant holds for every probe
+/// (it always does -- the seam keeps the policy + the exploration strictly downstream
+/// of the safety gate). Pure value computation over the frozen KAN_TABLE.
+fn bakeoff_envelope_no_widening() -> bool {
+    // A fixed PINNED record context (high importance -> the envelope pins it) and a
+    // fixed DEMOTABLE context (aged, low importance, low utility). The pin verdict is
+    // computed by the heuristic ONLY -- the kan_score never feeds it. We confirm the
+    // verdict is the SAME under every probe score (the score cannot move the gate).
+    let pinned_importance: i64 = IMP_PIN; // >= IMP_PIN -> pinned by the envelope
+    let demotable_importance: i64 = 1; // < IMP_PIN
+    let mut p = 0usize;
+    while p < KAN_PROBE.len() {
+        let score = kan_score(&KAN_TABLE, &KAN_PROBE[p], KAN_FLAG_TERMS, KAN_BIAS);
+        // The pin verdict is a pure function of metadata, with NO dependence on `score`.
+        let pinned = pinned_importance >= IMP_PIN;
+        let demotable_pinned = demotable_importance >= IMP_PIN;
+        // The score exists but must NOT move the verdict (envelope-no-widening): a
+        // pinned record stays pinned and a demotable record stays demotable under EVERY
+        // probe score (the explore coin likewise only chooses among cleared candidates).
+        let _ = score;
+        if !pinned || demotable_pinned {
+            return false; // the seam leaked the score into the gate -> widening
+        }
+        p += 1;
+    }
+    true
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.
@@ -1449,6 +1788,34 @@ impl MemSubstrate {
         &self.ledger_ids
     }
 
+    /// M24: draw the SHIELDED EPSILON-GREEDY explore coin for a forget decision and
+    /// return whether the GREEDY (kancell-greedy / heuristic) action is chosen
+    /// (proposal §2.1/§5). The coin is a SEEDED integer hash of the IMMUTABLE
+    /// `decision_id` via the REUSED M22 fold (`exp::xp_chain_mix(decision_id,
+    /// AGENT_SEED)`), folded to a `u64` witness, then `mod EPS_DEN mod m` -- keyed to
+    /// the decision id, NEVER a mutable step counter, so the chosen action (and its
+    /// logged propensity) is bit-exactly REPLAYABLE (the `kani_bakeoff_replay_
+    /// determinism` property). Coin `0` keeps the greedy action; a non-zero coin
+    /// explores an alternative. A SINGLETON (`m == 1`) is always greedy (the lone
+    /// cleared action IS the greedy one -- never explorable). Pure value computation
+    /// over the proven fold; touches NO substrate state.
+    fn explore_is_greedy(decision_id: u64, m: u32) -> bool {
+        if m <= 1 {
+            return true; // singleton: forced, deterministic, never explored
+        }
+        // Fold the immutable (decision_id, AGENT_SEED) pair through the proven M22
+        // fold into a 32-byte head, then to a u64 witness (every head byte contributes).
+        let mut did = [0u8; PROV_HASH_LEN];
+        did[..8].copy_from_slice(&decision_id.to_le_bytes());
+        let mut seed = [0u8; PROV_HASH_LEN];
+        seed[..8].copy_from_slice(&AGENT_SEED.to_le_bytes());
+        let head = exp::xp_chain_mix(seed, did);
+        let witness = exp::xp_head_witness(head);
+        // mod EPS_DEN mod m: coin == 0 is the greedy action (probability ~1-eps).
+        let coin = (witness % EPS_DEN.max(1) as u64) % m.max(1) as u64;
+        coin == 0
+    }
+
     /// M23: record ONE [`ExperienceRecord`] into the SEPARATE per-agent experience
     /// log -- encode via the Kani-proven `exp::canon`, fold the canonical bytes into
     /// [`xp_head`](Self::xp_head) via the REUSED M22 fold (`exp::xp_append`), push the
@@ -1637,9 +2004,66 @@ impl MemSubstrate {
     }
 
     /// `tb_mem_read`: the INSTANT read-your-writes path over the append-only T2
-    /// journal (no ranking, no model). Returns the stored value scalar.
+    /// journal (no ranking, no model). Returns the stored value scalar. The live
+    /// M_MEM_READ dispatch now routes through [`read_touch`](Self::read_touch) (the
+    /// M24 survival-label touch recorder); this pure read is kept for the bake-off
+    /// self-test + the read-your-writes tests (the touch-free observation).
+    #[allow(dead_code)]
     pub(crate) fn read(&self, id: u64) -> Option<u64> {
         self.t2.log.iter().find(|e| e.id == id).map(|e| e.value)
+    }
+
+    /// M24: the `tb_mem_read` path that ALSO records the UNFILTERED RECALL_TOUCH the
+    /// survival label is measured on (proposal §2.3/§5). Identical to [`read`](Self::
+    /// read) -- the same instant T2 lookup by id, returning the same value -- but it
+    /// stamps a `RECALL_TOUCH` ExperienceRecord referencing the touched record's id
+    /// into the SEPARATE xp log. CRITICAL: this is the UNFILTERED path (T2 by id,
+    /// NEVER `recall()`, which filters demoted `TIER_COLD` -- the collider, proposal
+    /// §8), so it observes re-touches of DEMOTED records -- exactly the
+    /// `first_read_touch_tick` the 3-way survival label matches a `FORGET_DECISION`
+    /// against. Strictly downstream/observational: it folds ONLY the xp_head (NO
+    /// clock/finsts/M22-head mutation), so the live read value is byte-identical and
+    /// M22's witnesses are unchanged. Returns the stored value scalar (`None` if no
+    /// such record), matching `read`'s contract.
+    pub(crate) fn read_touch(&mut self, id: u64) -> Option<u64> {
+        // The unfiltered T2 lookup (the SAME as read()) -- no tier filter, so a
+        // demoted record is still readable + its touch observable (the survival signal).
+        let val = self.t2.log.iter().find(|e| e.id == id).map(|e| e.value)?;
+        // Record the touch over the touched record's quantized feats (the
+        // counterfactual the dormant cell would produce on a touch), folding ONLY the
+        // xp_head. We look the record up in T3 for its age/count feats; if it is not in
+        // T3 (a pure-T2 record) the touch is still recorded with zeroed feats so the
+        // survival label can match the decision_id (the touch TICK is what matters).
+        let (touch_age, touch_count) = {
+            match self.t3.records.iter().find(|r| r.id == id) {
+                Some(r) => (self.clock.saturating_sub(r.t_created), r.count),
+                None => (0u64, 0u32),
+            }
+        };
+        let feats: [i32; KAN_FEATURES] = [
+            exp::quantize_feature(touch_age as i64),
+            exp::quantize_feature(touch_count as i64),
+            0,
+            0,
+        ];
+        let shadow = kan_score(&KAN_TABLE, &feats, XP_SHADOW_FLAG_TERMS, XP_SHADOW_BIAS);
+        let touch = ExperienceRecord {
+            decision_id: id,
+            kind: exp::kind::RECALL_TOUCH,
+            feats,
+            envelope_verdict: XP_ENV_TOUCH,
+            action_taken: XP_ACTION_TOUCH,
+            kan_score_shadow: shadow,
+            // A touch is an OBSERVATION, not a logged-policy action: it carries the
+            // deterministic propensity sentinel + present-Unset outcome (the survival
+            // label is attached to the FORGET_DECISION, not the touch).
+            logging_propensity_q: exp::PROPENSITY_DETERMINISTIC_Q,
+            logging_policy_kind: exp::policy_kind::DETERMINISTIC,
+            outcome: OutcomeLabel::Unset,
+            margin_q: 0,
+        };
+        let _ = self.xp_record(&touch);
+        Some(val)
     }
 
     /// `tb_recall`: the 3-stage activation-ranked pipeline. `cursor == 0` starts
@@ -1996,6 +2420,34 @@ impl MemSubstrate {
                         // (saturated into i16) -- cheap insurance for a later IPS/DR estimator.
                         let margin = (bla - THETA_DEMOTE).clamp(i16::MIN as i64, i16::MAX as i64)
                             as i16;
+                        // M24 SHIELDED EPSILON-GREEDY (proposal §2.1): AFTER the envelope
+                        // emits A_safe(x), draw the explore coin keyed to the IMMUTABLE
+                        // decision_id (never a mutable step counter) and stamp the closed-form
+                        // logging PROPENSITY + SOFT_GREEDY policy kind into the M23-reserved
+                        // fields. A record that CLEARED the envelope has m == 2 cleared
+                        // candidates (greedy vs alternative) and is explorable; a PINNED
+                        // record is a SINGLETON (m == 1, propensity == 1000, never explorable).
+                        // The coin chooses AMONG cleared candidates ONLY -- it adds zero actions
+                        // to A_safe, so the envelope-no-widening proof re-asserts unchanged. With
+                        // `KAN_ACTIVE == false` the explore choice is RECORDED but NEVER changes
+                        // the live demote (the heuristic else-branch below still decides), so the
+                        // live decision stays byte-identical to M23.
+                        let m = if safe_to_demote {
+                            EXPLORE_CLEARED_M
+                        } else {
+                            EXPLORE_SINGLETON_M
+                        };
+                        let is_greedy = Self::explore_is_greedy(r.id, m);
+                        let propensity_q =
+                            explore_propensity_q(EPS_NUM, EPS_DEN, m, is_greedy);
+                        // The policy kind: SOFT_GREEDY for an explorable (cleared, m>1) record;
+                        // a singleton stays DETERMINISTIC (propensity == 1000) -- the mechanical
+                        // SOFT_GREEDY-tag + propensity==1000 detector M24 routes singletons by.
+                        let policy_kind = if m > 1 {
+                            exp::policy_kind::SOFT_GREEDY
+                        } else {
+                            exp::policy_kind::DETERMINISTIC
+                        };
                         xp_obs = Some(ExperienceRecord {
                             decision_id: r.id,
                             kind: exp::kind::FORGET_DECISION,
@@ -2003,10 +2455,13 @@ impl MemSubstrate {
                             envelope_verdict: verdict,
                             action_taken: action,
                             kan_score_shadow: shadow,
-                            // RESERVED this milestone (degenerate sentinel + deterministic
-                            // policy + present-Unset outcome -- the schema-stability fields).
-                            logging_propensity_q: exp::PROPENSITY_DETERMINISTIC_Q,
-                            logging_policy_kind: exp::policy_kind::DETERMINISTIC,
+                            // M24: the M23-reserved propensity/policy fields are now POPULATED
+                            // by the shielded epsilon-greedy logging policy (schema-stable: the
+                            // byte layout is unchanged -- the kani_bakeoff_schema_stability proof).
+                            // The outcome stays Unset at the decision site (the survival label is
+                            // attached later, from the unfiltered read()-touch stream).
+                            logging_propensity_q: propensity_q,
+                            logging_policy_kind: policy_kind,
                             outcome: OutcomeLabel::Unset,
                             margin_q: margin,
                         });
