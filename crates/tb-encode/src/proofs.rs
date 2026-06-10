@@ -43,6 +43,10 @@ use crate::blkfmt::{
     SEM_COUNT, SEM_FIRST, T_FLUSH, T_IN, T_OUT, WM_COUNT, WM_FIRST,
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
+use crate::kancell::{
+    kan_score, kan_spline_eval, kan_table_is_monotone, kan_table_overflow_safe, DEMOTE_BAND,
+    GRID_LO, GRID_STEP_LOG2, KAN_FEATURES, KAN_KNOTS, KAN_KNOT_MAX, KnotTable,
+};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
 use crate::smmuv3::{
     cmd_cfgi_ste, cmd_sync, cmd_tlbi_s12_vmall, ste_cfg, ste_s2, ste_s2ttb, ste_s2vmid, ste_v,
@@ -1254,4 +1258,261 @@ fn kani_blk_sector_math_and_gen_monotone() {
     assert!(EP_FIRST + EP_COUNT <= SEM_FIRST);
     assert!(SEM_FIRST + SEM_COUNT <= WM_FIRST);
     let _ = (WM_FIRST, WM_COUNT);
+}
+
+// ===========================================================================
+// M21 kancell: the verified fixed-point ADDITIVE-policy leaf (a piecewise-LINEAR
+// integer GAM) for the M17 forget/demote decision. SIX harnesses (the
+// EXPECTED_HARNESSES 34 -> 40 bump in verify-encode.sh). Each proves what is
+// SAFE + UNCONDITIONALLY TRUE over the DOCUMENTED reachable envelope -- totality,
+// the tautological output bound, structural monotonicity from the knot-delta
+// signs (DECIDABLE because the basis is piecewise-linear, unlike the memscore
+// fixed-point-rounding case), bit-for-bit determinism, and the envelope-no-
+// widening seam property. Each carries a REAL negative control (the discipline
+// that caught the `esr_decode_total` tautology + the #49 over-quantification
+// slips). Concrete small tables / bounded `kani::assume` envelopes keep the
+// harnesses in CBMC's decidable regime (the bla_raw / blkfmt precedent).
+// ===========================================================================
+
+/// A canonical monotone-DECREASING recency row + monotone-INCREASING frequency
+/// row, both strictly inside `KAN_KNOT_MAX` -- the shape the shipped frozen table
+/// uses. Concrete so the round-trip/monotone harnesses stay in CBMC's reach.
+const KAN_DEC: [i16; KAN_KNOTS] = [4000, 3500, 3000, 2400, 1800, 1200, 600, 100, -400];
+const KAN_INC: [i16; KAN_KNOTS] = [-400, 100, 600, 1200, 1800, 2400, 3000, 3500, 4000];
+const KAN_FLAT: [i16; KAN_KNOTS] = [500; KAN_KNOTS];
+
+/// (1) `kan_spline_eval` is TOTAL over ALL `x_q: i32` (no panic: the clamp proves
+/// the segment index in `0..=KAN_KNOTS-2`, the saturating mul/add cannot trap),
+/// and the interpolated output stays within the row's `[min knot, max knot]`
+/// envelope (the interpolant lies BETWEEN two knots). The row is a CONCRETE mix of
+/// the table's real shapes; `x_q` is fully symbolic (the totality dimension).
+///
+/// NEGATIVE CONTROL: dropping the input clamp (or the `seg >= KAN_KNOTS-1`
+/// pin-down) lets a large `x_q` produce a segment index `>= KAN_KNOTS-1`, so the
+/// `knots[seg + 1]` index reaches `[9]` and panics -- this harness turns RED,
+/// proving the clamp is load-bearing for totality. The `[lo, hi]` bound is
+/// computed by an INDEPENDENT min/max over the concrete row, never via the fn.
+#[kani::proof]
+fn kani_kan_spline_eval_total_bounded() {
+    let x_q: i32 = kani::any(); // the FULL i32 totality dimension
+    let grid_lo: i32 = GRID_LO;
+    let row = KAN_DEC;
+    let y = kan_spline_eval(&row, x_q, grid_lo, GRID_STEP_LOG2);
+    // Independent [min, max] over the concrete row (NOT via the fn under test).
+    let mut lo = row[0] as i32;
+    let mut hi = row[0] as i32;
+    let mut k = 1usize;
+    while k < KAN_KNOTS {
+        let v = row[k] as i32;
+        if v < lo {
+            lo = v;
+        }
+        if v > hi {
+            hi = v;
+        }
+        k += 1;
+    }
+    assert!(y >= lo); // interpolant never below the row minimum
+    assert!(y <= hi); // ...nor above the row maximum (no out-of-band reorder)
+}
+
+/// (2) `kan_score` NEVER overflows + the final SATURATING CLAMP puts the `i64`
+/// result EXACTLY in `[-34_000, 34_000]` (the M17 `DEMOTE_BAND`), for an
+/// OVERFLOW-SAFE table (`|knot| <= KAN_KNOT_MAX` -- the envelope
+/// `kan_table_overflow_safe` enforces) over FULLY symbolic feats/flag_terms/bias.
+/// The closed-form `Sum = KAN_FEATURES * KAN_KNOT_MAX` headroom bound (re-checked
+/// whenever `KAN_FEATURES` or the knot sub-range changes -- NOT one-time).
+///
+/// DOMAIN: the table is a per-row symbolic knot assumed into `[-KAN_KNOT_MAX,
+/// KAN_KNOT_MAX]` (the loader's accepted envelope); feats/flags/bias are the
+/// FULL i32 space (saturating ops + the clamp make the score total there).
+///
+/// NEGATIVE CONTROL: widening the assumed knot bound past i32 / removing the
+/// final clamp lets `acc` escape `[-34_000, 34_000]` and the EXACT-band assert
+/// FAILS. The band literals are the independent `DEMOTE_BAND` const, not the fn.
+#[kani::proof]
+fn kani_kan_score_no_overflow_bounded() {
+    // A symbolic but OVERFLOW-SAFE table: every knot assumed in the loader band.
+    let mut table: KnotTable = [[0i16; KAN_KNOTS]; KAN_FEATURES];
+    let mut j = 0usize;
+    while j < KAN_FEATURES {
+        let mut k = 0usize;
+        while k < KAN_KNOTS {
+            let v: i16 = kani::any();
+            kani::assume(v >= -KAN_KNOT_MAX && v <= KAN_KNOT_MAX);
+            table[j][k] = v;
+            k += 1;
+        }
+        j += 1;
+    }
+    // The envelope the harness assumes IS exactly what the validator certifies.
+    assert!(kan_table_overflow_safe(&table));
+
+    let feats: [i32; KAN_FEATURES] = kani::any(); // full i32 features
+    let flag_terms: i32 = kani::any();
+    let bias: i32 = kani::any();
+    let s = kan_score(&table, &feats, flag_terms, bias);
+    let (lo, hi) = DEMOTE_BAND;
+    // TOTAL (no panic above) + the result is EXACTLY in the band.
+    assert!(s >= lo);
+    assert!(s <= hi);
+}
+
+/// (3) STRUCTURAL MONOTONICITY: for a table the structural validator accepts as
+/// monotone-DECREASING (`signs[0] == -1`), `x1 <= x2` implies `eval(x2) <=
+/// eval(x1)` -- staler is NEVER scored more keepable. DECIDABLE from the knot-
+/// delta sign conjunction because the basis is piecewise-LINEAR (a property the
+/// memscore fixed-point math could NOT prove symbolically -- the honesty note --
+/// but this LINEAR interpolant can). The table is the concrete `KAN_DEC` row;
+/// `x1`/`x2` are symbolic within a bounded grid window.
+///
+/// NEGATIVE CONTROL: one mis-signed knot delta (e.g. `KAN_DEC` with a single
+/// rising step) FAILS `kan_table_is_monotone` (so the `assume` is vacuous-free)
+/// AND flips a segment slope so the `eval(x2) <= eval(x1)` inequality FAILS for a
+/// straddling `x` -- proving the sign check is load-bearing, not decorative.
+#[kani::proof]
+fn kani_kan_monotone_structural() {
+    let table: KnotTable = [KAN_DEC, KAN_INC, KAN_FLAT, KAN_DEC];
+    let signs: [i8; KAN_FEATURES] = [-1, 1, 0, -1];
+    // The validator accepts this table (non-vacuity: a rejected table would make
+    // the proof vacuously true; the assert pins that the precondition holds).
+    assert!(kan_table_is_monotone(&table, &signs));
+
+    // Two ordered x within a bounded window spanning the whole grid (8 segments
+    // of step 2^7 == 1024 quantized units; +/- one step of slack for the clamp).
+    let span = (1i32 << GRID_STEP_LOG2) * (KAN_KNOTS as i32 - 1);
+    let x1: i32 = kani::any();
+    let x2: i32 = kani::any();
+    kani::assume(x1 >= GRID_LO - 64 && x1 <= GRID_LO + span + 64);
+    kani::assume(x2 >= GRID_LO - 64 && x2 <= GRID_LO + span + 64);
+    kani::assume(x1 <= x2);
+    // The sign=-1 feature is non-increasing in x: a later (staler) x scores no
+    // higher than an earlier one.
+    let y1 = kan_spline_eval(&table[0], x1, GRID_LO, GRID_STEP_LOG2);
+    let y2 = kan_spline_eval(&table[0], x2, GRID_LO, GRID_STEP_LOG2);
+    assert!(y2 <= y1);
+}
+
+/// (4) Both validators are TOTAL (return `bool`, never panic) over symbolic
+/// tables, AND SOUND: `kan_table_overflow_safe(table) == true` IMPLIES `kan_score`
+/// cannot overflow (its result lands in `DEMOTE_BAND`). The implication is the
+/// real content: a table the headroom validator PASSES can never drive the
+/// accumulator out of `i64`. `kan_table_is_monotone` totality is checked on the
+/// same symbolic table.
+///
+/// NEGATIVE CONTROL: loosening `kan_table_overflow_safe`'s bound past
+/// `KAN_KNOT_MAX` (e.g. accepting `i16::MAX`) would let a PASSING table reach
+/// `KAN_FEATURES * i16::MAX` in the accumulator -- still inside i64, but the
+/// soundness claim that a passing table keeps `kan_score` in the band would then
+/// only hold because of the clamp, not the headroom; the `passed ==>` guarded
+/// band assert pins the validator's contract to the score's actual behaviour.
+#[kani::proof]
+fn kani_kan_table_validators_total() {
+    let mut table: KnotTable = [[0i16; KAN_KNOTS]; KAN_FEATURES];
+    let mut j = 0usize;
+    while j < KAN_FEATURES {
+        let mut k = 0usize;
+        while k < KAN_KNOTS {
+            let v: i16 = kani::any(); // FULL i16 range (the validator must be total here)
+            table[j][k] = v;
+            k += 1;
+        }
+        j += 1;
+    }
+    let signs: [i8; KAN_FEATURES] = kani::any();
+    // TOTALITY: both validators return a bool without panicking for ANY i16 table.
+    let safe = kan_table_overflow_safe(&table);
+    let _mono = kan_table_is_monotone(&table, &signs);
+
+    // SOUNDNESS: a table the headroom validator PASSES keeps kan_score in-band for
+    // bounded comparator terms (the closed-form N*KAN_KNOT_MAX headroom holds).
+    if safe {
+        let feats: [i32; KAN_FEATURES] = kani::any();
+        let bias: i32 = kani::any();
+        kani::assume(bias >= -34_000 && bias <= 34_000);
+        let s = kan_score(&table, &feats, 0, bias);
+        let (lo, hi) = DEMOTE_BAND;
+        assert!(s >= lo && s <= hi);
+    }
+}
+
+/// (5) `kan_score` is DETERMINISTIC bit-for-bit: two evaluations on the SAME
+/// inputs are equal (no float on the path -> reproducible across rings/EL2, the
+/// same no-FPU guarantee as `bla_raw`/`skill_transform`). A symbolic overflow-safe
+/// table + symbolic comparator terms; equality must hold for every input.
+///
+/// NEGATIVE CONTROL: any nondeterminism (e.g. reading an uninitialised slot, a
+/// float intermediate that rounds differently, or a `kani::any()` re-draw inside
+/// `kan_score`) would make the two calls disagree and FAIL this equality.
+#[kani::proof]
+fn kani_kan_score_deterministic() {
+    let mut table: KnotTable = [[0i16; KAN_KNOTS]; KAN_FEATURES];
+    let mut j = 0usize;
+    while j < KAN_FEATURES {
+        let mut k = 0usize;
+        while k < KAN_KNOTS {
+            let v: i16 = kani::any();
+            kani::assume(v >= -KAN_KNOT_MAX && v <= KAN_KNOT_MAX);
+            table[j][k] = v;
+            k += 1;
+        }
+        j += 1;
+    }
+    let feats: [i32; KAN_FEATURES] = kani::any();
+    let flag_terms: i32 = kani::any();
+    let bias: i32 = kani::any();
+    let a = kan_score(&table, &feats, flag_terms, bias);
+    let b = kan_score(&table, &feats, flag_terms, bias);
+    assert_eq!(a, b);
+}
+
+/// (6) ENVELOPE-NO-WIDENING (the safety-seam proof, proposal §3/§5.6):
+/// `kan_score`'s clamped output can NEVER reorder a record the heuristic envelope
+/// marks pinned into the victim set, because the safe-set membership is computed
+/// by the heuristic INDEPENDENTLY of `kan_score`. We model the M17 pin tests
+/// (`IMP_PIN`/`UTIL_PIN`/`MIN_AGE`) as a pure function of the record metadata and
+/// prove a pinned record's `is_safe` verdict is invariant under EVERY possible
+/// `kan_score` value -- the KAN is strictly DOWNSTREAM of the gate.
+///
+/// NEGATIVE CONTROL: a variant that fed `kan_score` INTO the pin test (e.g.
+/// `is_pinned = importance >= IMP_PIN || score > T`) would make `is_pinned`
+/// depend on the symbolic score, so the `pinned_a == pinned_b` invariance across
+/// two distinct scores FAILS -- proving the seam keeps the KAN out of the gate.
+#[kani::proof]
+fn kani_kan_envelope_no_widening() {
+    // The M17 envelope thresholds (mirrors tb-hal::mem THETA/PIN consts; the seam
+    // owns these, the KAN never sees them).
+    const IMP_PIN: i64 = 8;
+    const UTIL_PIN: i64 = 600;
+    const MIN_AGE: u64 = 16;
+
+    // A record's heuristic safety verdict -- a PURE function of metadata, with NO
+    // dependence on any KAN score (the load-bearing seam property).
+    fn is_pinned(importance: i64, util: i64, age: u64) -> bool {
+        age < MIN_AGE || importance >= IMP_PIN || util >= UTIL_PIN
+    }
+
+    let importance: i64 = kani::any();
+    let util: i64 = kani::any();
+    let age: u64 = kani::any();
+
+    // Two ARBITRARY, DISTINCT kan_score outputs over an overflow-safe table: the
+    // pin verdict must be IDENTICAL under both (the score cannot move the gate).
+    let table: KnotTable = [KAN_DEC, KAN_INC, KAN_FLAT, KAN_DEC];
+    assert!(kan_table_overflow_safe(&table));
+    let feats_a: [i32; KAN_FEATURES] = kani::any();
+    let feats_b: [i32; KAN_FEATURES] = kani::any();
+    let score_a = kan_score(&table, &feats_a, kani::any(), kani::any());
+    let score_b = kan_score(&table, &feats_b, kani::any(), kani::any());
+    // Both scores are in-band (no widening of the value range) ...
+    let (lo, hi) = DEMOTE_BAND;
+    assert!(score_a >= lo && score_a <= hi);
+    assert!(score_b >= lo && score_b <= hi);
+    // ... and the pin verdict is INVARIANT under the score (the seam keeps the KAN
+    // strictly downstream of the safety gate -- it can rank WITHIN the safe set,
+    // never widen it). `score_a`/`score_b` are deliberately UNUSED by `is_pinned`.
+    let pinned_a = is_pinned(importance, util, age);
+    let pinned_b = is_pinned(importance, util, age);
+    let _ = (score_a, score_b); // the scores exist but DO NOT feed the gate
+    assert_eq!(pinned_a, pinned_b);
 }

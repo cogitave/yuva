@@ -42,6 +42,19 @@
 //!    Activation `bla_raw` that drives recall + the M17 FORGET sweep, the
 //!    `minmax` score normalizer, and the M18 frozen-evaluator `skill_transform`
 //!    -- panic/overflow-freedom + bounds proven over UNTRUSTED memory metadata.
+//!  * [`kancell`] -- the M21 forget/demote POLICY-CELL math lifted out of
+//!    `tb-hal::mem`: a verified fixed-point ADDITIVE-policy leaf (a piecewise-
+//!    LINEAR integer GAM, NOT a neural net -- the knots are frozen offline and
+//!    shipped as a `const` i16 Q4.11 table) that ranks ONLY inside the M17
+//!    heuristic safety envelope. `kan_spline_eval` interpolates one univariate
+//!    spline on a uniform power-of-2 grid (segment index by `>>`, no divide),
+//!    `kan_score` sums `KAN_FEATURES` splines + bias + flag terms in a SATURATING
+//!    `i64` and final-clamps into the M17 `DEMOTE_BAND` (the tautological output
+//!    bound), and `kan_table_is_monotone` / `kan_table_overflow_safe` are the
+//!    solver-free MonoKAN + headroom validators the fail-closed loader re-checks
+//!    in-kernel at load -- totality / overflow-freedom / structural monotonicity /
+//!    determinism / envelope-no-widening proven over the INTEGER artifact. SHIPS
+//!    DORMANT (the heuristic floor decides until an offline trace bake-off gate).
 //!  * [`stage2`] -- the L2.1 aarch64 second-stage (stage-2) descriptor + control
 //!    algebra: the `s2_leaf_2mib`/`s2_leaf_4k`/`s2_table` VMSAv8-64 stage-2 entry
 //!    encoders (S2AP=RW, MemAttr Normal-WB, mandatory AF, block/page/table low
@@ -92,6 +105,7 @@
 pub mod blkfmt;
 pub mod el2_trap;
 pub mod ipc_frame;
+pub mod kancell;
 pub mod memscore;
 pub mod paging;
 pub mod route;
