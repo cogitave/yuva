@@ -1,23 +1,27 @@
 # TABOS Milestones & Development Pipeline
 
-> Status: the agent-native milestone chain **M0 → M18 is complete and CI-green on
-> both architectures** (x86_64 + aarch64), extended since by seven follow-on markers
-> — **M14.1** (byte-payload IPC), **M14.2** (blocking-recv), **M15.1** (block unmap
-> + frame reclamation), **M18.1** (mandatory human-approval gate), **M18.2**
-> (rotating held-out evaluator), **M19** (a poll-based virtio-mmio virtio-rng
-> round-trip — the kernel's FIRST real device I/O), and **M20** (durable
-> persistence: a virtio-blk-backed log-structured store behind the M13
-> `BackingStore` seam — the FIRST byte to outlive a boot, now the LAST cumulative
-> marker) — plus the first two sovereignty-L2 rungs, **L2.0** (x86_64 VMX-root
-> graceful-skip + aarch64 EL2 world-switch) and **L2.1** (a genuine aarch64
-> stage-2 demand-translation round-trip under TCG — the ARM analog of x86
-> EPT-violation handling), both printed before M19 — every milestone verified by
-> booting under QEMU (and, on x86_64, the project's own `tb-vmm`/KVM) on every
-> change. A **formally-verified core** now backs the chain: M11's capability
-> rights-subset invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
-> `crates/tb-caps-core`), the silicon-unsafe encoders/parsers are **Kani-proven** in
-> a new `crates/tb-encode` (`V1: kani-encoders OK`), and a **Miri Tier-0 UB gate**
-> interprets both leaf crates (`T0: miri OK`); CI now runs **six lanes**. This
+> Status: the agent-native milestone chain **M0 → M22 is complete and CI-green on
+> both architectures** (x86_64 + aarch64), extended since the M18 capstone by a
+> tail of follow-on markers — **M14.1** (byte-payload IPC), **M14.2**
+> (blocking-recv), **M15.1** (block unmap + frame reclamation), **M18.1**
+> (mandatory human-approval gate), **M18.2** (rotating held-out evaluator),
+> **M19** (a poll-based virtio-mmio virtio-rng round-trip — the kernel's FIRST
+> real device I/O), then **M20** (durable persistence: a virtio-blk-backed
+> log-structured store behind the M13 `BackingStore` seam — the FIRST byte to
+> outlive a boot), **M21** (a verified fixed-point additive-policy seam for the
+> M17 forget/demote decision — SHIPS DORMANT, `active=0`), and **M22** (a verified
+> per-agent provenance hash-chain ledger — now the LAST cumulative marker,
+> `M22: provenance OK`) — plus the full aarch64 sovereignty-L2 chain, **L2.0**
+> (x86_64 VMX-root graceful-skip + aarch64 EL2 world-switch) through **L2.6**
+> (aarch64 stage-2 → exit-dispatch → trap-and-emulate → nested-EL1 guest → vGIC →
+> SMMUv3), all printed before M19 — every milestone verified by booting under QEMU
+> (and, on x86_64, the project's own `tb-vmm`/KVM) on every change. A
+> **formally-verified core** now backs the chain: M11's capability rights-subset
+> invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
+> `crates/tb-caps-core`), the silicon-unsafe encoders/parsers are **Kani-proven**
+> over the 11-leaf `crates/tb-encode` (46 harnesses, `V1: kani-encoders OK`), and a
+> **Miri Tier-0 UB gate** interprets both leaf crates (`T0: miri OK`); CI now runs
+> **9 gates across 8 workflow files**. This
 > document records what each milestone delivers, how it is proven, and how the
 > codebase is built and run; the full sequenced, risk-analysed v2 plan with
 > per-milestone detail is **[ROADMAP-V2](ROADMAP-V2.md)**.
@@ -59,16 +63,18 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M18, + L2.0, + L2.1, + M19, + M20)
+## 2. The milestone chain (M0 → M22, + L2.0 … L2.6)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
 milestones cumulatively, so every boot is a full regression of M0 through the
 latest. A green boot prints the M0–M4 foundation trace (below), then the M5–M18
 agent-native markers (now including the M14.1/M14.2/M15.1/M18.1/M18.2 follow-ons),
-then the two L2.0 sovereignty lines, then the `L2.1: stage2 OK` stage-2
-demand-translation line, then the `M19: virtio OK` device-I/O marker, then the
-final `M20: persist OK` durable-persistence marker — the complete ordered sequence
+then the aarch64 sovereignty-L2 chain `L2.0` … `L2.6` (two L2.0 lines, then
+`L2.1: stage2 OK` through `L2.6: smmu OK`), then the `M19: virtio OK` device-I/O
+marker, the `M20: persist OK` durable-persistence marker, the dormant
+`M21: kan-policy OK` policy-seam marker, and finally the cumulative-tail
+`M22: provenance OK` provenance-ledger marker — the complete ordered sequence
 is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
@@ -171,7 +177,9 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M18.1** | Mandatory human-approval gate on `EMIT_EXTERNAL`/high-impact skills | `M18.1: approval-gate OK` | none (new `APPROVE_HIGH_IMPACT` right; reduces to the M11 invariant) |
 | **M18.2** | Rotating never-exposed held-out evaluator partition (anti-Goodhart) | `M18.2: held-out OK` | none |
 | **M19** | Poll-based virtio-mmio device I/O — a virtio-rng round-trip (the FIRST real device I/O; prints AFTER the L2.0 lines; completion-IRQ deferred) | `M19: virtio OK` | virtio-mmio ring (MMIO/DMA) in `arch/{x86_64,aarch64}/virtio.rs` |
-| **M20** | Durable persistence — a poll-only virtio-mmio **virtio-blk** (DeviceID 2) backing a log-structured store behind the M13 `BackingStore` seam; the FIRST byte to outlive a boot (write → two-phase flush → re-mount → replay; the LAST cumulative marker; graceful `(no disk, skipped)` where no disk is attached) | `M20: persist OK` | virtio-blk MMIO/DMA ring in `arch/{x86_64,aarch64}/virtio.rs`; on-disk + request codecs in `tb-encode::blkfmt` (Kani-proven) |
+| **M20** | Durable persistence — a poll-only virtio-mmio **virtio-blk** (DeviceID 2) backing a log-structured store behind the M13 `BackingStore` seam; the FIRST byte to outlive a boot (write → two-phase flush → re-mount → replay; graceful `(no disk, skipped)` where no disk is attached) | `M20: persist OK` | virtio-blk MMIO/DMA ring in `arch/{x86_64,aarch64}/virtio.rs`; on-disk + request codecs in `tb-encode::blkfmt` (Kani-proven) |
+| **M21** | Verified fixed-point **additive-policy seam** for the M17 forget/demote decision — a Kani-proven, total/bounded/monotone integer GAM (`tb-encode::kancell`) that may only **rank within** the unchanged M17 heuristic safety envelope; **shipped DORMANT** (`active=0`) behind a fail-closed loader until a held-out trace bake-off earns its activation | `M21: kan-policy OK` | none (pure value computation in `tb-encode::kancell`; `tb-hal` calls it next to the unchanged `THETA_DEMOTE` comparator, exactly as it already calls `bla_raw`/`minmax`) |
+| **M22** | Verified memory **provenance ledger** — a per-agent, append-only, content-addressed **hash-chain** over the M13 substrate; every mutation appends a typed entry whose 256-bit structural digest folds into a running `chain_head`; M17 forget becomes a verifiable **tombstone**; a deterministic tamper-injection boot self-test proves the head + inclusion proof catch any single-byte mutation (the LAST cumulative marker) | `M22: provenance OK` | none (canonical encoder / digest / fold / inclusion verifier in `tb-encode::prov`, Kani-proven; safe `ledger_append` seam in `mem.rs`) |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
@@ -183,6 +191,132 @@ through a kernel-heap bounce buffer, where the mapping- and bounds-checked
 new per-arch `arch/{x86_64,aarch64}/uaccess.rs` modules (`ipc.rs` stays
 `#![forbid(unsafe_code)]`); **M14.2** closes the recv-blocks-off-the-run-queue /
 send-wakes-the-peer scheduler↔IPC round-trip.
+
+### M21 — a verified additive-policy seam for forget/demote, shipped *dormant*
+
+M21 is the first milestone produced by the **research-first ultracode** workflow:
+an honest, literature-grounded proposal
+([`docs/proposals/M21-kan-policy.md`](proposals/M21-kan-policy.md), backed by
+[`docs/research/kan-policy-literature.md`](research/kan-policy-literature.md))
+that **reshaped** the naive plan before any code was written. The original
+candidate — *"replace the M17 hand-tuned forget/demote constants with a learnable
+in-kernel KAN"* — was deliberately rejected: the closest published analog (A-MAC)
+won with a **linear** scorer, KANs beat MLPs only on symbolic regression (not
+tabular scoring), and strong simple heuristics (SIEVE/TinyLFU) make the baseline
+near-optimal. What survives is the part every research arm endorsed: the
+*verifiable leaf* and the *safety seam*. So M21 ships a **Kani-proven,
+total/bounded/monotone, fixed-point *additive* policy cell** (a piecewise-linear
+integer GAM — a per-segment LUT + linear interpolation, no float, no "learning"
+in-kernel), and the **"KAN/neural-net" framing is dropped**.
+
+The cell lives in a new pure leaf, **`tb-encode::kancell`**
+(`#![no_std] #![forbid(unsafe_code)]`, no float, zero-dep, host-buildable). It is
+a **pure ranker strictly inside** the existing M17 heuristic safety envelope — the
+**Black-Box Simplex / shielding** pattern. The envelope in `mem.rs` is
+**unchanged and owns the decision**: `forget_sweep()` first applies the HARD
+invariants (`MIN_AGE` grace, `IMP_PIN` flashbulb pin, `UTIL_PIN` utility pin, the
+ordered Working→Semantic→Episodic→drop tier path) to compute the
+eligible-and-safe candidate set, and **only then** calls `kancell::kan_score` to
+produce the bounded score the **identical** `THETA_DEMOTE` comparator thresholds.
+The consequence is the load-bearing safety property: the cell can only reorder /
+threshold *within* the already-safe set — it can **never widen** the action set,
+so even a signed-but-poisoned in-`i16` table is merely *suboptimal*, never
+*unsafe*, and anti-starvation/liveness stay in the envelope's clock-hand counter,
+never inferred from the cell. Monotonicity ("staler is never scored more
+keepable") is enforced **by construction** on the integer knot table
+(MonoKAN-style) and re-asserted at load with a solver-free sign check. The
+**heuristic floor is always live**: if the table is absent, rejected by the
+fail-closed loader, or its offline ship-gate margin was not met, the path falls
+back to the tuned additive default with **zero behavioral change**. FRAMEKERNEL
+is intact — `kancell` adds **zero** new `unsafe`/asm.
+
+**M21 ships DORMANT (`active=0`).** Turning the spline *on* in the decision path
+is a separate, evidence-bearing decision gated on a **pre-registered, falsifiable
+bake-off**: the frozen GAM must beat a tuned linear/GDSF baseline on a held-out,
+distribution-shifted eviction trace by a pre-registered margin. TABOS does not yet
+have a real agent-memory eviction workload to replay, so **M21 builds and proves
+the leaf + the fail-closed dormant seam** (the heuristic floor decides), and the
+**activation is a tracked follow-up** (the trace-replay bake-off harness). This is
+the honest division: the *verified machinery* is the milestone; the *activation*
+waits for evidence.
+
+The DoD is fail-closed and **anti-hollow-pass**. The boot self-test prints the
+marker **only after** the in-kernel loader, on the *frozen integer table actually
+shipped*, re-runs the monotonicity + overflow-safe validators **and** executes a
+**real round-trip** proving the cell agrees with its shipped error bound — the
+witness line
+
+```
+kan: monotone=1 ovf-safe=1 q-err=<delta> bound=<B> active=0
+```
+
+where `delta = max|float_score − kan_score|` is recomputed in-kernel over a fixed
+probe vector baked next to the table, and the kan path is aborted (heuristic
+restored, marker withheld) if `delta > B`. Because the dormant variant
+`M21: kan-policy OK (heuristic floor, gate-not-met)` **contains** the
+`M21: kan-policy OK` substring the run scripts grep, those scripts **reject** the
+`(no table, skipped)` / skip variants and **positively require** the real `kan:`
+witness with `active=0` — the same reject-skip + require-real-witness guard that
+closed the M20 hollow-pass (and the guard itself is negative-tested to fire). The
+six `kani_kan_*` harnesses (each with a documented **negative control**) land in
+`tb-encode`; `scripts/verify-encode.sh` `EXPECTED_HARNESSES` and the `kani.yml`
+count are bumped in **lockstep** so a vacuous or deleted harness reddens
+`V1: kani-encoders OK` *before* M21 can claim its marker.
+
+### M22 — a verified memory provenance ledger (mnemonic sovereignty)
+
+M22, also a research-first proposal
+([`docs/proposals/M22-memory-provenance.md`](proposals/M22-memory-provenance.md)),
+makes the M13 memory store **tamper-evident**. It adds a per-agent, append-only,
+**content-addressed hash-chain provenance ledger**: every memory mutation (write,
+demote/tombstone, skill-admit) appends a typed `ProvEntry` whose **256-bit
+structural digest** folds into a running per-agent `chain_head`. Crucially, **M17's
+silent demote becomes a verifiable tombstone** (a `kind = forget` entry) — deletion
+is *provable*, not silent — which the *Mnemonic Sovereignty* literature ranks as a
+top-missing governance primitive for agent memory ("forgetting is the strongest
+test of mnemonic sovereignty"). It composes existing milestones with almost no new
+surface: `MemRecord` already carries typed DAG `links` + a `provenance` tag and
+`SkillRecord` already carries `lineage`; the writer capability is M11's, the tiers
+are M13's, the forget/tombstone is M17's.
+
+The math is a new pure leaf, **`tb-encode::prov`** (`#![no_std]
+#![forbid(unsafe_code)]`, no float, zero-dep): a **canonical, injective**
+length-prefixed `ProvEntry` encoder (`canon`), the 256-bit digest (`prov_hash` —
+four domain-separated FNV-1a-64 lanes, reusing `blkfmt`'s already-Kani-proven
+`fnv1a64`), the per-agent running fold (`chain_mix`), and an inclusion verifier
+(`verify_inclusion`). The kernel seam is **100% safe** (`ledger_append` in
+`mem.rs`, invoked from the existing `write()` / `skill_add_class()` /
+`forget_sweep()` mutation sites) — **zero** new `unsafe`/asm, FRAMEKERNEL intact.
+
+**Honest scope:** M22 claims **structural tamper-evidence only** — any single-byte
+mutation to a committed entry invalidates the recomputed head and its inclusion
+proof, *Kani-proved* over the fold. It explicitly does **NOT** claim cryptographic
+collision / second-preimage resistance: the digest is fast/total/no-float FNV, not
+a crypto hash, and an adversary who can *choose* inputs is out of scope. The head
+is a **linear hash-chain fold, not a balanced Merkle tree**, and is held **in RAM
+this milestone** — a crypto/keyed-hash + signed root, balanced-Merkle batch proofs,
+and an M20-persisted reboot-surviving head are **tracked successors**. The boot
+marker claims only what is proved.
+
+The DoD is fail-closed and **anti-hollow-pass**. The self-test writes N ≥ 3 real
+Region records, demotes one through the *actual* M17 `forget_sweep` (a tombstone
+entry), asserts a genuine inclusion proof verifies `== true` on the clean ledger,
+then **flips one byte of a *committed* entry** and asserts **both** head-mismatch
+**and** inclusion-failure — exercising the real verifier path, not a constant
+comparison. It prints the witness line then the marker:
+
+```
+prov: head=<hex> entries=<n> tamper-caught=1 inclusion=1
+M22: provenance OK
+```
+
+A skip is **never** legitimate here (there is no device to be absent), so the run
+scripts **reject** any `(no ledger, skipped)` variant and **positively require**
+the `prov:` witness — and `M22: provenance OK` is **the cumulative-tail marker
+both run scripts grep for** (replacing M20 as the final chain marker). The six
+`kani_prov_*` harnesses (each with a negative control; `canon`-injectivity is the
+load-bearing proof, written before the kernel seam) land in `tb-encode`, bumping
+`verify-encode.sh` `EXPECTED_HARNESSES` and the `kani.yml` count in lockstep.
 
 ### L2.0 — the first sovereignty-L2 rung (VMX-root / EL2 world-switch)
 
@@ -224,7 +358,7 @@ green `n/a`:
 
 A green boot prints the M0–M4 foundation trace shown above, then the following
 markers in order — every milestone runs cumulatively, so each boot is a full
-regression of M0 through L2.0:
+regression of M0 through the cumulative tail `M22: provenance OK`:
 
 ```
 tb-boot: contract v0 OK          # only on the tb-vmm / tb-boot v0 path
@@ -258,8 +392,12 @@ L2.1: stage2 OK                  # aarch64: genuine stage-2 demand-translation r
 L2.2: el2-exits OK               # aarch64: genuine ESR_EL2.EC exit-dispatch round-trip under TCG (WFx-resume + fail-closed inject-UNDEF default, classify_exit Kani-proven); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.3: el2-trap OK                # aarch64: genuine trap-and-EMULATE round-trip under TCG (HCR_EL2.TVM sysreg-write trap + HCR_EL2.VM MMIO device-IPA abort, SYS64/DABT ISS decoders Kani-proven, routed through the device_mmio SEAM, ELR_EL2 advanced +4 past each trapped insn); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.4: el2-guest OK               # aarch64: a REAL minimal TABOS guest at EL1 under our EL2 stage-2 with its OWN stage-1 MMU live -- a GENUINE two-stage walk (VA->guest-S1->IPA->our-S2->PA), the guest's own stage-1 walk itself S1PTW-re-translated; the guest BUILDS+ENABLES its stage-1 (reusing the proven make_entry/level_index + mmu.rs MAIR/TCR geometry; SCTLR_EL1.M via the Kani-proven sctlr_el1_guest_enable), stores+reads back a sentinel through a no-flat-meaning VA, AND takes its OWN EL1 brk trap (EL1->EL1, not an EL2 exit); magic 0x2E5 needs BOTH, with an independent EL2-side identity-alias readback the guest cannot fake; HVC#9 tears stage-2 down FIRST + the facade restores the kernel's TTBR0/TCR/MAIR/SCTLR/VBAR_EL1 (the new EL1-side teardown) so M19 resumes clean; the LITERAL full-kernel-as-guest is deferred to aL2.4b; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
+L2.5: vgic OK                    # aarch64: genuine vGIC virtual-interrupt injection + WFI scheduler-hook round-trip under TCG (GICH_LRn list-register vIRQ encode Kani-proven in tb-encode::el2_trap, the guest takes a virtual IRQ via our EL2 maintenance path); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
+L2.6: smmu OK                    # aarch64: genuine SMMUv3 stage-2 STE table-programming proof under qemu >= 9.0 (the SMMU stage-2 IS the CPU stage-2 geometry; STE + command-queue encoders Kani-proven in tb-encode::smmuv3); graceful "(no stage-2 SMMU, skipped)" on qemu < 9.0 where IDR0.S2P=0 (e.g. the 8.2.2 CI image); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 M19: virtio OK                   # the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
-M20: persist OK                  # the LAST cumulative marker: DURABLE PERSISTENCE -- a poll-only virtio-mmio virtio-blk (DeviceID 2) backs a log-structured store behind the M13 BackingStore seam; the selftest writes N sentinel records through a real Region, runs the TWO-PHASE flush (records -> VIRTIO_BLK_T_FLUSH -> superblock gen+1 -> FLUSH), DROPS the substrate (all RAM destroyed), RE-MOUNTS the same disk, replays the log, and asserts replayed==written + gen bumped by 1 -- a true durability round-trip (bytes left RAM, hit the device, came back on a fresh mount). All MMIO/DMA in arch/*/virtio.rs; the superblock/record-frame/req-header codecs are the Kani-proven tb-encode::blkfmt; the kernel branches on a pure-data PersistProof. Proven under TCG (ci) on both arches; graceful "(no disk, skipped)" where no -drive is attached (tb-vmm/vmm-boot stay green, unchanged)
+M20: persist OK                  # DURABLE PERSISTENCE -- a poll-only virtio-mmio virtio-blk (DeviceID 2) backs a log-structured store behind the M13 BackingStore seam; the selftest writes N sentinel records through a real Region, runs the TWO-PHASE flush (records -> VIRTIO_BLK_T_FLUSH -> superblock gen+1 -> FLUSH), DROPS the substrate (all RAM destroyed), RE-MOUNTS the same disk, replays the log, and asserts replayed==written + gen bumped by 1 -- a true durability round-trip (bytes left RAM, hit the device, came back on a fresh mount). All MMIO/DMA in arch/*/virtio.rs; the superblock/record-frame/req-header codecs are the Kani-proven tb-encode::blkfmt; the kernel branches on a pure-data PersistProof. Proven under TCG (ci) on both arches; graceful "(no disk, skipped)" where no -drive is attached (tb-vmm/vmm-boot stay green, unchanged)
+M21: kan-policy OK               # VERIFIED FIXED-POINT ADDITIVE-POLICY SEAM for the M17 forget/demote decision -- a Kani-proven total/bounded/monotone integer GAM (tb-encode::kancell) that may only RANK WITHIN the unchanged M17 heuristic envelope; SHIPS DORMANT (active=0). Witness: "kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0" (the in-kernel q-err<=bound round-trip on the frozen integer table). DORMANT variant "(heuristic floor, gate-not-met)" is allowed and CONTAINS the grepped substring -> the run scripts REJECT "(no table, skipped)" and POSITIVELY REQUIRE the kan: witness with active=0; the spline is gated on a held-out trace bake-off that is a tracked follow-up
+M22: provenance OK               # the LAST cumulative marker: VERIFIED MEMORY PROVENANCE LEDGER -- a per-agent content-addressed hash-chain over M13; every mutation appends a typed ProvEntry whose 256-bit STRUCTURAL digest (Kani-proven tb-encode::prov; two domain-separated FNV-1a-64 lanes, NOT cryptographic) folds into a running chain_head; M17 forget emits a TOMBSTONE entry (deletion is provable, not silent). The selftest writes N>=3 records, demotes one via the real forget_sweep, asserts a clean inclusion proof verifies, then flips one byte of a COMMITTED entry and asserts BOTH head-mismatch AND inclusion-fail. Witness: "prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1". Head is in-RAM this milestone (M20-persisted head is a tracked successor); a "(no ledger, skipped)" variant is NEVER legitimate and the run scripts reject it. THE cumulative-tail marker both run scripts grep for
 ```
 
 Each line is a hard `grep` target in the per-arch run script; a missing or
@@ -295,8 +433,8 @@ Two machine-checked guarantees back the chain:
   wrong constant turns into a silent VM-entry failure — was extracted into a NEW
   pure `crates/tb-encode` (`no_std`, `#![forbid(unsafe_code)]`, host-buildable;
   `tb-hal` now CALLS it, the `vmwrite`/`read_volatile`/asm staying behind) and is
-  machine-proven by **Kani**. The suite now totals **20 `#[kani::proof]`
-  harnesses**: the control-MSR adjust-legality gate (force all allowed-0 bits,
+  machine-proven by **Kani**. The suite now totals **46 `#[kani::proof]`
+  harnesses** across 11 leaves: the control-MSR adjust-legality gate (force all allowed-0 bits,
   clear all non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition),
   the CR0/CR4 fixed-bit clamp, the page-table / EPT entry encoders (address +
   flags preserved, level index < 512, EPTP well-formed), the 16-byte IPC frame
@@ -312,10 +450,16 @@ Two machine-checked guarantees back the chain:
   `0x16` HVC64) and the faulting IPA (`kani_esr_decode_total`,
   `kani_hpfar_fault_ipa`). The `.github/workflows/kani.yml` `prove-encode` job
   runs `cargo kani -p tb-encode` and **fails closed** unless every harness
-  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 24`
-  (`scripts/verify-encode.sh`, bumped from 15 in lockstep across the L2.1–L2.4
-  rungs: +5 stage-2/ESR, +1 exit-classifier, +2 sysreg/DABT ISS, +1 SCTLR_EL1),
-  then emits `V1: kani-encoders OK`. (The `tb-caps-core` M11 proof is the independent
+  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 46`
+  (`scripts/verify-encode.sh`, bumped from 15 in lockstep across the L2.1–L2.6
+  rungs and the M20/M21/M22 leaves: +5 stage-2/ESR, +1 exit-classifier, +2
+  sysreg/DABT ISS, +1 SCTLR_EL1, +1 GICH_LR0 vIRQ, +3 SMMUv3 stage-2, +6 `blkfmt`
+  durable-persistence codecs (M20), +6 `kancell` additive-policy (M21), +6 `prov`
+  ledger (M22)), then emits `V1: kani-encoders OK`. The eleven `tb-encode` leaves
+  are now `vmx`, `paging`, `ipc_frame`, `route`, `memscore`, `stage2`, `smmuv3`,
+  `el2_trap`, `blkfmt`, `kancell`, and `prov`. Each harness must be **tractable**
+  (bounded symbolic / concretized-hash inputs — the `#49` symbolic-array
+  state-explosion is the documented trap) and carries a **negative control**. (The `tb-caps-core` M11 proof is the independent
   `prove-caps` job in the same workflow; neither can break the other.)
 - **Tier-0 UB gate (Miri).** `cargo miri test -p tb-caps-core -p tb-encode`
   interprets the EXACT pure host-runnable leaf crates the kernel runs (the same
@@ -335,16 +479,18 @@ Two machine-checked guarantees back the chain:
   leaves — `tb-caps-core` and `tb-hal`'s `caps.rs`/`mem.rs`/`ipc.rs`/`blocks.rs`/
   `infer.rs` (plus `heap.rs`/`pmm.rs`) — are literally `#![forbid(unsafe_code)]`.
 
-Six CI lanes guard the tree:
+Nine CI gates across eight workflow files guard the tree:
 
-| Lane | Workflow | What it proves |
+| Gate | Workflow | What it proves |
 |---|---|---|
-| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M20; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container with the virtio-blk disk attached) |
-| **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
-| **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
-| **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
-| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 24 harnesses) |
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M22; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached) |
+| **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm`, asserting M4 + the boot-time bench (allow-skip when KVM is absent) |
+| **l2-nested-vmx** | `l2-nested-vmx.yml` | informational/continue-on-error — the **real** L2.0 VMX-root verdict under nested KVM (`-cpu host`), checking the chain reached `M18: evolve OK` |
+| **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain reaches `M18: evolve OK` (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the non-blocking `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 46 harnesses); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode lane has a hard timeout |
 | **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
+| **clippy** | `clippy.yml` | static-lint `-D warnings` over the forbid-unsafe leaf crates (`tb-caps-core`/`tb-encode`/`tb-boot`) → `S0: clippy OK` |
+| **bench** | `bench.yml` | non-blocking `tb-vmm` vs Firecracker boot benchmark (BENCHMARKS Axis-A) |
 
 ## 3. Development pipeline
 

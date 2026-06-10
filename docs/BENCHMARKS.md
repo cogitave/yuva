@@ -42,12 +42,13 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (now
-  `M19: virtio OK`). This is boot **plus the entire M0…M19 self-test** (M2's
+  `M22: provenance OK`). This is boot **plus the entire M0…M22 self-test** (M2's
   1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB heap
   growths, M8's interrupt canary, M9's ≥100 involuntary switches, the
-  M10–M19 isolation / capability / memory / IPC / inference / consolidation /
-  evolve / approval-gate / held-out / virtio self-tests, plus the two L2.0
-  world-switch probes that print just before M19), so it is labelled separately
+  M10–M18 isolation / capability / memory / IPC / inference / consolidation /
+  evolve / approval-gate / held-out self-tests, then the L2.0…L2.6 aarch64
+  EL2-sovereignty chain, and finally M19 virtio-rng / M20 durable-persist /
+  M21 dormant-policy / M22 provenance self-tests), so it is labelled separately
   and is **emphatically not** a boot number — it is an exhaustive correctness
   suite that happens to run at boot.
 
@@ -92,7 +93,7 @@ pair launders an assumption into a measurement.
 > Caveat on the harness wall-clock: `bench-boot.sh`'s `full=NA` under
 > `qemu -M microvm -accel kvm` is an **untested config for the wall-clock
 > harness** — `bench-boot.sh` itself exercises `ci` (QEMU/TCG) and `vmm-boot`
-> (our own `tb-vmm`/KVM, which DOES reach the final `M19: virtio OK`). The
+> (our own `tb-vmm`/KVM, which DOES reach the final `M22: provenance OK`). The
 > QEMU-microvm+KVM path now has its **own** required `microvm-kvm` CI lane (it
 > boots `-M microvm -accel kvm -cpu host`, asserts the cumulative chain, and is
 > where the in-guest `--release` boot-ready figure in §3 is measured); only
@@ -115,7 +116,7 @@ non-comparable.)
 > until one exists the aarch64 lane publishes only the green functional marker
 > (`L2.1: stage2 OK`), no quotable latency (§5–§6).
 
-### TABOS measured — today (kernel boots the cumulative M0…M19 self-test then halts)
+### TABOS measured — today (kernel boots the cumulative M0…M22 self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
@@ -245,8 +246,9 @@ Two paths, both already exercised by the committed L2.0/L2.1 chain:
 
 - **L2.0 — HVC EL1↔EL2 round-trip.** The synchronous-exception world switch: a
   guest `HVC` traps to the EL2 vector, EL2 handles it, `ERET`s back. This is the
-  path the **two L2.0 world-switch probes** (printed just before `M19`, §2)
-  already walk; the micro-benchmark simply brackets it with `CNTPCT_EL0` reads.
+  path the **two L2.0 world-switch probes** (printed during the cumulative
+  self-test, before `M19`, §2) already walk; the micro-benchmark simply brackets
+  it with `CNTPCT_EL0` reads.
 - **L2.1 — stage-2 demand-translation round-trip** (the ARM analog of an x86
   EPT-violation): a guest access faults, EL2 takes a stage-2 abort, reads the
   faulting IPA from **`HPFAR_EL2`**, demand-maps the page, and `ERET`-retries the

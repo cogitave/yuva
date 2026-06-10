@@ -1,6 +1,6 @@
 # TABOS Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M18 agent-native milestone chain plus the first sovereignty-L2 rung (L2.0) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M22 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,9 +8,12 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M18 capstone is below. The authoritative, executable record is the cumulative
-serial-marker chain the kernel prints on every boot ([MILESTONES](MILESTONES.md)
-· [ROADMAP-V2](ROADMAP-V2.md)); the markers cited below are exactly those strings.
+M22 cumulative tail is below. The authoritative, executable record is the
+cumulative serial-marker chain the kernel prints on every boot
+([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
+below are exactly those strings. Both run scripts grep for the final
+`M22: provenance OK` marker, then assert each milestone directly and reject the
+skip/dormant variant while positively requiring its witness line.
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
 
@@ -55,9 +58,21 @@ serial-marker chain the kernel prints on every boot ([MILESTONES](MILESTONES.md)
   activation-ranked recall — all fixed-point/deterministic) behind the born-with
   memory-home handle. M15 (`M15: blocks OK`) adds shared memory blocks + a session
   blackboard; M16 fills the inert T3 dense channel; M17 (`M17: consolidate OK`)
-  adds the sleep-time consolidation / reflection / forgetting daemons. Backing is
-  RAM behind a `BackingStore` trait — durable virtio-blk persistence (the §8
-  orthogonal-persistence vision) is future.
+  adds the sleep-time consolidation / reflection / forgetting daemons (a
+  deterministic heuristic floor decides demote/forget). The §8 orthogonal-
+  persistence vision is now realized: **M20** (`M20: persist OK`) lands durable
+  virtio-blk backing — a log-structured `BackingStore` with a two-phase commit
+  whose on-wire bytes are the Kani-proven `tb-encode::blkfmt` codecs (superblock
+  + record-frame + sector/extent math), the round-trip witnessed by
+  `persist: gen=.. records=.. replayed=.. prior=..` (the run scripts reject the
+  `(no disk, skipped)` variant and require this line). **M21** (`M21: kan-policy
+  OK`) adds a *learned ranker strictly inside the M17 heuristic safety envelope*:
+  a verified fixed-point ADDITIVE policy cell (`tb-encode::kancell`, a piecewise-
+  linear integer GAM, not a neural net) that can re-rank only WITHIN the safe set
+  the heuristic gate already admits — it can never widen it (proven by the
+  envelope-no-widening harness). It **ships dormant** (`active=0`, the heuristic
+  floor still decides) behind a fail-closed loader, pending an offline trace
+  bake-off; witness `kan: monotone=1 ovf-safe=1 q-err=.. bound=.. active=0`.
 - **LLM-agnostic (§4 infer, §6 context scheduler).** M16 (`M16: infer OK`) is the
   `model:` scheme: a safe in-kernel **router** binds whichever backend registered
   the scheme (`model:anthropic/opus` ≡ `model:local/llama` behind one contract,
@@ -71,26 +86,96 @@ serial-marker chain the kernel prints on every boot ([MILESTONES](MILESTONES.md)
   self-improvement safety guarantee **reduces to the M11 rights-mask invariant**
   (which is exactly why that invariant carries a Kani proof). Adds the T4
   procedural/skill tier with verification-before-commit.
+- **Tamper-evident memory provenance (§7 audit, §8 persistence).** M22
+  (`M22: provenance OK`) makes the memory store **tamper-evident**: a per-agent,
+  content-addressed, append-only **hash-chain ledger** over the M13 substrate.
+  Every write/forget/skill-admit mutation site folds a canonical, length-prefixed
+  `ProvEntry` into the agent's running head via the Kani-proven `tb-encode::prov`
+  leaf (injective `canon`, a 256-bit structural digest of four domain-separated
+  FNV-1a-64 lanes, an order-sensitive `chain_mix` fold, and a sound
+  `verify_inclusion`); a forget writes a **tombstone** rather than erasing the
+  chain. The boot self-test proves any single-byte tamper of a committed entry
+  invalidates both the head and its inclusion proof, witnessed by
+  `prov: head=.. entries=.. tamper-caught=1 inclusion=1` — the cumulative-tail
+  marker both run scripts grep for, with no legitimate skip variant. This is
+  **structural** tamper-evidence (not cryptographic): a crypto hash + signed root
+  is a tracked successor.
 
-**Verification posture.** M11's capability rights-subset / no-confused-deputy
-invariant is machine-proven by **Kani** over `crates/tb-caps-core` — the single
-source of truth for the `Rights` algebra and the generation-checked `CapTable`,
-which `tb-hal` re-exports verbatim and wraps as `CapTable<Rc<Object>>`, so the
-kernel and the proofs verify the **exact same code (zero model drift)**: 12
-`#[kani::proof]` harnesses (`src/proofs.rs`) in three tiers — the `Rights` algebra
-over the full 2³² bit space, one proof per capability operation on the real
-`CapTable`, and an inductive single-step no-widen preservation proof (plus a
-bounded-sequence cross-check and a documented negative control). The `kani.yml`
-lane fails closed unless every harness verifies and the count matches the pinned
-constant, then emits `M11: caps-subset PROVEN`. Four CI lanes guard the tree:
-**ci** (build + boot both arches under pure QEMU-TCG, grepping the cumulative
-marker), **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
-`/dev/kvm`), **l2-nested-vmx** (the real L2.0 VMX-root proof under nested KVM), and
-**kani**.
+**Verification posture.** Two complementary machine-checked seams guard the
+silicon-adjacent value computation, both verifying the **exact same code the
+kernel runs (zero model drift)**.
+
+*M11 capability proof.* M11's rights-subset / no-confused-deputy invariant is
+machine-proven by **Kani** over `crates/tb-caps-core` — the single source of truth
+for the `Rights` algebra and the generation-checked `CapTable`, which `tb-hal`
+re-exports verbatim and wraps as `CapTable<Rc<Object>>`: 12 `#[kani::proof]`
+harnesses (`src/proofs.rs`) in three tiers — the `Rights` algebra over the full
+2³² bit space, one proof per capability operation on the real `CapTable`, and an
+inductive single-step no-widen preservation proof (plus a bounded-sequence
+cross-check and a documented negative control). `scripts/verify-caps.sh` fails
+closed unless every harness verifies and the count matches the pinned constant,
+then emits `M11: caps-subset PROVEN`.
+
+*The `tb-encode` VERIFIED-LEAF pattern.* This is now the **dominant** way value
+computation ships. A pure leaf in `crates/tb-encode` (`#![no_std]`
+`#![forbid(unsafe_code)]`, zero-dep, host-buildable, **no float**) computes WHAT a
+bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
+just-computed value, so the hardware side is byte-identical while the value is
+provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
+stay tractable — the #49 symbolic-array state-explosion is the documented trap)
+plus a negative control, and is also covered by the Miri UB gate. The 11 leaves:
+`vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
+`paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
+wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
+prefix routing), `memscore` (the M13 fixed-point recall-ranking math + M17 forget
+inputs + M18 frozen skill transform), `stage2` (L2.1 aarch64 stage-2 VMSAv8-64
+descriptors + VTCR/VTTBR packers), `el2_trap` (L2.1/L2.3 ESR/HPFAR/FAR + sysreg/
+MMIO ISS decoders + the aL2.5 GICH_LR vIRQ encoder), `smmuv3` (the aL2.6 SMMUv3
+stage-2 STE + command-queue algebra, with the lemma that the SMMU stage-2 IS the
+CPU stage-2 geometry), `blkfmt` (the **M20** durable-persistence codecs:
+superblock, record frame, sector/extent math), `kancell` (the **M21** verified
+fixed-point additive policy cell — spline totality, in-band score, structural
+monotonicity, envelope-no-widening), and `prov` (the **M22** provenance-ledger
+math: injective `canon`, structural digest, order-sensitive fold, sound
+inclusion). `scripts/verify-encode.sh` pins **`EXPECTED_HARNESSES=46`** and fails
+closed unless that many harnesses verify and zero fail, then emits
+`V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
+the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
+gate. Kani is installed locally in WSL (`cargo-kani`), so a new/changed harness
+should be measured with `cargo kani -p tb-encode --harness <name>` BEFORE pushing,
+since the `prove-encode` lane has a hard timeout.
+
+*CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
+**ci** — the one required full-chain dual-arch gate, building on the runner and
+booting both arches under pure QEMU-TCG to the final `M22: provenance OK` marker
+(the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
+the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
+lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
+`/dev/kvm`, asserting M4, plus the QEMU+KVM boot-time benchmark);
+**l2-nested-vmx** (informational — the real L2.0 VMX-root verdict under nested
+KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
+QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches
+`M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
+**kani** (two jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and
+`prove-encode` over `tb-encode` = 46 harnesses); **miri** (the Tier-0 dynamic UB
+gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
+over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
+`tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI
+discriminator (it changes `.bss` symbol ordering and has exposed layout-sensitive
+bugs); every local boot-verify must set it on the `cargo kbuild` invocation to
+match CI.
 
 **Sovereignty-L2 (§1.2 host substrate).** The L2 track — TABOS as its own minimal
-Type-1 microhypervisor, replacing `/dev/kvm` with `tb-core` — has started. **L2.0**
-prints two lines every boot. On x86_64, `L2.0: vmxroot OK` covers VMXON + a minimal
+Type-1 microhypervisor, replacing `/dev/kvm` with `tb-core` — now runs an
+**L2.0→L2.6 aarch64 sovereignty chain inside every boot** (`L2.0: el2 OK` EL2
+nVHE world-switch → `L2.1: stage2 OK` stage-2 demand-translation → `L2.2:
+el2-exits OK` exit-dispatch → `L2.3: el2-trap OK` trap-and-emulate → `L2.4:
+el2-guest OK` a nested EL1 guest with its own stage-1 under our stage-2 → `L2.5:
+vgic OK` vGIC vIRQ injection → `L2.6: smmu OK` SMMUv3 stage-2 STE programming,
+proven on qemu ≥ 9.0 and a green skip below), with the silicon-unsafe asm confined
+to `crates/tb-hal/src/arch/aarch64/` and the bit algebra in the proven `stage2` /
+`el2_trap` / `smmuv3` `tb-encode` leaves. On x86_64, `L2.0: vmxroot OK` covers
+VMXON + a minimal
 VMCS + an EPT identity map + a world-switch + a 1-instruction nested guest whose
 VM-exit is caught — all silicon-unsafe confined to
 `crates/tb-hal/src/arch/x86_64/vmx/`; **but under QEMU-TCG (and most hosted CI) the
