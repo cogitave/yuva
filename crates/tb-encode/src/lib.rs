@@ -111,6 +111,23 @@
 //!    `KAN_ACTIVE` stays `false` (the shadow changes zero demotes). Claims ONLY
 //!    replay-determinism + structural tamper-evidence -- NOT policy validity
 //!    (deterministic logging -> degenerate propensity; validity is M24's burden).
+//!  * [`exittel`] -- the M26 verified EL2 EXIT-TELEMETRY codec: turns the already-
+//!    Kani-proven [`el2_trap::classify_exit`] guest-exit demux into a BOUNDED, no-float,
+//!    injective telemetry record. `exittel::bucket_index` is an integer log2 cost-proxy
+//!    bucket (`leading_zeros`-based, the OTel exponential-histogram idea without the
+//!    float), `exittel::ExitHistogram` is a direct-mapped SATURATING per-class counter
+//!    (exact counts over the small closed `ExitClass` set, no sketch collisions), the
+//!    fixed-width injective `exittel::canon`/`decode` encode an `ExitTelemetryRecord`
+//!    {kind, exit_class, bucket, vmid, count, logical_time}, and the per-instance
+//!    `tel_head` fold REUSES the M22 [`prov`] leaf verbatim (`exittel::tel_append` /
+//!    `tel_chain_mix` / `tel_verify_inclusion` / `tel_head_witness` -- NO new fold
+//!    math). PRODUCER-ONLY: the telemetry is recorded + folded, NOT fed to any policy
+//!    whose decisions change the future exit distribution (the confounding loop the M24
+//!    adversary named is structurally avoided); the marker emits
+//!    `signal=OBSERVATIONAL-NONCAUSAL` so it cannot claim a causal state-signal. Claims
+//!    injective bounded encoding + replay-determinism + structural tamper-evidence (the
+//!    M23 claim set); the `tel_head` is SEPARATE from the M23 `xp_head` (zero
+//!    regression).
 //!  * [`opframe`] -- the M25 verified OPERATOR-TRANSCRIPT codec: the typed, fixed-
 //!    header, LENGTH-PREFIXED, injective [`opframe::OpFrame`] encoder (`opframe::canon`
 //!    / `opframe::decode` / `opframe::canon_len` -- magic/ver/kind/sev/partition +
@@ -195,6 +212,7 @@
 pub mod bakeoff;
 pub mod blkfmt;
 pub mod el2_trap;
+pub mod exittel;
 pub mod exp;
 pub mod explore;
 pub mod ipc_frame;

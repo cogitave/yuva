@@ -1,6 +1,6 @@
 ---
 name: tabos-milestone
-description: The end-to-end pipeline for shipping ONE TABOS kernel milestone (the cumulative M0..M25 + L2.0..L2.6 chain, or any new milestone from a research-first proposal). Use whenever implementing/continuing a TABOS milestone so NO step — research proposal, code, the tb-encode verified-leaf, adversarial review, both-arch build+boot (CARGO_INCREMENTAL=0), anti-hollow-pass guards, benchmark, every doc/script update, AND the PR-loop landing — is ever skipped. Invoke at the start of each milestone increment.
+description: The end-to-end pipeline for shipping ONE TABOS kernel milestone (the cumulative M0..M26 + L2.0..L2.6 chain, or any new milestone from a research-first proposal). Use whenever implementing/continuing a TABOS milestone so NO step — research proposal, code, the tb-encode verified-leaf, adversarial review, both-arch build+boot (CARGO_INCREMENTAL=0), anti-hollow-pass guards, benchmark, every doc/script update, AND the PR-loop landing — is ever skipped. Invoke at the start of each milestone increment.
 ---
 
 # TABOS milestone pipeline
@@ -60,11 +60,11 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
   kernel path) + Kani harnesses + the Miri gate. tb-hal CALLS the leaf byte-identically.
 - **No float** on any kernel path (fixed-point only).
 - **Cumulative DoD**: each milestone prints an EXACT serial marker; the kernel runs
-  M0..latest every boot. The current tail is **`M25: operator OK`** — the marker
+  M0..latest every boot. The current tail is **`M26: exit-telemetry OK`** — the marker
   both run scripts grep for. (Chain: M0…M18, M18.1/.2, then on aarch64 L2.0…L2.6,
   then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT], M22 provenance, then
   the learning-loop arc M23 experience, M24 bakeoff [honest gate, gate-not-met], M25
-  operator-transcript.)
+  operator-transcript, M26 exit-telemetry [PRODUCER-only].)
 - **Two arches** (x86_64 + aarch64) and **multiple boot paths** (PVH/microvm, tb-boot/
   tb-vmm, KVM/TCG) must stay green.
 - **The build + boot are the arbiter.** A reviewer that says "sound" is not enough;
@@ -118,10 +118,10 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      digest → 3s, and the whole gate then verifies in ~6 min locally.)
    - carrying a **NEGATIVE CONTROL** (an identity/constant/commutative variant the
      harness must REJECT).
-   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **64**) AND the
-     `kani.yml` "currently 64" comment **in LOCKSTEP** — a vacuous/deleted harness must
+   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **69**) AND the
+     `kani.yml` "currently 69" comment **in LOCKSTEP** — a vacuous/deleted harness must
      fail the gate. The kani lane has 2 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
-     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 64
+     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 69
      harnesses, marker `V1: kani-encoders OK`). Never `--workspace` (drags tb-hal asm into CBMC).
 
 5. **Build — the real arbiter (CARGO_INCREMENTAL=0).** `export CARGO_INCREMENTAL=0`

@@ -1,6 +1,6 @@
 # TABOS Milestones & Development Pipeline
 
-> Status: the agent-native milestone chain **M0 → M25 is complete and CI-green on
+> Status: the agent-native milestone chain **M0 → M26 is complete and CI-green on
 > both architectures** (x86_64 + aarch64), extended since the M18 capstone by a
 > tail of follow-on markers — **M14.1** (byte-payload IPC), **M14.2**
 > (blocking-recv), **M15.1** (block unmap + frame reclamation), **M18.1**
@@ -15,10 +15,14 @@
 > Monitor/log layer, `M23: experience OK`), **M24** (the HONEST activation gate:
 > shielded ε-greedy + a 3-way right-censored survival label + a partial-id
 > lower-bound + a one-shot HCPI gate that correctly REFUSES on synthetic data —
-> `M24: bakeoff OK (gate-not-met)`, the cell stays dormant), and **M25** (the
+> `M24: bakeoff OK (gate-not-met)`, the cell stays dormant), **M25** (the
 > verified OPERATOR TRANSCRIPT — a typed, tamper-evident channel the OS emits over
 > serial to SURFACE its decisions to a human exogenous oracle, anchored to the live
-> M22 provenance head; now the LAST cumulative marker, `M25: operator OK`) — plus
+> M22 provenance head, `M25: operator OK`), and **M26** (a verified EL2 EXIT-TELEMETRY
+> producer — the already-Kani-proven `el2_trap` guest-exit classifier becomes a
+> bounded, no-float, injective telemetry record folded into a separate `tel_head`; the
+> OS *records* its own virtualization workload; PRODUCER-ONLY, `signal=OBSERVATIONAL-
+> NONCAUSAL`; now the LAST cumulative marker, `M26: exit-telemetry OK`) — plus
 > the full aarch64 sovereignty-L2 chain, **L2.0**
 > (x86_64 VMX-root graceful-skip + aarch64 EL2 world-switch) through **L2.6**
 > (aarch64 stage-2 → exit-dispatch → trap-and-emulate → nested-EL1 guest → vGIC →
@@ -27,7 +31,7 @@
 > **formally-verified core** now backs the chain: M11's capability rights-subset
 > invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
 > `crates/tb-caps-core`), the silicon-unsafe encoders/parsers + the memory/learning
-> leaves are **Kani-proven** over the 15-leaf `crates/tb-encode` (64 harnesses,
+> leaves are **Kani-proven** over the 16-leaf `crates/tb-encode` (69 harnesses,
 > `V1: kani-encoders OK`), and a
 > **Miri Tier-0 UB gate** interprets both leaf crates (`T0: miri OK`); CI now runs
 > **9 gates across 8 workflow files**. This
@@ -72,7 +76,7 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M25, + L2.0 … L2.6)
+## 2. The milestone chain (M0 → M26, + L2.0 … L2.6)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
@@ -85,10 +89,10 @@ marker, the `M20: persist OK` durable-persistence marker, the dormant
 `M21: kan-policy OK` policy-seam marker, the `M22: provenance OK` provenance-ledger
 marker, the learning-loop arc — `M23: experience OK` (the experience codec +
 counterfactual shadow), `M24: bakeoff OK (gate-not-met)` (the honest activation gate,
-correctly refusing on synthetic data), — and finally the cumulative-tail
-`M25: operator OK` operator-transcript marker (each preceded by its anti-hollow
-witness line: `prov: …`, `exp: …`, `bakeoff: …`, `opframe: …`) — the complete
-ordered sequence is listed further below.
+correctly refusing on synthetic data), `M25: operator OK` (the operator transcript),
+and finally the cumulative-tail `M26: exit-telemetry OK` exit-telemetry-producer marker
+(each preceded by its anti-hollow witness line: `prov: …`, `exp: …`, `bakeoff: …`,
+`opframe: …`, `exittel: …`) — the complete ordered sequence is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -195,7 +199,8 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M22** | Verified memory **provenance ledger** — a per-agent, append-only, content-addressed **hash-chain** over the M13 substrate; every mutation appends a typed entry whose 256-bit structural digest folds into a running `chain_head`; M17 forget becomes a verifiable **tombstone**; a deterministic tamper-injection boot self-test proves the head + inclusion proof catch any single-byte mutation | `M22: provenance OK` | none (canonical encoder / digest / fold / inclusion verifier in `tb-encode::prov`, Kani-proven; safe `ledger_append` seam in `mem.rs`) |
 | **M23** | Verified **experience codec** + counterfactual shadow-recording — the learning loop's Monitor/log layer: each M17 forget/recall decision records a fixed-field injective `ExperienceRecord` (the features + the heuristic action + the COUNTERFACTUAL `kan_score` the dormant M21 cell WOULD produce + reserved-now propensity/outcome fields) into a fixed-capacity ring folded into a SEPARATE `xp_head` (reuses the M22 fold); a recorded row replays through the dormant `kan_score` BIT-IDENTICALLY; claims ONLY replay-determinism + structural tamper-evidence, NOT validity (`oracle=DECLARED-PROXY-DEFERRED-M24`) | `M23: experience OK` | none (codec / ring / replay in `tb-encode::exp`, Kani-proven; the M17 demote stays byte-identical, `kan_active=0`) |
 | **M24** | The **HONEST activation gate** — the honest resolution of the M21 ship-gate: shielded ε-greedy exploration restores statistical overlap (populating the M23-reserved propensity), a deterministic 3-way right-censored **survival label**, a partial-identification (Manski + Lipschitz-smoothness + empirical-Bernstein) **lower-bound** estimator, and a one-shot **HCPI** activation gate. On the necessarily-synthetic traces this milestone the gate does **NOT** clear — `gate-not-met` (the cell stays DORMANT) is the DESIGNED, CORRECT outcome (an honest gate that REFUSES is a success) | `M24: bakeoff OK (gate-not-met)` | none (estimators in `tb-encode::explore` + `tb-encode::bakeoff`, Kani-proven; `KAN_ACTIVE` stays `false`) |
-| **M25** | Verified **operator transcript** (the exogenous-oracle channel) — the COMMUNICATION pillar's outbound half: a typed, fixed-header, length-prefixed, INJECTIVE, tamper-evident frame the OS emits over serial to SURFACE what it recorded (M23) and decided (M24) to a human, anchored to the live M22 provenance head ("which instance am I", RATS RFC 9334), with a strictly-monotone `seq` folded into the canonical bytes + a closing `GATE_VERDICT` so a reader detects mutation/reorder/drop/truncation; a held-out-leakage guard fail-closes `canon` on the sealed M24 partition (Seldonian no-snoop). TX-only + claims ONLY structural tamper-evidence + instance binding (`keyed=0`), NOT crypto authenticity and NOT that a human replied (`oracle=HUMAN-DEFERRED-M26`); the LAST cumulative marker | `M25: operator OK` | none (canonical encoder / fold-reuse / seq / intro-binding / truncation verifier in `tb-encode::opframe`, Kani-proven; reuses the M22 `prov` fold verbatim) |
+| **M25** | Verified **operator transcript** (the exogenous-oracle channel) — the COMMUNICATION pillar's outbound half: a typed, fixed-header, length-prefixed, INJECTIVE, tamper-evident frame the OS emits over serial to SURFACE what it recorded (M23) and decided (M24) to a human, anchored to the live M22 provenance head ("which instance am I", RATS RFC 9334), with a strictly-monotone `seq` folded into the canonical bytes + a closing `GATE_VERDICT` so a reader detects mutation/reorder/drop/truncation; a held-out-leakage guard fail-closes `canon` on the sealed M24 partition (Seldonian no-snoop). TX-only + claims ONLY structural tamper-evidence + instance binding (`keyed=0`), NOT crypto authenticity and NOT that a human replied (`oracle=HUMAN-DEFERRED-M26`) | `M25: operator OK` | none (canonical encoder / fold-reuse / seq / intro-binding / truncation verifier in `tb-encode::opframe`, Kani-proven; reuses the M22 `prov` fold verbatim) |
+| **M26** | Verified **EL2 exit-telemetry producer** — the learning pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a BOUNDED, no-float, injective telemetry record (exit-class + a saturating log2 cost-proxy histogram + logical time) folded into a per-instance `tel_head` via the M22 fold reused verbatim; the OS *records* its own virtualization workload. PRODUCER-ONLY (the telemetry is recorded + folded, NEVER fed to a policy whose decisions change the future exit distribution — the confounding loop the M24 adversary named is structurally avoided); the `tel_head` is SEPARATE from the M23 `xp_head` (zero regression). Claims injective bounded encoding + tamper-evidence, NOT a causal state-signal (`signal=OBSERVATIONAL-NONCAUSAL`); the LAST cumulative marker | `M26: exit-telemetry OK` | none (classifier-reuse / log2-bucket histogram / fixed-width injective codec / fold-reuse in `tb-encode::exittel`, Kani-proven) |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
