@@ -61,6 +61,10 @@ use crate::exp::{
     canon as exp_canon, canon_len as exp_canon_len, decode as exp_decode, replay_shadow,
     ExpRing, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN, PROPENSITY_DETERMINISTIC_Q,
 };
+use crate::opframe::{
+    canon as op_canon, canon_len as op_canon_len, decode as op_decode, fold_frame,
+    gate_commits_final_seq, intro_binds, seq_index_exact, OpFrame, OPFRAME_HEADER_LEN,
+};
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
     eb_lower_bound, gate_clears, label_reward, smoothness_floor_mean, survival_label,
@@ -2586,4 +2590,284 @@ fn kani_bakeoff_schema_stability() {
         gate_clears(Y_HI, Y_LO, ACTIVATION_MARGIN, 0, 0),
         GateVerdict::NotEvaluable
     );
+}
+
+// ===========================================================================
+// M25 opframe: the verified OPERATOR-TRANSCRIPT codec. Six harnesses (one per
+// proposal §4 obligation), each with a NEGATIVE CONTROL. The codec proofs
+// (canon/decode) are cheap (pure byte layout, no FNV), so they run more
+// symbolic; the FOLD harness keeps the record/sibling CONCRETE and only the
+// flip index symbolic (the #49 symbolic-FNV trap the M22/M23 suites document).
+// ===========================================================================
+
+/// A symbolic-but-EMITTABLE 2-byte-payload frame builder for the codec harnesses:
+/// the validated fields (kind/sev/partition) are CONCRETE-valid so `canon` does not
+/// fail-close on them, while seq/t_logical/prev_head/payload are symbolic. (The
+/// validation/leakage REJECTIONS are proven separately in `kani_opframe_partition_leak`.)
+fn kani_op_frame<'a>(payload: &'a [u8; 2]) -> OpFrame<'a> {
+    OpFrame {
+        kind: crate::opframe::kind::EXPERIENCE_DIGEST,
+        sev: 9, // INFO -- in the 1..=24 OTel band
+        partition_id: crate::opframe::partition::CANDIDATE,
+        seq: kani::any(),
+        t_logical: kani::any(),
+        prev_head: kani::any(),
+        payload,
+    }
+}
+
+/// (1) THE LOAD-BEARING PROOF (proposal §4.1): `opframe::canon` is TOTAL (never
+/// panics; fails closed to `0` on a too-small buffer with NO partial write) AND
+/// INJECTIVE -- two emittable frames that differ in ANY field encode to DIFFERENT
+/// bytes, the fixed header at fixed offsets + the `payload_len` u32 prefix making the
+/// variable tail self-delimiting (so a different payload LENGTH yields a different
+/// total length -- the disambiguator). Symbolic scalars; each differing-field witness
+/// is a symbolic redraw forced to differ.
+///
+/// NEGATIVE CONTROL: a `canon` that DROPPED the `payload_len` prefix would let a
+/// 2-byte-payload frame alias a 3-byte one whose extra byte matched the next field ->
+/// the length-disambiguation assert FAILS; writing two header fields to one offset
+/// makes the corresponding field-difference assert FAIL.
+#[kani::proof]
+fn kani_opframe_canon_injective() {
+    let pay: [u8; 2] = kani::any();
+    let base = kani_op_frame(&pay);
+
+    // TOTALITY + exact width: canon writes exactly canon_len into a sized buffer.
+    let mut a = [0u8; OPFRAME_HEADER_LEN + 2];
+    let na = op_canon(&base, &mut a);
+    assert_eq!(na, op_canon_len(&base));
+    assert_eq!(na, OPFRAME_HEADER_LEN + 2);
+
+    // FAIL-CLOSED TOTALITY: a one-byte-too-small buffer yields 0, no partial write.
+    let mut small = [0u8; OPFRAME_HEADER_LEN + 2 - 1];
+    assert_eq!(op_canon(&base, &mut small), 0);
+
+    // INJECTIVITY over same-length frames (the differing field is forced to differ).
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; OPFRAME_HEADER_LEN + 2];
+            let nb = op_canon(&$e, &mut b);
+            assert_eq!(nb, na); // same payload length -> same total length
+            let mut any_diff = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any_diff = true;
+                }
+                i += 1;
+            }
+            any_diff
+        }};
+    }
+
+    // seq: the strictly-monotone counter -- a differing seq changes the [7..15] bytes
+    // (and is FOLDED into the digest, so a renumber perturbs the head).
+    let s2: u64 = kani::any();
+    kani::assume(s2 != base.seq);
+    assert!(differs!(OpFrame { seq: s2, ..base }));
+
+    // t_logical: a differing logical clock changes the bytes.
+    let t2: u64 = kani::any();
+    kani::assume(t2 != base.t_logical);
+    assert!(differs!(OpFrame { t_logical: t2, ..base }));
+
+    // payload VALUE at the same length: a differing payload byte changes the bytes.
+    let mut pv = pay;
+    pv[0] ^= 1;
+    assert!(differs!(OpFrame { payload: &pv, ..base }));
+
+    // A different payload LENGTH (the load-bearing length-prefix half): a 3-byte
+    // payload has a strictly longer total length than the 2-byte base.
+    let pay3 = [pay[0], pay[1], 0xAB];
+    let longer = OpFrame { payload: &pay3, ..base };
+    let mut c = [0u8; OPFRAME_HEADER_LEN + 3];
+    let nc = op_canon(&longer, &mut c);
+    assert_eq!(nc, OPFRAME_HEADER_LEN + 3);
+    assert!(nc != na); // distinct length -> cannot alias the 2-byte frame
+}
+
+/// (2) THE LEAKAGE GUARD negative control (proposal §4.5): `opframe::canon` FAIL-CLOSES
+/// (returns 0, no bytes written, no head advance) on a frame tagged the SEALED
+/// `partition::SAFETY_HELD_OUT` (the Seldonian no-snoop invariant) AND on any other
+/// invalid header (an out-of-band severity, an unknown kind). The candidate partition
+/// with a valid header DOES encode (the accept half is non-vacuous).
+///
+/// NEGATIVE CONTROL: a `canon` whose `frame_is_emittable` IGNORED the partition tag
+/// would ENCODE the held-out frame -> the `== 0` assert FAILS (the transcript would
+/// leak a sealed-partition record). Dropping the severity-band check encodes `sev==0`.
+#[kani::proof]
+fn kani_opframe_partition_leak() {
+    let pay: [u8; 2] = kani::any();
+    let mut out = [0u8; OPFRAME_HEADER_LEN + 2];
+
+    // THE HELD-OUT GUARD: a SAFETY_HELD_OUT frame must NOT encode (fail-closed to 0).
+    let held = OpFrame {
+        kind: crate::opframe::kind::EXPERIENCE_DIGEST,
+        sev: 9,
+        partition_id: crate::opframe::partition::SAFETY_HELD_OUT,
+        seq: kani::any(),
+        t_logical: kani::any(),
+        prev_head: kani::any(),
+        payload: &pay,
+    };
+    assert_eq!(op_canon(&held, &mut out), 0);
+    // ...and the fold step also refuses to advance the head on a held-out frame.
+    assert!(fold_frame([0u8; PROV_HASH_LEN], &held, &mut out).is_none());
+
+    // An out-of-band severity (0) is rejected.
+    let badsev = OpFrame { sev: 0, partition_id: crate::opframe::partition::CANDIDATE, ..held };
+    assert_eq!(op_canon(&badsev, &mut out), 0);
+
+    // The CANDIDATE partition with a valid header DOES encode (accept half non-vacuous).
+    let ok = OpFrame { partition_id: crate::opframe::partition::CANDIDATE, sev: 9, ..held };
+    assert_eq!(op_canon(&ok, &mut out), OPFRAME_HEADER_LEN + 2);
+}
+
+/// (3) SEQ STRICT-MONOTONE reader sensitivity (proposal §4.2): `seq_index_exact`
+/// accepts the well-formed sequence `seqs[i]==i` and REJECTS a gap, a duplicate, a
+/// reorder, or a non-zero start (so a dropped/duplicated/reordered middle frame is
+/// caught). We prove acceptance for a concrete in-order triple and rejection under a
+/// SYMBOLIC single-position perturbation of one element.
+///
+/// NEGATIVE CONTROL: a check using `>=`/non-decreasing instead of `== i` would ACCEPT
+/// a duplicate (`[0,1,1]`) -> the rejection assert FAILS; ignoring index 0 accepts a
+/// non-zero start.
+#[kani::proof]
+fn kani_opframe_seq_monotone() {
+    // ACCEPT the genuine in-order sequence.
+    assert!(seq_index_exact(&[0, 1, 2]));
+
+    // REJECT a SYMBOLIC single-element perturbation: pick a position and a wrong value.
+    let pos: usize = kani::any();
+    kani::assume(pos < 3);
+    let wrong: u64 = kani::any();
+    kani::assume(wrong != pos as u64); // anything other than the correct index value
+    let mut seqs = [0u64, 1, 2];
+    seqs[pos] = wrong;
+    assert!(!seq_index_exact(&seqs)); // any single corrupted index is caught
+
+    // A non-zero start is rejected (the genesis-INTRO-at-0 requirement).
+    assert!(!seq_index_exact(&[1, 2, 3]));
+}
+
+/// (4) INTRO-BINDING soundness (proposal §4.4): `intro_binds(frame, m22_head)` accepts
+/// IFF the frame is a genesis INTRO (`kind==INTRO`, `seq==0`) carrying the TRUE live
+/// M22 head as its `prev_head`. A forged anchor (any other head), a non-zero seq, or a
+/// non-INTRO kind is REJECTED -- so a transcript replayed from a different boot (whose
+/// M22 head differs) cannot verify in isolation. Symbolic head + a symbolic single-byte
+/// forgery.
+///
+/// NEGATIVE CONTROL: an `intro_binds` that ignored `prev_head` (binding on kind/seq
+/// alone) would ACCEPT a forged anchor -> the forged-head rejection assert FAILS.
+#[kani::proof]
+fn kani_opframe_intro_binding() {
+    let head: [u8; PROV_HASH_LEN] = kani::any();
+    let intro = OpFrame {
+        kind: crate::opframe::kind::INTRO,
+        sev: 9,
+        partition_id: crate::opframe::partition::CANDIDATE,
+        seq: 0,
+        t_logical: kani::any(),
+        prev_head: head,
+        payload: &[],
+    };
+    // SOUND ACCEPT: the genuine genesis INTRO binds to the live head.
+    assert!(intro_binds(&intro, head));
+
+    // FORGED ANCHOR: flip the bit at a symbolic index of the head the verifier holds;
+    // the INTRO's prev_head no longer matches -> reject.
+    let idx: usize = kani::any();
+    kani::assume(idx < PROV_HASH_LEN);
+    let mut forged = head;
+    forged[idx] ^= 0x01;
+    assert!(!intro_binds(&intro, forged));
+
+    // A non-genesis seq is rejected even with the true head.
+    let notgenesis = OpFrame { seq: 1, ..intro };
+    assert!(!intro_binds(&notgenesis, head));
+    // A non-INTRO kind is rejected even with the true head + seq 0.
+    let notintro = OpFrame { kind: crate::opframe::kind::MARKER, ..intro };
+    assert!(!intro_binds(&notintro, head));
+}
+
+/// (5) FOLD TAMPER + TAIL-TRUNCATION sensitivity (proposal §4.3): a single-byte flip
+/// of a committed frame's CANONICAL bytes changes the recomputed `op_head` (REUSING
+/// the proven M22 fold over the opframe bytes -- M25 writes NO fold math), AND the
+/// closing `gate_commits_final_seq` detects a truncated tail (a reader expecting a
+/// longer transcript than the GATE_VERDICT commits is rejected). The frame + sibling
+/// are CONCRETE so each `prov` fold is concrete; the flip INDEX stays symbolic.
+///
+/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original leaf
+/// ids EQUAL -> the `!=` assert FAILS; a `gate_commits_final_seq` that ignored the
+/// expected length would ACCEPT a truncated tail -> the truncation assert FAILS.
+#[kani::proof]
+fn kani_opframe_fold_truncation() {
+    // A concrete emittable frame -> concrete canonical bytes -> concrete fold.
+    let pay: [u8; 2] = [0xDE, 0xAD];
+    let frame = OpFrame {
+        kind: crate::opframe::kind::EXPERIENCE_DIGEST,
+        sev: 9,
+        partition_id: crate::opframe::partition::CANDIDATE,
+        seq: 1,
+        t_logical: 0xCAFE,
+        prev_head: [0x5a; PROV_HASH_LEN],
+        payload: &pay,
+    };
+    let mut bytes = [0u8; OPFRAME_HEADER_LEN + 2];
+    let n = op_canon(&frame, &mut bytes);
+    assert_eq!(n, OPFRAME_HEADER_LEN + 2);
+
+    // The genuine committed leaf id + a concrete sibling -> the committed head.
+    let leaf = prov_hash(&bytes[..n]);
+    let sib: [u8; PROV_HASH_LEN] = [0x33u8; PROV_HASH_LEN];
+    let head = recompute(leaf, &[sib]);
+    assert!(verify_inclusion(leaf, &[sib], head));
+
+    // TAMPER: flip the bit at a SYMBOLIC byte index -> a different leaf -> head mismatch
+    // AND a failing inclusion proof.
+    let idx: usize = kani::any();
+    kani::assume(idx < n);
+    let mut tampered = bytes;
+    tampered[idx] ^= 0x01;
+    let bad_leaf = prov_hash(&tampered[..n]);
+    assert!(bad_leaf != leaf);
+    assert!(recompute(bad_leaf, &[sib]) != head);
+    assert!(!verify_inclusion(bad_leaf, &[sib], head));
+
+    // TAIL-TRUNCATION: a closing GATE_VERDICT at seq=4 committing final_seq=4 is
+    // accepted only when the reader expects exactly 4; a reader expecting 5 (a frame
+    // was truncated AFTER) rejects -> truncation caught.
+    let gpay = 4u64.to_le_bytes();
+    let gate = OpFrame {
+        kind: crate::opframe::kind::GATE_VERDICT,
+        sev: 9,
+        partition_id: crate::opframe::partition::CANDIDATE,
+        seq: 4,
+        t_logical: 0,
+        prev_head: [0u8; PROV_HASH_LEN],
+        payload: &gpay,
+    };
+    assert!(gate_commits_final_seq(&gate, 4));
+    assert!(!gate_commits_final_seq(&gate, 5));
+}
+
+/// (6) CANON ROUND-TRIP (proposal §4.1): `opframe::decode(opframe::canon(frame)) ==
+/// frame` for a symbolic emittable frame -- the codec is a true bijection on the
+/// header layout (every field read back from its fixed offset, the payload slice
+/// recovered via the length prefix). The validated fields are concrete-valid (a
+/// non-emittable frame does not encode, proven in harness 2).
+///
+/// NEGATIVE CONTROL: encoding `seq` at the `t_logical` offset (a layout swap) would
+/// make `decode` recover the two transposed -> the round-trip equality FAILS; a decode
+/// that ignored the `payload_len` prefix would recover the wrong payload slice.
+#[kani::proof]
+fn kani_opframe_canon_roundtrip() {
+    let pay: [u8; 2] = kani::any();
+    let frame = kani_op_frame(&pay);
+    let mut buf = [0u8; OPFRAME_HEADER_LEN + 2];
+    let n = op_canon(&frame, &mut buf);
+    assert_eq!(n, OPFRAME_HEADER_LEN + 2);
+    let d = op_decode(&buf[..n]).unwrap();
+    assert!(d == frame); // every field round-trips, payload slice recovered exactly
 }

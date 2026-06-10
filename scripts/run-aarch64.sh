@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M24: bakeoff OK"
+MARKER="M25: operator OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -265,6 +265,39 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M24 marker/witness carries a 'validated'/'evaluated' overclaim -- M24 lower-bounds + honestly REFUSES, it does NOT validate any activation (proposal §6/§7 terminology discipline)" >&2
         exit 1
     fi
+    # M24 is no longer the top-level grep (M25 displaced it as the cumulative tail);
+    # assert it directly so the M24 -> M25 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M24: bakeoff OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M24: bakeoff OK' missing (M24 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M25 SOUNDNESS (anti-hollow-pass, the aL2.5/M20..M24 substring lesson): the
+    # 'M25: operator OK' marker must be backed by the REAL transcript round-trip -- the
+    # transcript is IN-RAM + TX-only (RX/auth is M26), so a skip is NEVER legitimate.
+    # Reject any '(no channel, skipped)' variant, and POSITIVELY require the witness line
+    # 'opframe: tx_head=0x.. frames=0x.. seq_monotone=0x1 intro_bound=0x1 fold-verified=0x1
+    # tamper-caught=0x1 keyed=0 oracle=HUMAN-DEFERRED-M26' (so a marker printed WITHOUT
+    # running the emit/recompute/seq/intro-binding/truncation/tamper verifier FAILS).
+    # seq_monotone=1 AND intro_bound=1 AND fold-verified=1 AND tamper-caught=1 are
+    # required: strictly-monotone seq, the INTRO binding the LIVE M22 head, the clean
+    # fold + inclusion, and the injected tamper + tail-truncation caught. The keyed=0 +
+    # oracle=HUMAN-DEFERRED-M26 honesty tokens must be present so the marker cannot claim
+    # crypto authenticity or that a human replied (it proves the CHANNEL, not the ORACLE).
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M25: operator OK (no channel, skipped)'; then
+        echo "[run-aarch64] FAIL -- M25 ran in SKIP mode (no channel) -- the operator-transcript verifier round-trip was NOT exercised (a skip is never legitimate here -- the transcript is in-RAM)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'opframe: tx_head=0x[0-9a-fA-F]+ frames=0x[0-9a-fA-F]+ seq_monotone=0x0*1 intro_bound=0x0*1 fold-verified=0x0*1 tamper-caught=0x0*1 keyed=0 oracle=HUMAN-DEFERRED-M26'; then
+        echo "[run-aarch64] FAIL -- M25 marker present but the real round-trip witness 'opframe: tx_head=.. frames=.. seq_monotone=0x1 intro_bound=0x1 fold-verified=0x1 tamper-caught=0x1 keyed=0 oracle=HUMAN-DEFERRED-M26' was NOT seen (hollow M25 pass)" >&2
+        exit 1
+    fi
+    # TERMINOLOGY DISCIPLINE (proposal §5): M25 surfaces + tamper-evidences a transcript +
+    # binds the instance; it does NOT validate any policy and does NOT prove a human
+    # replied. Reject any 'validated'/'evaluated' near the M25 marker/witness.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M25:|opframe:)' | grep -qE -- 'validated|evaluated'; then
+        echo "[run-aarch64] FAIL -- M25 marker/witness carries a 'validated'/'evaluated' overclaim -- M25 surfaces + tamper-evidences a transcript, it does NOT validate any policy or prove a human replied (proposal §5 terminology discipline)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -378,7 +411,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (gate-not-met expected; and 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

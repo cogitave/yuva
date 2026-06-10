@@ -1326,6 +1326,259 @@ fn bakeoff_envelope_no_widening() -> bool {
     true
 }
 
+// --- M25: the verified operator-transcript self-test (the marker body) --------
+
+/// The number of low-importance records the M25 transcript self-test seeds (to force
+/// >=1 forget-decision whose M23 record is surfaced as the borderline DIGEST payload).
+const OPFRAME_SELFTEST_WRITES: u64 = 3;
+
+/// A scratch buffer comfortably larger than any emitted frame (the 59-byte header +
+/// the largest payload, an `EXP_CANON_LEN`-byte M23 digest record).
+const OPFRAME_SCRATCH: usize = 256;
+
+/// The OTel integer SeverityNumber the transcript stamps on informational frames
+/// (`9 == INFO`; the closing gate frame uses `13 == WARN` to flag the honest refusal).
+const OPFRAME_SEV_INFO: u8 = 9;
+/// See [`OPFRAME_SEV_INFO`] -- the closing gate-verdict frame's severity.
+const OPFRAME_SEV_WARN: u8 = 13;
+
+/// Emit ONE transcript frame: canon-encode into `scratch`, hash to a committed id,
+/// fold into `op_head` via the REUSED M22 fold, and stash the canonical bytes + id +
+/// seq. Returns `false` (fail-closed, NO state mutated past `scratch`) if `canon`
+/// rejects the frame (too-small scratch OR not emittable -- e.g. the held-out
+/// partition). A free fn (NOT a closure) so the caller can read `op_head` between
+/// emits for the fail witnesses. (`[u8; 32]` == `[u8; prov::PROV_HASH_LEN]`.)
+fn op_emit_frame(
+    op_head: &mut [u8; 32],
+    ids: &mut alloc::vec::Vec<[u8; 32]>,
+    seqs: &mut alloc::vec::Vec<u64>,
+    frame_bytes: &mut alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    scratch: &mut [u8],
+    kind: u8,
+    sev: u8,
+    seq: u64,
+    t_logical: u64,
+    prev: [u8; 32],
+    payload: &[u8],
+) -> bool {
+    use tb_encode::opframe::{self, canon as op_canon, op_chain_mix, op_hash, OpFrame};
+    let f = OpFrame {
+        kind,
+        sev,
+        partition_id: opframe::partition::CANDIDATE,
+        seq,
+        t_logical,
+        prev_head: prev,
+        payload,
+    };
+    let n = op_canon(&f, scratch);
+    if n == 0 {
+        return false;
+    }
+    let id = op_hash(&scratch[..n]);
+    *op_head = op_chain_mix(*op_head, id);
+    frame_bytes.push(scratch[..n].to_vec());
+    ids.push(id);
+    seqs.push(seq);
+    true
+}
+
+/// M25: EMIT a short operator transcript over the (in-RAM, captured) channel and play
+/// the SIMULATED operator-verifier on it, reporting the outcome to the kernel as a
+/// pure-data [`crate::OpframeProof`]. 100% SAFE, no device touched beyond the serial
+/// the kernel renders the marker over, no scheduler -- pure value computation over the
+/// Kani-proven `tb_encode::opframe` leaf (which REUSES the M22 `tb_encode::prov` fold)
+/// and the real [`MemSubstrate`] M22-head + M23-experience state.
+///
+/// It (a) SEEDS the same memory-pressure scenario as the M23 self-test (>=3 low-
+/// importance writes + a recall + a real M17 [`MemSubstrate::forget_sweep`]) so the
+/// substrate carries a LIVE M22 provenance `chain_head` AND >=1 M23 forget-decision;
+/// (b) EMITS a 4-frame transcript -- `INTRO`(seq 0, `prev_head` = the LIVE M22 head:
+/// the "which instance am I" binding), `MARKER`(seq 1), `EXPERIENCE_DIGEST`(seq 2,
+/// payload = the MOST-BORDERLINE M23 record's canonical bytes, ranked by
+/// `opframe::borderline_gap` -- the Settles active-learning query), and the closing
+/// `GATE_VERDICT`(seq 3, payload = the committed final seq LE + the honest M24 verdict
+/// byte) -- folding each into a running `op_head` via the REUSED M22 fold; (c) plays
+/// the SIMULATED operator-verifier: independently re-fold the committed frame ids and
+/// confirm `op_head` + a genuine inclusion proof, assert the `seq` is strictly
+/// `seqs[i]==i` (no gap/reorder/dup), assert the `INTRO` binds the LIVE M22 head,
+/// assert the closing `GATE_VERDICT` commits the final seq (so a reader expecting a
+/// longer transcript -- a truncated tail -- is REJECTED), and FLIP ONE BYTE of a
+/// committed frame's canonical bytes to prove the recompute REJECTS (head-mismatch
+/// AND inclusion-fail). The marker is withheld unless EVERY leg holds. HONEST: the
+/// fold is keyless (structural tamper-EVIDENCE, not authenticity -- `keyed=0`) and the
+/// verifier is the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
+pub(crate) fn opframe_selftest() -> crate::OpframeProof {
+    use tb_encode::opframe::{
+        self, gate_commits_final_seq, intro_binds, op_hash, op_head_witness, op_recompute,
+        op_verify_inclusion, seq_index_exact, PROV_HASH_LEN,
+    };
+
+    let fail = |head: u64, frames: u64| crate::OpframeProof {
+        clean_ok: false,
+        inclusion_ok: false,
+        seq_monotone: false,
+        intro_bound: false,
+        truncation_caught: false,
+        tamper_caught: false,
+        head,
+        frames,
+    };
+
+    // (a) SEED the M23 scenario so the substrate carries a live M22 head + forget-
+    //     decisions (identical shape to exp_selftest: writes -> recall -> aged sweep).
+    let mut sub = MemSubstrate::new();
+    let mut w = 0u64;
+    while w < OPFRAME_SELFTEST_WRITES {
+        let key = 0x00F_5000 + w;
+        if sub.write(0, key, 0xFFF_0000 + w, 1).is_none() {
+            return fail(0, 0);
+        }
+        w += 1;
+    }
+    let _ = sub.recall(0x00F_5000, 0, 1, 0);
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let _ = sub.forget_sweep();
+
+    // The LIVE M22 provenance head -- the genesis INTRO binds to THIS (the instance
+    // anchor; a transcript from a different boot carries a different head).
+    let m22_head = sub.chain_head();
+
+    // Surface the MOST-BORDERLINE M23 forget-decision (smallest |kan_score_shadow|, the
+    // demote/keep boundary in shadow-score space) as the DIGEST payload (Settles margin
+    // sampling -- the record a scarce human would most inform the gate by labelling).
+    let mut digest_payload: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut best_gap = u64::MAX;
+    let ring_len = sub.xp_ring_len();
+    let mut s = 0usize;
+    while s < ring_len {
+        if let Some(row) = sub.xp_ring_row(s) {
+            if let Some(rec) = tb_encode::exp::decode(&row) {
+                if rec.kind == tb_encode::exp::kind::FORGET_DECISION {
+                    let gap = opframe::borderline_gap(rec.kan_score_shadow, 0);
+                    if gap <= best_gap {
+                        best_gap = gap;
+                        digest_payload = row.to_vec();
+                    }
+                }
+            }
+        }
+        s += 1;
+    }
+    if digest_payload.is_empty() {
+        return fail(0, 0); // no forget-decision surfaced -> nothing to attest (fail-closed)
+    }
+
+    // (b) EMIT the 4-frame transcript, folding each canonical frame into op_head. We
+    //     KEEP each frame's canonical bytes (for the INTRO-binding / truncation /
+    //     tamper legs) + its committed id + its seq.
+    let mut scratch = [0u8; OPFRAME_SCRATCH];
+    let mut op_head = [0u8; PROV_HASH_LEN];
+    let mut ids: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = alloc::vec::Vec::new();
+    let mut seqs: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    let mut frame_bytes: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+
+    // Emit each frame via the module-level [`op_emit_frame`] helper (NOT a closure --
+    // a closure would capture `op_head` by &mut and forbid reading it for the fail
+    // witnesses between emits). `op_head` is `Copy`, so passing the running head as the
+    // `prev` field (informational; the AUTHORITATIVE chain is the fold) is a cheap copy.
+
+    // INTRO(0): prev_head = the LIVE M22 head (the instance-binding attestation).
+    if !op_emit_frame(
+        &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
+        opframe::kind::INTRO, OPFRAME_SEV_INFO, 0, 1, m22_head, &[],
+    ) {
+        return fail(0, 0);
+    }
+    // MARKER(1): a human-readable checkpoint (prev = the running head so far).
+    let prev1 = op_head;
+    if !op_emit_frame(
+        &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
+        opframe::kind::MARKER, OPFRAME_SEV_INFO, 1, 2, prev1, b"M25-selftest",
+    ) {
+        return fail(op_head_witness(op_head), 1);
+    }
+    // EXPERIENCE_DIGEST(2): the most-borderline M23 record, surfaced for adjudication.
+    let prev2 = op_head;
+    if !op_emit_frame(
+        &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
+        opframe::kind::EXPERIENCE_DIGEST, OPFRAME_SEV_INFO, 2, 3, prev2, &digest_payload,
+    ) {
+        return fail(op_head_witness(op_head), 2);
+    }
+    // GATE_VERDICT(3): the closing frame commits the final seq (3) + the honest M24
+    // verdict byte (0 == gate-not-met, the dormant outcome -- never a forged activation).
+    let final_seq: u64 = 3;
+    let mut gate_payload = [0u8; 9];
+    let fs = final_seq.to_le_bytes();
+    let mut i = 0usize;
+    while i < 8 {
+        gate_payload[i] = fs[i];
+        i += 1;
+    }
+    gate_payload[8] = 0; // M24 verdict: gate-not-met (dormant) -- the honest outcome
+    let prev3 = op_head;
+    if !op_emit_frame(
+        &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
+        opframe::kind::GATE_VERDICT, OPFRAME_SEV_WARN, final_seq, 4, prev3, &gate_payload,
+    ) {
+        return fail(op_head_witness(op_head), 3);
+    }
+
+    let frames = ids.len() as u64;
+    if frames != 4 {
+        return fail(op_head_witness(op_head), frames);
+    }
+    let committed = op_head;
+    let leaf = ids[0];
+    let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+
+    // (c) THE SIMULATED OPERATOR-VERIFIER.
+    // clean + inclusion: independently re-fold the committed ids -> the running head.
+    let clean_ok = op_recompute(leaf, &siblings) == committed;
+    let inclusion_ok = op_verify_inclusion(leaf, &siblings, committed);
+    // seq strictly seqs[i]==i (no gap / reorder / dup / non-zero start).
+    let seq_monotone = seq_index_exact(&seqs);
+    // INTRO binds the LIVE M22 head (decode the stored genesis bytes).
+    let intro_bound = match opframe::decode(&frame_bytes[0]) {
+        Some(f) => intro_binds(&f, m22_head),
+        None => false,
+    };
+    // TAIL-truncation: the closing GATE_VERDICT commits final_seq, and a reader
+    // expecting a LONGER transcript (final_seq+1) is rejected.
+    let truncation_caught = match opframe::decode(&frame_bytes[frames as usize - 1]) {
+        Some(g) => {
+            gate_commits_final_seq(&g, final_seq) && !gate_commits_final_seq(&g, final_seq + 1)
+        }
+        None => false,
+    };
+    // TAMPER: flip one byte of the FIRST committed frame's canonical bytes; the re-hash
+    // must differ AND both the head recompute and the inclusion proof must REJECT.
+    let mut tamper_caught = false;
+    {
+        let leaf0 = op_hash(&frame_bytes[0]);
+        if leaf0 == ids[0] {
+            let mut tampered = frame_bytes[0].clone();
+            tampered[7] ^= 0x01; // perturb the seq field low byte (a real field byte)
+            let bad = op_hash(&tampered);
+            tamper_caught = bad != ids[0]
+                && op_recompute(bad, &siblings) != committed
+                && !op_verify_inclusion(bad, &siblings, committed);
+        }
+    }
+
+    crate::OpframeProof {
+        clean_ok,
+        inclusion_ok,
+        seq_monotone,
+        intro_bound,
+        truncation_caught,
+        tamper_caught,
+        head: op_head_witness(committed),
+        frames,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.

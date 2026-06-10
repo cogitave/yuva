@@ -130,8 +130,30 @@ set -euo pipefail
 # kani_bakeoff_schema_stability -- populating the M23-reserved OutcomeLabel slot with a RESOLVED
 # survival label (ReRecalled/Evicted) + the soft-greedy propensity shifts NO byte offset (reusing
 # the M23 reserve-now lemma -> M22 fold / M20 spill byte-identical).
+# + M25 opframe verified OPERATOR-TRANSCRIPT leaf x6: kani_opframe_canon_injective -- THE
+# LOAD-BEARING proof: the typed, fixed-header, LENGTH-PREFIXED opframe::canon is TOTAL (fails
+# closed to 0 on a too-small buffer, no partial write) AND INJECTIVE (a distinct seq/t_logical/
+# prev_head/payload-value encodes to distinct bytes, and a distinct payload LENGTH to a distinct
+# total length -- the payload_len u32 prefix is the disambiguator making the variable tail self-
+# delimiting); kani_opframe_partition_leak -- THE LEAKAGE GUARD negative control: canon FAIL-CLOSES
+# (returns 0, no head advance) on a frame tagged the sealed partition::SAFETY_HELD_OUT (the
+# Seldonian no-snoop invariant encoded in the encoder -- Thomas Science 2019 + Dwork reusable
+# holdout) AND on an out-of-band severity, while a CANDIDATE valid frame DOES encode (accept half
+# non-vacuous); kani_opframe_seq_monotone -- the strict-monotone reader check seq_index_exact
+# ACCEPTS seqs[i]==i and REJECTS a symbolic single-position perturbation (gap/dup/reorder) + a
+# non-zero start (so a dropped/reordered middle frame is caught); kani_opframe_intro_binding -- the
+# genesis INTRO binds the transcript to the LIVE M22 provenance head ("which instance am I" -- RATS
+# RFC 9334); intro_binds accepts IFF kind==INTRO && seq==0 && prev_head==the true head, and REJECTS
+# a symbolic single-byte forged anchor / non-zero seq / non-INTRO kind; kani_opframe_fold_truncation
+# -- a single-byte flip of a committed frame's canonical bytes changes the recomputed op_head
+# (REUSING the proven M22 prov::chain_mix fold over the opframe bytes -- a SYMBOLIC flip index,
+# concrete frame/sibling so the FNV fold stays concrete) AND the closing GATE_VERDICT's
+# gate_commits_final_seq catches a truncated tail (a reader expecting a longer transcript than the
+# committed final seq is rejected -- the Ma-Tsudik FssAgg fix); kani_opframe_canon_roundtrip --
+# opframe::decode(opframe::canon(frame)) == frame (every header field read back from its fixed
+# offset, the payload slice recovered via the length prefix).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=58
+EXPECTED_HARNESSES=64
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

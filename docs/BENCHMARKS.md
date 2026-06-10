@@ -42,7 +42,7 @@ convention — VMM-start as t0):
   (`hello from rust_main`). The purest boot figure: VMM init + kernel entry +
   M0 serial bring-up.
 - **boot+selftest** = spawn → the final cumulative marker (now
-  `M22: provenance OK`). This is boot **plus the entire M0…M22 self-test** (M2's
+  `M25: operator OK`). This is boot **plus the entire M0…M25 self-test** (M2's
   1000-round ping-pong, M6's ~65 k free-frame `seed()`, M7's three 4 MiB heap
   growths, M8's interrupt canary, M9's ≥100 involuntary switches, the
   M10–M18 isolation / capability / memory / IPC / inference / consolidation /
@@ -93,7 +93,7 @@ pair launders an assumption into a measurement.
 > Caveat on the harness wall-clock: `bench-boot.sh`'s `full=NA` under
 > `qemu -M microvm -accel kvm` is an **untested config for the wall-clock
 > harness** — `bench-boot.sh` itself exercises `ci` (QEMU/TCG) and `vmm-boot`
-> (our own `tb-vmm`/KVM, which DOES reach the final `M22: provenance OK`). The
+> (our own `tb-vmm`/KVM, which DOES reach the final `M25: operator OK`). The
 > QEMU-microvm+KVM path now has its **own** required `microvm-kvm` CI lane (it
 > boots `-M microvm -accel kvm -cpu host`, asserts the cumulative chain, and is
 > where the in-guest `--release` boot-ready figure in §3 is measured); only
@@ -116,7 +116,7 @@ non-comparable.)
 > until one exists the aarch64 lane publishes only the green functional marker
 > (`L2.1: stage2 OK`), no quotable latency (§5–§6).
 
-### TABOS measured — today (kernel boots the cumulative M0…M22 self-test then halts)
+### TABOS measured — today (kernel boots the cumulative M0…M25 self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|

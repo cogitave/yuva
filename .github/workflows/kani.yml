@@ -63,7 +63,7 @@ jobs:
   # nor can break the M11 `prove-caps` lane above. Runs `cargo kani -p tb-encode`
   # (NEVER --workspace -- that would drag tb-hal's inline asm into CBMC), then
   # scripts/verify-encode.sh asserts ZERO failures AND that SUCCESSFUL == the
-  # pinned EXPECTED_HARNESSES (currently 58: the 15 original + the 5 L2.1 stage-2/
+  # pinned EXPECTED_HARNESSES (currently 64: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -95,9 +95,18 @@ jobs:
   # decision_id + propensity + label + bound all replay bit-for-bit) / kani_kan_envelope_no_widening_m24
   # (the M21 envelope-no-widening proof re-asserts under the soft-greedy path -- the coin chooses
   # only AMONG cleared candidates) / kani_bakeoff_schema_stability (a resolved survival label +
-  # soft-greedy propensity shift no byte offset); bump in LOCKSTEP
-  # with scripts/verify-encode.sh) before emitting the DoD marker `V1: kani-encoders OK`
-  # (fail-closed).
+  # soft-greedy propensity shift no byte offset) + the 6 M25 opframe verified OPERATOR-
+  # TRANSCRIPT harnesses: kani_opframe_canon_injective (the load-bearing canon
+  # totality+injectivity proof, the payload_len prefix disambiguating the variable tail)
+  # / kani_opframe_partition_leak (THE LEAKAGE GUARD negative control -- canon fail-closes
+  # on the sealed SAFETY_HELD_OUT partition, the Seldonian no-snoop invariant) /
+  # kani_opframe_seq_monotone (seq_index_exact catches gap/dup/reorder/non-zero-start)
+  # / kani_opframe_intro_binding (the genesis INTRO binds the transcript to the live M22
+  # head; a forged anchor is rejected) / kani_opframe_fold_truncation (a single-byte
+  # tamper changes op_head, REUSING the M22 fold, + the closing GATE_VERDICT catches
+  # tail-truncation) / kani_opframe_canon_roundtrip (decode(canon(frame))==frame); bump
+  # in LOCKSTEP with scripts/verify-encode.sh) before emitting the DoD marker
+  # `V1: kani-encoders OK` (fail-closed).
   prove-encode:
     name: "prove #49 encoders (Kani)"
     runs-on: ubuntu-latest
