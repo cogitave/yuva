@@ -580,6 +580,85 @@ pub fn smmu_selftest() -> SmmuProof {
 }
 
 // ===========================================================================
+// M27a: the COOPERATIVE two-VMID sovereign time-partition scheduler self-test
+// facade — the sovereignty pillar's "TABOS owns time for two guests" rung, built
+// ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam + M22's fold. Unlike
+// M27b (the real CNTHP-preemption path, DEFERRED), M27a is COOPERATIVE: two
+// trivial EL1 guest stubs run under TWO distinct VMIDs (two stage-2 roots); each,
+// when scheduled, bumps a DISTINCT per-VMID MMIO cell then voluntarily YIELDS
+// (`hvc #14`). The EL2 monitor, on each yield, consults the Kani-proven
+// `tb_encode::tpsched::next_slot`, switches `VTTBR_EL2` to the next VMID's root,
+// folds a `tb_encode::tpsched::SchedDecision` into a running `sched_head` (the M22
+// `prov` fold reused VERBATIM), and resumes the next guest. After K bounded major
+// frames the monitor tears the window down (teardown-FIRST) and verifies the five
+// DoD properties. This exercises EVERYTHING EXCEPT the timer IRQ and CANNOT
+// IRQ-storm; the marker emits `timing=COOPERATIVE-HVC-YIELD` so it can never
+// impersonate M27b's `timing=TCG-NON-CYCLE-ACCURATE` real-timer claim.
+//
+// ALL the asm/unsafe is confined to tb-hal's arch/aarch64/{el2,tpsched_hal,stage2,
+// el2mmio}.rs (the tpsched leaf + the prov fold in tb-encode are forbid(unsafe) +
+// Kani-proven); this crate stays unsafe-free and the kernel only branches on a
+// closed enum. On x86_64 there is no EL2 — the (deferred) VMX-preemption-timer
+// path would be this arch's rung, so this reports NotApplicable (mirroring the
+// `VgicProof` block above).
+// ===========================================================================
+
+/// M27a COOPERATIVE two-VMID time-partition scheduler self-test outcome (returned
+/// to the kernel for marker rendering). A SIBLING of [`VgicProof`]: the proof is a
+/// closed round-trip in which TWO guest VMIDs are time-partitioned under TWO
+/// stage-2 roots, each yielding voluntarily (`hvc #14`), with every scheduling
+/// DECISION folded into a running provenance head — rather than a single-guest
+/// world-switch or a real-timer preemption (M27b, deferred).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedProof {
+    /// This arch has no EL2 (x86_64): the (deferred) VMX-preemption-timer path
+    /// would be its realization of the sovereign-scheduler rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// scheduler window is never armed — a graceful green skip (mirrors
+    /// [`VgicProof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean schedule proof (a stage-2 build OOM, a starved VMID, an
+    /// out-of-order schedule, a fold mismatch, a tamper that was NOT caught, a
+    /// non-conserved frame, or too few major frames); `code` is the nonzero
+    /// diagnostic (surfaced honestly as a red marker WITHOUT a "sched OK"
+    /// substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the cooperative two-VMID round-trip closed — both VMIDs advanced
+    /// their DISTINCT MMIO cell (both-progressed, neither starved), the observed
+    /// VMID run-order was the tpsched round-robin (order-honored), the recomputed
+    /// `sched_head` matched the committed fold (fold-verified) AND a single-byte
+    /// tamper flipped it (tamper-caught), and the major frame was conserved
+    /// (`frame_total == Σ slot budgets`). `head` is the `head_witness` of the
+    /// committed fold; `frames` is the bounded major-frame count K.
+    Proven {
+        /// The `tb_encode::tpsched::sched_head_witness` of the committed fold head.
+        head: u64,
+        /// The bounded number of major frames the scheduler ran (K).
+        frames: u64,
+    },
+}
+
+/// M27a: run the cooperative two-VMID time-partition scheduler self-test
+/// (aarch64), or report [`SchedProof::NotApplicable`] on x86_64. See [`SchedProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn sched_selftest() -> SchedProof {
+    arch::sched_selftest()
+}
+
+/// M27a: x86_64 has no EL2 — the (deferred) VMX-preemption-timer path would be
+/// this arch's realization of the sovereign-scheduler rung, so this reports
+/// [`SchedProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn sched_selftest() -> SchedProof {
+    SchedProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //

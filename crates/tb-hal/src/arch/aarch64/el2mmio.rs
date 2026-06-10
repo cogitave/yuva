@@ -139,6 +139,74 @@ pub(super) fn device_shadow() -> u64 {
 }
 
 // ===========================================================================
+// M27a: the TWO-CELL per-VMID device shadow (the cooperative two-VMID scheduler's
+// FORWARD-PROGRESS witness). Each guest, when running, STORES to a DISTINCT device
+// IPA -> the M27 stage-2 faults -> the trap-and-emulate handler routes the access
+// through `device_mmio_m27(.., vmid)`, INCREMENTING that VMID's cell. The monitor
+// reads BOTH cells at done: both advanced == both VMIDs were scheduled + made
+// forward progress (neither starved). A guest CANNOT fake a non-trapping store
+// (the IPA is unmapped at stage-2), so the count is the GROUND TRUTH. A separate
+// `align(64)` cell -- byte-identical to the single-VMID `DEVICE_SHADOW` when M27
+// is NOT armed (the L2.3 path never touches this pair).
+// ===========================================================================
+
+#[repr(C, align(64))]
+struct DeviceShadowPair(UnsafeCell<[u64; 2]>);
+
+// SAFETY: single vCPU; the two cells are touched ONLY from EL2 (the M27 MMIO
+// emulate handler increments; the done verdict reads), never concurrently and
+// never by EL1. No Rust reference to the interior is ever minted; access is
+// volatile raw-pointer only -- like `DeviceCell`.
+unsafe impl Sync for DeviceShadowPair {}
+
+static DEVICE_SHADOW_PAIR: DeviceShadowPair = DeviceShadowPair(UnsafeCell::new([0; 2]));
+
+fn pair_ptr() -> *mut u64 {
+    DEVICE_SHADOW_PAIR.0.get() as *mut u64
+}
+
+/// EL2: reset BOTH per-VMID forward-progress cells to 0 (called by the M27 arm
+/// handler before `eret`-ing into slot 0 -- a clean slate, so a stale count from
+/// a prior boot phase can never read as progress).
+pub(super) fn reset_device_pair_m27() {
+    // SAFETY: EL2, single accessor; two aligned volatile stores of cells 0/1.
+    unsafe {
+        write_volatile(pair_ptr().add(0), 0);
+        write_volatile(pair_ptr().add(1), 0);
+    }
+}
+
+/// THE M27a per-VMID MMIO device-model SEAM. On a WRITE (the guest's
+/// forward-progress store), INCREMENT cell `vmid` (clamped to the two cells) and
+/// return 0; on a READ, return the current count (the guest may read its own
+/// progress back). `ipa`/`size`/`value` are accepted for parity with
+/// [`device_mmio`] but the M27 device is a pure per-VMID COUNTER (the store's
+/// VALUE is irrelevant -- the COUNT is the witness), so they are unused. A guest
+/// cannot reach this without a trapping (unmapped-IPA) store, so the count cannot
+/// be forged.
+pub(super) fn device_mmio_m27(_ipa: u64, is_write: bool, _size: u64, _value: u64, vmid: u64) -> u64 {
+    let cell = (vmid & 1) as usize; // two cells: VMID 0 -> [0], VMID 1 -> [1]
+    // SAFETY: EL2, single accessor; `pair_ptr()` is our static cell (64-B aligned,
+    // EL1 never touches it). `cell < 2`. One aligned volatile RMW (write) or load.
+    unsafe {
+        let p = pair_ptr().add(cell);
+        if is_write {
+            write_volatile(p, read_volatile(p).wrapping_add(1));
+            0
+        } else {
+            read_volatile(p)
+        }
+    }
+}
+
+/// EL2 (the M27 done verdict): read VMID `vmid`'s forward-progress count.
+pub(super) fn device_count_m27(vmid: u64) -> u64 {
+    let cell = (vmid & 1) as usize;
+    // SAFETY: as `device_mmio_m27`; an aligned volatile load of cell 0 or 1.
+    unsafe { read_volatile(pair_ptr().add(cell)) }
+}
+
+// ===========================================================================
 // The EL2 served-mask / context cell (single-accessor; EL1 NEVER references it).
 //
 // `[0]` = armed flag (0/1), `[1]` = served mask (SYSREG|MMIO_WR|MMIO_RD bits),

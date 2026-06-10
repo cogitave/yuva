@@ -501,6 +501,70 @@ pub(super) fn compute_vttbr(root: u64) -> u64 {
     vttbr(root, VMID)
 }
 
+// ===========================================================================
+// M27a: the two-VMID time-partition stage-2 plumbing. The fixed `const VMID = 1`
+// is GENERALIZED so the cooperative scheduler can build TWO distinct stage-2
+// roots under two DISTINCT VMIDs (0 and 1). The builder body is byte-identical to
+// [`build_device_stage2`] (GiB0+GiB1 identity, every HIGH L1 slot left INVALID so
+// each guest's distinct device IPA stage-2-faults to the per-VMID MMIO emulate
+// seam) -- only the VTTBR VMID differs. The M27 device IPAs sit in FREE high L1
+// slots distinct from HOLE_IPA (L1[5]), DEVICE_IPA (L1[7]) and the aL2.4 guest VA
+// (L1[8]), so they never collide with an existing rung's window.
+// ===========================================================================
+
+/// M27a guest-0 device IPA: L1[9] (`9 * 1 GiB`). The slot guest 0 STORES its
+/// forward-progress magic into; stage-2-faults to `device_mmio_m27(.., vmid 0)`.
+pub(super) const M27_DEVICE_IPA_0: u64 = 0x2_4000_0000;
+/// M27a guest-1 device IPA: L1[10] (`10 * 1 GiB`). Distinct from guest 0's so the
+/// two guests bump DISTINCT MMIO cells (the per-VMID forward-progress witness).
+pub(super) const M27_DEVICE_IPA_1: u64 = 0x2_8000_0000;
+
+// Lock the M27 device IPAs against the L1 layout (a collision is a build error).
+const _: () = assert!(M27_DEVICE_IPA_0 >> SHIFT_1G == 9); // L1[9] -- a free gigabyte
+const _: () = assert!(M27_DEVICE_IPA_1 >> SHIFT_1G == 10); // L1[10] -- a free gigabyte
+const _: () = assert!(M27_DEVICE_IPA_0 & (GIB - 1) == 0); // 1 GiB-aligned (S1 block base)
+const _: () = assert!(M27_DEVICE_IPA_1 & (GIB - 1) == 0);
+const _: () = assert!(M27_DEVICE_IPA_0 != HOLE_IPA && M27_DEVICE_IPA_0 != DEVICE_IPA);
+const _: () = assert!(M27_DEVICE_IPA_1 != HOLE_IPA && M27_DEVICE_IPA_1 != DEVICE_IPA);
+const _: () = assert!(M27_DEVICE_IPA_0 != M27_DEVICE_IPA_1);
+
+/// M27a: build ONE stage-2 root (GiB0+GiB1 identity, all high L1 slots INVALID so
+/// the guest's distinct M27 device IPA stage-2-faults) for VMID `vmid`. Byte-for-
+/// byte the [`build_device_stage2`] geometry; returns the L1 root PA or `None` on
+/// physical-frame OOM. The caller builds TWO (VMID 0 and 1) for the two guests.
+pub(super) fn build_identity_stage2_for_vmid(_vmid: u64) -> Option<u64> {
+    // The geometry is VMID-independent (the VMID lands in VTTBR, not the tables),
+    // so reuse the proven device-stage-2 builder verbatim.
+    build_device_stage2()
+}
+
+/// M27a: `VTTBR_EL2` = stage-2 root `root` in BADDR | `vmid` in `[63:48]`. The
+/// VMID-parameterized twin of [`compute_vttbr`] (which is fixed to [`VMID`]).
+pub(super) fn compute_vttbr_vmid(root: u64, vmid: u64) -> u64 {
+    vttbr(root, vmid)
+}
+
+/// EL1: splice a stage-1 1 GiB identity block at the L1 slot of `device_ipa` of
+/// the LIVE `TTBR0_EL1` so the guest VA `device_ipa` produces IPA `device_ipa`
+/// (which the M27 stage-2 then faults). A sibling of [`install_stage1_device_block`]
+/// for an arbitrary 1 GiB-aligned high IPA. The stage-1 walk for this VA touches
+/// only the L1 root (in GiB1, stage-2-covered), so it never S1PTW-faults. No TLBI
+/// (the slot was INVALID -- a first map). Left installed after the round-trip --
+/// harmless (the kernel never touches that VA; stage-2 is torn down so it is plain
+/// stage-1 to an unbacked PA thereafter).
+pub(super) fn install_stage1_m27_block(device_ipa: u64) {
+    let l1 = super::mmu::current_root() as *mut u64;
+    let idx = level_index(device_ipa, SHIFT_1G);
+    // SAFETY: `current_root()` returns the live `TTBR0_EL1` L1 base PA (BADDR
+    // masked), an identity-mapped 512-entry table; `idx < 512` (the M27 IPAs are
+    // L1[9]/L1[10], locked by the const-asserts above). We write a single
+    // previously-INVALID slot with a valid 1 GiB Normal block whose output
+    // (`device_ipa`) is 1 GiB-aligned, then publish before any access through it.
+    unsafe { write_volatile(l1.add(idx), make_entry(device_ipa, STAGE1_BLOCK_NORMAL)) }
+    dsb_ishst();
+    isb();
+}
+
 /// The stage-2 [`VMID`] the CPU stage-2 regime uses. Exposed `pub(super)` so the
 /// aL2.6 SMMU self-test ([`super::smmu`]) packs the SAME VMID into the STE's
 /// `S2VMID` field — the "SMMU stage-2 VMID == CPU stage-2 VMID" half of the

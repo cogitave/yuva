@@ -479,6 +479,78 @@ const _: () = assert!(FAIL_VGIC_NO_PARK != FAIL_VGIC_NO_RETIRE);
 const _: () = assert!(FAIL_VGIC_NO_RETIRE != FAIL_VGIC_NO_LR && FAIL_VGIC_NO_LR != FAIL_VGIC_RELOOP);
 
 // ===========================================================================
+// M27a sovereign-scheduler constants (the COOPERATIVE two-VMID time-partition
+// rung, built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam). THREE new
+// HVC immediates bookend + drive the window: #12 arm, #13 done, #14 the
+// voluntary yield. NO async IRQ (that is M27b) -- the guests HVC-yield.
+// ===========================================================================
+
+/// M27a: the kernel's scheduler bootstrap HVC immediate (`hvc #12`) -- "populate
+/// the SchedCtx (two VMIDs / roots / entry PCs / FramePlan), arm the M27 stage-2
+/// window (VTTBR_EL2 = slot-0 root, HCR.VM=1), and eret into slot 0's guest stub".
+const HVC_SCHED_ARM: u64 = 12;
+/// M27a: the orchestrator's scheduler done HVC immediate (`hvc #13`) -- "the K
+/// bounded major frames are complete; TEAR the window DOWN (HCR=RW, drop VTTBR)
+/// FIRST, then verify both-progressed + order-honored + fold-verified +
+/// tamper-caught + frame-conserved, and unwind". Teardown-first (returning to EL1
+/// with HCR.VM=1 instantly aborts the kernel -- the L2.1 discipline).
+const HVC_SCHED_DONE: u64 = 13;
+/// M27a: the guest's voluntary YIELD HVC immediate (`hvc #14`) -- "I made forward
+/// progress (bumped my MMIO cell); consult tpsched::next_slot, switch VTTBR_EL2 to
+/// the next VMID's root + fold a SchedDecision, and resume the next guest". The
+/// cooperative substitute for M27b's CNTHP timer preemption.
+const HVC_SCHED_YIELD: u64 = 14;
+
+// M27a FAIL codes (distinct nonzero; any -> `SchedProof::Faulted` -> red marker,
+// rendered WITHOUT a "sched OK" substring so the run grep stays fail-closed).
+// Family 0x05CED_.... ("SChEDuler").
+/// Could not build the two stage-2 roots at EL1 (physical-frame OOM).
+const FAIL_SCHED_BUILD: u64 = 0x0000_05CE_0000_0001;
+/// VMID 0 never advanced its MMIO cell (it was starved -- the round-robin or the
+/// yield switch failed to schedule it).
+const FAIL_SCHED_VMID0_STARVED: u64 = 0x0000_05CE_0000_0002;
+/// VMID 1 never advanced its MMIO cell (it was starved).
+const FAIL_SCHED_VMID1_STARVED: u64 = 0x0000_05CE_0000_0003;
+/// The observed VMID run-order did NOT match the tpsched round-robin (the
+/// schedule was not honored -- a slot stuck / out of sequence).
+const FAIL_SCHED_ORDER: u64 = 0x0000_05CE_0000_0004;
+/// The committed `sched_head` did NOT match a fresh `recompute` over the folded
+/// decisions (the fold diverged from the canonical chain).
+const FAIL_SCHED_FOLD: u64 = 0x0000_05CE_0000_0005;
+/// A single-byte TAMPER of a committed decision did NOT flip the recompute (the
+/// fold is not tamper-sensitive -- a constant/identity fold would fail here).
+const FAIL_SCHED_TAMPER: u64 = 0x0000_05CE_0000_0006;
+/// The major frame was NOT conserved (`frame_total != Σ slot budgets`).
+const FAIL_SCHED_FRAME: u64 = 0x0000_05CE_0000_0007;
+/// The bounded major-frame count was not reached (too few yields observed -- the
+/// orchestrator ended early or a guest hung instead of yielding).
+const FAIL_SCHED_SHORT: u64 = 0x0000_05CE_0000_0008;
+
+/// M27a: the per-slot tick budgets of the fixed two-slot major frame (the
+/// `FramePlan.slot_ticks`). DISTINCT non-zero budgets so the conservation witness
+/// (`frame_total == slot0 + slot1`) is a non-trivial sum; under TCG these are a
+/// RELATIVE shape, never a timing claim (the `timing=COOPERATIVE-HVC-YIELD` +
+/// `realtime=NOT-CLAIMED` honesty tokens hold).
+const M27_SLOT0_TICKS: u64 = 0x1000;
+const M27_SLOT1_TICKS: u64 = 0x2000;
+/// M27a: the two guest VMIDs (the minimal two-VMID sovereign partition). VMID 0
+/// and VMID 1 (distinct stage-2 roots), packed into VTTBR_EL2[63:48].
+const M27_VMID0: u16 = 0;
+const M27_VMID1: u16 = 1;
+
+// Tier-1 compile-time locks on the M27a dispatch constants (a drift is a build
+// error). The HVC immediates are distinct from every existing rung's (0..11) and
+// from each other; the FAIL codes are distinct nonzero.
+const _: () = assert!(HVC_SCHED_ARM == 12 && HVC_SCHED_DONE == 13 && HVC_SCHED_YIELD == 14);
+const _: () = assert!(M27_SLOT0_TICKS != 0 && M27_SLOT1_TICKS != 0);
+const _: () = assert!(M27_SLOT0_TICKS != M27_SLOT1_TICKS); // a non-trivial conserved sum
+const _: () = assert!(M27_VMID0 != M27_VMID1); // two DISTINCT VMIDs
+const _: () = assert!(FAIL_SCHED_BUILD != 0 && FAIL_SCHED_VMID0_STARVED != 0);
+const _: () = assert!(FAIL_SCHED_VMID1_STARVED != 0 && FAIL_SCHED_ORDER != 0);
+const _: () = assert!(FAIL_SCHED_FOLD != 0 && FAIL_SCHED_TAMPER != 0);
+const _: () = assert!(FAIL_SCHED_FRAME != 0 && FAIL_SCHED_SHORT != 0);
+
+// ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
 // ===========================================================================
 
@@ -603,6 +675,15 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
         // device seam + ELR ADVANCE), routed BEFORE the L2.1 demand path so the
         // device IPA never reaches the demand-map (it stays unmapped per access).
         ExitClass::StageTwoAbort => {
+            // M27a: the cooperative two-VMID scheduler window. A guest's store to
+            // its DISTINCT (unmapped) device IPA stage-2-faults here -> route it
+            // through the per-VMID MMIO counter seam + advance ELR (the L2.3
+            // emulate discipline, but counting per-VMID). Checked FIRST + gated on
+            // the M27 armed flag, so when M27 is NOT armed this is byte-identical
+            // to the L2.3 path (the M27 emulate never fires).
+            if super::tpsched_hal::armed() {
+                el2_mmio_emulate_m27(frame, esr);
+            }
             if super::el2mmio::armed() {
                 el2_mmio_emulate(frame, esr);
             }
@@ -1065,11 +1146,309 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             };
             el2_return_to_kernel(outcome, magic);
         }
+        HVC_SCHED_ARM => {
+            // imm == 12: the kernel's M27a scheduler bootstrap. The two-VMID
+            // context rides the frame: x0 = VTCR, x1 = vttbr[0] (slot-0 root +
+            // VMID 0), x2 = vttbr[1] (slot-1 root + VMID 1), x3 = entry_pc[0],
+            // x4 = entry_pc[1]. Populate the SchedCtx (the FramePlan is a
+            // compile-time const here), reset the per-VMID MMIO progress pair,
+            // arm the M27 stage-2 window (VTTBR_EL2 = slot-0 root, HCR.VM=1), and
+            // eret INTO slot 0's guest stub. Leave this frame (B0 ==
+            // __el2_stack_top - 0x110) resident (SP_EL2 reset to it) so each
+            // guest's voluntary `hvc #14` yield + the final `hvc #13` stack below
+            // it and the done unwind hits B0.
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[0..4] were framed by SAVE_CONTEXT_EL2 and carry the HVC #12 args.
+            let (vtcr_v, vttbr0, vttbr1, entry0, entry1) = unsafe {
+                (
+                    (*frame).gpr[0],
+                    (*frame).gpr[1],
+                    (*frame).gpr[2],
+                    (*frame).gpr[3],
+                    (*frame).gpr[4],
+                )
+            };
+            let plan = m27_frame_plan();
+            super::tpsched_hal::set_sched_context(&plan, vttbr0, vttbr1, entry0, entry1);
+            super::el2mmio::reset_device_pair_m27();
+            super::tpsched_hal::arm_sched_el2(vtcr_v, vttbr0);
+            // SAFETY: reset SP_EL2 = &B0, program ELR_EL2/SPSR_EL2 for an EL1h
+            // entry at slot 0's identity-mapped stub, `eret`. `noreturn`: control
+            // leaves EL2 for slot 0's guest (now under its stage-2) and re-enters
+            // only via that guest's `hvc #14` yield.
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) entry0,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    options(noreturn),
+                );
+            }
+        }
+        HVC_SCHED_YIELD => {
+            // imm == 14: a guest's voluntary YIELD (it bumped its MMIO cell). This
+            // is the cooperative substitute for M27b's timer preemption. Consult
+            // tpsched::next_slot, FOLD a SchedDecision into the running sched_head
+            // (the M22 prov fold reused verbatim, inside note_yield), switch
+            // VTTBR_EL2 to the next slot's root (+ tlbi vmalls12e1is), and RESUME
+            // the next guest. If the bounded major-frame count is reached, do NOT
+            // resume a guest -- instead fall through to the done verdict (the
+            // orchestrator is the EL2 monitor itself; there is no separate driver
+            // guest, so the LAST yield that completes frame K ends the run).
+            // SAFETY: `frame` is the yield frame on the single-accessor monitor
+            // stack; note_yield reads/writes only the EL2 SchedCtx cell.
+            let (next_slot_idx, next_vttbr, next_entry) = super::tpsched_hal::note_yield();
+            let _ = next_entry; // we resume PAST the yielding guest's hvc, not re-enter the stub
+            if super::tpsched_hal::frames_done() >= super::tpsched_hal::K_MAX_FRAMES {
+                // The bounded run is complete: end teardown-FIRST, then verdict.
+                m27_done_verdict(esr);
+            }
+            // Switch the stage-2 world to the next VMID's root (the world-switch),
+            // then ADVANCE ELR past the yielding guest's `hvc #14` (a 32-bit insn)
+            // and resume -- BUT the resumed instruction stream is the NEXT guest's
+            // stub, reached because we flipped VTTBR. The yielding guest never runs
+            // past its `hvc #14` under its OWN stage-2; instead we redirect ELR to
+            // the next slot's entry PC so the next guest's stub executes from its
+            // top under the now-switched stage-2.
+            let _ = next_slot_idx;
+            super::tpsched_hal::switch_vttbr_el2(next_vttbr);
+            // SAFETY: `frame.elr` (0xF8) is the yielding guest's PC; redirect it to
+            // the NEXT slot's stub entry so the next guest runs from its top under
+            // the switched VTTBR. The frame's GPRs are irrelevant (each stub
+            // materialises its own state from immediates), so el2_abort_retry
+            // restores them UNCHANGED and erets into the next guest.
+            unsafe { (*frame).elr = next_entry };
+            el2_abort_retry(frame);
+        }
+        HVC_SCHED_DONE => {
+            // imm == 13: the orchestrator's explicit done HVC (reached only if the
+            // run ended via an explicit driver `hvc #13` rather than the
+            // frames-done fall-through above -- kept for symmetry + a belt-and-
+            // suspenders end path). Teardown-FIRST, then the verdict.
+            m27_done_verdict(esr);
+        }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
             el2_return_to_kernel(FAIL_BAD_IMM, other);
         }
     }
+}
+
+// ===========================================================================
+// M27a: the per-VMID MMIO trap-and-emulate (the cooperative scheduler's
+// forward-progress witness). A guest's store to its DISTINCT (unmapped) device
+// IPA stage-2-faults here; route it through `device_mmio_m27(.., vmid)` (which
+// INCREMENTS that VMID's count) and ADVANCE ELR past the trapped STR/LDR. A
+// sibling of `el2_mmio_emulate` but keyed on the CURRENT scheduled VMID (which
+// guest is running) rather than a single fixed device. Never returns: reuses
+// `el2_abort_retry` to resume.
+// ===========================================================================
+fn el2_mmio_emulate_m27(frame: *mut Frame, esr: u64) -> ! {
+    let hpfar = super::stage2::read_hpfar_el2();
+    let fault_ipa = hpfar_fault_ipa(hpfar);
+    // The current scheduled slot identifies WHICH guest faulted (its VMID + its
+    // expected device IPA). A fault at any OTHER IPA while M27 is armed is not our
+    // window -> DEFER to the L2.1 stage-2 demand handler (the IPA is the ground
+    // truth, exactly the `el2_mmio_emulate` mis-route guard).
+    let slot = super::tpsched_hal::current_slot();
+    let vmid = super::tpsched_hal::vmid_for(slot);
+    let expect_ipa = if vmid == M27_VMID0 as u64 {
+        super::stage2::M27_DEVICE_IPA_0
+    } else {
+        super::stage2::M27_DEVICE_IPA_1
+    };
+    if fault_ipa != expect_ipa {
+        aarch64_el2_stage2_abort(frame, esr);
+    }
+    // The abort MUST be emulatable (ISV=1, !S1PTW): a single-GP LDR/STR. Else fail
+    // closed (the KVM `KVM_EXIT_ARM_NISV` early-out).
+    if !dabt_is_emulatable(esr) {
+        super::tpsched_hal::disarm_sched_el2();
+        el2_return_to_kernel(FAIL_TRAP_MMIO_NISV, esr);
+    }
+    let is_write = esr_wnr(esr) == 1;
+    let size = dabt_access_size_bytes(esr);
+    let srt = dabt_iss_srt(esr) as usize;
+    if is_write {
+        // WRITE: read the source value (irrelevant -- the COUNT is the witness)
+        // and route it through the per-VMID counter seam.
+        // SAFETY: `frame.gpr` (0x00) holds x0..x30; `srt < 32` (a 5-bit ISS field,
+        // proven by `kani_dabt_iss_decode_total`). srt==31 == XZR -> 0.
+        let value = if srt < 31 {
+            unsafe { (*frame).gpr[srt] }
+        } else {
+            0
+        };
+        super::el2mmio::device_mmio_m27(fault_ipa, true, size, value, vmid);
+    } else {
+        // READ: return the current count into gpr[SRT] (the guest may read its own
+        // progress); XZR (SRT==31) discards it.
+        let value = super::el2mmio::device_mmio_m27(fault_ipa, false, size, 0, vmid);
+        if srt < 31 {
+            // SAFETY: as the write path; a single in-frame store of the SRT GPR.
+            unsafe { (*frame).gpr[srt] = value };
+        }
+    }
+    // ADVANCE ELR past the 32-bit LDR/STR and resume the SAME guest (it will then
+    // `hvc #14` to yield). The guest never re-executes the access.
+    // SAFETY: `frame.elr` (0xF8) is the faulting PC; +4 resumes PAST it.
+    unsafe { (*frame).elr += 4 };
+    el2_abort_retry(frame);
+}
+
+/// M27a: the fixed two-slot major-frame plan (a compile-time const FramePlan).
+/// VMID 0 in slot 0, VMID 1 in slot 1; the per-slot tick budgets are the
+/// conservation witness (NOT a timing claim under TCG).
+fn m27_frame_plan() -> tb_encode::tpsched::FramePlan {
+    tb_encode::tpsched::FramePlan {
+        slot_ticks: [M27_SLOT0_TICKS, M27_SLOT1_TICKS],
+        vmid: [M27_VMID0, M27_VMID1],
+    }
+}
+
+// ===========================================================================
+// M27a: the done verdict -- teardown-FIRST, then verify the five DoD properties
+// (both-progressed, order-honored, fold-verified, tamper-caught, frame-conserved)
+// and unwind to the kernel. Never returns. The 32-byte head-witness rides x1 back
+// so the kernel can render `head=<hex16>` -- BUT to fit the witness line the
+// kernel actually recomputes the witness from the returned proof; here x1 carries
+// the head_witness so the facade has it directly.
+// ===========================================================================
+fn m27_done_verdict(esr: u64) -> ! {
+    // TEARDOWN IS THE FIRST ACTION (returning to EL1 with HCR.VM=1 instantly
+    // aborts the kernel -- the L2.1 discipline). Reads of the SchedCtx cell below
+    // are unaffected by the teardown (it only touches HCR/VTTBR + the armed flag).
+    super::tpsched_hal::disarm_sched_el2();
+
+    // (a) BOTH-PROGRESSED: each VMID advanced its DISTINCT MMIO cell (neither
+    // starved). The counts are the ground truth (a guest cannot fake a
+    // non-trapping store to its unmapped device IPA).
+    let c0 = super::el2mmio::device_count_m27(M27_VMID0 as u64);
+    let c1 = super::el2mmio::device_count_m27(M27_VMID1 as u64);
+    if c0 == 0 {
+        el2_return_to_kernel(FAIL_SCHED_VMID0_STARVED, c0);
+    }
+    if c1 == 0 {
+        el2_return_to_kernel(FAIL_SCHED_VMID1_STARVED, c1);
+    }
+
+    // (b) BOUNDED FRAME COUNT: the run completed at least K_MAX_FRAMES major
+    // frames (2*K yields). Too few == the orchestrator ended early / a guest hung.
+    let yields = super::tpsched_hal::yields_done();
+    if yields < 2 * super::tpsched_hal::K_MAX_FRAMES {
+        el2_return_to_kernel(FAIL_SCHED_SHORT, yields);
+    }
+
+    // (c) ORDER-HONORED: the observed VMID run-order is the tpsched round-robin --
+    // the trace alternates VMID0, VMID1, VMID0, VMID1, ... (slot 0 ran first). A
+    // stuck/out-of-sequence slot breaks the alternation.
+    let mut i = 0usize;
+    while (i as u64) < yields && i < super::tpsched_hal::MAX_YIELDS {
+        let expect = if i % 2 == 0 { M27_VMID0 as u64 } else { M27_VMID1 as u64 };
+        if super::tpsched_hal::order_at(i) != expect {
+            el2_return_to_kernel(FAIL_SCHED_ORDER, super::tpsched_hal::order_at(i));
+        }
+        i += 1;
+    }
+
+    // (d) FRAME-CONSERVED: frame_total == Σ slot budgets (the Kani-proven leaf
+    // invariant, recomputed at EL2 against the recorded budgets).
+    let plan = m27_frame_plan();
+    let frame_total = tb_encode::tpsched::frame_total(&plan);
+    let sum = super::tpsched_hal::slot_ticks(0).saturating_add(super::tpsched_hal::slot_ticks(1));
+    if frame_total != sum || frame_total != M27_SLOT0_TICKS + M27_SLOT1_TICKS {
+        el2_return_to_kernel(FAIL_SCHED_FRAME, frame_total);
+    }
+
+    // (e) FOLD-VERIFIED + TAMPER-CAUGHT: replay the EXACT folded decision sequence
+    // (the cooperative scheduler folds one SchedDecision per yield, identical to
+    // note_yield's), recompute the head from genesis, and require it EQUALS the
+    // committed running head; then flip a single byte of the FIRST decision and
+    // require the recompute now DIFFERS (the M22 fold is tamper-sensitive). All
+    // pure tb-encode (no alloc): we rebuild each decision the same way note_yield
+    // did and chain_mix them.
+    let committed = super::tpsched_hal::head_bytes();
+    let (recomputed, tampered) = m27_replay_head(yields);
+    if recomputed != committed {
+        el2_return_to_kernel(
+            FAIL_SCHED_FOLD,
+            tb_encode::tpsched::sched_head_witness(recomputed),
+        );
+    }
+    if tampered == committed {
+        // A single-byte tamper did NOT change the head -> the fold is not
+        // tamper-sensitive (a constant/identity fold). Fail closed.
+        el2_return_to_kernel(
+            FAIL_SCHED_TAMPER,
+            tb_encode::tpsched::sched_head_witness(tampered),
+        );
+    }
+
+    // ALL FIVE properties hold. Return outcome 0 + the head-witness in x1 so the
+    // facade renders the marker line directly.
+    let _ = esr;
+    el2_return_to_kernel(0, tb_encode::tpsched::sched_head_witness(committed));
+}
+
+// ===========================================================================
+// M27a: replay the folded decision sequence at done (EL2, no alloc). Rebuilds
+// each SchedDecision EXACTLY as note_yield did, recomputes the head from the
+// all-zero genesis, and ALSO recomputes a head over a single-byte-tampered FIRST
+// decision. Returns (clean_head, tampered_head). The clean head must equal the
+// committed running head (fold-verified); the tampered head must DIFFER from it
+// (tamper-caught). This mirrors the `kani_tpsched` fold-tamper harness over the
+// concrete boot sequence.
+// ===========================================================================
+fn m27_replay_head(yields: u64) -> ([u8; 32], [u8; 32]) {
+    let plan = m27_frame_plan();
+    let mut clean = [0u8; 32]; // genesis
+    let mut tampered = [0u8; 32];
+    let mut t_logical = 0u64;
+    let mut frame_seq = 0u64;
+    let mut cur = 0usize; // slot 0 runs first
+    let mut y = 0u64;
+    while y < yields {
+        let nxt = tb_encode::tpsched::next_slot(cur);
+        let vmid_from = plan.vmid[cur % 2];
+        let vmid_to = plan.vmid[nxt % 2];
+        let decision = tb_encode::tpsched::SchedDecision {
+            frame_seq,
+            slot: nxt as u8,
+            vmid_from,
+            vmid_to,
+            t_logical,
+        };
+        let mut scratch = [0u8; tb_encode::tpsched::SCHED_CANON_LEN];
+        let n = tb_encode::tpsched::canon(&decision, &mut scratch);
+        if n == tb_encode::tpsched::SCHED_CANON_LEN {
+            let id = tb_encode::tpsched::sched_hash(&scratch[..n]);
+            clean = tb_encode::tpsched::sched_chain_mix(clean, id);
+            // The tampered chain flips one byte of the FIRST decision's canon, then
+            // folds the rest identically -- so a tamper-INSENSITIVE fold would
+            // produce the SAME head and the verdict would (correctly) fail.
+            if y == 0 {
+                let mut tcanon = scratch;
+                tcanon[8] ^= 0x01; // flip the `slot` byte (offset 8) of decision 0
+                let tid = tb_encode::tpsched::sched_hash(&tcanon[..n]);
+                tampered = tb_encode::tpsched::sched_chain_mix(tampered, tid);
+            } else {
+                tampered = tb_encode::tpsched::sched_chain_mix(tampered, id);
+            }
+        }
+        // Advance the replay state EXACTLY as note_yield did.
+        t_logical = t_logical.wrapping_add(plan.slot_ticks[cur % 2]);
+        if nxt == 0 {
+            frame_seq += 1;
+        }
+        cur = nxt;
+        y += 1;
+    }
+    (clean, tampered)
 }
 
 // ===========================================================================
@@ -2461,4 +2840,149 @@ fn l2_vgic_guest_vectors_addr() -> u64 {
         );
     }
     v
+}
+
+// ===========================================================================
+// M27a: the TWO EL1 guest stubs -- trivial position-independent EL1 payloads, one
+// per VMID. Each, when scheduled, STORES a magic to its DISTINCT device IPA (an
+// unmapped stage-2 IPA -> the store stage-2-faults -> the monitor's per-VMID MMIO
+// counter increments == this guest's forward-progress witness), then voluntarily
+// YIELDS with `hvc #14`. On each yield the monitor consults tpsched::next_slot,
+// switches VTTBR_EL2 to the OTHER VMID's root, folds a SchedDecision, and
+// REDIRECTS ELR to the next guest's entry -- so each scheduling runs the stub from
+// its top under its OWN stage-2 view (the `b 1b` is unreachable: the monitor never
+// resumes a yielding guest under its own stage-2; it world-switches away).
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #12` arm's eret (slot 0) or a `HVC #14`
+//           yield's VTTBR-switched redirect (either slot), at EL1h
+//           (SPSR_EL2 = 0x3C5) under the M27 stage-2 (HCR_EL2.VM=1). Its VA == PA:
+//           identity-mapped EL1-executable kernel `.text` in GiB1 (the M27
+//           stage-2 identity-covers GiB0+GiB1, so the fetch + stack never
+//           S1PTW-fault). POST: `hvc #14` (yield); the monitor world-switches +
+//           never resumes past it under this guest's stage-2.
+// (b) ABI : `#[unsafe(naked)]` -- PC-relative / immediate only (valid at its
+//           identity VA), NO stack (SP_EL1 untouched). A SINGLE-GPR STR (no
+//           LDP/STP, no writeback, no SIMD) so QEMU TCG sets ISV=1. The device VA
+//           is materialised MOVZ+MOVK (== stage2.rs M27_DEVICE_IPA_{0,1}).
+// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "M27: sched OK".
+/// M27a guest 0 (VMID 0): STORE a magic to `M27_DEVICE_IPA_0` (0x2_4000_0000),
+/// then `hvc #14` to yield. The store stage-2-faults -> VMID-0 counter ++.
+#[unsafe(naked)]
+extern "C" fn m27_guest0_stub() -> ! {
+    naked_asm!(
+        "movz x4, #0x4000, lsl #16", // x4 = 0x0000_0000_4000_0000
+        "movk x4, #0x0002, lsl #32", // x4 = 0x0000_0002_4000_0000 == M27_DEVICE_IPA_0
+        "movz x5, #0x270",           // a forward-progress magic (value is irrelevant: the COUNT is the witness)
+        "str  x5, [x4]",             // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 0)++ -> ELR+=4
+        "hvc  #14",                  // voluntary YIELD: consult next_slot + world-switch
+        "1: b 1b",                   // unreachable: the monitor world-switches away, never resumes here
+    )
+}
+
+/// M27a guest 1 (VMID 1): STORE a magic to `M27_DEVICE_IPA_1` (0x2_8000_0000),
+/// then `hvc #14` to yield. The store stage-2-faults -> VMID-1 counter ++.
+#[unsafe(naked)]
+extern "C" fn m27_guest1_stub() -> ! {
+    naked_asm!(
+        "movz x4, #0x8000, lsl #16", // x4 = 0x0000_0000_8000_0000
+        "movk x4, #0x0002, lsl #32", // x4 = 0x0000_0002_8000_0000 == M27_DEVICE_IPA_1
+        "movz x5, #0x271",           // a forward-progress magic (value is irrelevant)
+        "str  x5, [x4]",             // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 1)++ -> ELR+=4
+        "hvc  #14",                  // voluntary YIELD: consult next_slot + world-switch
+        "1: b 1b",                   // unreachable: the monitor world-switches away, never resumes here
+    )
+}
+
+// ===========================================================================
+// M27a: the safe facade: sched_selftest() -> SchedProof.
+// ===========================================================================
+// (a) PRE : called once from the kernel at the M27 slot (right after L2.6, before
+//           M19), at EL1h, with the resident monitor armed (BOOTED_AT_EL2 == 1).
+//           POST: built TWO distinct stage-2 roots (VMID 0 + 1) + spliced the two
+//           stage-1 device blocks AT EL1, issued ONE `HVC #12`, drove the
+//           arm -> [slot0 store+yield -> world-switch -> slot1 store+yield ->
+//           world-switch] x K -> teardown-FIRST -> verdict -> unwind round-trip,
+//           and returns the outcome enum. The kernel resumes here at EL1 with the
+//           M27 window fully torn down (HCR back to RW baseline). Graceful skip
+//           when not booted at EL2.
+// (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `tpsched_hal.rs` /
+//           `stage2.rs` / `el2mmio.rs`, so the `#![forbid(unsafe_code)]` kernel
+//           only branches on the returned `SchedProof`.
+// (c) TEST: scripts/run-aarch64.sh -- "M27: sched OK" iff this returns `Proven`.
+/// Drive the cooperative two-VMID time-partition round-trip and report the
+/// outcome. `Unavailable` if we did not boot at EL2 (a green skip);
+/// `Proven{head, frames}` on a closed round-trip where both VMIDs progressed, the
+/// order was the round-robin, the fold verified + a tamper was caught, and the
+/// frame was conserved; `Faulted{code}` on any monitor-reported fault.
+pub fn sched_selftest() -> crate::SchedProof {
+    use crate::SchedProof;
+
+    // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
+    if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
+        return SchedProof::Unavailable;
+    }
+
+    // Build TWO distinct stage-2 roots (VMID 0 + 1). Each is the GiB0+GiB1
+    // identity regime (covers each guest's fetch/stack + the live stage-1 table
+    // frames so its own stage-1 walk never S1PTW-faults), with every HIGH L1 slot
+    // -- including both M27 device IPAs -- left INVALID so each guest's distinct
+    // store stage-2-faults to the per-VMID MMIO seam. On OOM, surface Faulted.
+    let root0 = match super::stage2::build_identity_stage2_for_vmid(M27_VMID0 as u64) {
+        Some(r) => r,
+        None => return SchedProof::Faulted { code: FAIL_SCHED_BUILD },
+    };
+    let root1 = match super::stage2::build_identity_stage2_for_vmid(M27_VMID1 as u64) {
+        Some(r) => r,
+        None => return SchedProof::Faulted { code: FAIL_SCHED_BUILD },
+    };
+    // Splice the stage-1 identity blocks at L1[9]/L1[10] so each guest VA
+    // M27_DEVICE_IPA_{0,1} produces the same IPA (which the M27 stage-2 faults).
+    super::stage2::install_stage1_m27_block(super::stage2::M27_DEVICE_IPA_0);
+    super::stage2::install_stage1_m27_block(super::stage2::M27_DEVICE_IPA_1);
+
+    let vtcr_v = super::stage2::compute_vtcr();
+    let vttbr0 = super::stage2::compute_vttbr_vmid(root0, M27_VMID0 as u64);
+    let vttbr1 = super::stage2::compute_vttbr_vmid(root1, M27_VMID1 as u64);
+    let entry0 = m27_guest0_stub as *const () as u64;
+    let entry1 = m27_guest1_stub as *const () as u64;
+
+    // Mask EL1 IRQs across the whole window (the guests run DAIF-masked too; M27a
+    // has NO async IRQ, so this is purely belt-and-suspenders -- no stray physical
+    // IRQ disturbs the round-trip).
+    let daif = super::timer::local_irq_save();
+
+    let outcome: u64;
+    let head_witness: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #12`, populates the SchedCtx,
+    // programs VTCR/VTTBR (slot-0 root) + HCR.VM=1, and erets into slot 0's stub.
+    // Each guest stores to its device IPA (stage-2-faults -> per-VMID counter ++),
+    // then `hvc #14`s -- the monitor folds a SchedDecision, switches VTTBR to the
+    // next VMID's root, and resumes the next guest. After K major frames the
+    // monitor TEARS the window DOWN (HCR=RW) FIRST, verifies the five properties,
+    // and unwinds here with x0 = outcome, x1 = the head-witness, every other
+    // kernel register restored from B0. The result arrives in registers -- nothing
+    // here touches the EL2 stack. x0..x4 carry the in-args; clobber_abi("C")
+    // covers the rest.
+    unsafe {
+        asm!(
+            "hvc #12",
+            inout("x0") vtcr_v => outcome,
+            inout("x1") vttbr0 => head_witness,
+            in("x2") vttbr1,
+            in("x3") entry0,
+            in("x4") entry1,
+            clobber_abi("C"),
+        );
+    }
+
+    super::timer::local_irq_restore(daif);
+
+    if outcome == 0 {
+        SchedProof::Proven {
+            head: head_witness,
+            frames: super::tpsched_hal::K_MAX_FRAMES,
+        }
+    } else {
+        SchedProof::Faulted { code: outcome }
+    }
 }

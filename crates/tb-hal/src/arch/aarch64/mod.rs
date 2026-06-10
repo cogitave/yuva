@@ -44,6 +44,7 @@ mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
 mod smmu; // aL2.6: SMMUv3 stage-2 DMA-isolation table-programming (EL1-only; IOMMU twin of L2.1).
 mod stage2; // L2.1: stage-2 demand-translation builder/arm/abort glue (+ HOLE_IPA).
 mod timer; // M8: GICv2 + EL1 physical timer (PPI 30); IRQ ack/EOI/tick + CNTPCT.
+mod tpsched_hal; // M27a: cooperative two-VMID time-partition scheduler (arm/yield/disarm + decision cell).
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
 mod uaccess; // M14.1: cross-address-space user-buffer copy (the only new aarch64 unsafe).
 mod user; // M4: EL0 entry/exit + user-page mapping + user_demo round-trip.
@@ -56,6 +57,7 @@ pub use el2::el2_trap_selftest; // L2.3: the safe trap-and-emulate self-test fac
 pub use el2::stage2_selftest; // L2.1: the safe stage-2 demand-translation self-test facade.
 pub use el2::el2_nested_guest_selftest; // aL2.4: the safe nested-guest (two-stage) self-test facade.
 pub use el2::el2_vgic_selftest; // aL2.5: the safe vGIC virtual-interrupt-injection self-test facade.
+pub use el2::sched_selftest; // M27a: the safe cooperative two-VMID time-partition scheduler self-test facade.
 pub use smmu::smmu_selftest; // aL2.6: the safe SMMUv3 stage-2 table-programming self-test facade.
 pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
 pub use virtio::{blk_flush, blk_probe, blk_read, blk_saw_legacy, blk_write}; // M20: virtio-blk.
