@@ -42,9 +42,24 @@ set -euo pipefail
 # stage-2 geometry); smmu_cmd_encode_total -- CFGI_STE/TLBI_S12_VMALL/CMD_SYNC
 # place the right opcode in word0[7:0] + operands in their fields for all inputs.
 # -- one per syndrome family / encoder, each proving totality AND round-trip
-# correctness).
+# correctness) + M20 blkfmt durable-persistence codecs x6: blk_req_header_roundtrip
+# -- the 16-byte virtio-blk request header {le32 type, le32 reserved, le64 sector}
+# round-trips + T_IN/T_OUT/T_FLUSH are well-formed; blk_superblock_identity -- the
+# 512-byte log-structured superblock encode->decode is identity over symbolic gen/
+# log_head[3]/record_count[3] (the FNV-1a-64 checksum it stamps matches on read-
+# back); blk_superblock_decode_total -- the decode is TOTAL + fail-closed under the
+# bounded magic/version/checksum-perturbation assume-envelope (NOT full 512-byte
+# nondet -- the #49 over-quantification trap); blk_frame_header_roundtrip -- the
+# 24-byte record-frame header round-trips every region/len/seq/payload_crc field;
+# blk_record_frame_decode_total -- a frame over a symbolic 48-byte Episode body
+# decodes (Some), the payload window stays in-bounds, and the Episode round-trips
+# field-for-field (frame-level replay determinism); blk_sector_math_and_gen_monotone
+# -- region_extent/record_sector are no-overflow + in-extent (sectors land strictly
+# inside disjoint [first,first+count) extents, never the SB sector 0), the ceiling
+# fails closed (Full), record_sector is strictly monotone in the log head (replay
+# reproduces on-disk order), and gen+1 strictly increases (the two-phase commit).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=28
+EXPECTED_HARNESSES=34
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

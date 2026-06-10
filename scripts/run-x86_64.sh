@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M19: virtio OK'
+MARKER='M20: persist OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -54,6 +54,16 @@ fi
 echo ">> qemu=${QEMU} accel=${ACCEL} cpu=${CPU} timeout=${TIMEOUT_SECS}s" >&2
 echo ">> kernel=${KERNEL}" >&2
 
+# M20: a fresh 4 MiB raw disk per run for the virtio-blk durable-persistence
+# round-trip. `mktemp`+`truncate -s 4M` zeroes it (so the first mount formats);
+# `trap` removes it on EXIT so the temp never leaks/commits. microvm exposes the
+# virtio-mmio bus the x86 M19 driver already scans, so virtio-blk-DEVICE (the
+# mmio transport variant, NOT virtio-blk-pci -- microvm has no PCI by default) is
+# correct + symmetric with the aarch64 rng/blk device pair.
+IMG="$(mktemp)"
+trap 'rm -f "$IMG"' EXIT
+truncate -s 4M "$IMG"
+
 set +e
 OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
   "${QEMU}" \
@@ -64,6 +74,8 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     -nic none \
     -global virtio-mmio.force-legacy=false \
     -device virtio-rng-device \
+    -drive file="$IMG",if=none,format=raw,id=vblk0 \
+    -device virtio-blk-device,drive=vblk0 \
     -serial stdio -display none 2>&1)"
 RC=$?
 set -e
@@ -78,7 +90,31 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: final marker present but 'M14.2: blocking-recv OK' missing" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M14.2: blocking-recv OK')" >&2
+  # M19: the virtio-rng round-trip (the M20 dependency) must STILL print before
+  # the displaced M20 tail -- assert it directly so the M19 -> M20 order is
+  # fail-closed (two virtio-mmio devices, rng + blk, now share the microvm bus;
+  # M19 must stay green with both present -- the scan matches by DeviceID).
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M19: virtio OK'; then
+    echo ">> FAIL: final marker present but 'M19: virtio OK' missing (M19 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M20 SOUNDNESS (anti-hollow-pass): this lane ATTACHES a real virtio-blk disk,
+  # so it must prove the REAL durable-persistence round-trip, not the graceful
+  # "(no disk, skipped)" path. The skip marker 'M20: persist OK (no disk,
+  # skipped)' CONTAINS the 'M20: persist OK' substring the top-level grep matches,
+  # so a silently-unattached disk would otherwise pass green with a hollow proof
+  # (the aL2.5 "(no EL2, skipped)" substring-grep hole). Reject the skip AND
+  # positively require the real round-trip line 'persist: gen=.. records=..
+  # replayed=..' the Proven path prints before the marker.
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M20: persist OK (no disk, skipped)'; then
+    echo ">> FAIL: M20 ran in SKIP mode (no virtio-blk disk attached) but this lane attaches one -- the durable-persistence Proven path was NOT exercised" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'persist: gen=0x[0-9a-fA-F]+ records=0x[0-9a-fA-F]+ replayed=0x[0-9a-fA-F]+'; then
+    echo ">> FAIL: M20 marker present but the real durable-persistence round-trip line 'persist: gen=.. records=.. replayed=..' was NOT seen (hollow M20 pass)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

@@ -58,6 +58,7 @@ pub use el2::el2_nested_guest_selftest; // aL2.4: the safe nested-guest (two-sta
 pub use el2::el2_vgic_selftest; // aL2.5: the safe vGIC virtual-interrupt-injection self-test facade.
 pub use smmu::smmu_selftest; // aL2.6: the safe SMMUv3 stage-2 table-programming self-test facade.
 pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
+pub use virtio::{blk_flush, blk_probe, blk_read, blk_saw_legacy, blk_write}; // M20: virtio-blk.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,
     map_user_in_root, mmu_init, mmu_selftest, switch_root, unmap_in_root, va_to_pa_in_root,

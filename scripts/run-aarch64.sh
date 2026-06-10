@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M19: virtio OK"
+MARKER="M20: persist OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -44,6 +44,16 @@ if ! command -v "${QEMU}" >/dev/null 2>&1; then
     echo "[run-aarch64] error: '${QEMU}' not found on PATH" >&2
     exit 127
 fi
+
+# M20: a fresh 4 MiB raw disk per run for the virtio-blk durable-persistence
+# round-trip. `mktemp` + `truncate -s 4M` gives a zeroed image (so the first
+# mount finds no valid superblock and formats); the `trap` removes it on EXIT so
+# the temp never leaks or gets committed. A lane that does NOT attach this disk
+# (the kernel scans, finds no DeviceID==2, and renders the green
+# "(no disk, skipped)" skip) is unaffected -- this lane proves the REAL path.
+IMG="$(mktemp)"
+trap 'rm -f "$IMG"' EXIT
+truncate -s 4M "$IMG"
 
 # Print the exact QEMU build FIRST (fix_plan §B): the hosted ubuntu-24.04 runner
 # image may ship a different 8.2.x point-release than the apt snapshot tested
@@ -95,6 +105,8 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -nic none \
         -global virtio-mmio.force-legacy=false \
         -device virtio-rng-device \
+        -drive file="$IMG",if=none,format=raw,id=vblk0 \
+        -device virtio-blk-device,drive=vblk0 \
         -semihosting \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
@@ -113,6 +125,32 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     # that re-breaks it fails CI loudly instead of silently riding through.
     if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M4: user/ring OK'; then
         echo "[run-aarch64] FAIL -- final marker present but 'M4: user/ring OK' missing (M4 user/ring regressed)" >&2
+        exit 1
+    fi
+    # M19: the virtio-rng round-trip (the M20 dependency) must STILL print before
+    # the displaced M20 tail -- assert it directly so the M19 -> M20 order is
+    # fail-closed + traceable (mirroring the L2.x asserts below). Two virtio-mmio
+    # devices (rng + blk) now share the bus; M19 must stay green with both present.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M19: virtio OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M19: virtio OK' missing (M19 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M20 SOUNDNESS (anti-hollow-pass): this lane ATTACHES a real virtio-blk disk,
+    # so it must prove the REAL durable-persistence round-trip -- not the graceful
+    # "(no disk, skipped)" path. That skip marker, 'M20: persist OK (no disk,
+    # skipped)', CONTAINS the 'M20: persist OK' substring the top-level grep
+    # matches, so a silently-unattached disk (wrong QEMU, device off the scanned
+    # bus, future flag drift) would otherwise pass GREEN with a hollow proof
+    # (exactly the substring-grep hole that the aL2.5 "(no EL2, skipped)" variant
+    # exposed). Reject the skip AND positively require the real round-trip line
+    # 'persist: gen=.. records=.. replayed=..' the Proven path prints before the
+    # marker.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M20: persist OK (no disk, skipped)'; then
+        echo "[run-aarch64] FAIL -- M20 ran in SKIP mode (no virtio-blk disk attached) but this lane attaches one -- the durable-persistence Proven path was NOT exercised" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'persist: gen=0x[0-9a-fA-F]+ records=0x[0-9a-fA-F]+ replayed=0x[0-9a-fA-F]+'; then
+        echo "[run-aarch64] FAIL -- M20 marker present but the real durable-persistence round-trip line 'persist: gen=.. records=.. replayed=..' was NOT seen (hollow M20 pass)" >&2
         exit 1
     fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
@@ -228,7 +266,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

@@ -198,6 +198,386 @@ impl BackingStore for RamStore {
     }
 }
 
+// --- M20: the durable virtio-blk-backed store (the real BackingStore) --------
+
+/// Map a [`Region`] onto its on-disk record tag (the `tb_encode::blkfmt` extent
+/// index). The three regions map 1:1 onto the three log extents.
+#[allow(dead_code)]
+fn region_tag(region: Region) -> u8 {
+    match region {
+        Region::Episodic => tb_encode::blkfmt::REGION_EPISODIC,
+        Region::Semantic => tb_encode::blkfmt::REGION_SEMANTIC,
+        Region::Working => tb_encode::blkfmt::REGION_WORKING,
+    }
+}
+
+#[allow(dead_code)]
+fn region_index(region: Region) -> usize {
+    match region {
+        Region::Episodic => 0,
+        Region::Semantic => 1,
+        Region::Working => 2,
+    }
+}
+
+/// The M20 durable [`BackingStore`]: a log-structured virtio-blk store. ALL the
+/// MMIO/DMA `unsafe` is in `arch::*::virtio` (called via the safe
+/// `crate::arch::blk_read`/`blk_write`/`blk_flush` facades); this layer is 100% safe
+/// value-staging + a TWO-PHASE COMMIT. Appends are buffered per-Region until
+/// [`flush`](BackingStore::flush), which (1) writes each staged record frame to
+/// its log sector, (2) `blk_flush` barrier, (3) writes the superblock at `gen+1`
+/// (the one-sector atomic commit point), (4) `blk_flush`. A crash before step 3
+/// leaves the prior committed superblock as truth (the staged tail "never
+/// happened"). `mount` validates the superblock fail-closed, formats a fresh
+/// disk, and replays each Region's committed log into the in-RAM image `read_at`
+/// serves from. `epoch = (gen << 32) | appends_since_mount` so freshness is
+/// monotonic across reboots.
+#[allow(dead_code)]
+pub(crate) struct VirtioBlkStore {
+    /// The probed virtio-mmio slot the blk device sits at.
+    slot: u32,
+    /// The committed checkpoint generation (bumped by exactly 1 per flush).
+    gen: u64,
+    /// Per-Region committed log-head BYTE watermark (one frame == one sector).
+    log_head: [u64; 3],
+    /// Per-Region committed replayable record count.
+    record_count: [u64; 3],
+    /// Per-Region append sequence (strictly increasing; the replay witness).
+    seq: [u64; 3],
+    /// Per-Region STAGED (not-yet-committed) record payloads (heap, never stack).
+    staged: [Vec<Vec<u8>>; 3],
+    /// Per-Region committed in-RAM image (replayed payloads) `read_at` serves.
+    image: [Vec<u8>; 3],
+    /// Appends since the last mount (the low half of `epoch`).
+    appends_since_mount: u64,
+}
+
+#[allow(dead_code)]
+impl VirtioBlkStore {
+    /// Probe + mount a virtio-blk device. Returns `None` if absent/legacy (the
+    /// caller renders the graceful skip). On a formatted disk, replays the
+    /// committed logs into the in-RAM image; on an unformatted/torn disk, formats
+    /// a fresh store (gen 0). All scratch is a SINGLE static-free 512-byte sector
+    /// buffer reused in a loop (no large stack arrays; #65 discipline).
+    pub(crate) fn mount(slot: u32) -> Result<Self, MemErr> {
+        use tb_encode::blkfmt;
+        let mut s = VirtioBlkStore {
+            slot,
+            gen: 0,
+            log_head: [0; 3],
+            record_count: [0; 3],
+            seq: [0; 3],
+            staged: [Vec::new(), Vec::new(), Vec::new()],
+            image: [Vec::new(), Vec::new(), Vec::new()],
+            appends_since_mount: 0,
+        };
+        // Read the superblock (LBA 0) into one reusable sector buffer.
+        let mut sec = [0u8; 512];
+        if !crate::arch::blk_read(slot, blkfmt::SB_SECTOR, &mut sec) {
+            return Err(MemErr::Io);
+        }
+        match blkfmt::superblock_decode(&sec) {
+            Some(sb) => {
+                // A committed checkpoint: adopt its watermarks + replay.
+                s.gen = sb.gen;
+                s.log_head = sb.log_head;
+                s.record_count = sb.record_count;
+                s.replay()?;
+            }
+            None => {
+                // Fresh/unformatted/torn disk: format gen 0 (an empty committed
+                // superblock), so a subsequent flush advances to gen 1.
+                s.write_superblock(0)?;
+            }
+        }
+        Ok(s)
+    }
+
+    /// Replay each Region's committed log [0..record_count) into the in-RAM
+    /// image, verifying each frame's CRC + monotone seq. A torn frame (CRC fail)
+    /// truncates the replay of that Region (the committed tail is honoured, the
+    /// rest ignored). Reads sector-by-sector into ONE 512-byte buffer.
+    fn replay(&mut self) -> Result<(), MemErr> {
+        use tb_encode::blkfmt;
+        let mut sec = [0u8; 512];
+        for r in 0..3usize {
+            let tag = r as u8;
+            let count = self.record_count[r];
+            let mut last_seq: Option<u64> = None;
+            let mut i: u64 = 0;
+            while i < count {
+                let head = i * blkfmt::SECTOR_SIZE;
+                let sector = match blkfmt::record_sector(tag, head) {
+                    Some(x) => x,
+                    None => break, // past the extent -> stop (defensive)
+                };
+                if !crate::arch::blk_read(self.slot, sector, &mut sec) {
+                    return Err(MemErr::Io);
+                }
+                match blkfmt::record_frame_decode(&sec) {
+                    Some((h, off)) => {
+                        // monotone-seq witness: a non-increasing seq is a torn /
+                        // reordered tail -> stop replaying this Region.
+                        if let Some(p) = last_seq {
+                            if h.seq <= p {
+                                break;
+                            }
+                        }
+                        last_seq = Some(h.seq);
+                        let len = h.len as usize;
+                        self.image[r].extend_from_slice(&sec[off..off + len]);
+                    }
+                    None => break, // torn frame -> committed tail honoured, rest ignored
+                }
+                i += 1;
+            }
+            // The next append continues past the committed seq.
+            self.seq[r] = last_seq.map(|x| x + 1).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    /// Encode + write the superblock at `gen`, then FLUSH. The one-sector atomic
+    /// commit point.
+    fn write_superblock(&mut self, gen: u64) -> Result<(), MemErr> {
+        use tb_encode::blkfmt;
+        let sb = blkfmt::superblock_encode(gen, self.log_head, self.record_count);
+        if !crate::arch::blk_write(self.slot, blkfmt::SB_SECTOR, &sb) {
+            return Err(MemErr::Io);
+        }
+        if !crate::arch::blk_flush(self.slot) {
+            return Err(MemErr::Io);
+        }
+        self.gen = gen;
+        Ok(())
+    }
+}
+
+impl BackingStore for VirtioBlkStore {
+    /// Stage `bytes` as a record-frame payload for `region` (no disk write yet;
+    /// committed on flush). Returns the staged byte offset within the Region's
+    /// committed+staged image. `Full` if the Region's log would pass its extent.
+    fn append(&mut self, region: Region, bytes: &[u8]) -> Result<u64, MemErr> {
+        use tb_encode::blkfmt;
+        let r = region_index(region);
+        if bytes.len() > blkfmt::MAX_PAYLOAD {
+            return Err(MemErr::Full); // a never-fitting payload
+        }
+        // Would the new frame pass the extent ceiling?
+        let next_sector_idx = self.record_count[r] + self.staged[r].len() as u64;
+        let (_, count) = blkfmt::region_extent(region_tag(region)).ok_or(MemErr::Io)?;
+        if next_sector_idx >= count {
+            return Err(MemErr::Full);
+        }
+        let off = self.image[r].len() as u64
+            + self.staged[r].iter().map(|v| v.len() as u64).sum::<u64>();
+        self.staged[r].push(bytes.to_vec());
+        self.appends_since_mount = self.appends_since_mount.wrapping_add(1);
+        Ok(off)
+    }
+
+    /// Serve from the committed in-RAM image (post-mount replay) plus any staged-
+    /// but-not-yet-flushed appends, so reads are instant + reflect read-your-writes.
+    fn read_at(&self, region: Region, off: u64, buf: &mut [u8]) -> Result<usize, MemErr> {
+        let r = region_index(region);
+        // Logical stream = committed image ++ staged payloads (concatenated).
+        let start = off as usize;
+        let img_len = self.image[r].len();
+        let staged_len: usize = self.staged[r].iter().map(|v| v.len()).sum();
+        let total = img_len + staged_len;
+        if start > total {
+            return Err(MemErr::NotFound);
+        }
+        let mut written = 0usize;
+        let mut pos = start;
+        while written < buf.len() && pos < total {
+            let byte = if pos < img_len {
+                self.image[r][pos]
+            } else {
+                // walk the staged payloads
+                let mut rem = pos - img_len;
+                let mut b = 0u8;
+                for v in self.staged[r].iter() {
+                    if rem < v.len() {
+                        b = v[rem];
+                        break;
+                    }
+                    rem -= v.len();
+                }
+                b
+            };
+            buf[written] = byte;
+            written += 1;
+            pos += 1;
+        }
+        Ok(written)
+    }
+
+    /// The TWO-PHASE COMMIT. (1) Write each staged record frame to its log
+    /// sector; (2) FLUSH barrier; (3) write the superblock at `gen+1` (the atomic
+    /// commit point) + FLUSH. On success the staged appends fold into the
+    /// committed image + watermarks and the staging buffers clear.
+    fn flush(&mut self) -> Result<(), MemErr> {
+        use tb_encode::blkfmt;
+        // Nothing staged: still advance the generation so a flush is a witnessable
+        // checkpoint (the selftest asserts gen continuity).
+        let mut sec = [0u8; 512];
+        // Phase 1: write every staged frame at its Region's next log sector.
+        for r in 0..3usize {
+            let tag = r as u8;
+            let mut idx = self.record_count[r];
+            for payload in self.staged[r].iter() {
+                let head = idx * blkfmt::SECTOR_SIZE;
+                let sector = match blkfmt::record_sector(tag, head) {
+                    Some(x) => x,
+                    None => return Err(MemErr::Full),
+                };
+                if !blkfmt::record_frame_encode(tag, self.seq[r], payload, &mut sec) {
+                    return Err(MemErr::Io);
+                }
+                if !crate::arch::blk_write(self.slot, sector, &sec) {
+                    return Err(MemErr::Io);
+                }
+                self.seq[r] = self.seq[r].wrapping_add(1);
+                idx += 1;
+            }
+        }
+        // Phase 2: data-durability barrier.
+        if !crate::arch::blk_flush(self.slot) {
+            return Err(MemErr::Io);
+        }
+        // Fold staged -> committed image + watermarks (now durable).
+        for r in 0..3usize {
+            for payload in core::mem::take(&mut self.staged[r]) {
+                self.image[r].extend_from_slice(&payload);
+                self.record_count[r] += 1;
+                self.log_head[r] += blkfmt::SECTOR_SIZE;
+            }
+        }
+        // Phase 3: the one-sector atomic commit -- superblock at gen+1, then FLUSH.
+        let next_gen = self.gen.wrapping_add(1);
+        self.write_superblock(next_gen)?;
+        Ok(())
+    }
+
+    /// `(gen << 32) | appends_since_mount` -- monotonic ACROSS reboots (the gen
+    /// is the durable checkpoint counter; the low half is per-boot freshness).
+    fn epoch(&self) -> u64 {
+        (self.gen << 32) | (self.appends_since_mount & 0xFFFF_FFFF)
+    }
+}
+
+// --- M20: the durable-persistence self-test (the marker body) ----------------
+
+/// The number of known-token sentinel records the round-trip writes + replays.
+const PERSIST_SENTINELS: u64 = 3;
+
+/// M20: run the single-boot durability round-trip + report a [`PersistProof`].
+///
+/// probe -> mount (capture the PRIOR gen) -> write N sentinel records through a
+/// REAL [`Region`] behind the [`VirtioBlkStore`] (so `push_record`'s
+/// `backing.append` exercises the real staged append) -> two-phase flush -> DROP
+/// the substrate (all RAM state destroyed) + the device is reset -> RE-MOUNT the
+/// SAME disk image -> replay the Region log -> assert the replayed sentinel bytes
+/// == what was written AND `gen` bumped by exactly 1. A true durability round-
+/// trip: the bytes left the kernel's RAM, hit the device, and came back from the
+/// device on a fresh mount that dropped all prior in-RAM state.
+///
+/// Absent / LegacyUnsupported are graceful skips. All scratch is heap/Vec or a
+/// single reusable 512-byte sector buffer inside [`VirtioBlkStore`] -- NO large
+/// stack arrays (#65 discipline).
+pub(crate) fn persist_selftest() -> crate::PersistProof {
+    use crate::PersistProof;
+
+    // 1. Probe for a MODERN virtio-blk (DeviceID==2).
+    let (slot, _cap) = match crate::arch::blk_probe() {
+        Some(x) => x,
+        None => {
+            return if crate::arch::blk_saw_legacy() {
+                PersistProof::LegacyUnsupported
+            } else {
+                PersistProof::Absent
+            };
+        }
+    };
+
+    // 2. Mount the store on the (freshly-attached) disk; capture the prior gen.
+    let store = match VirtioBlkStore::mount(slot) {
+        Ok(s) => s,
+        Err(_) => return PersistProof::Failed { stage: 0x3 },
+    };
+    let prior = store.gen;
+
+    // 3. Write N sentinel records through a real Region via the substrate's
+    //    normal write path (push_record -> backing.append(Region::Episodic, ..)).
+    let mut substrate = MemSubstrate::new_with_backing(Box::new(store));
+    // Known tokens; the stored ids are the 8-byte payloads the journal appends.
+    let mut written_ids: [u64; PERSIST_SENTINELS as usize] = [0; PERSIST_SENTINELS as usize];
+    let mut n = 0u64;
+    while n < PERSIST_SENTINELS {
+        let token = 0xA11CE_u64 + n; // distinct known token per sentinel
+        match substrate.write(0, token, 0xB0B0_0000 + n, 5) {
+            Some(id) => written_ids[n as usize] = id,
+            None => return PersistProof::Failed { stage: 0x4 },
+        }
+        n += 1;
+    }
+
+    // 4. Two-phase flush (records -> FLUSH -> superblock gen+1 -> FLUSH).
+    if substrate.backing.flush().is_err() {
+        return PersistProof::Failed { stage: 0x4 };
+    }
+    // The committed generation after the flush (the high half of epoch).
+    let committed_gen = substrate.epoch() >> 32;
+    if committed_gen != prior.wrapping_add(1) {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+
+    // 5. DROP the substrate (destroys ALL in-RAM tier state + the store image)
+    //    and re-mount the SAME disk image -- a fresh read-from-device.
+    drop(substrate);
+    let remount = match VirtioBlkStore::mount(slot) {
+        Ok(s) => s,
+        Err(_) => return PersistProof::Failed { stage: 0x5 },
+    };
+
+    // 6. Assert generation continuity + replay equality. The re-mount must see
+    //    the committed gen, and the replayed Episodic image must equal the
+    //    concatenated id bytes the sentinels appended (byte-for-byte).
+    if remount.gen != committed_gen {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+    let ep = region_index(Region::Episodic);
+    let replayed = remount.record_count[ep];
+    if replayed != PERSIST_SENTINELS {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+    // Each sentinel appended exactly `id.to_le_bytes()` (8 bytes), so the image
+    // is the 24-byte concatenation; verify it matches what we wrote, in order.
+    let mut k = 0u64;
+    while k < PERSIST_SENTINELS {
+        let base = (k as usize) * 8;
+        let mut got = [0u8; 8];
+        if remount
+            .read_at(Region::Episodic, base as u64, &mut got)
+            .unwrap_or(0)
+            != 8
+        {
+            return PersistProof::Failed { stage: 0x6 };
+        }
+        if u64::from_le_bytes(got) != written_ids[k as usize] {
+            return PersistProof::Failed { stage: 0x6 };
+        }
+        k += 1;
+    }
+
+    PersistProof::Proven {
+        gen: remount.gen,
+        replayed,
+        prior,
+    }
+}
+
 // --- T0: context registers (ACT-R buffers; const-bounded, no unbounded blob) --
 
 /// One named, typed T0 register (the prompt is materialized only from these).
@@ -439,6 +819,17 @@ impl MemSubstrate {
                 best_score: 0,
             },
         }
+    }
+
+    /// M20: a fresh, empty substrate over an INJECTED backing store (the
+    /// durable [`VirtioBlkStore`]). Identical to [`new`](Self::new) but the
+    /// caller supplies the type-erased backing -- every existing agent keeps the
+    /// `RamStore` default; only the M20 persist selftest injects a blk store.
+    #[allow(dead_code)]
+    pub(crate) fn new_with_backing(backing: Box<dyn BackingStore>) -> Self {
+        let mut s = Self::new();
+        s.backing = backing;
+        s
     }
 
     /// The current freshness epoch of the backing store (T3 staleness marker).

@@ -55,6 +55,15 @@
 //!    command-queue encoders, and the `strtab_base`/`strtab_base_cfg`/
 //!    `cmdq_base`/`eventq_base` register packers -- reusing `stage2::vtcr`,
 //!    proven bit-faithful (the IOMMU twin of the stage-2 geometry).
+//!  * [`blkfmt`] -- the M20 durable-persistence codecs: the virtio-blk request
+//!    header (`{le32 type, le32 reserved, le64 sector}`; IN=0/OUT=1/FLUSH=4) +
+//!    closed status decode, the 512-byte log-structured superblock
+//!    (magic/version/gen/per-Region watermarks + FNV-1a-64 checksum, total fail-
+//!    closed decode), the 24-byte record frame (region/len/seq + FNV-1a-32
+//!    payload CRC, the torn-tail rejector) + the 48-byte LE Episode body, and the
+//!    const fixed-partition sector/extent math (`region_extent`/`record_sector`,
+//!    no-overflow/in-extent) -- the PURE bytes the `VirtioBlkStore` two-phase
+//!    commit reads/writes, byte-identical to a Kani-proven model.
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -80,6 +89,7 @@
 //! identity, total/fail-closed decoding, and the page-table/EPT entry bit
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
+pub mod blkfmt;
 pub mod el2_trap;
 pub mod ipc_frame;
 pub mod memscore;

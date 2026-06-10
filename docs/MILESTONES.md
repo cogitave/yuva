@@ -1,12 +1,14 @@
 # TABOS Milestones & Development Pipeline
 
 > Status: the agent-native milestone chain **M0 → M18 is complete and CI-green on
-> both architectures** (x86_64 + aarch64), extended since by six follow-on markers
+> both architectures** (x86_64 + aarch64), extended since by seven follow-on markers
 > — **M14.1** (byte-payload IPC), **M14.2** (blocking-recv), **M15.1** (block unmap
 > + frame reclamation), **M18.1** (mandatory human-approval gate), **M18.2**
-> (rotating held-out evaluator), and **M19** (a poll-based virtio-mmio virtio-rng
-> round-trip — the kernel's FIRST real device I/O, now the LAST cumulative marker)
-> — plus the first two sovereignty-L2 rungs, **L2.0** (x86_64 VMX-root
+> (rotating held-out evaluator), **M19** (a poll-based virtio-mmio virtio-rng
+> round-trip — the kernel's FIRST real device I/O), and **M20** (durable
+> persistence: a virtio-blk-backed log-structured store behind the M13
+> `BackingStore` seam — the FIRST byte to outlive a boot, now the LAST cumulative
+> marker) — plus the first two sovereignty-L2 rungs, **L2.0** (x86_64 VMX-root
 > graceful-skip + aarch64 EL2 world-switch) and **L2.1** (a genuine aarch64
 > stage-2 demand-translation round-trip under TCG — the ARM analog of x86
 > EPT-violation handling), both printed before M19 — every milestone verified by
@@ -57,7 +59,7 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M18, + L2.0, + L2.1, + M19)
+## 2. The milestone chain (M0 → M18, + L2.0, + L2.1, + M19, + M20)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
@@ -65,8 +67,9 @@ milestones cumulatively, so every boot is a full regression of M0 through the
 latest. A green boot prints the M0–M4 foundation trace (below), then the M5–M18
 agent-native markers (now including the M14.1/M14.2/M15.1/M18.1/M18.2 follow-ons),
 then the two L2.0 sovereignty lines, then the `L2.1: stage2 OK` stage-2
-demand-translation line, then the final `M19: virtio OK` device-I/O marker — the
-complete ordered sequence is listed further below.
+demand-translation line, then the `M19: virtio OK` device-I/O marker, then the
+final `M20: persist OK` durable-persistence marker — the complete ordered sequence
+is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -167,7 +170,8 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M18** | Frozen-kernel self-improvement harness + held-out evaluators + T4 skill tier | `M18: evolve OK` | none |
 | **M18.1** | Mandatory human-approval gate on `EMIT_EXTERNAL`/high-impact skills | `M18.1: approval-gate OK` | none (new `APPROVE_HIGH_IMPACT` right; reduces to the M11 invariant) |
 | **M18.2** | Rotating never-exposed held-out evaluator partition (anti-Goodhart) | `M18.2: held-out OK` | none |
-| **M19** | Poll-based virtio-mmio device I/O — a virtio-rng round-trip (the FIRST real device I/O; prints AFTER the L2.0 lines, the LAST cumulative marker; completion-IRQ deferred) | `M19: virtio OK` | virtio-mmio ring (MMIO/DMA) in `arch/{x86_64,aarch64}/virtio.rs` |
+| **M19** | Poll-based virtio-mmio device I/O — a virtio-rng round-trip (the FIRST real device I/O; prints AFTER the L2.0 lines; completion-IRQ deferred) | `M19: virtio OK` | virtio-mmio ring (MMIO/DMA) in `arch/{x86_64,aarch64}/virtio.rs` |
+| **M20** | Durable persistence — a poll-only virtio-mmio **virtio-blk** (DeviceID 2) backing a log-structured store behind the M13 `BackingStore` seam; the FIRST byte to outlive a boot (write → two-phase flush → re-mount → replay; the LAST cumulative marker; graceful `(no disk, skipped)` where no disk is attached) | `M20: persist OK` | virtio-blk MMIO/DMA ring in `arch/{x86_64,aarch64}/virtio.rs`; on-disk + request codecs in `tb-encode::blkfmt` (Kani-proven) |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
@@ -254,7 +258,8 @@ L2.1: stage2 OK                  # aarch64: genuine stage-2 demand-translation r
 L2.2: el2-exits OK               # aarch64: genuine ESR_EL2.EC exit-dispatch round-trip under TCG (WFx-resume + fail-closed inject-UNDEF default, classify_exit Kani-proven); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.3: el2-trap OK                # aarch64: genuine trap-and-EMULATE round-trip under TCG (HCR_EL2.TVM sysreg-write trap + HCR_EL2.VM MMIO device-IPA abort, SYS64/DABT ISS decoders Kani-proven, routed through the device_mmio SEAM, ELR_EL2 advanced +4 past each trapped insn); not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
 L2.4: el2-guest OK               # aarch64: a REAL minimal TABOS guest at EL1 under our EL2 stage-2 with its OWN stage-1 MMU live -- a GENUINE two-stage walk (VA->guest-S1->IPA->our-S2->PA), the guest's own stage-1 walk itself S1PTW-re-translated; the guest BUILDS+ENABLES its stage-1 (reusing the proven make_entry/level_index + mmu.rs MAIR/TCR geometry; SCTLR_EL1.M via the Kani-proven sctlr_el1_guest_enable), stores+reads back a sentinel through a no-flat-meaning VA, AND takes its OWN EL1 brk trap (EL1->EL1, not an EL2 exit); magic 0x2E5 needs BOTH, with an independent EL2-side identity-alias readback the guest cannot fake; HVC#9 tears stage-2 down FIRST + the facade restores the kernel's TTBR0/TCR/MAIR/SCTLR/VBAR_EL1 (the new EL1-side teardown) so M19 resumes clean; the LITERAL full-kernel-as-guest is deferred to aL2.4b; not-booted-at-EL2 prints "(no EL2, skipped)"; x86_64 prints "(aarch64-only, n/a on x86_64)"
-M19: virtio OK                   # the LAST cumulative marker: the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
+M19: virtio OK                   # the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
+M20: persist OK                  # the LAST cumulative marker: DURABLE PERSISTENCE -- a poll-only virtio-mmio virtio-blk (DeviceID 2) backs a log-structured store behind the M13 BackingStore seam; the selftest writes N sentinel records through a real Region, runs the TWO-PHASE flush (records -> VIRTIO_BLK_T_FLUSH -> superblock gen+1 -> FLUSH), DROPS the substrate (all RAM destroyed), RE-MOUNTS the same disk, replays the log, and asserts replayed==written + gen bumped by 1 -- a true durability round-trip (bytes left RAM, hit the device, came back on a fresh mount). All MMIO/DMA in arch/*/virtio.rs; the superblock/record-frame/req-header codecs are the Kani-proven tb-encode::blkfmt; the kernel branches on a pure-data PersistProof. Proven under TCG (ci) on both arches; graceful "(no disk, skipped)" where no -drive is attached (tb-vmm/vmm-boot stay green, unchanged)
 ```
 
 Each line is a hard `grep` target in the per-arch run script; a missing or
@@ -334,7 +339,7 @@ Six CI lanes guard the tree:
 
 | Lane | Workflow | What it proves |
 |---|---|---|
-| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M19) |
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M20; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container with the virtio-blk disk attached) |
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | the **real** L2.0 VMX-root proof under nested KVM (`-cpu host`); allow-skip when nested VMX is absent |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
@@ -421,8 +426,13 @@ is the rest of the L2 track plus a set of named debts:
   aarch64 arch backend (`KVM_ARM_VCPU_INIT`) plus an aarch64 `tb-boot` producer +
   an `_tb_start`-equivalent EL1 entry are the prerequisites for an ARM L1/L2 boot
   path (today the aarch64 kernel `_start` consumes `x0`=FDT).
-- **Durable persistence** — M13's tiered substrate is RAM-backed behind a
-  `BackingStore` trait; a durable virtio-blk backing milestone is deferred.
+- **Durable persistence** — **DONE at M20.** M13's tiered substrate was RAM-backed
+  behind a `BackingStore` trait; M20 lands `VirtioBlkStore: BackingStore` over a
+  poll-only virtio-mmio virtio-blk device, log-structured with a two-phase-commit
+  `flush()` and a mount/replay that rebuilds the journal across reboots
+  (`M20: persist OK`). Crash-consistency is scoped to clean-flush durability (the
+  commit point); crash-at-an-arbitrary-point is a named non-claim (a torn tail past
+  the committed superblock is ignored on replay, not recovered).
 - **SMP** — M0–M18 are single-vCPU (preemptive time-multiplex on one core); SMP
   is the biggest latent debt and is first designed at L2.6.
 - **Real inference backends** — M16 ships a deterministic mock provider; the real
