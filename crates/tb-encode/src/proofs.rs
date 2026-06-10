@@ -57,6 +57,10 @@ use crate::prov::{
     canon, canon_len, chain_mix, prov_hash, recompute, verify_inclusion, ProvEntry,
     CANON_PREFIX_LEN, PROV_HASH_LEN,
 };
+use crate::exp::{
+    canon as exp_canon, canon_len as exp_canon_len, decode as exp_decode, replay_shadow,
+    ExpRing, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN, PROPENSITY_DETERMINISTIC_Q,
+};
 use crate::paging::{
     entry_addr, ept_leaf_2mib, ept_nonleaf, eptp, level_index, make_entry, ENTRIES,
     ENTRY_ADDR_MASK, EPT_MAPS_PAGE, EPT_MEMTYPE_WB, EPT_RWX, EPT_WALK_LEN_MINUS_1, SHIFT_1G,
@@ -1878,4 +1882,337 @@ fn kani_prov_head_deterministic() {
     // leaf/sibling changes the head (the fold is a SEQUENCE, not a set).
     let swapped = recompute(b, &[a]);
     assert!(swapped != h1);
+}
+
+// ===========================================================================
+// M23 -- the verified EXPERIENCE CODEC (`exp.rs`). Six harnesses, each with a
+// NEGATIVE CONTROL, mirroring the M22 prov suite. The record is FULLY FIXED-WIDTH
+// (no variable-length tail), so canon-injectivity is a fixed-offset proof; the
+// fold REUSES the proven M22 `prov` leaf (no new fold math). The replay harness
+// BOUNDS `feats` to the kancell clamp range so the spline eval stays the proven
+// kancell regime (the #49 trap) and evaluates `kan_score` a SINGLE time (the M22
+// hash_total saga: a symbolic score over many bytes / multiple evaluations times
+// the lane out). Each harness is sized to verify in << 60s standalone.
+// ===========================================================================
+
+/// A small symbolic-but-fixed-width [`ExperienceRecord`] builder for the harnesses.
+/// `feats` is left to the caller (the replay harness bounds it; the others vary it
+/// freely). The reserved propensity + present-`Unset` outcome are populated so the
+/// injectivity/round-trip/schema proofs exercise the FULL layout.
+#[cfg(kani)]
+fn kani_exp_record(feats: [i32; KAN_FEATURES]) -> ExperienceRecord {
+    ExperienceRecord {
+        decision_id: kani::any(),
+        kind: kani::any(),
+        feats,
+        envelope_verdict: kani::any(),
+        action_taken: kani::any(),
+        kan_score_shadow: kani::any(),
+        logging_propensity_q: PROPENSITY_DETERMINISTIC_Q,
+        logging_policy_kind: kani::any(),
+        outcome: OutcomeLabel::Unset,
+        margin_q: kani::any(),
+    }
+}
+
+/// (1) THE LOAD-BEARING PROOF (proposal §5.1): `exp::canon` is TOTAL (never panics;
+/// fails closed to `0` on a too-small buffer with NO partial write) AND INJECTIVE on
+/// the fixed-width record -- two records that differ in ANY field (INCLUDING the
+/// reserved propensity field and the present-`Unset` outcome tag) encode to DIFFERENT
+/// bytes. Because the record is FULLY FIXED-WIDTH, each field lands at its own fixed
+/// offset, so a single differing field changes the bytes; we prove this for the
+/// outcome TAG explicitly (the reserve-now field whose aliasing is the §5.1 neg
+/// control). Symbolic scalars; the differing-field witness is a symbolic redraw.
+///
+/// NEGATIVE CONTROL: a `canon` that DROPPED the outcome tag byte (or aliased two
+/// scalars to one offset) would let two records differing only in `outcome` collide
+/// -> the outcome-tag injectivity assert FAILS. Writing two fields to the SAME offset
+/// makes the corresponding field-difference assert FAIL.
+#[kani::proof]
+fn kani_exp_canon_injective() {
+    let feats: [i32; KAN_FEATURES] = kani::any();
+    let base = kani_exp_record(feats);
+
+    // TOTALITY + exact width: canon writes exactly EXP_CANON_LEN into a sized buffer.
+    let mut a = [0u8; EXP_CANON_LEN];
+    let na = exp_canon(&base, &mut a);
+    assert_eq!(na, EXP_CANON_LEN);
+    assert_eq!(na, exp_canon_len(&base));
+
+    // FAIL-CLOSED TOTALITY: a one-byte-too-small buffer yields 0, no partial write.
+    let mut small = [0u8; EXP_CANON_LEN - 1];
+    assert_eq!(exp_canon(&base, &mut small), 0);
+
+    // INJECTIVITY, exercised on representative fields via a symbolic redraw that is
+    // FORCED to differ. Each differing field must change at least one byte.
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; EXP_CANON_LEN];
+            let nb = exp_canon(&$e, &mut b);
+            assert_eq!(nb, na); // fixed width: same length
+            let mut any_diff = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any_diff = true;
+                }
+                i += 1;
+            }
+            any_diff
+        }};
+    }
+
+    // decision_id: the OPE row key -- a differing id changes the [0..8] bytes.
+    let d2: u64 = kani::any();
+    kani::assume(d2 != base.decision_id);
+    assert!(differs!(ExperienceRecord { decision_id: d2, ..base }));
+
+    // kind: a forget-decision must not alias a recall-touch.
+    let k2: u8 = kani::any();
+    kani::assume(k2 != base.kind);
+    assert!(differs!(ExperienceRecord { kind: k2, ..base }));
+
+    // kan_score_shadow: the counterfactual score -- a differing shadow changes bytes.
+    let s2: i64 = kani::any();
+    kani::assume(s2 != base.kan_score_shadow);
+    assert!(differs!(ExperienceRecord { kan_score_shadow: s2, ..base }));
+
+    // The RESERVED propensity field is load-bearing for injectivity (the reserve-now
+    // bytes are real bytes -- a differing sentinel must change the encoding).
+    let p2: u16 = kani::any();
+    kani::assume(p2 != base.logging_propensity_q);
+    assert!(differs!(ExperienceRecord { logging_propensity_q: p2, ..base }));
+
+    // The present-`Unset` OUTCOME TAG is load-bearing (§5.1 neg control): an
+    // `Unset` record vs a `ReRecalled` record must differ at the tag byte.
+    let other = ExperienceRecord {
+        outcome: OutcomeLabel::ReRecalled(0),
+        ..base
+    };
+    assert!(differs!(other));
+}
+
+/// (2) REPLAY-DETERMINISM (the headline claim, proposal §5.2): a recorded `feats`
+/// row replayed through the dormant `kan_score` reproduces the logged
+/// `kan_score_shadow` BIT-IDENTICALLY. We model "logging then replay" as TWO
+/// evaluations of the SAME `kan_score` over the SAME `(table, feats)` and prove they
+/// are equal i64-for-i64. CRITICAL (the #49 trap): `feats` is BOUNDED to the kancell
+/// clamp range `[GRID_LO, GRID_LO + 8*step]` so the spline eval stays the PROVEN
+/// kancell regime, and the table is CONCRETE so each `kan_score` is a concrete
+/// evaluation (the symbolic surface is the four bounded feats only -- a single
+/// evaluation pair, not a symbolic score over many bytes).
+///
+/// NEGATIVE CONTROL: a re-quantizing replay that landed `feats` on a DIFFERENT grid
+/// cell (e.g. `replay_shadow(table, &[f^step ...])`) would evaluate a different
+/// spline segment and the bit-equality FAILS. Any float intermediate (there is none)
+/// would also break the i64 bit-identity. The concrete table keeps the proof cheap.
+#[kani::proof]
+fn kani_exp_replay_determinism() {
+    // The frozen kancell-shaped table (concrete -> each kan_score is concrete).
+    let table: KnotTable = [KAN_DEC, KAN_INC, KAN_FLAT, KAN_DEC];
+
+    // BOUND feats to the kancell clamp range so the spline stays the proven regime.
+    let span = (1i32 << GRID_STEP_LOG2) * (KAN_KNOTS as i32 - 1);
+    let mut feats = [0i32; KAN_FEATURES];
+    let mut j = 0usize;
+    while j < KAN_FEATURES {
+        let f: i32 = kani::any();
+        kani::assume(f >= GRID_LO && f <= GRID_LO + span);
+        feats[j] = f;
+        j += 1;
+    }
+
+    // LOGGING: the shadow logged at decision time (a single kan_score evaluation).
+    let logged = kan_score(&table, &feats, 0, 0);
+    // REPLAY: the recorded feats re-derive the SAME shadow bit-for-bit.
+    let replayed = replay_shadow(&table, &feats, 0, 0);
+    assert_eq!(replayed, logged);
+
+    // And it lands in the M17 DEMOTE_BAND (the clamped output -- in the proven regime).
+    let (lo, hi) = DEMOTE_BAND;
+    assert!(replayed >= lo && replayed <= hi);
+}
+
+/// (3) RING TOTALITY + FIXED-CAPACITY (proposal §5.3): `ExpRing::push` NEVER
+/// allocates and NEVER panics, the length never exceeds `CAP`, and the drop-oldest
+/// FIFO overwrite is total. A bounded push sequence over a capacity-3 ring tracks a
+/// model length exactly and `is_full`/`len` stay consistent. `#[kani::unwind]`
+/// bounds the loop (an under-set bound fails closed). The row payload is a tiny
+/// fixed-content array (the framing is what matters, not the bytes -- a symbolic
+/// per-row payload is the state-explosion trap, so the rows are concrete tags).
+///
+/// NEGATIVE CONTROL: dropping the `if self.len < CAP` guard (always overwriting and
+/// always incrementing) lets `len()` exceed `CAP`, failing the `len <= CAP` assert;
+/// a `push` that grew an internal `Vec` would not be the fixed `[[u8;LEN];CAP]` POD
+/// this harness's `len <= CAP` invariant pins.
+#[kani::proof]
+#[kani::unwind(7)]
+fn kani_exp_ring_total() {
+    const CAP: usize = 3;
+    const LEN: usize = EXP_CANON_LEN;
+    let mut ring: ExpRing<CAP, LEN> = ExpRing::new();
+    let mut model_len = 0usize;
+    let mut tick = 0u8;
+    for _ in 0..6 {
+        // A concrete, distinguishable row (the tag rides byte 0; framing is the point).
+        let mut row = [0u8; LEN];
+        row[0] = tick;
+        tick = tick.wrapping_add(1);
+        let evicted = ring.push(&row);
+        // The model: grow until full, then stay full (drop-oldest).
+        if model_len < CAP {
+            assert!(!evicted);
+            model_len += 1;
+        } else {
+            assert!(evicted);
+        }
+        assert!(ring.len() <= CAP); // capacity NEVER exceeded (the fixed-cap invariant)
+        assert_eq!(ring.len(), model_len);
+        assert_eq!(ring.is_full(), model_len == CAP);
+    }
+    // Out-of-range reads fail closed to None (no panic).
+    assert!(ring.get(CAP).is_none());
+}
+
+/// (4) FOLD TAMPER-SENSITIVITY (proposal §5.4): a single-byte flip of a committed
+/// record's CANONICAL bytes changes the recomputed `xp_head` -- REUSING the proven
+/// M22 `prov::chain_mix` fold (M23 writes NO fold math). We encode a record, hash it
+/// to a leaf id, fold a concrete sibling, and prove flipping byte `idx` of the
+/// canonical bytes drives a DIFFERENT leaf id (hence a different head + a failing
+/// inclusion proof). The flip INDEX stays symbolic (every byte position proven); the
+/// record + sibling are concrete so each fold is a concrete `prov` evaluation (the
+/// #49 symbolic-FNV trap the M22 suite documents).
+///
+/// NEGATIVE CONTROL: a constant/identity hash (`exp::xp_hash(_) == const`) would make
+/// the flipped-vs-original leaf ids EQUAL -> the `!=` assert FAILS; a fold that
+/// ignored the leaf would accept the tampered record at the inclusion check.
+#[kani::proof]
+fn kani_exp_fold_tamper() {
+    // A concrete record's canonical bytes (so the hash/fold are concrete).
+    let rec = ExperienceRecord {
+        decision_id: 0xA17_C0DE,
+        kind: 1,
+        feats: [0, 256, 512, 1024],
+        envelope_verdict: 1,
+        action_taken: 1,
+        kan_score_shadow: -123,
+        logging_propensity_q: PROPENSITY_DETERMINISTIC_Q,
+        logging_policy_kind: 0,
+        outcome: OutcomeLabel::Unset,
+        margin_q: 7,
+    };
+    let mut bytes = [0u8; EXP_CANON_LEN];
+    let n = exp_canon(&rec, &mut bytes);
+    assert_eq!(n, EXP_CANON_LEN);
+
+    // The genuine committed leaf id + a concrete sibling -> the committed head.
+    let leaf = prov_hash(&bytes);
+    let sib: [u8; PROV_HASH_LEN] = [0x5au8; PROV_HASH_LEN];
+    let head = recompute(leaf, &[sib]);
+    assert!(verify_inclusion(leaf, &[sib], head));
+
+    // TAMPER: flip the bit at a SYMBOLIC byte index of the canonical bytes. The
+    // re-hashed leaf differs (canon is injective + prov_hash is tamper-sensitive),
+    // so the recomputed head mismatches AND the inclusion proof fails.
+    let idx: usize = kani::any();
+    kani::assume(idx < EXP_CANON_LEN);
+    let mut tampered = bytes;
+    tampered[idx] ^= 0x01;
+    let bad_leaf = prov_hash(&tampered);
+    // The tampered bytes differ from the genuine bytes -> a different leaf id.
+    assert!(bad_leaf != leaf);
+    // ...so the fold catches it: head mismatch AND inclusion failure.
+    assert!(recompute(bad_leaf, &[sib]) != head);
+    assert!(!verify_inclusion(bad_leaf, &[sib], head));
+}
+
+/// (5) CANON ROUND-TRIP (proposal §5.5): `exp::decode(exp::canon(rec)) == rec` for a
+/// symbolic record -- the codec is a true bijection on the fixed-width layout (every
+/// field read back from its fixed offset). The `outcome` is `Unset` (the tag-0
+/// present sentinel); a separate concrete sub-check round-trips a POPULATED outcome
+/// (the M24 shape) so the tagged decode is non-vacuous.
+///
+/// NEGATIVE CONTROL: encoding `kan_score_shadow` at the `decision_id` offset (a
+/// layout swap) would make `decode` recover the fields transposed -> the round-trip
+/// equality FAILS. A `decode` that ignored the outcome tag would mis-reconstruct the
+/// variant and FAIL the populated sub-check.
+#[kani::proof]
+fn kani_exp_canon_roundtrip() {
+    let feats: [i32; KAN_FEATURES] = kani::any();
+    let rec = kani_exp_record(feats); // outcome = Unset (present sentinel)
+    let mut buf = [0u8; EXP_CANON_LEN];
+    let n = exp_canon(&rec, &mut buf);
+    assert_eq!(n, EXP_CANON_LEN);
+    // The bijection: decode recovers the EXACT record.
+    assert_eq!(exp_decode(&buf), Some(rec));
+
+    // A POPULATED outcome (the M24 shape) round-trips too -- the tagged decode is
+    // exercised (concrete payload so the tag arm is non-vacuous).
+    let pop = ExperienceRecord {
+        outcome: OutcomeLabel::ReRecalled(0x1234),
+        ..rec
+    };
+    let mut pb = [0u8; EXP_CANON_LEN];
+    assert_eq!(exp_canon(&pop, &mut pb), EXP_CANON_LEN);
+    assert_eq!(exp_decode(&pb), Some(pop));
+
+    // A too-short buffer decodes to None (fail-closed totality, no panic).
+    assert!(exp_decode(&buf[..EXP_CANON_LEN - 1]).is_none());
+}
+
+/// (6) SCHEMA-STABILITY (the reserve-now correctness obligation, proposal §5.6):
+/// `canon()` of a record with `outcome = Unset` + the reserved propensity sentinel
+/// has the SAME canonical LENGTH and IDENTICAL field offsets as a future record with
+/// those fields POPULATED -- so M24 populating them CANNOT shift the fold. Proven by
+/// encoding an `Unset` record and an otherwise-identical `ReRecalled`/`Evicted`
+/// record and asserting (a) identical length, (b) every byte BEFORE the outcome tag
+/// is identical, and (c) the trailing `margin_q` field (after the fixed 8-byte
+/// outcome payload) is identical -- the outcome tag/payload window is the ONLY
+/// difference, at a FIXED offset that never moves.
+///
+/// NEGATIVE CONTROL: if `Unset` encoded as a ZERO-LENGTH (absent) outcome and a
+/// populated variant added 8 bytes, the lengths would differ and the trailing
+/// `margin_q` would shift -> the length + trailing-field asserts FAIL. (M23 instead
+/// encodes a present `Unset` with a fixed 8-byte zero payload, so the layout is
+/// stable -- the property this harness pins.)
+#[kani::proof]
+fn kani_exp_schema_stability() {
+    let feats: [i32; KAN_FEATURES] = kani::any();
+    // Two records identical EXCEPT the outcome: Unset (this milestone) vs populated.
+    let unset = ExperienceRecord {
+        outcome: OutcomeLabel::Unset,
+        ..kani_exp_record(feats)
+    };
+    let pay: i64 = kani::any();
+    let populated = ExperienceRecord {
+        outcome: OutcomeLabel::ReRecalled(pay),
+        ..unset
+    };
+
+    let mut a = [0u8; EXP_CANON_LEN];
+    let mut b = [0u8; EXP_CANON_LEN];
+    let na = exp_canon(&unset, &mut a);
+    let nb = exp_canon(&populated, &mut b);
+
+    // (a) IDENTICAL length -- the schema-stability length lemma.
+    assert_eq!(na, nb);
+    assert_eq!(na, EXP_CANON_LEN);
+
+    // (b) Every byte BEFORE the outcome tag (offset 38) is byte-identical: the
+    // decision_id/kind/feats/envelope/action/shadow/propensity/policy_kind fields
+    // do NOT move when the outcome is populated. (38 = OFF_OUTCOME_TAG, the literal.)
+    const OUTCOME_TAG_OFF: usize = 38;
+    const MARGIN_OFF: usize = 47;
+    let mut i = 0usize;
+    while i < OUTCOME_TAG_OFF {
+        assert_eq!(a[i], b[i]);
+        i += 1;
+    }
+    // (c) The trailing margin_q field (after the FIXED 8-byte outcome payload) is
+    // identical -- the populated outcome did NOT push it to a new offset.
+    let mut m = MARGIN_OFF;
+    while m < EXP_CANON_LEN {
+        assert_eq!(a[m], b[m]);
+        m += 1;
+    }
 }

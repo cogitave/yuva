@@ -92,8 +92,27 @@ set -euo pipefail
 # inside disjoint [first,first+count) extents, never the SB sector 0), the ceiling
 # fails closed (Full), record_sector is strictly monotone in the log head (replay
 # reproduces on-disk order), and gen+1 strictly increases (the two-phase commit).
+# + M23 exp verified EXPERIENCE-CODEC leaf x6: kani_exp_canon_injective -- THE
+# LOAD-BEARING proof: the fixed-WIDTH exp::canon is TOTAL (fails closed to 0 on a
+# too-small buffer, no partial write) AND INJECTIVE (a distinct decision_id/kind/
+# kan_score_shadow/RESERVED logging_propensity_q/present-Unset outcome-TAG encodes to
+# distinct bytes -- every field at a FIXED offset, no variable-length tail);
+# kani_exp_replay_determinism -- the HEADLINE claim: a recorded feats row replayed
+# through the dormant kan_score reproduces kan_score_shadow BIT-IDENTICALLY, with
+# feats BOUNDED to the kancell clamp range (so the spline stays the proven kancell
+# regime, the #49 trap) + a CONCRETE table (a single evaluation pair, no symbolic-
+# score blow-up); kani_exp_ring_total -- ExpRing::push is fixed-capacity / no-alloc /
+# no-panic and the drop-oldest FIFO never exceeds CAP (bounded #[kani::unwind]);
+# kani_exp_fold_tamper -- a single-byte flip of a committed record's canonical bytes
+# changes the recomputed xp_head, REUSING the proven M22 prov::chain_mix fold (a
+# SYMBOLIC flip index over all EXP_CANON_LEN bytes, concrete record/sibling so the
+# FNV fold stays concrete); kani_exp_canon_roundtrip -- exp::decode(exp::canon(rec))
+# == rec (the fixed-width bijection, an Unset record + a populated-outcome sub-check);
+# kani_exp_schema_stability -- canon of an outcome=Unset + reserved-propensity-sentinel
+# record has IDENTICAL length + field offsets to a populated record, so M24 populating
+# the reserved fields CANNOT shift the fold (the reserve-now correctness obligation).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=46
+EXPECTED_HARNESSES=52
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M22: provenance OK'
+MARKER='M23: experience OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -162,7 +162,40 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M22 marker present but the real round-trip witness 'prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1' was NOT seen (hollow M22 pass)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M22 is no longer the top-level grep (M23 displaced it as the cumulative tail);
+  # assert it directly so the M22 -> M23 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M22: provenance OK'; then
+    echo ">> FAIL: final marker present but 'M22: provenance OK' missing (M22 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M23 SOUNDNESS (anti-hollow-pass, the aL2.5/M20/M21/M22 substring lesson): the
+  # 'M23: experience OK' marker must be backed by the REAL verifier round-trip -- the
+  # experience log is IN-RAM (durable spill is M24), so a skip is NEVER legitimate.
+  # Reject any '(no log, skipped)' variant, and POSITIVELY require the witness line
+  # 'exp: head=0x.. records=0x.. replay-bitexact=0x1 tamper-caught=0x1 kan_active=0x0
+  # oracle=DECLARED-PROXY-DEFERRED-M24' (so a marker printed WITHOUT running the
+  # canon/fold/replay/tamper verifier FAILS). replay-bitexact=1 AND tamper-caught=1
+  # AND kan_active=0 are required: a recorded feats row must replay bit-exactly, the
+  # injected tamper must be caught, and the learned cell must be DORMANT (the shadow
+  # changed zero demotes). The oracle honesty token must be present so the marker
+  # mechanically cannot overclaim validity.
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M23: experience OK (no log, skipped)'; then
+    echo ">> FAIL: M23 ran in SKIP mode (no log) -- the experience verifier round-trip was NOT exercised (a skip is never legitimate here -- the log is in-RAM)" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'exp: head=0x[0-9a-fA-F]+ records=0x[0-9a-fA-F]+ replay-bitexact=0x0*1 tamper-caught=0x0*1 kan_active=0x0+ oracle=DECLARED-PROXY-DEFERRED-M24'; then
+    echo ">> FAIL: M23 marker present but the real round-trip witness 'exp: head=0x.. records=0x.. replay-bitexact=0x1 tamper-caught=0x1 kan_active=0x0 oracle=DECLARED-PROXY-DEFERRED-M24' was NOT seen (hollow M23 pass)" >&2
+    exit 1
+  fi
+  # TERMINOLOGY DISCIPLINE (proposal §6): M23 claims ONLY replay-determinism +
+  # structural tamper-evidence, NOT validity. Reject any 'validated'/'evaluated'
+  # substring on the exp: witness or the M23 marker line so the marker can never
+  # silently overclaim (the OPE-loaded words are confined to bit-exact re-derivation).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M23:|exp:)' | grep -qE -- 'validated|evaluated'; then
+    echo ">> FAIL: M23 marker/witness carries a 'validated'/'evaluated' overclaim -- M23 records + replay-determines, it does NOT validate any policy (proposal §6 terminology discipline)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M22: provenance OK"
+MARKER="M23: experience OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -200,6 +200,39 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M22 marker present but the real round-trip witness 'prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1' was NOT seen (hollow M22 pass)" >&2
         exit 1
     fi
+    # M22 is no longer the top-level grep (M23 displaced it as the cumulative tail);
+    # assert it directly so the M22 -> M23 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M22: provenance OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M22: provenance OK' missing (M22 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M23 SOUNDNESS (anti-hollow-pass, the aL2.5/M20/M21/M22 substring lesson): the
+    # 'M23: experience OK' marker must be backed by the REAL verifier round-trip -- the
+    # experience log is IN-RAM (durable spill is M24), so a skip is NEVER legitimate.
+    # Reject any '(no log, skipped)' variant, and POSITIVELY require the witness line
+    # 'exp: head=0x.. records=0x.. replay-bitexact=0x1 tamper-caught=0x1 kan_active=0x0
+    # oracle=DECLARED-PROXY-DEFERRED-M24' (so a marker printed WITHOUT running the
+    # canon/fold/replay/tamper verifier FAILS). replay-bitexact=1 AND tamper-caught=1
+    # AND kan_active=0 are required: a recorded feats row must replay bit-exactly, the
+    # injected tamper must be caught, and the learned cell must be DORMANT (the shadow
+    # changed zero demotes). The oracle honesty token must be present so the marker
+    # mechanically cannot overclaim validity.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M23: experience OK (no log, skipped)'; then
+        echo "[run-aarch64] FAIL -- M23 ran in SKIP mode (no log) -- the experience verifier round-trip was NOT exercised (a skip is never legitimate here -- the log is in-RAM)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'exp: head=0x[0-9a-fA-F]+ records=0x[0-9a-fA-F]+ replay-bitexact=0x0*1 tamper-caught=0x0*1 kan_active=0x0+ oracle=DECLARED-PROXY-DEFERRED-M24'; then
+        echo "[run-aarch64] FAIL -- M23 marker present but the real round-trip witness 'exp: head=0x.. records=0x.. replay-bitexact=0x1 tamper-caught=0x1 kan_active=0x0 oracle=DECLARED-PROXY-DEFERRED-M24' was NOT seen (hollow M23 pass)" >&2
+        exit 1
+    fi
+    # TERMINOLOGY DISCIPLINE (proposal §6): M23 claims ONLY replay-determinism +
+    # structural tamper-evidence, NOT validity. Reject any 'validated'/'evaluated'
+    # substring on the exp: witness or the M23 marker line so the marker can never
+    # silently overclaim (the OPE-loaded words are confined to bit-exact re-derivation).
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M23:|exp:)' | grep -qE -- 'validated|evaluated'; then
+        echo "[run-aarch64] FAIL -- M23 marker/witness carries a 'validated'/'evaluated' overclaim -- M23 records + replay-determines, it does NOT validate any policy (proposal §6 terminology discipline)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -313,7 +346,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

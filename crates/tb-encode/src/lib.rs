@@ -91,6 +91,26 @@
 //!    single-byte tamper of a committed entry invalidates the head AND its
 //!    inclusion proof. Structural tamper-evidence only -- a crypto hash + signed
 //!    root is a tracked successor.
+//!  * [`exp`] -- the M23 verified EXPERIENCE CODEC: the fixed-field, FIXED-WIDTH
+//!    injective [`exp::ExperienceRecord`] encoder (`exp::canon` / `exp::decode` /
+//!    `exp::canon_len` -- every field at a fixed offset, so distinct records ->
+//!    distinct bytes, total + fail-closed on a too-small buffer) over the M17
+//!    forget/recall decisions: the quantized `feats` (on the EXACT `kancell` grid),
+//!    the heuristic envelope verdict + action, the COUNTERFACTUAL `kan_score_shadow`
+//!    the DORMANT cell would produce, plus the RESERVED-but-unset
+//!    `logging_propensity_q` / `logging_policy_kind` / present-`Unset`
+//!    [`exp::OutcomeLabel`] fields (the schema-stability reserve-now refinement so
+//!    M24 populating them cannot shift the canonical bytes). `exp::replay_shadow`
+//!    re-derives the dormant `kan_score` BIT-IDENTICALLY from a recorded `feats` row
+//!    (the headline replay-determinism claim -- achievable because the kancell is
+//!    integer / no-float), `exp::ExpRing` is the fixed-capacity drop-oldest in-RAM
+//!    replay buffer (no alloc, no panic at capacity), and the per-agent `xp_head`
+//!    fold REUSES the M22 [`prov`] leaf verbatim (`exp::xp_append` /
+//!    `exp::xp_chain_mix` / `exp::xp_verify_inclusion` / `exp::xp_head_witness` --
+//!    NO new fold math). `tb-hal` CALLS these next to the M17 forget/recall sites;
+//!    `KAN_ACTIVE` stays `false` (the shadow changes zero demotes). Claims ONLY
+//!    replay-determinism + structural tamper-evidence -- NOT policy validity
+//!    (deterministic logging -> degenerate propensity; validity is M24's burden).
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -118,6 +138,7 @@
 
 pub mod blkfmt;
 pub mod el2_trap;
+pub mod exp;
 pub mod ipc_frame;
 pub mod kancell;
 pub mod memscore;
