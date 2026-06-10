@@ -77,6 +77,20 @@
 //!    const fixed-partition sector/extent math (`region_extent`/`record_sector`,
 //!    no-overflow/in-extent) -- the PURE bytes the `VirtioBlkStore` two-phase
 //!    commit reads/writes, byte-identical to a Kani-proven model.
+//!  * [`prov`] -- the M22 memory-PROVENANCE LEDGER math: the canonical, injective,
+//!    LENGTH-PREFIXED [`prov::ProvEntry`] encoder (`prov::canon` -- fixed field
+//!    order + an explicit parent-count prefix so distinct entries -> distinct
+//!    bytes), the 256-bit STRUCTURAL digest (`prov::prov_hash` -- four domain-
+//!    separated, already-Kani-proven `blkfmt::fnv1a64` lanes + a length domain-
+//!    separator, NOT cryptographic), the running per-agent fold step
+//!    (`prov::chain_mix` -- `head' = mix(head, entry_id)`, tamper-sensitive in
+//!    every input byte) and the inclusion verifier (`prov::verify_inclusion` --
+//!    accept IFF `recompute(leaf, siblings) == head`) behind a per-agent append-
+//!    only hash-chain ledger over the M13 substrate. `tb-hal` CALLS these next to
+//!    the write/forget/skill-admit mutation sites; the boot self-test proves any
+//!    single-byte tamper of a committed entry invalidates the head AND its
+//!    inclusion proof. Structural tamper-evidence only -- a crypto hash + signed
+//!    root is a tracked successor.
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -108,6 +122,7 @@ pub mod ipc_frame;
 pub mod kancell;
 pub mod memscore;
 pub mod paging;
+pub mod prov;
 pub mod route;
 pub mod smmuv3;
 pub mod stage2;

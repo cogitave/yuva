@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M21: kan-policy OK'
+MARKER='M22: provenance OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -138,7 +138,31 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M21 marker present but the real round-trip line 'kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0' was NOT seen (hollow M21 pass)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M21 is no longer the top-level grep (M22 displaced it as the cumulative tail);
+  # assert it directly so the M21 -> M22 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M21: kan-policy OK'; then
+    echo ">> FAIL: final marker present but 'M21: kan-policy OK' missing (M21 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M22 SOUNDNESS (anti-hollow-pass, the aL2.5/M20/M21 substring lesson): the
+  # 'M22: provenance OK' marker must be backed by the REAL verifier round-trip --
+  # there is NO device to be absent, so a skip is NEVER legitimate. Reject any
+  # '(no ledger, skipped)' variant, and POSITIVELY require the witness line
+  # 'prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1' (so a marker
+  # printed WITHOUT running the canon/hash/fold + tamper-injection verifier FAILS).
+  # tamper-caught=1 AND inclusion=1 are required: the injected single-byte tamper of
+  # a committed entry must be caught (head-mismatch AND inclusion-fail) and a genuine
+  # inclusion proof must verify -- a hollow pass that printed the marker without the
+  # tamper round-trip is rejected here.
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M22: provenance OK (no ledger, skipped)'; then
+    echo ">> FAIL: M22 ran in SKIP mode (no ledger) -- the provenance verifier round-trip was NOT exercised (a skip is never legitimate here)" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'prov: head=0x[0-9a-fA-F]+ entries=0x[0-9a-fA-F]+ tamper-caught=0x0*1 inclusion=0x0*1'; then
+    echo ">> FAIL: M22 marker present but the real round-trip witness 'prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1' was NOT seen (hollow M22 pass)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

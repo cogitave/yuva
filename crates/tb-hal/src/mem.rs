@@ -43,6 +43,16 @@ use tb_encode::kancell::{
     kan_score, kan_spline_eval, kan_table_is_monotone, kan_table_overflow_safe, KnotTable,
     GRID_LO, GRID_STEP_LOG2, KAN_FEATURES,
 };
+// M22: the verified memory-PROVENANCE LEDGER leaf -- the canonical encoder
+// (`canon`), the 256-bit structural digest (`prov_hash`), and the running per-
+// agent fold step (`chain_mix`, via `prov::append`) of a per-agent, append-only,
+// content-addressed hash-chain provenance ledger. `tb-hal` CALLS these next to the
+// existing write/forget/skill-admit mutation sites, exactly as it calls
+// `bla_raw`/`kan_score`; the math (canon-injectivity / fold tamper-sensitivity /
+// inclusion-soundness) is Kani-proven in `tb-encode::prov`, so the ledger head is
+// byte-identical to a host-verified model. Structural tamper-evidence only (NOT
+// cryptographic -- proposal §2).
+use tb_encode::prov::{self, ProvEntry, PROV_HASH_LEN};
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
 const SCALE: i64 = 1000;
@@ -55,6 +65,19 @@ const F_FINST: usize = 4;
 const NODE_QUOTA: usize = 256;
 /// Token write-amplification cap (KeyKOS space-bank); writes beyond it fail-closed.
 const TOKEN_QUOTA: u64 = 1 << 20;
+
+// --- M22 provenance-ledger constants -----------------------------------------
+/// The fixed stack scratch buffer `ledger_append` canon-encodes into. The seam's
+/// mutation sites emit 0..=`PROV_SCRATCH_PARENTS` parents, so this covers
+/// `prov::CANON_PREFIX_LEN + PROV_SCRATCH_PARENTS * PROV_HASH_LEN` with headroom;
+/// an entry past it fails closed (no head advance) rather than truncating. No
+/// large stack array (the #65 discipline): 34 + 4*32 = 162 bytes.
+const PROV_SCRATCH: usize = 256;
+/// The max parent (DAG edge) count any ledger mutation site stages into one entry
+/// (writes/skill-admits carry the parent head's id; tombstones carry the demoted
+/// record's id). Bounds the `PROV_SCRATCH` sizing above.
+#[allow(dead_code)]
+const PROV_SCRATCH_PARENTS: usize = 4;
 
 // --- M17 sleep-time consolidation / reflection / forgetting constants ---------
 // All fixed-point integer (deterministic / replayable), beside SCALE/TOKEN_QUOTA.
@@ -607,6 +630,131 @@ pub(crate) fn kan_selftest() -> crate::KanProof {
     }
 }
 
+// --- M22: the provenance-ledger self-test (the marker body) ------------------
+
+/// The number of real Region records the M22 round-trip writes before demoting one.
+const PROV_SELFTEST_WRITES: u64 = 3;
+
+/// M22: run the per-agent provenance-ledger round-trip self-test and report a
+/// [`crate::ProvProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::prov` leaf and the real
+/// [`MemSubstrate`] mutation path.
+///
+/// It (a) writes `PROV_SELFTEST_WRITES` (>=3) REAL T2/T3 records through the
+/// normal [`MemSubstrate::write`] path (each appends a typed `WRITE` ledger
+/// entry), then DEMOTES one through the ACTUAL M17 [`MemSubstrate::forget_sweep`]
+/// (which appends a `FORGET` TOMBSTONE -- deletion made provable); (b) builds a
+/// GENUINE inclusion proof for the first committed entry and asserts
+/// `verify_inclusion == true` on the CLEAN ledger AND that the recomputed head
+/// equals the committed head; (c) FLIPS ONE BYTE of a COMMITTED entry's canonical
+/// bytes (a faithfully-reconstructed entry whose `prov_hash` is asserted to equal
+/// the committed id first, so the tamper hits a REAL committed entry, not a zero
+/// region) and asserts BOTH the recomputed head MISMATCHES the committed head AND
+/// the tampered entry's inclusion proof now FAILS. The marker is withheld unless
+/// the clean proof verifies AND the tamper is caught on BOTH legs.
+pub(crate) fn prov_selftest() -> crate::ProvProof {
+    use tb_encode::prov::{
+        self, prov_hash, recompute, verify_inclusion, ProvEntry, PROV_HASH_LEN,
+    };
+
+    // (a) A fresh RAM-backed substrate; write N >= 3 real records via the normal
+    //     write path (each appends a typed WRITE provenance entry). The keys are
+    //     known so we can FAITHFULLY reconstruct a committed entry's canonical bytes
+    //     for the tamper leg (the substrate stores only ids, by design).
+    let mut sub = MemSubstrate::new();
+    let mut scratch = [0u8; PROV_SCRATCH];
+
+    let mut w = 0u64;
+    while w < PROV_SELFTEST_WRITES {
+        let key = 0x000B_10C5 + w; // a distinct known token per write
+        let packed_low: u8 = 1; // importance 1 (< IMP_PIN -> envelope-eligible to demote)
+        // The substrate write (ADD): appends the real record + a WRITE ledger entry.
+        if sub.write(0, key, 0xDA7A_0000 + w, packed_low as u64).is_none() {
+            return crate::ProvProof {
+                clean_ok: false,
+                tamper_caught: false,
+                inclusion_ok: false,
+                head: 0,
+                entries: 0,
+            };
+        }
+        w += 1;
+    }
+
+    // Demote one record through the REAL forget_sweep (a TOMBSTONE entry). Advance
+    // the clock well past MIN_AGE so the heuristic envelope marks a record eligible.
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let _demoted = sub.forget_sweep();
+
+    let committed = sub.chain_head();
+    let ids = sub.ledger_ids();
+    let n = ids.len();
+    // We must have at least the >=3 writes (a tombstone may or may not fire
+    // depending on the heuristic, but the writes alone satisfy N>=3).
+    if n < PROV_SELFTEST_WRITES as usize {
+        return crate::ProvProof {
+            clean_ok: false,
+            tamper_caught: false,
+            inclusion_ok: false,
+            head: prov::head_witness(committed),
+            entries: n as u64,
+        };
+    }
+
+    // Independently RE-FOLD the committed ids and confirm we match the substrate's
+    // head (proves the in-RAM head is exactly recompute(id0, id1..)). This is the
+    // CLEAN recompute == committed-head check.
+    let leaf = ids[0];
+    let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+    let refold = recompute(leaf, &siblings);
+    let clean_head_ok = refold == committed;
+    // (b) The genuine inclusion proof for the FIRST committed entry verifies.
+    let inclusion_ok = verify_inclusion(leaf, &siblings, committed);
+
+    // (c) TAMPER: faithfully reconstruct ONE committed entry's canonical bytes, flip
+    //     a single byte, recompute its id, and re-fold. We reconstruct the FIRST
+    //     WRITE entry: kind=WRITE, payload_tok=0xB10C5, tier=1 (packed_low),
+    //     writer_cap_id=0 (the first ADD returns record id 0), parents=[] (genesis,
+    //     no prior entry), t_created=2. The clock starts at 1; push_record stamps
+    //     the RECORD t_created=1 then advances clock to 2 BEFORE write() calls
+    //     ledger_append, so the ENTRY's t_created is 2. We assert
+    //     prov_hash(canon(reconstructed)) == ids[0] FIRST (recon_faithful), so the
+    //     tamper provably hits a REAL committed entry's bytes (not a guessed/zero
+    //     region) -- if the reconstruction is ever wrong, clean_ok goes false and
+    //     the marker is withheld (fail-closed, never a silent hollow pass).
+    let recon = ProvEntry {
+        kind: prov::kind::WRITE,
+        payload_tok: 0x000B_10C5,
+        tier: 1,
+        writer_cap_id: 0, // the first ADD returns record id 0
+        t_created: 2,     // clock advances to 2 in push_record before ledger_append
+        parent_ids: &[],  // genesis: no prior entry
+    };
+    let rn = prov::canon(&recon, &mut scratch);
+    let recon_faithful = rn != 0 && prov_hash(&scratch[..rn]) == ids[0];
+
+    let mut tamper_caught = false;
+    let mut tamper_inclusion_failed = false;
+    if recon_faithful {
+        // Flip ONE byte of the COMMITTED entry's canonical bytes.
+        scratch[0] ^= 0x01; // perturb the `kind` byte (a real field, not padding)
+        let tampered_id = prov_hash(&scratch[..rn]);
+        // Re-fold the chain with the tampered leaf id in place of the genuine one.
+        let tampered_head = recompute(tampered_id, &siblings);
+        // BOTH legs must catch it: the head mismatches AND inclusion fails.
+        tamper_caught = tampered_head != committed;
+        tamper_inclusion_failed = !verify_inclusion(tampered_id, &siblings, committed);
+    }
+
+    crate::ProvProof {
+        clean_ok: clean_head_ok && recon_faithful,
+        tamper_caught: tamper_caught && tamper_inclusion_failed,
+        inclusion_ok,
+        head: prov::head_witness(committed),
+        entries: n as u64,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.
@@ -917,6 +1065,21 @@ pub(crate) struct MemSubstrate {
     consol_cursor: u64,
     /// M18: the T4 PROCEDURAL/SKILL store (the privileged WRITE_PROCEDURAL tier).
     t4: ProceduralStore,
+    /// M22: the per-agent, append-only PROVENANCE-LEDGER head -- a 256-bit running
+    /// fold over every memory mutation's canonical [`ProvEntry`] (write / forget-
+    /// tombstone / skill-admit). Genesis is all-zero; each [`MemSubstrate::
+    /// ledger_append`] folds the new entry's structural digest into it via
+    /// `tb_encode::prov::chain_mix`. The head makes the store TAMPER-EVIDENT: any
+    /// single-byte mutation to a committed entry invalidates the recomputed head
+    /// (and its inclusion proof) -- proven by the boot `prov_selftest`. Kept IN-RAM
+    /// this milestone (it does NOT ride the M20 superblock, so the M20 two-phase
+    /// commit + `persist_selftest` gen-continuity stay byte-identical).
+    chain_head: [u8; PROV_HASH_LEN],
+    /// M22: the committed ledger entry ids, in append order (the per-agent chain).
+    /// The boot self-test builds genuine inclusion proofs from this; production use
+    /// keeps it bounded by the same `TOKEN_QUOTA` write-amplification cap the tiers
+    /// share (an unbounded ledger would defeat the space-bank). Small + heap-`Vec`.
+    ledger_ids: Vec<[u8; PROV_HASH_LEN]>,
 }
 
 impl MemSubstrate {
@@ -958,6 +1121,9 @@ impl MemSubstrate {
                 next_id: 0,
                 best_score: 0,
             },
+            // M22: genesis ledger head (all-zero) + an empty per-agent chain.
+            chain_head: [0u8; PROV_HASH_LEN],
+            ledger_ids: Vec::new(),
         }
     }
 
@@ -978,13 +1144,98 @@ impl MemSubstrate {
         self.backing.epoch()
     }
 
+    /// M22: append ONE typed [`ProvEntry`] to the per-agent provenance ledger and
+    /// roll the [`chain_head`](Self::chain_head) forward. Called from EVERY memory
+    /// mutation site (`write`, `skill_add_class`, the `forget_sweep` tombstone), so
+    /// each mutation leaves a verifiable chain-of-custody record. The canonical
+    /// bytes are built by the Kani-proven `tb_encode::prov::canon`, hashed by
+    /// `prov_hash`, and folded by `chain_mix` (all via `prov::append`). 100% SAFE:
+    /// a single stack scratch buffer (`PROV_SCRATCH` bytes -- enough for the small
+    /// `parents` counts the seam emits) and a heap `Vec` push. Returns the new
+    /// entry's 256-bit id, or `None` if the entry would exceed the scratch buffer
+    /// (fail-closed -- the head is NOT advanced, so the ledger stays consistent).
+    fn ledger_append(
+        &mut self,
+        kind: u8,
+        payload_tok: u64,
+        tier: u8,
+        writer_cap_id: u64,
+        parents: &[[u8; PROV_HASH_LEN]],
+    ) -> Option<[u8; PROV_HASH_LEN]> {
+        let entry = ProvEntry {
+            kind,
+            payload_tok,
+            tier,
+            writer_cap_id,
+            t_created: self.clock,
+            parent_ids: parents,
+        };
+        // A fixed stack scratch sized for the seam's small parent counts (the
+        // mutation sites pass 0..=1 parents; PROV_SCRATCH leaves ample headroom).
+        let mut scratch = [0u8; PROV_SCRATCH];
+        let (new_head, id) = prov::append(self.chain_head, &entry, &mut scratch)?;
+        self.chain_head = new_head;
+        self.ledger_ids.push(id);
+        Some(id)
+    }
+
+    /// M22: the current per-agent provenance-ledger head (the running fold).
+    #[allow(dead_code)]
+    pub(crate) fn chain_head(&self) -> [u8; PROV_HASH_LEN] {
+        self.chain_head
+    }
+
+    /// M22: the committed ledger entry ids in append order (read-only borrow). The
+    /// boot `prov_selftest` builds genuine inclusion proofs from this slice.
+    #[allow(dead_code)]
+    pub(crate) fn ledger_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
+        &self.ledger_ids
+    }
+
     /// `tb_mem_write`: the Mem0 four-op write vocabulary. Returns the affected
     /// record id, or `None` when the write-amplification quota is exhausted.
     pub(crate) fn write(&mut self, op: u64, key: u64, value: u64, packed: u64) -> Option<u64> {
-        match op {
+        let r = match op {
             0 | 1 => self.add(key, value, packed), // ADD / UPDATE (append new version)
             2 => self.delete(key),                 // DELETE -> tombstone
             _ => Some(0),                          // NOOP
+        };
+        // M22: append a typed WRITE entry to the provenance ledger for every real
+        // mutation (op 0/1/2; NOOP op>2 returns Some(0) and is not a store change,
+        // so it is not ledgered). The entry is parented on the prior chain head
+        // (chain of custody to the preceding mutation); `key` is the payload token
+        // and `packed`'s low byte carries the writer-cap/tier context the M11 path
+        // supplies. A None from the store (quota) skips the ledger (no phantom
+        // entry); a None from the ledger (scratch overflow -- unreachable for these
+        // small parent counts) does NOT fail the write (the store mutation already
+        // happened and is the source of truth; the ledger is fail-soft here).
+        if op <= 2 {
+            if let Some(rid) = r {
+                let parents = self.parent_of_head();
+                let _ = self.ledger_append(
+                    prov::kind::WRITE,
+                    key,
+                    (packed & 0xFF) as u8,
+                    rid,
+                    &parents,
+                );
+            }
+        }
+        r
+    }
+
+    /// M22: the single-element parent set for a new ledger entry: the PRIOR chain
+    /// head id (the immediately-preceding committed entry), or empty at genesis (no
+    /// prior entry). This threads each entry's typed DAG edge to its predecessor so
+    /// the ledger is a verifiable chain of custody, not a flat list.
+    fn parent_of_head(&self) -> Vec<[u8; PROV_HASH_LEN]> {
+        match self.ledger_ids.last() {
+            Some(&id) => {
+                let mut v = Vec::with_capacity(1);
+                v.push(id);
+                v
+            }
+            None => Vec::new(),
         }
     }
 
@@ -1391,8 +1642,28 @@ impl MemSubstrate {
                 }
             };
             if demote {
+                // Capture the demoted record's identity BEFORE the borrow ends, so
+                // the M22 tombstone records WHAT was forgotten (token + tier).
+                let (tomb_token, tomb_id) = {
+                    let r = &self.t3.records[idx];
+                    (r.token, r.id)
+                };
                 self.t3.records[idx].tier = TIER_COLD;
                 n += 1;
+                // M22: emit a TOMBSTONE provenance entry -- the M17 demote is no
+                // longer SILENT, it is a verifiable deletion record in the ledger
+                // (proposal §4: "deletion is provable, not silent"). Parented on the
+                // prior chain head; `kind = FORGET`. Fail-soft (the demote already
+                // applied; the ledger is downstream). `writer_cap_id` carries the
+                // demoted record's id (the consolidation daemon is the authorizer).
+                let parents = self.parent_of_head();
+                let _ = self.ledger_append(
+                    prov::kind::FORGET,
+                    tomb_token,
+                    TIER_COLD,
+                    tomb_id,
+                    &parents,
+                );
             }
             idx = (idx + 1) % len;
         }
@@ -1482,6 +1753,13 @@ impl MemSubstrate {
         self.t4.next_id = self.t4.next_id.wrapping_add(1);
         self.quota.tokens_written = self.quota.tokens_written.saturating_add(1);
         self.clock = self.clock.wrapping_add(1);
+        // M22: a typed SKILL_ADMIT provenance entry for the T4 procedural write,
+        // parented on the prior chain head (chain of custody). `body` is the
+        // payload token, `prov` (the EMIT_EXTERNAL classification) rides the tier
+        // byte so the ledger records the privileged class. Fail-soft (the skill is
+        // already committed; the ledger is downstream).
+        let parents = self.parent_of_head();
+        let _ = self.ledger_append(prov::kind::SKILL_ADMIT, body, prov, id, &parents);
         Some(id)
     }
 
