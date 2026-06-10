@@ -1691,19 +1691,26 @@ fn kani_prov_chain_mix_tamper() {
     // DETERMINISTIC.
     assert_eq!(chain_mix(head, entry_id), base);
 
-    // Flip the bit at a symbolic index of entry_id: the fold output must change.
-    let idx: usize = kani::any();
-    kani::assume(idx < PROV_HASH_LEN);
-    let mut tampered = entry_id;
-    tampered[idx] ^= 0x01;
-    assert!(chain_mix(head, tampered) != base);
-
-    // Symmetrically, a flip in the HEAD also changes the fold (chained tamper).
-    let hidx: usize = kani::any();
-    kani::assume(hidx < PROV_HASH_LEN);
-    let mut htamper = head;
-    htamper[hidx] ^= 0x01;
-    assert!(chain_mix(htamper, entry_id) != base);
+    // EVERY entry-id byte position, CONCRETELY unrolled: a symbolic `idx` here
+    // makes `tampered[idx]` symbolic and re-introduces a symbolic 65-byte FNV fold
+    // (the #49 blow-up that timed the lane out at 35 min). A concrete-bounded loop
+    // CBMC fully unrolls into PROV_HASH_LEN CONCRETE chain_mix evaluations -- fast,
+    // and it still proves "the head is a function of EVERY byte" (host-validated).
+    let mut idx = 0usize;
+    while idx < PROV_HASH_LEN {
+        let mut tampered = entry_id;
+        tampered[idx] ^= 0x01;
+        assert!(chain_mix(head, tampered) != base);
+        idx += 1;
+    }
+    // Symmetrically, EVERY head byte position (chained tamper) -- concrete loop.
+    let mut hidx = 0usize;
+    while hidx < PROV_HASH_LEN {
+        let mut htamper = head;
+        htamper[hidx] ^= 0x01;
+        assert!(chain_mix(htamper, entry_id) != base);
+        hidx += 1;
+    }
 }
 
 /// (4) `verify_inclusion` is SOUND (proposal §5.4): for a small fixed chain
