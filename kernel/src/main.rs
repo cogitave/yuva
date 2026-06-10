@@ -313,6 +313,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         write_hex_u64(tb_hal::booted_at_el2() as u64);
         tb_hal::serial_write_byte(b"
 "[0]);
+        // DIAG (#65, probe P2): paint the boot-stack + EL2-stack red-zones
+        // before ANY deeper call chain or timer tick; `dispatch_irq` and the
+        // milestone checkpoints below re-check them (one-time loud line on
+        // the first breach, silence on a healthy run).
+        tb_hal::stack_redzone_init();
     }
 
     // Clean guest-only BOOT-TO-READY figure: `rust_main` entry -> serial up
@@ -931,6 +936,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // never deadlocks.
     tb_hal::scheduler_init();
     tb_hal::set_irq_hook(tb_hal::schedule);
+    // DIAG (#65, probe P6): snapshot the just-registered IRQ-hook word; the
+    // checkpoint after the wait loop re-compares it (drift = the IRQ_HOOK
+    // static, transmute-called on EVERY tick, was stomped).
+    let m9_hook_expected = tb_hal::irq_hook_raw();
     let _ = tb_hal::scheduler_spawn(STACK_C.take(), spin_c);
     let _ = tb_hal::scheduler_spawn(STACK_D.take(), spin_d);
 
@@ -959,8 +968,16 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // early into the "M9: FAIL" path below.
     let mut last_ticks = tb_hal::tick_count();
     let mut stalled: u64 = 0;
+    // DIAG (#65, probe P4): count the boot task's OWN loop iterations across
+    // the armed window. On a healthy run the boot task gets real slices, so
+    // iterations per observed switch are large; a tick-storm/livelock run
+    // shows the switch count climbing while this counter crawls (the
+    // zero-progress-slice signature). Rendered as one deterministic line
+    // after the disarm below.
+    let mut m9_iters: u64 = 0;
     while tb_hal::involuntary_switch_count() < REQUIRED_SWITCHES {
         core::hint::spin_loop();
+        m9_iters = m9_iters.wrapping_add(1);
         let now = tb_hal::tick_count();
         if now != last_ticks {
             last_ticks = now;
@@ -977,6 +994,34 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // the boot context with no further preemption (decision 7: timer masked
     // BEFORE the marker).
     tb_hal::timer_disarm();
+
+    // DIAG (#65): the M9-window checkpoint -- one deterministic line per run
+    // (boot-loop iterations, total ticks, IRQ-hook integrity), plus a stack
+    // red-zone sweep. The line prints on healthy runs too (like boot-cycles=)
+    // so CI logs always carry the slice-progress + hook-integrity reading.
+    tb_hal::serial_write_str("m9: diag iters=");
+    write_hex_u64(m9_iters);
+    tb_hal::serial_write_str(" ticks=");
+    write_hex_u64(tb_hal::tick_count());
+    tb_hal::serial_write_str(" ihook=");
+    tb_hal::serial_write_str(if tb_hal::irq_hook_raw() == m9_hook_expected {
+        "ok"
+    } else {
+        "BAD"
+    });
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Measured stack headroom (bytes between each stack's bottom and its
+        // deepest dirty word): the near-overflow question becomes a NUMBER,
+        // comparable incremental-vs-noinc and local-vs-CI.
+        tb_hal::serial_write_str(" bsfree=");
+        write_hex_u64(tb_hal::boot_stack_headroom());
+        tb_hal::serial_write_str(" e2free=");
+        write_hex_u64(tb_hal::el2_stack_headroom());
+    }
+    tb_hal::serial_write_byte(b'\n');
+    #[cfg(target_arch = "aarch64")]
+    tb_hal::stack_redzone_check();
 
     let switches = tb_hal::involuntary_switch_count();
     let c_ran = SPIN_C_COUNT.load(Ordering::Relaxed);
@@ -1312,6 +1357,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // user-launch frame, maps its user code/stack and ENQUEUES it.
         tb_hal::scheduler_init();
         tb_hal::set_irq_hook(tb_hal::schedule);
+        // DIAG (#65, probe P6): snapshot the registered hook word for the
+        // heartbeat + post-window integrity re-compare (see M9).
+        let m12_hook_expected = tb_hal::irq_hook_raw();
         tb_hal::agent_traps_init();
         let agent_a = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_A.take());
         let agent_b = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_B.take());
@@ -1348,7 +1396,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             if stall == 100_000_000 || stall == 400_000_000 {
                 // Progress heartbeat: a wall-clock-ceiling death inside this
                 // wait now leaves a diagnosable line (switch count + pending
-                // agent flags) instead of a silent stall.
+                // agent flags) instead of a silent stall. DIAG (#65, P5/P6):
+                // extended with the IRQ-hook integrity bit and (aarch64) the
+                // BOOTED_AT_EL2 flag, so a manifestation-1-class stall also
+                // reports whether the scheduler hook / EL2 flag were stomped.
                 tb_hal::serial_write_str("m12: waiting sw=");
                 write_hex_u64(sw);
                 tb_hal::serial_write_str(" flags=");
@@ -1356,6 +1407,17 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 tb_hal::serial_write_byte(if tb_hal::agent_permitted_ok(agent_b) { b"1"[0] } else { b"0"[0] });
                 tb_hal::serial_write_byte(if tb_hal::agent_denied_ok(agent_a) { b"1"[0] } else { b"0"[0] });
                 tb_hal::serial_write_byte(if tb_hal::agent_denied_ok(agent_b) { b"1"[0] } else { b"0"[0] });
+                tb_hal::serial_write_str(" ihook=");
+                tb_hal::serial_write_str(if tb_hal::irq_hook_raw() == m12_hook_expected {
+                    "ok"
+                } else {
+                    "BAD"
+                });
+                #[cfg(target_arch = "aarch64")]
+                {
+                    tb_hal::serial_write_str(" el2=");
+                    write_hex_u64(tb_hal::booted_at_el2() as u64);
+                }
                 tb_hal::serial_write_byte(b"
 "[0]);
             }
@@ -1366,6 +1428,16 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             core::hint::spin_loop();
         }
         tb_hal::timer_disarm(); // STOP before the verdict (like M9)
+        // DIAG (#65): the M12-window checkpoint (mirrors the M9 one).
+        tb_hal::serial_write_str("m12: diag ihook=");
+        tb_hal::serial_write_str(if tb_hal::irq_hook_raw() == m12_hook_expected {
+            "ok"
+        } else {
+            "BAD"
+        });
+        tb_hal::serial_write_byte(b'\n');
+        #[cfg(target_arch = "aarch64")]
+        tb_hal::stack_redzone_check();
         let switches = tb_hal::involuntary_switch_count().wrapping_sub(switches_before);
 
         if !tb_hal::agent_permitted_ok(agent_a) || !tb_hal::agent_permitted_ok(agent_b) {
@@ -3382,6 +3454,23 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // so this crate stays unsafe-free; the kernel only branches on El2Proof.
     // Unlike vmxroot (a TCG skip), this proof EXECUTES under pure TCG. On x86_64
     // there is no EL2, so it reports the n/a path. DoD: "L2.0: el2 OK".
+    //
+    // DIAG (#65, probe P7/manifestation-2 discriminator): BOOT_ENTRY_EL is a
+    // .data record written by `_start` BEFORE any branching; BOOTED_AT_EL2 is
+    // a .bss flag written AFTER .bss-zero and sitting EXACTLY at the heap
+    // arena's end. If the boot really entered at EL2 but the flag now reads 0,
+    // the flag was lost/stomped after boot (the silent-skip manifestation) --
+    // make that loud BEFORE the gracefully-skipping selftests run, plus a
+    // stack red-zone sweep at the same checkpoint.
+    #[cfg(target_arch = "aarch64")]
+    {
+        if tb_hal::boot_entry_el() == 0x2 && tb_hal::booted_at_el2() != 1 {
+            tb_hal::serial_write_str(
+                "el2: DIAG BOOTED_AT_EL2 lost (entry-el=0x2 but flag=0) -- stomp suspected\n",
+            );
+        }
+        tb_hal::stack_redzone_check();
+    }
     match tb_hal::el2_selftest() {
         tb_hal::El2Proof::Proven { .. } => {
             tb_hal::serial_write_str("L2.0: el2 OK\n"); // <-- the L2.0 aarch64 DoD marker
@@ -3640,6 +3729,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_byte(b'\n');
         }
     }
+
+    // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
+    #[cfg(target_arch = "aarch64")]
+    tb_hal::stack_redzone_check();
 
     tb_hal::halt()
 }
@@ -3953,16 +4046,41 @@ fn write_hex_u64(value: u64) {
     }
 }
 
-/// Panic handler: best-effort marker over serial, then halt forever.
+/// Minimal `core::fmt::Write` sink over the serial console, used ONLY by the
+/// panic handler so it can render the panic message + location (the rest of
+/// the kernel keeps its no-`core::fmt` discipline). Pure safe Rust.
+struct PanicSerialWriter;
+
+impl core::fmt::Write for PanicSerialWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        tb_hal::serial_write_str(s);
+        Ok(())
+    }
+}
+
+/// Panic handler: report the panic MESSAGE + LOCATION over serial, then exit
+/// QEMU with a NONZERO code (or halt when semihosting is unavailable).
+///
+/// DIAG (#65): the old handler printed a bare "panic" and exited 0 via
+/// `qemu_exit_success` -- so a corruption-induced panic produced a CLEAN
+/// rc=0 exit that read as "control flow reached qemu_exit_success from its
+/// top" (manifestation 3). Now: (a) the file:line + message pinpoint the
+/// failing source line, (b) the exit code is 1 (`qemu_exit_failure`), so a
+/// panicking boot can never again masquerade as a clean exit.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    tb_hal::serial_write_str("panic\n");
-    // Chain green -- exit QEMU NOW (semihosting SYS_EXIT) instead of
-    // parking to the wall-clock ceiling: a green boot finishes in seconds
-    // and a CI timeout now always means a genuinely stuck boot (the
-    // aL2.4/aL2.5 revert class). Falls through to halt() when semihosting
-    // is unavailable (non-harness boots).
+fn panic(info: &PanicInfo) -> ! {
+    use core::fmt::Write;
+    tb_hal::serial_write_str("panic: ");
+    let mut w = PanicSerialWriter;
+    let _ = write!(w, "{}", info.message());
+    if let Some(loc) = info.location() {
+        let _ = write!(w, " @ {}:{}:{}", loc.file(), loc.line(), loc.column());
+    }
+    tb_hal::serial_write_byte(b'\n');
+    // Exit QEMU NOW (semihosting SYS_EXIT, code 1) instead of parking to the
+    // wall-clock ceiling. Falls through to halt() when semihosting is
+    // unavailable (non-harness boots).
     #[cfg(target_arch = "aarch64")]
-    tb_hal::qemu_exit_success();
+    tb_hal::qemu_exit_failure();
     tb_hal::halt()
 }

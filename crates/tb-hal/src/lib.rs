@@ -72,11 +72,181 @@ pub fn serial_write_str(s: &str) {
     }
 }
 
+/// DIAG (#65): write a `u64` as a fixed-width `0x`-prefixed hex string over
+/// serial. Crate-internal twin of the kernel's `write_hex_u64`, so the in-HAL
+/// diagnostic probes (red-zones, EL2 tripwire, tick-gap witness) can render
+/// values without `core::fmt`. Pure safe Rust.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn diag_write_hex(value: u64) {
+    serial_write_str("0x");
+    let mut shift: i32 = 60;
+    while shift >= 0 {
+        let nibble = ((value >> shift) & 0xf) as u8;
+        let c = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        };
+        serial_write_byte(c);
+        shift -= 4;
+    }
+}
+
+// ===========================================================================
+// DIAG (#65): the aL2.5 CI-only-failure probe surface (aarch64-only).
+//
+// Phase-1 of case #65 reproduced all three per-commit-deterministic failure
+// modes locally with `CARGO_INCREMENTAL=0` builds (the dtolnay/rust-toolchain
+// CI default) -- a layout-sensitive corruption expressed around the M9
+// preemption-arming window. These probes discriminate the candidate
+// mechanisms (stack overflow vs stray-EL2-entry vs non-stack writer vs tick
+// storm) with one-time-latched serial lines and ZERO output on a healthy run.
+// ===========================================================================
+
+/// DIAG (#65, P2): base address of each task's stack (0 = not recorded; slot 0,
+/// the bootstrap context, uses the linker boot stack checked in `arch::diag`).
+#[cfg(target_arch = "aarch64")]
+static TASK_STACK_BASE: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
+
+/// DIAG (#65, P2): length (in `usize` words) of each task's stack.
+#[cfg(target_arch = "aarch64")]
+static TASK_STACK_LEN: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
+
+/// DIAG (#65, P2): one-time latch for the task-stack red-zone breach report.
+#[cfg(target_arch = "aarch64")]
+static TASK_RZ_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// DIAG (#65, P6): one-time latch for the TASK_SP out-of-range report.
+#[cfg(target_arch = "aarch64")]
+static TASK_SP_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// DIAG (#65, P4): CNTPCT stamp of the previous tick seen by `dispatch_irq`.
+#[cfg(target_arch = "aarch64")]
+static DIAG_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// DIAG (#65, P4): consecutive anomalously-fast ticks (gap < period/4).
+#[cfg(target_arch = "aarch64")]
+static DIAG_FAST_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// DIAG (#65, P4): one-time latch for the tick-storm report.
+#[cfg(target_arch = "aarch64")]
+static DIAG_STORM_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// DIAG (#65): paint the boot-stack + EL2-stack red-zones (probe P2). The
+/// kernel calls this ONCE, early in `rust_main`, before the first timer tick.
+#[cfg(target_arch = "aarch64")]
+pub fn stack_redzone_init() {
+    arch::redzone_init();
+}
+
+/// DIAG (#65): check every stack red-zone (boot, EL2, all recorded task
+/// stacks) and report the FIRST breach of each with one loud, one-time serial
+/// line. Called from `dispatch_irq` on every tick and by the kernel at
+/// milestone checkpoints. Silent on a healthy run.
+#[cfg(target_arch = "aarch64")]
+pub fn stack_redzone_check() {
+    arch::redzone_check_report();
+    if TASK_RZ_REPORTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let slots = NEXT_TASK_SLOT.load(Ordering::Relaxed).min(MAX_TASKS);
+    let mut s = 1;
+    while s < slots {
+        let base = TASK_STACK_BASE[s].load(Ordering::Relaxed);
+        if base != 0 {
+            let mut i = 0;
+            while i < arch::REDZONE_WORDS {
+                let w = arch::read_word(base + i * core::mem::size_of::<usize>());
+                if w != arch::REDZONE_PATTERN {
+                    if !TASK_RZ_REPORTED.swap(true, Ordering::AcqRel) {
+                        serial_write_str("diag: stack red-zone breached: task slot=");
+                        diag_write_hex(s as u64);
+                        serial_write_str(" word=");
+                        diag_write_hex(w as u64);
+                        serial_write_byte(b'\n');
+                    }
+                    return;
+                }
+                i += 1;
+            }
+        }
+        s += 1;
+    }
+}
+
+/// DIAG (#65): measured remaining headroom of the BOOT stack in bytes -- the
+/// distance from `__boot_stack_bottom` up to the deepest word that is neither
+/// zero nor the red-zone pattern (approximate: an all-zero frame is
+/// invisible). The kernel prints it at each milestone checkpoint, turning the
+/// near-overflow question into a per-run, per-build NUMBER.
+#[cfg(target_arch = "aarch64")]
+pub fn boot_stack_headroom() -> u64 {
+    arch::boot_stack_headroom()
+}
+
+/// DIAG (#65): as [`boot_stack_headroom`], for the resident EL2-monitor stack.
+#[cfg(target_arch = "aarch64")]
+pub fn el2_stack_headroom() -> u64 {
+    arch::el2_stack_headroom()
+}
+
+/// DIAG (#65, P4): per-tick probes run from `dispatch_irq` BEFORE the IRQ hook
+/// (so they execute even when `schedule()` switches away): the stack red-zone
+/// scan plus the tick-gap storm witness. The TVAL rearm makes the next timer
+/// deadline ack-time + period, so two timer ticks can NEVER legitimately
+/// arrive closer than the period -- a sustained run of fast ticks means
+/// anomalous re-delivery (a storm-class condition) and is reported once.
+#[cfg(target_arch = "aarch64")]
+fn diag_tick_probes() {
+    stack_redzone_check();
+    let now = arch::read_cycle_counter();
+    let last = DIAG_LAST_TICK.swap(now, Ordering::Relaxed);
+    if last == 0 {
+        return;
+    }
+    let gap = now.wrapping_sub(last);
+    if gap < arch::tick_period() / 4 {
+        let n = DIAG_FAST_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n >= 32 && !DIAG_STORM_REPORTED.swap(true, Ordering::AcqRel) {
+            serial_write_str("irq: tick storm (32 consecutive gaps < period/4) gap=");
+            diag_write_hex(gap);
+            serial_write_byte(b'\n');
+        }
+    } else {
+        DIAG_FAST_TICKS.store(0, Ordering::Relaxed);
+    }
+}
+
+/// DIAG (#65, P6): the raw registered IRQ-hook word. The kernel snapshots this
+/// right after `set_irq_hook(schedule)` and re-compares at the M9/M12
+/// checkpoints: any drift means the `IRQ_HOOK` static (transmute-called on
+/// EVERY tick) was stomped -- instant arbitrary control flow on the next tick.
+pub fn irq_hook_raw() -> usize {
+    IRQ_HOOK.load(Ordering::Acquire)
+}
+
 /// Ask the QEMU harness to exit with code 0 (aarch64 semihosting).
 /// No effect when semihosting is unavailable; callers then halt().
+///
+/// DIAG (#65, probe P1): prints a one-line canary BEFORE delegating to the
+/// arch body. NOTHING on the current chain legitimately calls this function
+/// (the happy path parks in `halt()`; the panic path uses
+/// [`qemu_exit_failure`]), so any appearance of the canary -- or of any
+/// exit(0) at all -- now means stray control flow (wild ret / corrupted
+/// function pointer) arrived at this function's top.
 #[cfg(target_arch = "aarch64")]
 pub fn qemu_exit_success() {
+    serial_write_str("qemu-exit: requested (entry canary)\n");
     arch::qemu_exit_success()
+}
+
+/// Ask the QEMU harness to exit with code **1** (aarch64 semihosting) -- the
+/// panic/fatal twin of [`qemu_exit_success`] (#65 hardening: a panicking boot
+/// used to exit 0 and could read as a clean run; now panic always exits
+/// nonzero). No effect when semihosting is unavailable; callers then halt().
+#[cfg(target_arch = "aarch64")]
+pub fn qemu_exit_failure() {
+    arch::qemu_exit_failure()
 }
 
 /// Diagnostic: the EL the aarch64 `_start` entered at (0xFF = not via `_start`).
@@ -307,6 +477,23 @@ pub fn task_create(stack: &'static mut [usize], entry: fn()) -> Task {
     if slot >= MAX_TASKS {
         task_api_fatal("task_create: too many tasks");
     }
+    // DIAG (#65, probe P2): paint a red-zone at the BOTTOM of the task stack
+    // (the fabricated frame lives at the TOP; MIN_STACK_WORDS guarantees the
+    // two cannot meet) and record the stack's range, so `dispatch_irq` can
+    // catch a descending overflow into the NEIGHBOR stack -- the saved-x30
+    // smash path -- the moment it crosses the bound. Safe: `stack` is a plain
+    // `&mut [usize]` here.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let zone = arch::REDZONE_WORDS.min(stack.len() / 4);
+        let mut i = 0;
+        while i < zone {
+            stack[i] = arch::REDZONE_PATTERN;
+            i += 1;
+        }
+        TASK_STACK_BASE[slot].store(stack.as_ptr() as usize, Ordering::Release);
+        TASK_STACK_LEN[slot].store(stack.len(), Ordering::Release);
+    }
     let sp = arch::task_stack_init(stack, entry);
     TASK_SP[slot].store(sp, Ordering::Release);
     Task(slot)
@@ -329,6 +516,28 @@ pub fn yield_to(next: Task) {
     let next_sp = TASK_SP[next.0].load(Ordering::Acquire);
     if next_sp == 0 {
         task_api_fatal("yield_to: target has no saved context");
+    }
+    // DIAG (#65, probe P6): bounds-check the saved SP against the recorded
+    // stack range BEFORE switching to it. An out-of-range value means the
+    // TASK_SP cell was stomped (the bad VALUE fingerprints the writer: the
+    // 0xA5..5AA5 red-zone pattern = a stack sweep, a code address = a spilled
+    // x30, 0-adjacent = a zero-writer). One-time report; the switch still
+    // proceeds so the downstream failure keeps its original shape.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let base = TASK_STACK_BASE[next.0].load(Ordering::Acquire);
+        if base != 0 {
+            let len = TASK_STACK_LEN[next.0].load(Ordering::Acquire);
+            let lo = base + arch::REDZONE_WORDS * core::mem::size_of::<usize>();
+            let hi = base + len * core::mem::size_of::<usize>();
+            if (next_sp < lo || next_sp > hi) && !TASK_SP_REPORTED.swap(true, Ordering::AcqRel) {
+                serial_write_str("diag: TASK_SP out of range slot=");
+                diag_write_hex(next.0 as u64);
+                serial_write_str(" sp=");
+                diag_write_hex(next_sp as u64);
+                serial_write_byte(b'\n');
+            }
+        }
     }
     CURRENT_TASK.store(next.0, Ordering::Relaxed);
     // M10: fold the address-space switch into the cooperative/preemptive switch.
@@ -747,6 +956,11 @@ pub fn set_irq_hook(hook: fn(u64)) {
 /// asm (per-arch, `unsafe`) and policy (safe; M9's `schedule()`).
 pub(crate) fn dispatch_irq(irq_id: u64) {
     TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    // DIAG (#65): per-tick probes (stack red-zones + tick-gap storm witness),
+    // run BEFORE the hook so they execute even when `schedule()` switches
+    // away. One-time-latched prints; silent and cheap on a healthy run.
+    #[cfg(target_arch = "aarch64")]
+    diag_tick_probes();
     let raw = IRQ_HOOK.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is non-zero, so `set_irq_hook` produced it from a valid

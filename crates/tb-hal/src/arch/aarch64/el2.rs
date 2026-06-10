@@ -50,7 +50,7 @@
 //!  * Frame size `0x110`; B0 == B1 + 0x110 (one frame, never popped).
 
 use core::arch::{asm, naked_asm};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tb_encode::el2_trap::{
     classify_exit, dabt_access_size_bytes, dabt_is_emulatable, dabt_iss_sf, dabt_iss_srt,
@@ -517,6 +517,16 @@ fn read_esr_el2() -> u64 {
     // stack effect and leaves NZCV unchanged. The handler runs at EL2.
     unsafe {
         asm!("mrs {v}, esr_el2", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Read `ELR_EL2` (the trapped lower-EL return PC) -- EL2-readable, no effects.
+fn read_elr_el2() -> u64 {
+    let v: u64;
+    // SAFETY: as `read_esr_el2`; ELR_EL2 is an EL2-readable system register.
+    unsafe {
+        asm!("mrs {v}, elr_el2", v = out(reg) v, options(nomem, nostack, preserves_flags));
     }
     v
 }
@@ -1370,12 +1380,30 @@ fn el2_abort_retry(frame: *mut Frame) -> ! {
 // The EL2 fatal-vector handler: any non-(Lower-EL-sync) slot. Surfaces a FAIL by
 // unwinding to the kernel (never a silent loop / hang).
 // ===========================================================================
+/// DIAG (#65, probe P3): one-time latch for the unexpected-EL2-vector print,
+/// so a recurring fault cannot flood the serial log from EL2.
+static EL2_FAULT_REPORTED: AtomicBool = AtomicBool::new(false);
+
 /// Handle an unexpected EL2 exception (e.g. the guest stub aborting instead of
 /// HVC-ing): unwind to the kernel's resident B0 with a nonzero code carrying the
 /// EL2 syndrome, so [`el2_selftest`] reports `RoundTripFailed` (red marker).
 #[no_mangle]
 pub(super) extern "C" fn aarch64_el2_fault_handler(_frame: *mut Frame) -> ! {
     let esr = read_esr_el2();
+    // DIAG (#65, probe P3): an entry through ANY non-(Lower-EL-sync) EL2 slot
+    // is unexpected by construction (HCR_EL2.IMO/FMO/AMO=0 routes physical
+    // IRQ/FIQ/SError to EL1; the monitor itself never faults on the healthy
+    // path). Print the syndrome + trapped PC ONCE before unwinding: if the
+    // CI-only corruption enters here, the esr/elr pinpoint the trigger class.
+    // Serial is safe at EL2: the PL011 MMIO write needs no MMU (EL2 runs
+    // MMU-off, physical addressing) and the print is one-time latched.
+    if !EL2_FAULT_REPORTED.swap(true, Ordering::AcqRel) {
+        crate::serial_write_str("el2: UNEXPECTED vector entry esr=");
+        crate::diag_write_hex(esr);
+        crate::serial_write_str(" elr=");
+        crate::diag_write_hex(read_elr_el2());
+        crate::serial_write_byte(b'\n');
+    }
     el2_return_to_kernel(FAIL_EL2_FAULT, esr);
 }
 
@@ -1390,6 +1418,29 @@ pub(super) extern "C" fn aarch64_el2_fault_handler(_frame: *mut Frame) -> ! {
 /// transparent except x0 = `code`, x1 = `x1val` (both caller-saved / clobbered).
 fn el2_return_to_kernel(code: u64, x1val: u64) -> ! {
     let b0 = (el2_stack_top() - 0x110) as *mut Frame;
+    // DIAG (#65, probe P3): B0 is only initialised by the FIRST bootstrap
+    // `HVC #0` at L2.0 time. If an unexpected EL2 entry lands here EARLIER,
+    // the frame is still all-zeros (.bss) and the "unwind" would eret to
+    // EL0t at PC=0 with DAIF fully unmasked -- a silent corruption amplifier
+    // (the suspected manifestation-2/3 cascade). Detect the all-zero frame
+    // (a REAL kernel HVC always saves a nonzero ELR_EL2 and an EL1h SPSR),
+    // report ONCE, and PARK at EL2 instead of issuing the junk eret: the run
+    // then dies loudly at the 240 s ceiling with the line in the log.
+    // SAFETY: B0 lives in the single-accessor monitor stack; reading two u64
+    // fields of the linker-placed frame is a plain aligned load at EL2.
+    let (b0_elr, b0_spsr) = unsafe { ((*b0).elr, (*b0).spsr) };
+    if b0_elr == 0 && b0_spsr == 0 {
+        crate::serial_write_str("el2: B0 UNINITIALIZED (pre-L2.0 EL2 entry) -- parking, code=");
+        crate::diag_write_hex(code);
+        crate::serial_write_str(" x1=");
+        crate::diag_write_hex(x1val);
+        crate::serial_write_byte(b'\n');
+        loop {
+            // SAFETY: `wfi` is a hint with no memory/stack effects; parking at
+            // EL2 forever is the fail-closed alternative to an eret-to-PC=0.
+            unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
+        }
+    }
     // SAFETY: B0 lives in the single-accessor monitor stack (the EL1 kernel never
     // references it); it was fully initialised by the bootstrap HVC's
     // SAVE_CONTEXT_EL2. We overwrite only gpr[0]/gpr[1] (the result registers).

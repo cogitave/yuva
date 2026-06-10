@@ -28,6 +28,7 @@
 //! `user.rs`); the rest of the Lower-EL quadrant remains a fatal stub.
 
 mod boot; // _start; EL-aware bring-up + nVHE EL2-monitor install; arms VBAR_EL1.
+mod diag; // #65: stack red-zones + raw-word probe (boot-path corruption triage).
 mod el2; // L2.0: resident nVHE EL2 monitor (HVC handler) + el2_selftest() facade.
 mod el2_nested_vectors; // aL2.4: __l2_nested_guest_vectors EL1 table (guest's OWN brk target); pure asm.
 mod el2_vectors; // L2.0: VBAR_EL2 table + EL2 save path; pure `global_asm!` module.
@@ -60,6 +61,10 @@ pub use mmu::{
     map_user_in_root, mmu_init, mmu_selftest, switch_root, unmap_in_root, va_to_pa_in_root,
 };
 pub use pmm::pmm_collect_regions;
+pub use diag::{
+    boot_stack_headroom, el2_stack_headroom, read_word, redzone_check_report, redzone_init,
+    REDZONE_PATTERN, REDZONE_WORDS,
+}; // #65 probes.
 pub use sched::{ctx_switch, task_stack_init, task_stack_init_user};
 pub use serial::{serial_init, serial_write_byte};
 pub use timer::{
@@ -73,6 +78,12 @@ pub use trap::breakpoint;
 // as the x86_64 arm, one uniform contract.
 pub use uaccess::{copy_from_user, copy_to_user};
 pub use user::{agent_map_space, agent_traps_init, caps_user_probe, user_demo};
+
+/// DIAG (#65, probe P4): the periodic tick period in CNTPCT counts (~1 ms),
+/// for `dispatch_irq`'s tick-gap storm witness. Pure `CNTFRQ_EL0` re-read.
+pub fn tick_period() -> u64 {
+    timer::tick_period()
+}
 
 /// M12: program the running agent's kernel stack for the privilege-change frame.
 /// A NO-OP on aarch64: there is no `TSS.rsp0` analogue -- `SP_EL1` already tracks
@@ -125,11 +136,36 @@ pub fn install_traps() {
 /// "healthy but slower than the ceiling" (the aL2.4/aL2.5 revert class).
 /// Returns only if semihosting is unavailable (caller falls to halt()).
 pub fn qemu_exit_success() {
+    // DIAG (#65, probe P1, second latch): this line directly above the HLT
+    // discriminates "control reached the function body" from a wild jump past
+    // it. On the current chain NOTHING legitimately calls this function (the
+    // happy path parks in halt(); the panic path exits via qemu_exit_failure),
+    // so ANY appearance of this line means stray control flow arrived here.
+    crate::serial_write_str("qemu-exit: success-body reached\n");
     // SYS_EXIT: x1 -> two-word block { reason, subcode }; QEMU exits with
     // subcode when reason == ADP_Stopped_ApplicationExit (0x20026).
     let block: [u64; 2] = [0x0002_0026, 0];
     // SAFETY: one HLT #0xF000 with x0/x1 per the Arm semihosting spec;
     // QEMU intercepts it at translation time when -semihosting is on.
+    unsafe {
+        core::arch::asm!(
+            "hlt #0xF000",
+            in("x0") 0x18u64,
+            in("x1") block.as_ptr(),
+            options(nostack),
+        );
+    }
+}
+
+/// Exit QEMU with code **1** via AArch64 semihosting (HLT #0xF000, SYS_EXIT).
+/// The PANIC/fatal twin of [`qemu_exit_success`] (#65 hardening): a panicking
+/// boot used to exit 0 and could masquerade as a clean run to anything keyed on
+/// the process exit code; now the panic path is rc=1 + its own serial report.
+/// Returns only if semihosting is unavailable (caller falls to halt()).
+pub fn qemu_exit_failure() {
+    let block: [u64; 2] = [0x0002_0026, 1];
+    // SAFETY: as `qemu_exit_success` -- one HLT #0xF000 with x0/x1 per the Arm
+    // semihosting spec; QEMU intercepts it when -semihosting is on.
     unsafe {
         core::arch::asm!(
             "hlt #0xF000",
