@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M20: persist OK"
+MARKER="M21: kan-policy OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -153,6 +153,30 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M20 marker present but the real durable-persistence round-trip line 'persist: gen=.. records=.. replayed=..' was NOT seen (hollow M20 pass)" >&2
         exit 1
     fi
+    # M20 is no longer the top-level grep (M21 displaced it as the cumulative tail);
+    # assert it directly so the M20 -> M21 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M20: persist OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M20: persist OK' missing (M20 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M21 SOUNDNESS (anti-hollow-pass, the aL2.5/M20 substring lesson): the marker
+    # substring 'M21: kan-policy OK' is shared by the DORMANT variant
+    # 'M21: kan-policy OK (heuristic floor, gate-not-met)' -- EXPECTED this milestone
+    # (the verified spline ships dormant; the heuristic floor decides), so it is NOT
+    # rejected. But a hollow pass that printed the marker WITHOUT running the
+    # loader/validators must fail, so (a) positively require the real round-trip line
+    # 'kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0' (the validators
+    # provably ran on the shipped integer table), and (b) reject a future
+    # '(no table, skipped)' variant (a skipped loader is a hollow proof on a lane
+    # that ships a table). active=0 is required: the spline is dormant this lane.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M21: kan-policy OK (no table, skipped)'; then
+        echo "[run-aarch64] FAIL -- M21 ran in SKIP mode (no policy table loaded) -- the verified-leaf loader/validators were NOT exercised" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'kan: monotone=0x0*1 ovf-safe=0x0*1 q-err=0x[0-9a-fA-F]+ bound=0x[0-9a-fA-F]+ active=0x0+'; then
+        echo "[run-aarch64] FAIL -- M21 marker present but the real round-trip line 'kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0' was NOT seen (hollow M21 pass)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -266,7 +290,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

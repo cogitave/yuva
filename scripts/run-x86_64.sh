@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M20: persist OK'
+MARKER='M21: kan-policy OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -114,7 +114,31 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M20 marker present but the real durable-persistence round-trip line 'persist: gen=.. records=.. replayed=..' was NOT seen (hollow M20 pass)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M20 is no longer the top-level grep (M21 displaced it as the cumulative tail);
+  # assert it directly so the M20 -> M21 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M20: persist OK'; then
+    echo ">> FAIL: final marker present but 'M20: persist OK' missing (M20 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M21 SOUNDNESS (anti-hollow-pass, the aL2.5/M20 substring lesson): the marker
+  # 'M21: kan-policy OK' substring is shared by the DORMANT variant
+  # 'M21: kan-policy OK (heuristic floor, gate-not-met)' -- which is EXPECTED this
+  # milestone (the spline ships dormant; the heuristic floor decides), so it is
+  # NOT rejected. But a hollow pass that printed the marker WITHOUT running the
+  # loader/validators must fail, so (a) positively require the real round-trip line
+  # 'kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0' (so the validators
+  # provably ran on the shipped integer table), and (b) reject a future
+  # '(no table, skipped)' variant (a skipped loader is a hollow proof on a lane
+  # that ships a table). active=0 is required: the spline is dormant this lane.
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M21: kan-policy OK (no table, skipped)'; then
+    echo ">> FAIL: M21 ran in SKIP mode (no policy table loaded) -- the verified-leaf loader/validators were NOT exercised" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'kan: monotone=0x0*1 ovf-safe=0x0*1 q-err=0x[0-9a-fA-F]+ bound=0x[0-9a-fA-F]+ active=0x0+'; then
+    echo ">> FAIL: M21 marker present but the real round-trip line 'kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0' was NOT seen (hollow M21 pass)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

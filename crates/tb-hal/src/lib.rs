@@ -3264,3 +3264,49 @@ pub enum PersistProof {
 pub fn persist_selftest() -> PersistProof {
     mem::persist_selftest()
 }
+
+// ===========================================================================
+// M21: verified fixed-point ADDITIVE-policy leaf self-test facade. The
+// fail-closed loader + real round-trip the kernel runs at boot over the FROZEN
+// `tb_encode::kancell` integer artifact, returned as a pure-data verdict the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`PersistProof`]). SHIPS
+// DORMANT: `active == false` this milestone -- the heuristic floor in
+// `mem::forget_sweep` owns every demote decision; the spline is WIRED + validated
+// at load but never on the decision path (turning it on is gated on an offline
+// trace bake-off, proposal §7). The math is the Kani-proven `tb-encode::kancell`;
+// the validators/round-trip are pure value computation -- no device, no `unsafe`.
+// ===========================================================================
+
+/// M21 policy-leaf load-time self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`PersistProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KanProof {
+    /// The shipped table passed the solver-free MonoKAN sign check
+    /// (`kan_table_is_monotone`): every sign-constrained feature is monotone by
+    /// construction (staler never scored more keepable). The kernel requires this.
+    pub monotone: bool,
+    /// The shipped table passed the headroom check (`kan_table_overflow_safe`):
+    /// every knot is within `KAN_KNOT_MAX`, so `kan_score` cannot overflow. The
+    /// kernel requires this.
+    pub ovf_safe: bool,
+    /// The recomputed round-trip deviation `delta = max|expected - kan_score(probe)|`
+    /// over the baked probe vector. The kernel requires `q_err <= bound`.
+    pub q_err: i64,
+    /// The shipped checked error bound `B`. `q_err > bound` fails closed (the kan
+    /// path is aborted, the marker withheld -- so an over-error table can never
+    /// reach the comparator).
+    pub bound: i64,
+    /// Whether the spline is on the decision path. `false` this milestone (DORMANT,
+    /// gate-not-met): the heuristic floor decides. The run-scripts require
+    /// `active=0` for this lane (and would reject a future `(no table, skipped)`).
+    pub active: bool,
+}
+
+/// M21: run the verified-policy-leaf load-time self-test (both arches) over the
+/// frozen integer table and report the outcome. See [`KanProof`]. Pure value
+/// computation -- re-runs the `tb_encode::kancell` MonoKAN + headroom validators
+/// and the `kan_score` round-trip over the baked probe vector; touches NO device
+/// and NO scheduler. SHIPS DORMANT (`active == false`).
+pub fn kan_selftest() -> KanProof {
+    mem::kan_selftest()
+}

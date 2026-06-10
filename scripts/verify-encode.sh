@@ -42,7 +42,24 @@ set -euo pipefail
 # stage-2 geometry); smmu_cmd_encode_total -- CFGI_STE/TLBI_S12_VMALL/CMD_SYNC
 # place the right opcode in word0[7:0] + operands in their fields for all inputs.
 # -- one per syndrome family / encoder, each proving totality AND round-trip
-# correctness) + M20 blkfmt durable-persistence codecs x6: blk_req_header_roundtrip
+# correctness) + M21 kancell verified fixed-point ADDITIVE-policy leaf x6:
+# kani_kan_spline_eval_total_bounded -- the piecewise-LINEAR spline is TOTAL over
+# ALL i32 x_q (the clamp proves the segment index in 0..=KAN_KNOTS-2 so [seg+1]
+# never panics) + the interpolant stays within the row's [min,max] knot envelope;
+# kani_kan_score_no_overflow_bounded -- kan_score NEVER overflows + the final
+# saturating clamp puts the i64 EXACTLY in the M17 DEMOTE_BAND [-34_000,34_000]
+# over an overflow-safe table (the closed-form KAN_FEATURES*KAN_KNOT_MAX headroom);
+# kani_kan_monotone_structural -- a table kan_table_is_monotone accepts as sign=-1
+# is non-increasing in x (DECIDABLE from the knot-delta signs because the basis is
+# piecewise-linear -- staler is never scored more keepable);
+# kani_kan_table_validators_total -- kan_table_overflow_safe + kan_table_is_monotone
+# are TOTAL over all i16 tables AND overflow_safe==true SOUNDLY implies kan_score
+# stays in-band; kani_kan_score_deterministic -- kan_score is bit-for-bit
+# reproducible (no float on the path); kani_kan_envelope_no_widening -- the
+# heuristic pin verdict (IMP_PIN/UTIL_PIN/MIN_AGE) is INVARIANT under every
+# kan_score value (the safety seam keeps the policy strictly downstream of the
+# gate, can rank WITHIN the safe set but never widen it) + M20 blkfmt
+# durable-persistence codecs x6: blk_req_header_roundtrip
 # -- the 16-byte virtio-blk request header {le32 type, le32 reserved, le64 sector}
 # round-trips + T_IN/T_OUT/T_FLUSH are well-formed; blk_superblock_identity -- the
 # 512-byte log-structured superblock encode->decode is identity over symbolic gen/
@@ -59,7 +76,7 @@ set -euo pipefail
 # fails closed (Full), record_sector is strictly monotone in the log head (replay
 # reproduces on-disk order), and gen+1 strictly increases (the two-phase commit).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=34
+EXPECTED_HARNESSES=40
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

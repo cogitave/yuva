@@ -3858,6 +3858,64 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // ---- M21: verified fixed-point ADDITIVE-policy leaf (forget/demote) --------
+    // A Kani-proven, total/bounded/monotone-by-construction piecewise-LINEAR
+    // integer GAM (NOT a neural net -- the knots are frozen offline + shipped as a
+    // `const` i16 table) for the M17 forget/demote decision, that may only RANK
+    // strictly INSIDE the existing heuristic safety envelope. It SHIPS DORMANT
+    // (proposal §7): the heuristic floor in `mem::forget_sweep` owns every demote
+    // decision (`KAN_ACTIVE == false`), so the proven M0..M20 boot chain is
+    // BEHAVIORALLY UNCHANGED; the spline is WIRED + validated at load but never on
+    // the decision path until an offline trace bake-off (which does not exist yet)
+    // measures it to beat a tuned linear baseline. The fail-closed boot self-test
+    // re-runs the solver-free MonoKAN + headroom structural validators on the
+    // shipped frozen table AND a REAL round-trip (recompute `kan_score` over a baked
+    // probe vector, require `delta <= B`), withholding the marker if any check
+    // fails -- so a bad/poisoned/over-error table can never reach the comparator.
+    // ALL value computation is the host-verifiable `tb_encode::kancell` (no_std,
+    // forbid(unsafe), NO float); this kernel stays zero-unsafe and only branches on
+    // the returned `KanProof` bools. DoD: "M21: kan-policy OK".
+    {
+        let kp = tb_hal::kan_selftest();
+        // FAIL-CLOSED: both structural validators must pass AND the round-trip
+        // deviation must be within the shipped bound. Any failure withholds the
+        // marker (renders a FAIL line with NO 'kan-policy OK' substring) and exits
+        // red NOW, exactly like the M20 Failed arm.
+        if !kp.monotone || !kp.ovf_safe || kp.q_err > kp.bound {
+            tb_hal::serial_write_str("M21: kan-policy FAIL monotone=");
+            write_hex_u64(kp.monotone as u64);
+            tb_hal::serial_write_str(" ovf-safe=");
+            write_hex_u64(kp.ovf_safe as u64);
+            tb_hal::serial_write_str(" q-err=");
+            write_hex_u64(kp.q_err as u64);
+            tb_hal::serial_write_str(" bound=");
+            write_hex_u64(kp.bound as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip line (the anti-hollow-pass witness the run-scripts
+        // positively require): the validators + round-trip provably ran at boot.
+        tb_hal::serial_write_str("kan: monotone=");
+        write_hex_u64(kp.monotone as u64);
+        tb_hal::serial_write_str(" ovf-safe=");
+        write_hex_u64(kp.ovf_safe as u64);
+        tb_hal::serial_write_str(" q-err=");
+        write_hex_u64(kp.q_err as u64);
+        tb_hal::serial_write_str(" bound=");
+        write_hex_u64(kp.bound as u64);
+        tb_hal::serial_write_str(" active=");
+        write_hex_u64(kp.active as u64);
+        tb_hal::serial_write_byte(b'\n');
+        // The marker. The spline ships DORMANT (the offline ship-gate margin is not
+        // met -- no trace workload exists yet), so the heuristic floor decides and
+        // the marker carries the honest `(heuristic floor, gate-not-met)` suffix.
+        // It CONTAINS the `M21: kan-policy OK` substring the run-scripts grep; the
+        // scripts also positively require the `kan:` round-trip line above (so a
+        // hollow pass without the loader/validators FAILS) and reject a future
+        // `(no table, skipped)` variant.
+        tb_hal::serial_write_str("M21: kan-policy OK (heuristic floor, gate-not-met)\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();

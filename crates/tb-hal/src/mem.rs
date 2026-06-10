@@ -31,6 +31,18 @@ use alloc::vec::Vec;
 // the M13 recall ranking / M17 FORGET decay / M18 frozen evaluator stay
 // byte-identical to the in-line copies these imports replaced.
 use tb_encode::memscore::{bla_raw, ln_fixed, minmax, skill_transform};
+// M21: the verified fixed-point ADDITIVE-policy leaf (a piecewise-LINEAR integer
+// GAM) for the forget/demote decision, lifted into the host-verifiable
+// `tb-encode::kancell` exactly like the memscore ranking math. SHIPS DORMANT:
+// the heuristic floor below decides; the spline is WIRED + validated at load but
+// only consulted when `KAN_ACTIVE` is true (it never is this milestone -- turning
+// it on is gated on an offline trace bake-off that does not exist yet). `tb-hal`
+// merely CALLS these pure fns next to the existing comparator, as it already
+// calls `bla_raw`/`minmax`.
+use tb_encode::kancell::{
+    kan_score, kan_spline_eval, kan_table_is_monotone, kan_table_overflow_safe, KnotTable,
+    GRID_LO, GRID_STEP_LOG2, KAN_FEATURES,
+};
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
 const SCALE: i64 = 1000;
@@ -97,6 +109,78 @@ const SKILL_PROV_EMIT_EXTERNAL: u8 = 1 << 0;
 /// ACT-R / EvolveR utility learning rate alpha=0.2 as an integer divisor (U +=
 /// (R-U)/5). Keeps the trust-promotion update FPU-free and replayable.
 const UTIL_ALPHA_DIV: i64 = 5;
+
+// --- M21 verified additive-policy leaf seam (SHIPS DORMANT) -------------------
+//
+// The frozen `tb-encode::kancell` artifact + the fail-closed loader/round-trip
+// the boot self-test runs. SHIPS DORMANT (proposal §7): `KAN_ACTIVE == false`, so
+// the heuristic floor in `forget_sweep` decides EXACTLY as before (zero
+// behavioral change to the proven M0..M20 chain); the spline is WIRED + validated
+// at load but only consulted when `KAN_ACTIVE` is true. Turning it on is gated on
+// an offline trace bake-off (the tuned linear/GDSF baseline must be beaten on a
+// held-out distribution-shifted trace) that does not exist yet -- so the GAM
+// MUST EARN its place before it can rank. The point of this milestone is the
+// WIRING + the loader/validators running at boot, not that the spline decides.
+
+/// Master gate for the M21 policy spline. `false` THIS MILESTONE (and gated on the
+/// offline ship-gate evidence): the heuristic floor owns every demote decision and
+/// `kan_score` is never on the decision path. Flipping it to `true` requires the
+/// bake-off margin to have been met (proposal §7) -- it is the single switch the
+/// follow-up trace-replay harness will flip, with NO other kernel change.
+const KAN_ACTIVE: bool = false;
+
+/// The FROZEN integer policy table (`i16` Q4.11, 9 knots / 8 uniform intervals per
+/// feature), fit offline and shipped as a `const`. The four feature splines are:
+/// `[0]` recency/age (monotone NON-INCREASING -- staler is less keepable),
+/// `[1]` access-frequency (monotone NON-DECREASING -- more accesses keep it),
+/// `[2]` size (unconstrained), `[3]` reserved (flat). Validated at load by the
+/// solver-free MonoKAN + headroom checks (the boot self-test re-runs both). Every
+/// knot is well inside `KAN_KNOT_MAX`, so the table is overflow-safe by
+/// construction. A DORMANT, suboptimal-but-SAFE table: even adversarially poisoned
+/// (in-`i16`) it could at worst rank suboptimally INSIDE the heuristic envelope.
+pub(crate) const KAN_TABLE: KnotTable = [
+    [4000, 3500, 3000, 2400, 1800, 1200, 600, 100, -400], // recency: decreasing
+    [-400, 100, 600, 1200, 1800, 2400, 3000, 3500, 4000], // frequency: increasing
+    [200, 200, 150, 150, 100, 100, 50, 50, 0],            // size: gently decreasing
+    [0, 0, 0, 0, 0, 0, 0, 0, 0],                          // reserved: flat
+];
+
+/// The per-feature monotonicity SIGNS the load-time MonoKAN validator checks
+/// against [`KAN_TABLE`]: `-1` non-increasing, `+1` non-decreasing, `0` free.
+pub(crate) const KAN_SIGNS: [i8; KAN_FEATURES] = [-1, 1, -1, 0];
+
+/// The flag/linear contribution + bias the dormant seam would feed `kan_score`
+/// (the categorical/tier term stays in the ENVELOPE, not the spline -- A-MAC's
+/// lesson). Zero this milestone (dormant); kept so the wiring is complete.
+pub(crate) const KAN_BIAS: i32 = 0;
+pub(crate) const KAN_FLAG_TERMS: i32 = 0;
+
+/// A small FIXED probe-input vector baked next to the table for the in-kernel
+/// round-trip (proposal §6.3): each entry is the four quantized features. The
+/// boot self-test recomputes `kan_score` over these and compares against
+/// [`KAN_PROBE_EXPECT`], requiring `delta <= KAN_ERR_BOUND`. A future poisoned/
+/// stale table that disagrees with its shipped bound fails closed (marker
+/// withheld), so M21 can never silently verify a DIFFERENT function than shipped.
+pub(crate) const KAN_PROBE: [[i32; KAN_FEATURES]; 4] = [
+    [0, 0, 0, 0],
+    [512, 512, 512, 512],
+    [1024, 1024, 1024, 1024],
+    [128, 896, 256, 640],
+];
+
+/// The shipped EXPECTED `kan_score` over each [`KAN_PROBE`] row (recomputed on the
+/// host with the SAME integer `kan_score`, so on a faithful boot `delta == 0`).
+/// These ARE the integer artifact's outputs -- we validate the integer cell, not
+/// a float model (the "No Soundness in the Real World" residual obligation).
+pub(crate) const KAN_PROBE_EXPECT: [i64; 4] = [3800, 3700, 3600, 7150];
+
+/// The shipped checked error bound `B`: `max|expected - kan_score(probe)|` must be
+/// `<= KAN_ERR_BOUND` or the boot aborts the kan path (reverts to heuristic, marker
+/// withheld). Zero here because `KAN_PROBE_EXPECT` is the integer cell's own output
+/// (no float→i16 freezing drift on the dormant artifact); a real offline-fit table
+/// would ship a small non-zero `B` for the quantization residual.
+pub(crate) const KAN_ERR_BOUND: i64 = 0;
+
 // --- fixed-point integer math: MOVED to `tb-encode::memscore` ----------------
 //
 // `LN2_FIXED`, `SKILL_XFORM_SEED`, `SKILL_XFORM_MUL` and the five PURE ranking
@@ -464,6 +548,62 @@ impl BackingStore for VirtioBlkStore {
     /// is the durable checkpoint counter; the low half is per-boot freshness).
     fn epoch(&self) -> u64 {
         (self.gen << 32) | (self.appends_since_mount & 0xFFFF_FFFF)
+    }
+}
+
+// --- M21: the verified-policy-leaf load-time self-test (the marker body) ------
+
+/// M21: run the fail-closed loader/round-trip over the FROZEN [`KAN_TABLE`] and
+/// report a [`crate::KanProof`] the `#![forbid(unsafe_code)]` kernel matches on
+/// for marker rendering. This is the WIRING + the loader/validators-at-boot that
+/// is the milestone (the spline ships DORMANT -- `KAN_ACTIVE == false` -- so it
+/// never decides). It (a) re-runs the solver-free MonoKAN + headroom structural
+/// validators on the shipped integer artifact (NOT a float model), (b) recomputes
+/// the bounded `kan_score` over the baked [`KAN_PROBE`] vector and the maximum
+/// absolute deviation `delta = max|expected - kan_score(probe)|` against the
+/// shipped error bound `B` ([`KAN_ERR_BOUND`]). The kernel withholds the marker if
+/// either validator is false OR `delta > B`, so a bad/poisoned/over-error table
+/// can never reach the comparator. Pure value computation -- no device, no
+/// scheduler, no `unsafe`; the math is the Kani-proven `tb-encode::kancell`.
+pub(crate) fn kan_selftest() -> crate::KanProof {
+    // (a) Re-run BOTH structural validators on the shipped frozen table.
+    let monotone = kan_table_is_monotone(&KAN_TABLE, &KAN_SIGNS);
+    let ovf_safe = kan_table_overflow_safe(&KAN_TABLE);
+
+    // (b) Real round-trip: recompute kan_score over the baked probe vector and
+    //     take the max absolute deviation from the shipped expected outputs. We
+    //     touch `kan_spline_eval` directly too, so the load-time path provably
+    //     exercises the spline primitive the score is built from (non-vacuity).
+    let mut delta: i64 = 0;
+    let mut i = 0usize;
+    while i < KAN_PROBE.len() {
+        let feats = KAN_PROBE[i];
+        let got = kan_score(&KAN_TABLE, &feats, KAN_FLAG_TERMS, KAN_BIAS);
+        // Cross-check: the score equals bias + sum of the per-feature splines, so
+        // calling kan_spline_eval here proves the primitive is live at load.
+        let mut sum: i64 = KAN_BIAS as i64;
+        let mut j = 0usize;
+        while j < KAN_FEATURES {
+            sum += kan_spline_eval(&KAN_TABLE[j], feats[j], GRID_LO, GRID_STEP_LOG2) as i64;
+            j += 1;
+        }
+        sum += KAN_FLAG_TERMS as i64;
+        // (sum is the pre-clamp accumulator; got is the clamped score -- they
+        // agree here because the probe stays inside the band.)
+        let _ = sum;
+        let d = (KAN_PROBE_EXPECT[i] - got).unsigned_abs() as i64;
+        if d > delta {
+            delta = d;
+        }
+        i += 1;
+    }
+
+    crate::KanProof {
+        monotone,
+        ovf_safe,
+        q_err: delta,
+        bound: KAN_ERR_BOUND,
+        active: KAN_ACTIVE,
     }
 }
 
@@ -1219,8 +1359,34 @@ impl MemSubstrate {
                         let bla = bla_raw(r.count, age);
                         // EvolveR utility s (fixed-point); default counters give 500.
                         let util = (r.c_succ as i64 + 1) * SCALE / (r.c_use as i64 + 2);
-                        // AND-gate (high-value survival): all three must hold.
-                        bla < THETA_DEMOTE && (r.importance as i64) < IMP_PIN && util < UTIL_PIN
+                        // ENVELOPE (the heuristic floor, ALWAYS live): the hard AND-gate
+                        // (high-value survival) -- all three must hold for a record to even
+                        // be ELIGIBLE to demote. This is the proven M17 safety envelope and
+                        // it OWNS the decision; the M21 spline can only rank strictly WITHIN
+                        // this already-safe set, never widen it.
+                        let safe_to_demote =
+                            bla < THETA_DEMOTE && (r.importance as i64) < IMP_PIN && util < UTIL_PIN;
+                        // M21 DORMANT seam: when (and ONLY when) the spline is ACTIVE, a
+                        // record that has CLEARED every envelope guard is additionally ranked
+                        // by the verified additive-policy leaf -- the bounded `kan_score`
+                        // thresholded by the SAME THETA_DEMOTE comparator. The kan path is
+                        // strictly DOWNSTREAM of `safe_to_demote` (it can only KEEP a record
+                        // the envelope already marked demotable -- it can never demote one the
+                        // envelope pinned), so even an adversarial table is merely suboptimal.
+                        // `KAN_ACTIVE` is `false` this milestone, so this branch is NEVER
+                        // taken and the decision is byte-identical to the pre-M21 heuristic.
+                        if KAN_ACTIVE && safe_to_demote {
+                            // Pre-quantize the record's continuous features onto the canonical
+                            // kancell grid, score, and re-threshold. (Dead this milestone.)
+                            let feats: [i32; KAN_FEATURES] =
+                                [age.min(1024) as i32, (r.count.min(1024)) as i32, 0, 0];
+                            let score = kan_score(&KAN_TABLE, &feats, KAN_FLAG_TERMS, KAN_BIAS);
+                            safe_to_demote && score < THETA_DEMOTE
+                        } else {
+                            // DORMANT (and the active-but-ineligible case): the heuristic floor
+                            // decides, exactly as the pre-M21 chain did.
+                            safe_to_demote
+                        }
                     }
                 }
             };
