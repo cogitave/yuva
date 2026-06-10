@@ -46,7 +46,7 @@
 //!  * `VPIDR_EL2 = MIDR_EL1`, `VMPIDR_EL2 = MPIDR_EL1` -- EL1 reads of those IDs
 //!                               return the real values.
 //!  * `VBAR_EL2  = __el2_exception_vectors` (el2_vectors.rs).
-//!  * `SP_EL2    = __el2_stack_top` -- the dedicated 16 KiB monitor stack (a
+//!  * `SP_EL2    = __el2_stack_top` -- the dedicated 32 KiB monitor stack (a
 //!                               single-accessor region the EL1 kernel never
 //!                               references; see el2.rs's coherency note).
 //!  * `SPSR_EL2  = 0x3C5`      -- EL1h + DAIF masked (INIT_PSTATE_EL1) for the
@@ -58,7 +58,7 @@ use core::arch::global_asm;
 // (a) PRE : EL2h (QEMU virt,virtualization=on) OR EL1h (plain virt); MMU OFF,
 //           DAIF masked, x0 = FDT/DTB pointer. POST: a resident nVHE EL2 monitor
 //           (when entered at EL2) + BOOTED_AT_EL2 recorded; SP = top of the
-//           16 KiB boot stack (SP_EL1), .bss zeroed, VBAR_EL1 armed, control
+//           64 KiB boot stack (SP_EL1), .bss zeroed, VBAR_EL1 armed, control
 //           tail-branched to rust_main(x0) with x0 (FDT) preserved as arg0.
 // (b) ABI : clobbers x1, x2 (scratch); x0 stashed in x19 and restored; x20
 //           carries the entry-EL flag; no SP_EL1 use before SP_EL1 is set; the
@@ -153,7 +153,7 @@ _start:
     adrp x1, __el2_exception_vectors
     add  x1, x1, :lo12:__el2_exception_vectors
     msr  vbar_el2, x1
-    // SP_EL2 = top of the dedicated 16 KiB monitor stack. We are at EL2h, so
+    // SP_EL2 = top of the dedicated 32 KiB monitor stack. We are at EL2h, so
     // the current SP IS SP_EL2; the EL1 kernel never references this region.
     adrp x1, __el2_stack_top
     add  x1, x1, :lo12:__el2_stack_top

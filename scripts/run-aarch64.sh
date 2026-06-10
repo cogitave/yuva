@@ -165,6 +165,22 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'M14.2: blocking-recv OK' missing" >&2
         exit 1
     fi
+    # #65 PERMANENT RED LINES: the stack red-zone/guard canaries, the TASK_SP
+    # bounds check, the BOOTED_AT_EL2 stomp witness and the un-armed qemu-exit
+    # tripwire are all SILENT on a healthy boot; any of them in the log means
+    # live memory corruption (the H1b boot-stack-overflow class) rode through
+    # an otherwise green-looking chain -- fail the lane, never warn.
+    for CANARY in \
+        'diag: stack red-zone breached' \
+        'diag: stack guard breached' \
+        'diag: TASK_SP out of range' \
+        'el2: DIAG BOOTED_AT_EL2 lost' \
+        'qemu-exit: UNEXPECTED entry'; do
+        if printf '%s' "${OUTPUT}" | grep -qF -- "${CANARY}"; then
+            echo "[run-aarch64] FAIL -- corruption canary fired: '${CANARY}' (see the serial log above)" >&2
+            exit 1
+        fi
+    done
     # LOUD when the EL2 track silently degrades to its skip variant: the lane
     # stays green (the cumulative chain still proves M0..M19) but the GitHub UI
     # shows a warning so reduced proof coverage is never invisible again.

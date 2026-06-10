@@ -384,7 +384,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M3: mmu OK\n"); // <-- the M3 DoD marker
     } else {
         tb_hal::serial_write_str("M3: FAIL\n");
-        tb_hal::halt();
+        tb_hal::fail_exit();
     }
 
     // --- M4: user/ring boundary -- drop to ring3/EL0, syscall, trap back ----
@@ -400,6 +400,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M4: user/ring OK\n"); // <-- the M4 DoD marker
     } else {
         tb_hal::serial_write_str("M4: FAIL\n");
+        // #65 fix: fail-closed AND fail-fast -- exit the harness nonzero now
+        // (a missing M4 marker used to ride to the wall-clock ceiling).
+        tb_hal::fail_exit();
     }
 
     // --- M5: bring `alloc` online via a #[global_allocator] over a .bss arena --
@@ -419,7 +422,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M5: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     // A freshly-initialised heap has handed out zero bytes.
@@ -561,7 +564,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M6: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     // The boot map must yield usable RAM, and a freshly seeded allocator has
@@ -734,7 +737,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M7: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     // Baselines: the heap is empty (M5/M6 left used-bytes at 0) and the PMM pool
@@ -883,7 +886,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M8: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     if !tb_hal::timer_demo() {
@@ -924,7 +927,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M9: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     // Register the boot task (the current context) as the first runnable entry,
@@ -1072,7 +1075,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M10: FAIL ");
         tb_hal::serial_write_str(why);
         tb_hal::serial_write_byte(b'\n');
-        tb_hal::halt()
+        tb_hal::fail_exit()
     };
 
     // (1) Two fresh address spaces, each a COPY of the live kernel root.
@@ -1208,7 +1211,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M11: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         // (1) A heap-backed per-principal table; mint the ROOT object as the
@@ -1348,7 +1351,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M12: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         // PHASE 0 -- spawn (timer still disarmed). Reset the run queue to {boot};
@@ -1539,7 +1542,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M13: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         // A capability-checked dispatch against `h` in `tbl` with the full
@@ -1717,7 +1720,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M14: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         let ok = SysStatus::Ok as u32;
@@ -1920,7 +1923,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M14.1: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         let ok = SysStatus::Ok as u32;
@@ -2158,7 +2161,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M15: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         let ok = SysStatus::Ok as u32;
@@ -2305,7 +2308,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M15.1: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         let ok = SysStatus::Ok as u32;
@@ -2442,7 +2445,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M16: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         let ok = caps::SysStatus::Ok as u32;
@@ -2550,7 +2553,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M17: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         // A capability-checked dispatch against `h` in `tbl` (the M13/M16 idiom).
@@ -2756,7 +2759,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M18: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         // The M13/M16/M17 capability-checked dispatch helper (full [u64;4] args).
@@ -2963,7 +2966,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M18.1: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         fn disp(
@@ -3144,7 +3147,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M18.2: FAIL ");
             tb_hal::serial_write_str(why);
             tb_hal::serial_write_byte(b'\n');
-            tb_hal::halt()
+            tb_hal::fail_exit()
         }
 
         fn disp(
@@ -3489,6 +3492,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.0: el2 FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3524,6 +3528,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.1: stage2 FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3559,6 +3564,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.2: el2-exits FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3595,6 +3601,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.3: el2-trap FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3637,6 +3644,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.4: el2-guest FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3680,6 +3688,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("L2.5: vgic FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3727,6 +3736,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M19: virtio FAIL stage=");
             write_hex_u64(stage as u64);
             tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
     }
 
@@ -3734,6 +3744,19 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();
 
+    // #65 hardening (F4): the SINGLE legitimate clean-exit site. Every fail
+    // path above terminated via `tb_hal::fail_exit()` (exit 1), so reaching
+    // here means the full cumulative chain printed its markers; arm the gate
+    // and ask QEMU to exit 0 NOW instead of idling to the harness's wall-clock
+    // ceiling. Any OTHER entry into `qemu_exit_success` (the gate un-armed --
+    // a wild ret / corrupted function pointer) prints a loud line and parks,
+    // so corruption can never again fake a clean exit. Falls through to
+    // `halt()` when semihosting is unavailable (non-harness boots).
+    #[cfg(target_arch = "aarch64")]
+    {
+        tb_hal::qemu_exit_arm();
+        tb_hal::qemu_exit_success();
+    }
     tb_hal::halt()
 }
 
@@ -3867,7 +3890,7 @@ fn fail(why: &str) -> ! {
     tb_hal::serial_write_str("M2: FAIL ");
     tb_hal::serial_write_str(why);
     tb_hal::serial_write_byte(b'\n');
-    tb_hal::halt()
+    tb_hal::fail_exit()
 }
 
 /// M9 spin task C: the involuntary-preemption proof. It NEVER `yield_to`s. It
@@ -3955,7 +3978,7 @@ fn m14b_fail(why: &str) -> ! {
     tb_hal::serial_write_str("M14.2: FAIL ");
     tb_hal::serial_write_str(why);
     tb_hal::serial_write_byte(b'\n');
-    tb_hal::halt()
+    tb_hal::fail_exit()
 }
 
 /// M10 task G: runs in address space E (the `yield_to` fold-in flips the live
@@ -3971,7 +3994,7 @@ fn task_g_main() {
     tb_hal::yield_to(Task::from_raw(TASK_H_RAW.load(Ordering::Acquire)));
     // Normal flow never resumes G; if it somehow does, fail loudly.
     tb_hal::serial_write_str("M10: FAIL task G resumed after hand-off\n");
-    tb_hal::halt()
+    tb_hal::fail_exit()
 }
 
 /// M10 task H: as task G but in address space F; after writing+verifying its own
@@ -3986,7 +4009,7 @@ fn task_h_main() {
     tb_hal::yield_to(Task::from_raw(BOOT10_RAW.load(Ordering::Acquire)));
     // Normal flow never resumes H; if it somehow does, fail loudly.
     tb_hal::serial_write_str("M10: FAIL task H resumed after hand-off\n");
-    tb_hal::halt()
+    tb_hal::fail_exit()
 }
 
 /// Safe trap-dispatch policy hook (kept from M1: policy lives in this

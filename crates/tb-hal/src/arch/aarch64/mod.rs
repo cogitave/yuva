@@ -136,12 +136,11 @@ pub fn install_traps() {
 /// "healthy but slower than the ceiling" (the aL2.4/aL2.5 revert class).
 /// Returns only if semihosting is unavailable (caller falls to halt()).
 pub fn qemu_exit_success() {
-    // DIAG (#65, probe P1, second latch): this line directly above the HLT
-    // discriminates "control reached the function body" from a wild jump past
-    // it. On the current chain NOTHING legitimately calls this function (the
-    // happy path parks in halt(); the panic path exits via qemu_exit_failure),
-    // so ANY appearance of this line means stray control flow arrived here.
-    crate::serial_write_str("qemu-exit: success-body reached\n");
+    // #65 hardening (F4): the LEGITIMATE caller is the lib.rs facade, whose
+    // EXIT_ARMED gate is armed only at the single end-of-chain call site in
+    // `rust_main`; an un-armed (stray-control-flow) entry is reported + parked
+    // THERE, so this body stays silent on the healthy path (the probe-P1
+    // "success-body reached" canary print lived here during the #65 triage).
     // SYS_EXIT: x1 -> two-word block { reason, subcode }; QEMU exits with
     // subcode when reason == ADP_Stopped_ApplicationExit (0x20026).
     let block: [u64; 2] = [0x0002_0026, 0];

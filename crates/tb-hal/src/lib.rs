@@ -225,18 +225,38 @@ pub fn irq_hook_raw() -> usize {
     IRQ_HOOK.load(Ordering::Acquire)
 }
 
+/// #65 hardening (F4): gate on the clean semihosting exit. `false` until the
+/// kernel's SINGLE legitimate post-M19 call site arms it via
+/// [`qemu_exit_arm`]; an un-armed entry into [`qemu_exit_success`] (a wild
+/// ret / corrupted function pointer) prints a loud line and parks instead of
+/// faking a clean exit 0 (manifestation 3 of the #65 corruption did exactly
+/// that through the old panic handler). Cost: one atomic load on the exit path.
+#[cfg(target_arch = "aarch64")]
+static EXIT_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Arm the clean QEMU exit. Call ONLY from the single legitimate end-of-chain
+/// site in `rust_main`, immediately before [`qemu_exit_success`].
+#[cfg(target_arch = "aarch64")]
+pub fn qemu_exit_arm() {
+    EXIT_ARMED.store(true, Ordering::Release);
+}
+
 /// Ask the QEMU harness to exit with code 0 (aarch64 semihosting).
 /// No effect when semihosting is unavailable; callers then halt().
 ///
-/// DIAG (#65, probe P1): prints a one-line canary BEFORE delegating to the
-/// arch body. NOTHING on the current chain legitimately calls this function
-/// (the happy path parks in `halt()`; the panic path uses
-/// [`qemu_exit_failure`]), so any appearance of the canary -- or of any
-/// exit(0) at all -- now means stray control flow (wild ret / corrupted
-/// function pointer) arrived at this function's top.
+/// #65 hardening (F4): exits ONLY when [`qemu_exit_arm`] was called first --
+/// the single legitimate call site is the end-of-chain exit in `rust_main`,
+/// after the final marker printed. An un-armed entry means stray control flow
+/// (wild ret / corrupted function pointer) arrived at this function's top: it
+/// prints one loud line (which scripts/run-aarch64.sh turns into a RED
+/// verdict) and parks, so corruption can never again fake a clean exit 0.
+/// Silent on the legitimate armed path.
 #[cfg(target_arch = "aarch64")]
 pub fn qemu_exit_success() {
-    serial_write_str("qemu-exit: requested (entry canary)\n");
+    if !EXIT_ARMED.load(Ordering::Acquire) {
+        serial_write_str("qemu-exit: UNEXPECTED entry (un-armed) -- stray control flow\n");
+        arch::halt();
+    }
     arch::qemu_exit_success()
 }
 
@@ -244,9 +264,25 @@ pub fn qemu_exit_success() {
 /// panic/fatal twin of [`qemu_exit_success`] (#65 hardening: a panicking boot
 /// used to exit 0 and could read as a clean run; now panic always exits
 /// nonzero). No effect when semihosting is unavailable; callers then halt().
+/// Deliberately NOT gated by [`qemu_exit_arm`]: a stray entry here exits 1,
+/// which is already a red verdict -- fail-closed either way.
 #[cfg(target_arch = "aarch64")]
 pub fn qemu_exit_failure() {
     arch::qemu_exit_failure()
+}
+
+/// Fatal-milestone termination (#65 fix): surface the failure to the harness
+/// IMMEDIATELY with a NONZERO exit instead of parking to the wall-clock
+/// ceiling. The kernel's `Mx: FAIL` / `L2.x: ... FAIL` paths call this after
+/// printing their verdict line: on aarch64 it asks QEMU to exit 1 via
+/// semihosting (the M9 FAIL of run 27244333561 burned the full 240 s ceiling
+/// before CI could read the log; now the lane goes red in seconds), falling
+/// through to a parked core when semihosting is unavailable; on x86_64 it
+/// parks (that runner's marker grep is the verdict). Never returns.
+pub fn fail_exit() -> ! {
+    #[cfg(target_arch = "aarch64")]
+    arch::qemu_exit_failure();
+    arch::halt()
 }
 
 /// Diagnostic: the EL the aarch64 `_start` entered at (0xFF = not via `_start`).
