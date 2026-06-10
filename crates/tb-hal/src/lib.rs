@@ -3208,3 +3208,59 @@ pub enum VirtioProof {
 pub fn virtio_selftest() -> VirtioProof {
     arch::virtio_selftest()
 }
+
+// ===========================================================================
+// M20: durable persistence self-test facade -- the first time ANYTHING in TABOS
+// outlives a boot. Mirrors the `VirtioProof` pattern verbatim: a pure-data
+// verdict the `#![forbid(unsafe_code)]` kernel matches on. ALL silicon-unsafe
+// (the virtio-blk MMIO/DMA ring) is in `arch::*::virtio`; the on-disk codecs are
+// the Kani-proven `tb_encode::blkfmt`; the orchestration (mount/replay/two-phase
+// commit) is 100% safe in `mem::VirtioBlkStore`. Absent (no DeviceID==2 in any
+// slot -- e.g. a lane with no `-drive`) is a GRACEFUL GREEN skip.
+// ===========================================================================
+
+/// M20 durable-persistence self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`VirtioProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistProof {
+    /// No virtio-blk (DeviceID 2) in any scanned slot -- a GRACEFUL GREEN skip
+    /// (a lane with no `-drive`; the open-bus read != magic case). The kernel
+    /// renders `M20: persist OK (no disk, skipped)`.
+    Absent,
+    /// A virtio-blk was found but it is LEGACY (`Version` != 2) -- an honest skip
+    /// (this driver speaks only the modern transport); still GREEN.
+    LegacyUnsupported,
+    /// THE PROOF: N sentinel records were written through a real Region behind
+    /// the [`VirtioBlkStore`], the two-phase flush committed (data sectors ->
+    /// FLUSH -> superblock at gen+1 -> FLUSH), the store was RE-MOUNTED (super-
+    /// block re-read + Region logs replayed into a freshly-rebuilt journal), and
+    /// the replayed records == the read-after-flush values AND `gen` bumped by 1.
+    Proven {
+        /// The committed checkpoint generation after the round-trip's flush.
+        gen: u64,
+        /// The number of sentinel records replayed back on the re-mount.
+        replayed: u64,
+        /// The prior generation observed on the FIRST mount (`0` on a fresh disk,
+        /// `> 0` if a previous boot left a committed checkpoint -- the two-boot
+        /// durability witness).
+        prior: u64,
+    },
+    /// Found + driven, but the durability round-trip failed fail-closed. `stage`
+    /// localises the failure (0x1 probe/feature, 0x2 DMA-frame OOM, 0x3 mount/
+    /// superblock-decode, 0x4 write/flush, 0x5 re-mount/replay, 0x6 equality-or-
+    /// generation mismatch). The kernel renders it WITHOUT a "persist OK"
+    /// substring, so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (see the variant doc).
+        stage: u32,
+    },
+}
+
+/// M20: run the durable-persistence round-trip self-test (both arches) and
+/// report the outcome. See [`PersistProof`]. Poll-only (no completion IRQ),
+/// touches NO scheduler; all raw device work is in `arch::*::virtio`, the on-disk
+/// codecs are the Kani-proven `tb_encode::blkfmt`, the orchestration is safe
+/// `mem::VirtioBlkStore`. Absent (no `-drive`) is a GRACEFUL GREEN skip.
+pub fn persist_selftest() -> PersistProof {
+    mem::persist_selftest()
+}

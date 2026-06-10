@@ -83,6 +83,8 @@ const VIRTIO_WINDOW_VA: u64 = 0x0000_0180_0000_1000;
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt", little-endian
 const VIRTIO_VERSION_MODERN: u32 = 2;
 const VIRTIO_DEV_ENTROPY: u32 = 4;
+/// M20: virtio-blk DeviceID (the block device the `VirtioBlkStore` drives).
+const VIRTIO_DEV_BLK: u32 = 2;
 
 const R_MAGIC: u64 = 0x000;
 const R_VERSION: u64 = 0x004;
@@ -113,11 +115,15 @@ const S_FAILED: u32 = 128;
 /// `VIRTIO_F_VERSION_1` (bit 32) as it appears in the HIGH feature dword (sel 1).
 const VIRTIO_F_VERSION_1_HI: u32 = 1 << 0;
 
+const VIRTQ_DESC_F_NEXT: u16 = 1; // M20: the descriptor chains to `next`.
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 /// Spec-minimum single-entry queue (QEMU accepts QueueNum == 1).
 const Q_SIZE: u32 = 1;
+
+/// M20: virtio-blk config-space base (capacity in 512-byte sectors @ +0x00).
+const R_CONFIG: u64 = 0x100;
 
 // In-frame layout (one 4 KiB DMA frame; all offsets meet the split-queue
 // alignment: desc 16, avail 2, used 4):
@@ -410,4 +416,245 @@ fn fail(dev: u64, frame: u64, stage: u32) -> crate::VirtioProof {
     reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
     crate::frame_free(frame);
     crate::VirtioProof::Failed { stage }
+}
+
+// ===========================================================================
+// M20: the poll-only modern virtio-blk (DeviceID 2) driver. BYTE-SYMMETRIC with
+// the aarch64 arm: same 3-descriptor request chain, same in-frame layout, same
+// `tb_encode::blkfmt` codecs. The ONLY x86 delta is `dma_fence` (TSO) where
+// aarch64 uses dmb/dsb, and the UC device-window `map_window()` (aarch64 needs
+// none). The safe `VirtioBlkStore` layer calls blk_probe/blk_read/blk_write/
+// blk_flush. The `microvm` machine exposes the virtio-mmio bus virtio-blk-device
+// attaches to (NOT virtio-blk-pci -- microvm has no PCI by default).
+// ===========================================================================
+
+/// One additional byte accessor (the status byte the device writes; volatile).
+#[inline]
+fn ram_w8(pa: u64, v: u8) {
+    // SAFETY: `pa` is a 1-byte offset within the owned DMA frame.
+    unsafe { write_volatile(pa as *mut u8, v) }
+}
+
+// In-frame layout for the blk request (Q_SIZE=4 desc table is 64 bytes).
+const BLK_DESC_OFF: u64 = 0x000; // 4 * 16 = 64 bytes
+const BLK_AVAIL_OFF: u64 = 0x040; // flags@+0, idx@+2, ring[4]@+4
+const BLK_USED_OFF: u64 = 0x080; // flags@+0, idx@+2, ring[4]{id,len}
+const BLK_HDR_OFF: u64 = 0x100; // 16-byte request header (RO)
+const BLK_STATUS_OFF: u64 = 0x110; // 1-byte status (WO)
+const BLK_DATA_OFF: u64 = 0x200; // 512-byte data sector
+const BLK_Q_SIZE: u32 = 4;
+
+/// Probe the virtio-mmio bus for a MODERN (Version==2) virtio-blk (DeviceID==2).
+/// Maps the UC device window first (it shares the M19 PML4[3] chain). Returns
+/// `Some((slot, capacity_sectors))` if found + modern, `None` if absent, legacy,
+/// or the window could not be mapped.
+pub fn blk_probe() -> Option<(u32, u64)> {
+    let base = map_window()?;
+    let mut i: u32 = 0;
+    while i < N_SLOTS {
+        let s = base + (i as u64) * SLOT_STRIDE;
+        if reg_read(s, R_MAGIC) == VIRTIO_MAGIC && reg_read(s, R_DEVICE_ID) == VIRTIO_DEV_BLK {
+            if reg_read(s, R_VERSION) != VIRTIO_VERSION_MODERN {
+                return None; // legacy
+            }
+            let cap_lo = reg_read(s, R_CONFIG) as u64;
+            let cap_hi = reg_read(s, R_CONFIG + 4) as u64;
+            return Some((i, (cap_hi << 32) | cap_lo));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the bus carries a LEGACY blk device but no modern one (Absent vs
+/// LegacyUnsupported disambiguation for the safe layer).
+pub fn blk_saw_legacy() -> bool {
+    let base = match map_window() {
+        Some(b) => b,
+        None => return false,
+    };
+    let mut i: u32 = 0;
+    let mut legacy = false;
+    while i < N_SLOTS {
+        let s = base + (i as u64) * SLOT_STRIDE;
+        if reg_read(s, R_MAGIC) == VIRTIO_MAGIC && reg_read(s, R_DEVICE_ID) == VIRTIO_DEV_BLK {
+            if reg_read(s, R_VERSION) == VIRTIO_VERSION_MODERN {
+                return false;
+            }
+            legacy = true;
+        }
+        i += 1;
+    }
+    legacy
+}
+
+/// Run ONE virtio-blk request. See the aarch64 twin for the descriptor-chain
+/// contract; this arm is byte-identical save the `dma_fence` (TSO) barriers.
+fn blk_request(slot: u32, req_type: u32, sector: u64, data: Option<&mut [u8; 512]>) -> bool {
+    use tb_encode::blkfmt;
+    let base = match map_window() {
+        Some(b) => b,
+        None => return false,
+    };
+    let dev = base + (slot as u64) * SLOT_STRIDE;
+    let frame = match crate::frame_alloc() {
+        Some(f) => f,
+        None => return false,
+    };
+    let mut z: u64 = 0;
+    while z < 4096 {
+        ram_w64(frame + z, 0);
+        z += 8;
+    }
+    let desc = frame + BLK_DESC_OFF;
+    let avail = frame + BLK_AVAIL_OFF;
+    let used = frame + BLK_USED_OFF;
+    let hdr = frame + BLK_HDR_OFF;
+    let status = frame + BLK_STATUS_OFF;
+    let dbuf = frame + BLK_DATA_OFF;
+
+    let hbytes = blkfmt::req_header_encode(req_type, sector);
+    let mut k = 0u64;
+    while k < blkfmt::REQ_HEADER_LEN as u64 {
+        ram_w8(hdr + k, hbytes[k as usize]);
+        k += 1;
+    }
+    let is_flush = req_type == blkfmt::T_FLUSH;
+    let is_in = req_type == blkfmt::T_IN;
+    if req_type == blkfmt::T_OUT {
+        if let Some(ref d) = data {
+            let mut i = 0u64;
+            while i < 512 {
+                ram_w8(dbuf + i, d[i as usize]);
+                i += 1;
+            }
+        }
+    }
+    ram_w8(status, 0xFF);
+
+    reg_write(dev, R_STATUS, 0);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER);
+    reg_write(dev, R_DEVICE_FEATURES_SEL, 1);
+    let df_hi = reg_read(dev, R_DEVICE_FEATURES);
+    if df_hi & VIRTIO_F_VERSION_1_HI == 0 {
+        reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+        crate::frame_free(frame);
+        return false;
+    }
+    reg_write(dev, R_DRIVER_FEATURES_SEL, 0);
+    reg_write(dev, R_DRIVER_FEATURES, 0);
+    reg_write(dev, R_DRIVER_FEATURES_SEL, 1);
+    reg_write(dev, R_DRIVER_FEATURES, VIRTIO_F_VERSION_1_HI);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK);
+    if reg_read(dev, R_STATUS) & S_FEATURES_OK == 0 {
+        reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+        crate::frame_free(frame);
+        return false;
+    }
+
+    reg_write(dev, R_QUEUE_SEL, 0);
+    if reg_read(dev, R_QUEUE_NUM_MAX) == 0 {
+        reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+        crate::frame_free(frame);
+        return false;
+    }
+    reg_write(dev, R_QUEUE_NUM, BLK_Q_SIZE);
+    reg_write(dev, R_QUEUE_DESC_LOW, desc as u32);
+    reg_write(dev, R_QUEUE_DESC_HIGH, (desc >> 32) as u32);
+    reg_write(dev, R_QUEUE_DRIVER_LOW, avail as u32);
+    reg_write(dev, R_QUEUE_DRIVER_HIGH, (avail >> 32) as u32);
+    reg_write(dev, R_QUEUE_DEVICE_LOW, used as u32);
+    reg_write(dev, R_QUEUE_DEVICE_HIGH, (used >> 32) as u32);
+
+    ram_w64(desc, hdr);
+    ram_w32(desc + 8, blkfmt::REQ_HEADER_LEN as u32);
+    if is_flush {
+        ram_w16(desc + 12, VIRTQ_DESC_F_NEXT);
+        ram_w16(desc + 14, 1);
+        ram_w64(desc + 16, status);
+        ram_w32(desc + 16 + 8, 1);
+        ram_w16(desc + 16 + 12, VIRTQ_DESC_F_WRITE);
+        ram_w16(desc + 16 + 14, 0);
+    } else {
+        ram_w16(desc + 12, VIRTQ_DESC_F_NEXT);
+        ram_w16(desc + 14, 1);
+        ram_w64(desc + 16, dbuf);
+        ram_w32(desc + 16 + 8, 512);
+        let data_flags = if is_in {
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
+        } else {
+            VIRTQ_DESC_F_NEXT
+        };
+        ram_w16(desc + 16 + 12, data_flags);
+        ram_w16(desc + 16 + 14, 2);
+        ram_w64(desc + 32, status);
+        ram_w32(desc + 32 + 8, 1);
+        ram_w16(desc + 32 + 12, VIRTQ_DESC_F_WRITE);
+        ram_w16(desc + 32 + 14, 0);
+    }
+
+    ram_w16(avail, VIRTQ_AVAIL_F_NO_INTERRUPT);
+    ram_w16(avail + 4, 0);
+
+    reg_write(dev, R_QUEUE_READY, 1);
+    if reg_read(dev, R_QUEUE_READY) != 1 {
+        reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+        crate::frame_free(frame);
+        return false;
+    }
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
+
+    dma_fence();
+    ram_w16(avail + 2, 1);
+    dma_fence();
+    reg_write(dev, R_QUEUE_NOTIFY, 0);
+
+    let mut spins: u64 = 0;
+    let mut used_idx: u16 = 0;
+    while spins < POLL_CAP {
+        used_idx = ram_r16(used + 2);
+        if used_idx != 0 {
+            break;
+        }
+        spins += 1;
+    }
+    if used_idx == 0 {
+        reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+        crate::frame_free(frame);
+        return false;
+    }
+    dma_fence();
+
+    let st = blkfmt::status_decode(ram_r8(status));
+    let ok = st == blkfmt::S_OK;
+    if ok && is_in {
+        if let Some(d) = data {
+            let mut i = 0u64;
+            while i < 512 {
+                d[i as usize] = ram_r8(dbuf + i);
+                i += 1;
+            }
+        }
+    }
+
+    reg_write(dev, R_STATUS, 0);
+    crate::frame_free(frame);
+    ok
+}
+
+/// Read 512 bytes from `sector` into `buf`. Returns `true` on success.
+pub fn blk_read(slot: u32, sector: u64, buf: &mut [u8; 512]) -> bool {
+    blk_request(slot, tb_encode::blkfmt::T_IN, sector, Some(buf))
+}
+
+/// Write 512 bytes from `buf` to `sector`. Returns `true` on success.
+pub fn blk_write(slot: u32, sector: u64, buf: &[u8; 512]) -> bool {
+    let mut tmp = *buf;
+    blk_request(slot, tb_encode::blkfmt::T_OUT, sector, Some(&mut tmp))
+}
+
+/// Issue a VIRTIO_BLK_T_FLUSH durability barrier. Returns `true` on success.
+pub fn blk_flush(slot: u32) -> bool {
+    blk_request(slot, tb_encode::blkfmt::T_FLUSH, 0, None)
 }

@@ -74,11 +74,19 @@ jobs:
           K=target/x86_64-tabos-none/debug/tabos-kernel
           # -M microvm,rtc=off -accel kvm -cpu host = the exact config that
           # surfaced #36. PVH entry; LAPIC is the only interrupt controller.
+          # M20: attach a fresh 4 MiB raw disk so the virtio-blk durable-
+          # persistence Proven path runs under KVM too (the x86 poll-only used-
+          # ring completion works identically under TCG + KVM). This lane gates
+          # on M18 (which prints before M20), so it is unaffected by M20's verdict.
+          IMG="$(mktemp)"; truncate -s 4M "$IMG"
           timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
             -m 256M -smp 1 -kernel "$K" -no-reboot -nic none \
             -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+            -drive file="$IMG",if=none,format=raw,id=vblk0 \
+            -device virtio-blk-device,drive=vblk0 \
             -serial stdio -display none \
             > serial.log 2>&1 || true
+          rm -f "$IMG"
           echo "=== serial tail (last 30 lines) ==="; tail -30 serial.log || true
           # boot-ready-cycles is an in-guest rdtsc span (DEBUG build here; the
           # quotable figure is the --release tb-vmm number, see BENCHMARKS.md).

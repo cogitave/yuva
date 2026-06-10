@@ -106,6 +106,10 @@ pub use vmx::vmx_selftest;
 // the aarch64 arm, one uniform contract.
 pub use virtio::virtio_selftest;
 
+// M20: the virtio-blk device-driver surface the safe `VirtioBlkStore` layer
+// calls (the only new x86 unsafe lives in virtio.rs alongside the M19 rng path).
+pub use virtio::{blk_flush, blk_probe, blk_read, blk_saw_legacy, blk_write};
+
 // `breakpoint()` is re-exported as part of tb-hal's public trap surface; the
 // `int3` lives in `trap.rs`. `set_trap_hook`/`TrapInfo`/`TrapKind`/`TrapAction`
 // and the `dispatch_trap` glue live at the crate root (`lib.rs`).

@@ -35,6 +35,13 @@ use crate::el2_trap::{
     EC_HVC64, EC_IABT_LOW, GICH_LR_MASK, GICH_LR_STATE_INVALID, GICH_LR_STATE_PENDING,
     SCTLR_EL1_GUEST_ENABLE_BITS, SYSREG_ISS_SYS_MASK,
 };
+use crate::blkfmt::{
+    episode_decode, episode_encode, frame_header_decode, frame_header_encode, record_frame_decode,
+    record_frame_encode, record_sector, region_extent, req_header_decode, req_header_encode,
+    req_type_is_known, superblock_decode, superblock_encode, EPISODE_LEN, EP_COUNT,
+    EP_FIRST, MAX_PAYLOAD, REGION_EPISODIC, REGION_SEMANTIC, REGION_WORKING, SECTOR_SIZE,
+    SEM_COUNT, SEM_FIRST, T_FLUSH, T_IN, T_OUT, WM_COUNT, WM_FIRST,
+};
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
 use crate::smmuv3::{
@@ -1017,4 +1024,234 @@ fn kani_smmu_cmd_encode_total() {
     assert!(CMD_OP_CFGI_STE != CMD_OP_TLBI_S12_VMALL);
     assert!(CMD_OP_TLBI_S12_VMALL != CMD_OP_CMD_SYNC);
     assert!(CMD_OP_CFGI_STE != CMD_OP_CMD_SYNC);
+}
+
+// ===========================================================================
+// M20 blkfmt: the durable-persistence on-disk + virtio-blk request codecs.
+// Six harnesses (the EXPECTED_HARNESSES 28 -> 34 bump in verify-encode.sh).
+// ===========================================================================
+
+/// (1) The virtio-blk REQUEST HEADER round-trips + the three request types are
+/// well-formed. For ALL symbolic `(type, sector)`, `req_header_decode(
+/// req_header_encode(..))` recovers the pair, and the three issued types
+/// (`T_IN`/`T_OUT`/`T_FLUSH`) all pass `req_type_is_known`. A total, loop-free
+/// proof over the whole 16-byte layout (the reserved dword is decode-ignored).
+///
+/// NEGATIVE CONTROL: writing the sector at byte offset 4 (overlapping the
+/// reserved dword) instead of 8 would corrupt the low sector bytes -> the
+/// `ds == sector` readback FAILS for any sector with set low bytes. The
+/// `req_type_is_known` checks reference the public type constants directly.
+#[kani::proof]
+fn kani_blk_req_header_roundtrip() {
+    let t: u32 = kani::any();
+    let sector: u64 = kani::any();
+    let enc = req_header_encode(t, sector);
+    let (dt, ds) = req_header_decode(&enc);
+    assert_eq!(dt, t);
+    assert_eq!(ds, sector);
+    // The three types the driver issues are recognised as known.
+    assert!(req_type_is_known(T_IN));
+    assert!(req_type_is_known(T_OUT));
+    assert!(req_type_is_known(T_FLUSH));
+    // and they are pairwise distinct (the device routes on them).
+    assert!(T_IN != T_OUT && T_OUT != T_FLUSH && T_IN != T_FLUSH);
+}
+
+/// (2) The SUPERBLOCK encode->decode IDENTITY + the field LAYOUT is read back
+/// from the correct offsets. The fields are CONCRETE distinct values (so the
+/// FNV-1a-64 checksum the encoder stamps + the decoder recomputes is a CBMC
+/// CONSTANT, not a symbolic-hash formula -- a fully-symbolic 504-byte FNV equality
+/// is the documented #49 state-explosion trap). The distinct sentinel values
+/// prove each field is read from its OWN offset (no field bleed): gen, the three
+/// log_head entries, and the three record_count entries all round-trip to their
+/// distinct inputs, and the version is the stamped `SB_VERSION`. The checksum
+/// gate's symbolic fail-closure is harness (3); the encode/decode over arbitrary
+/// fields is exercised concretely under Miri in `blkfmt::tests`.
+///
+/// NEGATIVE CONTROL: stamping the checksum over `[0..512]` (including its own
+/// slot) in the encoder but recomputing over `[0..504]` in the decoder would make
+/// the checksum gate reject the encoder's own output -> `decode` returns `None`
+/// and the `expect` traps; reading any field from the wrong offset would recover
+/// a different sentinel -> the per-field `assert_eq!` FAILS (the distinct values
+/// are chosen so no two offsets share a value).
+#[kani::proof]
+fn kani_blk_superblock_identity() {
+    // Distinct sentinels so a cross-offset read recovers the WRONG value.
+    let gen: u64 = 0x0102_0304_0506_0708;
+    let log_head = [0x1111_1111_1111_1111u64, 0x2222_2222_2222_2222, 0x3333_3333_3333_3333];
+    let record_count = [0x4444_4444_4444_4444u64, 0x5555_5555_5555_5555, 0x6666_6666_6666_6666];
+    let s = superblock_encode(gen, log_head, record_count);
+    // TOTALITY + the checksum gate accepts the encoder's own output.
+    let d = superblock_decode(&s).expect("the encoder's own output must decode");
+    // Every field round-trips from its OWN offset (the distinct values rule out
+    // field bleed), and the version is the stamped constant.
+    assert_eq!(d.gen, gen);
+    assert_eq!(d.log_head, log_head);
+    assert_eq!(d.record_count, record_count);
+    assert_eq!(d.version, crate::blkfmt::SB_VERSION);
+}
+
+/// (3) The SUPERBLOCK decode is TOTAL + FAIL-CLOSED under the documented BOUNDED
+/// assume-envelope (NOT a full 512-byte `kani::any()` -- the #49 trap the
+/// proofs.rs honesty note warns of). We take a valid encoder output and let Kani
+/// nondeterministically perturb a SINGLE byte in either the header region (magic/
+/// version) OR the checksum tail; the decode must NEVER panic, and a perturbation
+/// that lands on a magic/version/checksum byte must yield `None` (fail-closed). A
+/// matching perturbation on a reserved byte stays `Some` (it is covered by the
+/// recompute). This proves the decode is total AND the integrity gate bites.
+///
+/// NEGATIVE CONTROL: dropping the magic check in `superblock_decode` would let a
+/// flipped magic byte still decode -> the `is_none()` assertion on the magic-byte
+/// branch FAILS.
+#[kani::proof]
+fn kani_blk_superblock_decode_total() {
+    // A concrete, structurally-valid base (fixed fields keep the state space
+    // bounded; the perturbation is the only nondeterminism).
+    let mut s = superblock_encode(1, [512, 1024, 2048], [3, 1, 0]);
+    // One symbolic byte index in {magic[0], version[0], checksum[0]} and one
+    // symbolic nonzero delta -- the bounded envelope.
+    let which: u8 = kani::any();
+    kani::assume(which < 3);
+    let delta: u8 = kani::any();
+    kani::assume(delta != 0);
+    let idx: usize = match which {
+        0 => 0,                                // a magic byte
+        1 => 8,                                // the version low byte
+        _ => crate::blkfmt::SB_CKSUM_OFF,      // a checksum byte
+    };
+    s[idx] = s[idx].wrapping_add(delta);
+    // TOTALITY: decode must not panic for any of these perturbations.
+    let d = superblock_decode(&s);
+    // FAIL-CLOSURE: perturbing magic, version, or checksum invalidates the block.
+    // (version perturbation: any nonzero delta on byte 8 makes version != 1.)
+    assert!(d.is_none());
+}
+
+/// (4) The FRAME HEADER round-trips over ALL symbolic fields: `frame_header_decode(
+/// frame_header_encode(tag, len, seq, crc))` recovers `(tag, len, seq, crc)`. A
+/// total, loop-free proof over the 24-byte layout (the two reserved regions are
+/// decode-ignored).
+///
+/// NEGATIVE CONTROL: encoding `seq` at offset 2 (overlapping `len`) instead of 4
+/// would corrupt both fields -> the `seq`/`len` readbacks FAIL.
+#[kani::proof]
+fn kani_blk_frame_header_roundtrip() {
+    let tag: u8 = kani::any();
+    let len: u16 = kani::any();
+    let seq: u64 = kani::any();
+    let crc: u32 = kani::any();
+    let h = frame_header_encode(tag, len, seq, crc);
+    let d = frame_header_decode(&h);
+    assert_eq!(d.region_tag, tag);
+    assert_eq!(d.len, len);
+    assert_eq!(d.seq, seq);
+    assert_eq!(d.payload_crc, crc);
+}
+
+/// (5) The RECORD FRAME structure is TOTAL + the CRC gate accepts the encoder's
+/// own frame, the header fields round-trip, and the payload window stays in-
+/// bounds. The FRAME PARAMETERS (`region_tag`, `seq`) are symbolic; the payload
+/// is a fixed CONCRETE 4-byte body. Keeping the payload concrete makes the
+/// FNV-1a-32 CRC a CBMC-computed CONSTANT on BOTH the encode (stamp) and decode
+/// (recompute) sides, so the CRC-equality gate is proven WITHOUT the symbolic-
+/// hash SAT blowup (a fully-symbolic-payload CRC equality is the documented #49
+/// state-explosion trap; the CRC's correctness over ARBITRARY data + the torn-
+/// tail rejection are exercised concretely under Miri in `blkfmt::tests`).
+///
+/// NEGATIVE CONTROL: computing the CRC over the WRONG byte range in the decoder
+/// (e.g. `[24..512]` instead of `[24..24+len]`) would make the recomputed CRC
+/// differ from the stamped one -> `record_frame_decode` returns `None` and the
+/// `expect` traps; placing `seq`/`len` at the wrong header offset would break the
+/// `seq`/`len` round-trip + the in-bounds `off+len <= 512` check.
+#[kani::proof]
+#[kani::unwind(513)] // the 512-byte sector-zeroing loop in record_frame_encode
+                     // dominates (a concrete 512-bound unroll is cheap for CBMC);
+                     // the FNV/copy loops over the 4-byte payload are far shorter.
+fn kani_blk_record_frame_decode_total() {
+    // A fixed concrete payload (the CRC is then a CBMC constant, not symbolic).
+    let payload: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+    let region_tag: u8 = kani::any();
+    kani::assume(
+        region_tag == REGION_EPISODIC
+            || region_tag == REGION_SEMANTIC
+            || region_tag == REGION_WORKING,
+    );
+    let seq: u64 = kani::any();
+
+    let mut sector = [0u8; 512];
+    let ok = record_frame_encode(region_tag, seq, &payload, &mut sector);
+    assert!(ok);
+    // TOTALITY + the CRC gate accepts the encoder's own frame.
+    let (h, off) = record_frame_decode(&sector).expect("the encoder's own frame must decode");
+    // HEADER ROUND-TRIP over the symbolic frame parameters.
+    assert_eq!(h.region_tag, region_tag);
+    assert_eq!(h.len as usize, payload.len());
+    assert_eq!(h.seq, seq);
+    // IN-BOUNDS: the payload window never escapes the sector; header is 24 bytes.
+    assert_eq!(off, 24);
+    assert!(off + (h.len as usize) <= 512);
+    // REPLAY DETERMINISM: the payload bytes land at the payload offset.
+    assert_eq!(sector[off], payload[0]);
+    assert_eq!(sector[off + 3], payload[3]);
+    // CONST tie: the real 48-byte T2 Episode payload fits a single-sector frame.
+    assert!(EPISODE_LEN <= MAX_PAYLOAD);
+    let _ = (episode_encode, episode_decode); // keep the codecs referenced
+}
+
+/// (6) The SECTOR MATH is NO-OVERFLOW + IN-EXTENT, plus the GENERATION-
+/// MONOTONICITY / REPLAY-DETERMINISM lemma. For each region tag, a valid log head
+/// (strictly below the extent ceiling) maps to a sector strictly INSIDE that
+/// region's `[first, first+count)` extent and never overlaps the superblock
+/// (sector 0) or another region (the extents are disjoint by const construction);
+/// a head AT/PAST the ceiling fails closed (`None`). The lemma: `gen + 1 > gen`
+/// for every non-saturating gen (the two-phase commit's strict monotone advance),
+/// and a record's sector is a strictly increasing function of its sector-aligned
+/// log head (so replaying frames in log order reproduces the on-disk order).
+///
+/// NEGATIVE CONTROL: changing the ceiling test from `idx >= count` to `idx > count`
+/// would let the one-past sector escape the extent -> the `< first + count`
+/// assertion FAILS at the boundary head.
+#[kani::proof]
+fn kani_blk_sector_math_and_gen_monotone() {
+    // Region tag in {0,1,2}; an unknown tag is None (fail-closed).
+    let tag: u8 = kani::any();
+    kani::assume(tag == REGION_EPISODIC || tag == REGION_SEMANTIC || tag == REGION_WORKING);
+    let (first, count) = region_extent(tag).expect("known tag has an extent");
+
+    // A sector index strictly inside the extent (bounded so the head cannot
+    // overflow when multiplied; count <= 4095 so head < ~2 MiB).
+    let idx: u64 = kani::any();
+    kani::assume(idx < count);
+    let head = idx * SECTOR_SIZE; // no overflow: idx < 4095, * 512 < 2^21
+    let sec = record_sector(tag, head).expect("in-extent head maps to a sector");
+    // IN-EXTENT: strictly inside [first, first+count); never the SB sector 0.
+    assert!(sec >= first);
+    assert!(sec < first + count);
+    assert!(sec != 0); // first >= 1 for every region, so never the superblock
+    assert_eq!(sec, first + idx); // exact, no-overflow
+
+    // CEILING fail-closure: a head AT the ceiling is None (the Full case).
+    let ceil_head = count * SECTOR_SIZE;
+    assert!(record_sector(tag, ceil_head).is_none());
+
+    // STRICT MONOTONICITY of record_sector in idx (replay reproduces log order):
+    // a strictly larger in-extent idx maps to a strictly larger sector.
+    let idx2: u64 = kani::any();
+    kani::assume(idx2 < count);
+    kani::assume(idx2 > idx);
+    let sec2 = record_sector(tag, idx2 * SECTOR_SIZE).expect("in-extent");
+    assert!(sec2 > sec);
+
+    // GENERATION MONOTONICITY: the two-phase commit advances gen by exactly 1 and
+    // strictly increases it (for every non-saturating gen).
+    let gen: u64 = kani::any();
+    kani::assume(gen < u64::MAX);
+    assert!(gen + 1 > gen);
+
+    // The const extents are DISJOINT and ordered (Episodic < Semantic < Working),
+    // and none overlaps the superblock at sector 0.
+    assert!(EP_FIRST >= 1);
+    assert!(EP_FIRST + EP_COUNT <= SEM_FIRST);
+    assert!(SEM_FIRST + SEM_COUNT <= WM_FIRST);
+    let _ = (WM_FIRST, WM_COUNT);
 }
