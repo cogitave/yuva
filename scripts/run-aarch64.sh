@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M25: operator OK"
+MARKER="M26: exit-telemetry OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -298,6 +298,40 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M25 marker/witness carries a 'validated'/'evaluated' overclaim -- M25 surfaces + tamper-evidences a transcript, it does NOT validate any policy or prove a human replied (proposal §5 terminology discipline)" >&2
         exit 1
     fi
+    # M25 is no longer the top-level grep (M26 displaced it as the cumulative tail);
+    # assert it directly so the M25 -> M26 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M25: operator OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M25: operator OK' missing (M25 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M26 SOUNDNESS (anti-hollow-pass, the aL2.5/M20..M25 substring lesson): the
+    # 'M26: exit-telemetry OK' marker must be backed by the REAL telemetry round-trip --
+    # the exit vector is synthetic + in-RAM (a real EL2 exit producer drains here in
+    # M27+), so a skip is NEVER legitimate. Reject any '(no exits, skipped)' variant, and
+    # POSITIVELY require the witness line 'exittel: head=0x.. records=0x.. classes=0x..
+    # class-total=0x1 buckets-exact=0x1 fold-verified=0x1 tamper-caught=0x1
+    # signal=OBSERVATIONAL-NONCAUSAL' (so a marker printed WITHOUT running the
+    # classifier/histogram/fold/tamper verifier FAILS). class-total=1 AND buckets-exact=1
+    # AND fold-verified=1 AND tamper-caught=1 are required: every synthetic ESR must
+    # classify to a distinct in-range class, the recorded buckets/counts must be exact,
+    # the clean fold + inclusion must verify, and the injected tamper must be caught. The
+    # signal=OBSERVATIONAL-NONCAUSAL honesty token must be present so the marker cannot
+    # claim a causal state-signal (the telemetry is recorded, not learned-from).
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M26: exit-telemetry OK (no exits, skipped)'; then
+        echo "[run-aarch64] FAIL -- M26 ran in SKIP mode (no exits) -- the exit-telemetry verifier round-trip was NOT exercised (a skip is never legitimate here -- the exit vector is synthetic + in-RAM)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'exittel: head=0x[0-9a-fA-F]+ records=0x[0-9a-fA-F]+ classes=0x[0-9a-fA-F]+ class-total=0x0*1 buckets-exact=0x0*1 fold-verified=0x0*1 tamper-caught=0x0*1 signal=OBSERVATIONAL-NONCAUSAL'; then
+        echo "[run-aarch64] FAIL -- M26 marker present but the real round-trip witness 'exittel: head=.. records=.. classes=.. class-total=0x1 buckets-exact=0x1 fold-verified=0x1 tamper-caught=0x1 signal=OBSERVATIONAL-NONCAUSAL' was NOT seen (hollow M26 pass)" >&2
+        exit 1
+    fi
+    # TERMINOLOGY DISCIPLINE (proposal §5): M26 is PRODUCER-ONLY -- it RECORDS observational
+    # exit telemetry; it does NOT validate a causal state-signal and does NOT learn from the
+    # stream. Reject any 'validated'/'causal'/'learned' near the M26 marker/witness.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M26:|exittel:)' | grep -qE -- 'validated|causal|learned'; then
+        echo "[run-aarch64] FAIL -- M26 marker/witness carries a 'validated'/'causal'/'learned' overclaim -- M26 RECORDS observational exit telemetry, it does NOT validate a causal signal or learn from it (proposal §5 terminology discipline)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -411,7 +445,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

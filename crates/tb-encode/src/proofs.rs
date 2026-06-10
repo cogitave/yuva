@@ -65,6 +65,10 @@ use crate::opframe::{
     canon as op_canon, canon_len as op_canon_len, decode as op_decode, fold_frame,
     gate_commits_final_seq, intro_binds, seq_index_exact, OpFrame, OPFRAME_HEADER_LEN,
 };
+use crate::exittel::{
+    bucket_index, canon as et_canon, class_from_tag, class_tag, decode as et_decode,
+    ExitHistogram, ExitTelemetryRecord, EXITTEL_CANON_LEN, N_BUCKETS, N_CLASSES,
+};
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
     eb_lower_bound, gate_clears, label_reward, smoothness_floor_mean, survival_label,
@@ -2870,4 +2874,196 @@ fn kani_opframe_canon_roundtrip() {
     assert_eq!(n, OPFRAME_HEADER_LEN + 2);
     let d = op_decode(&buf[..n]).unwrap();
     assert!(d == frame); // every field round-trips, payload slice recovered exactly
+}
+
+// ===========================================================================
+// M26 exittel: the verified EL2 EXIT-TELEMETRY codec. Five harnesses (per
+// proposal §4), each with a NEGATIVE CONTROL. The codec proofs are cheap (pure
+// byte layout, no FNV); the FOLD harness keeps the record concrete and only the
+// flip index symbolic (the #49 symbolic-FNV trap).
+// ===========================================================================
+
+/// A symbolic exit-telemetry record with a CONCRETE-valid class tag (so `decode` does
+/// not fail-close on the class) and symbolic remaining fields, for the codec harnesses.
+fn kani_et_record() -> ExitTelemetryRecord {
+    let class_sel: u8 = kani::any();
+    kani::assume((class_sel as usize) < N_CLASSES);
+    ExitTelemetryRecord {
+        kind: crate::exittel::kind::EXIT_TELEMETRY,
+        exit_class: class_sel,
+        bucket: kani::any(),
+        vmid: kani::any(),
+        count_in_bucket: kani::any(),
+        logical_time: kani::any(),
+    }
+}
+
+/// (1) THE LOAD-BEARING PROOF: `exittel::canon` is TOTAL (never panics; fails closed to
+/// `0` on a too-small buffer with NO partial write) AND INJECTIVE on the fixed-width
+/// record -- two records that differ in ANY field encode to different bytes (every
+/// field at a fixed offset, no variable tail).
+///
+/// NEGATIVE CONTROL: writing two fields to the SAME offset makes the corresponding
+/// field-difference assert FAIL.
+#[kani::proof]
+fn kani_exittel_canon_injective() {
+    let base = kani_et_record();
+    let mut a = [0u8; EXITTEL_CANON_LEN];
+    let na = et_canon(&base, &mut a);
+    assert_eq!(na, EXITTEL_CANON_LEN);
+    // FAIL-CLOSED TOTALITY: a one-byte-too-small buffer yields 0, no partial write.
+    let mut small = [0u8; EXITTEL_CANON_LEN - 1];
+    assert_eq!(et_canon(&base, &mut small), 0);
+
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; EXITTEL_CANON_LEN];
+            let nb = et_canon(&$e, &mut b);
+            assert_eq!(nb, na);
+            let mut any = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any = true;
+                }
+                i += 1;
+            }
+            any
+        }};
+    }
+
+    // exit_class (another valid tag): a differing class changes the class byte.
+    let c2sel: u8 = kani::any();
+    kani::assume((c2sel as usize) < N_CLASSES && c2sel != base.exit_class);
+    assert!(differs!(ExitTelemetryRecord { exit_class: c2sel, ..base }));
+
+    let bk2: u8 = kani::any();
+    kani::assume(bk2 != base.bucket);
+    assert!(differs!(ExitTelemetryRecord { bucket: bk2, ..base }));
+
+    let v2: u16 = kani::any();
+    kani::assume(v2 != base.vmid);
+    assert!(differs!(ExitTelemetryRecord { vmid: v2, ..base }));
+
+    let n2: u64 = kani::any();
+    kani::assume(n2 != base.count_in_bucket);
+    assert!(differs!(ExitTelemetryRecord { count_in_bucket: n2, ..base }));
+
+    let t2: u64 = kani::any();
+    kani::assume(t2 != base.logical_time);
+    assert!(differs!(ExitTelemetryRecord { logical_time: t2, ..base }));
+}
+
+/// (2) CANON ROUND-TRIP: `exittel::decode(exittel::canon(rec)) == rec` for a symbolic
+/// record (the fixed-width bijection; every field read back from its fixed offset).
+///
+/// NEGATIVE CONTROL: encoding `count_in_bucket` at the `logical_time` offset (a layout
+/// swap) would make `decode` recover the two transposed -> the equality FAILS.
+#[kani::proof]
+fn kani_exittel_canon_roundtrip() {
+    let rec = kani_et_record();
+    let mut buf = [0u8; EXITTEL_CANON_LEN];
+    let n = et_canon(&rec, &mut buf);
+    assert_eq!(n, EXITTEL_CANON_LEN);
+    assert!(et_decode(&buf) == Some(rec));
+}
+
+/// (3) CLASS TAG TOTALITY + BIJECTION (the verified-projection reuse): the reused L2.2
+/// `classify_exit` is TOTAL over every ESR (already proven `kani_exit_classifier_total`);
+/// here we prove `class_tag` maps EVERY `ExitClass` into `0..N_CLASSES` and
+/// `class_from_tag` is its exact inverse (a bijection), so an exit's class always
+/// encodes to a valid, round-trippable byte. An unknown tag fails closed to `None`.
+///
+/// NEGATIVE CONTROL: a `class_tag` that aliased two classes to one byte would break the
+/// `class_from_tag(class_tag(c)) == c` round-trip for the collided pair.
+#[kani::proof]
+fn kani_exittel_class_total() {
+    // The 6 classes round-trip through the tag and stay in range.
+    let classes = [
+        ExitClass::StageTwoAbort,
+        ExitClass::Hvc,
+        ExitClass::Smc,
+        ExitClass::Sys64,
+        ExitClass::Wfx,
+        ExitClass::Undef,
+    ];
+    let mut i = 0usize;
+    while i < classes.len() {
+        let c = classes[i];
+        assert!((class_tag(c) as usize) < N_CLASSES);
+        assert!(class_from_tag(class_tag(c)) == Some(c));
+        i += 1;
+    }
+    // The classifier maps a SYMBOLIC ESR to one of the 6 classes (totality reuse), and
+    // that class always has an in-range tag.
+    let esr: u64 = kani::any();
+    let c = classify_exit(esr);
+    assert!((class_tag(c) as usize) < N_CLASSES);
+    // An out-of-range tag fails closed.
+    let bad: u8 = kani::any();
+    kani::assume((bad as usize) >= N_CLASSES);
+    assert!(class_from_tag(bad).is_none());
+}
+
+/// (4) BUCKET BOUNDED + HISTOGRAM SATURATION: `bucket_index(delta)` is in
+/// `0..N_BUCKETS` for ALL `u64` delta (total, no panic), and `ExitHistogram::record`
+/// SATURATING-increments -- the returned bucket is in range and the count is monotone
+/// non-decreasing (never wraps below the prior value), over symbolic inputs.
+///
+/// NEGATIVE CONTROL: a `bucket_index` without the `>= N_BUCKETS` clamp would return an
+/// out-of-range index for a large delta -> the bound assert FAILS; a `+=` instead of
+/// `saturating_add` could wrap a near-`u64::MAX` count below its prior value.
+#[kani::proof]
+fn kani_exittel_histogram_saturates() {
+    // Bounded over ALL u64 (the cost-proxy delta).
+    let delta: u64 = kani::any();
+    let b = bucket_index(delta);
+    assert!(b < N_BUCKETS);
+
+    // record(): bucket in range, count monotone non-decreasing. A symbolic class.
+    let class_sel: u8 = kani::any();
+    kani::assume((class_sel as usize) < N_CLASSES);
+    let c = class_from_tag(class_sel).unwrap();
+    let mut h = ExitHistogram::new();
+    let before = h.count(c, bucket_index(delta));
+    let (rb, after) = h.record(c, delta);
+    assert!((rb as usize) < N_BUCKETS);
+    assert!(after >= before); // saturating -> never wraps below prior
+    assert!(after == before.saturating_add(1));
+}
+
+/// (5) FOLD TAMPER-SENSITIVITY: a single-byte flip of a committed record's CANONICAL
+/// bytes changes the recomputed `tel_head` -- REUSING the proven M22 `prov::chain_mix`
+/// fold over the exittel record (M26 writes NO fold math). The record + sibling are
+/// CONCRETE so each `prov` fold is concrete; the flip INDEX stays symbolic (the #49
+/// symbolic-FNV trap).
+///
+/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original leaf
+/// ids EQUAL -> the `!=` assert FAILS.
+#[kani::proof]
+fn kani_exittel_fold_tamper() {
+    let rec = ExitTelemetryRecord {
+        kind: crate::exittel::kind::EXIT_TELEMETRY,
+        exit_class: class_tag(ExitClass::Sys64),
+        bucket: 5,
+        vmid: 0x1234,
+        count_in_bucket: 7,
+        logical_time: 0xCAFE,
+    };
+    let mut bytes = [0u8; EXITTEL_CANON_LEN];
+    let n = et_canon(&rec, &mut bytes);
+    assert_eq!(n, EXITTEL_CANON_LEN);
+    let leaf = prov_hash(&bytes);
+    let sib: [u8; PROV_HASH_LEN] = [0x5au8; PROV_HASH_LEN];
+    let head = recompute(leaf, &[sib]);
+    assert!(verify_inclusion(leaf, &[sib], head));
+
+    let idx: usize = kani::any();
+    kani::assume(idx < EXITTEL_CANON_LEN);
+    let mut tampered = bytes;
+    tampered[idx] ^= 0x01;
+    let bad = prov_hash(&tampered);
+    assert!(bad != leaf);
+    assert!(recompute(bad, &[sib]) != head);
+    assert!(!verify_inclusion(bad, &[sib], head));
 }

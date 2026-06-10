@@ -152,8 +152,23 @@ set -euo pipefail
 # committed final seq is rejected -- the Ma-Tsudik FssAgg fix); kani_opframe_canon_roundtrip --
 # opframe::decode(opframe::canon(frame)) == frame (every header field read back from its fixed
 # offset, the payload slice recovered via the length prefix).
+# + M26 exittel verified EL2 EXIT-TELEMETRY leaf x5: kani_exittel_canon_injective -- THE
+# LOAD-BEARING proof: the fixed-WIDTH exittel::canon is TOTAL (fails closed to 0 on a too-small
+# buffer, no partial write) AND INJECTIVE (a distinct exit_class/bucket/vmid/count/logical_time
+# encodes to distinct bytes -- every field at a FIXED offset); kani_exittel_canon_roundtrip --
+# exittel::decode(exittel::canon(rec)) == rec (the fixed-width bijection); kani_exittel_class_total
+# -- the reused L2.2 classify_exit is TOTAL over every ESR, class_tag maps EVERY ExitClass into
+# 0..N_CLASSES and class_from_tag is its exact inverse (a bijection -> an exit's class always
+# encodes to a valid round-trippable byte), an out-of-range tag fails closed;
+# kani_exittel_histogram_saturates -- bucket_index(delta) is in 0..N_BUCKETS for ALL u64 (no panic,
+# the OTel log2 idea no-float) AND ExitHistogram::record SATURATING-increments (bucket in range +
+# count monotone non-decreasing, never wraps); kani_exittel_fold_tamper -- a single-byte flip of a
+# committed record's canonical bytes changes the recomputed tel_head, REUSING the proven M22
+# prov::chain_mix fold (a SYMBOLIC flip index, concrete record/sibling so the FNV fold stays
+# concrete). PRODUCER-ONLY: the telemetry is recorded + folded, never fed to a policy (the
+# confounding loop is structurally avoided; signal=OBSERVATIONAL-NONCAUSAL).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=64
+EXPECTED_HARNESSES=69
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

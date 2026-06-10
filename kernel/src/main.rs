@@ -4220,6 +4220,84 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M25: operator OK\n");
     }
 
+    // ---- M26: verified EL2 EXIT-TELEMETRY producer (the OS records its workload) -
+    // The learning pillar's SECOND experience producer. The aarch64 EL2 (nVHE) monitor
+    // ALREADY demuxes every guest exit by ESR_EL2.EC (the Kani-proven L2.2
+    // el2_trap::classify_exit); M26 turns that demux into a BOUNDED, fixed-point,
+    // injective TELEMETRY record -- each exit becomes {exit-class, a saturating log2
+    // cost-proxy bucket, the cell count, logical time, vmid} folded into a per-instance
+    // `tel_head` via the M22 prov fold REUSED verbatim. So the OS *records* its own
+    // virtualization workload, a richer experience source next to the M17 forget/recall
+    // decisions. The boot self-test feeds a FIXED synthetic ESR vector (one of each
+    // class) through the demux and proves class-totality (six distinct classes, in-range
+    // tags), bucket-exactness (each recorded bucket == an independent bucket_index), the
+    // clean fold + a genuine inclusion proof, and a single-byte tamper rejection. ALL
+    // value computation is the host-verifiable, Kani-proven `tb_encode::exittel` (no_std,
+    // forbid(unsafe), NO float; it REUSES the el2_trap classifier + the M22 prov fold
+    // verbatim); this kernel stays zero-unsafe and only branches on the returned
+    // `ExitTelemetryProof` bools. HONEST: PRODUCER-ONLY -- the telemetry is recorded +
+    // folded, NEVER fed to a policy whose decisions change the future exit distribution
+    // (the confounding loop the M24 adversary named is structurally avoided); the
+    // `tel_head` is SEPARATE from the M23 `xp_head`, so M22/M23 + M20's two-phase commit
+    // stay byte-identical. The token `signal=OBSERVATIONAL-NONCAUSAL` is machine-emitted
+    // so the marker mechanically cannot claim a causal state-signal. DoD: "M26:
+    // exit-telemetry OK".
+    {
+        let et = tb_hal::exittel_selftest();
+        // FAIL-CLOSED: every synthetic ESR must classify to an in-range, distinct class
+        // AND the recorded buckets/counts must be exact AND the clean fold + inclusion
+        // proof must verify AND the injected tamper must be caught. Any false withholds
+        // the marker (renders a FAIL line with NO 'exit-telemetry OK' substring) and
+        // exits red NOW (the #65 fail-closed idiom).
+        if !et.class_total
+            || !et.buckets_exact
+            || !et.clean_ok
+            || !et.inclusion_ok
+            || !et.tamper_caught
+        {
+            tb_hal::serial_write_str("M26: exit-telemetry FAIL class-total=");
+            write_hex_u64(et.class_total as u64);
+            tb_hal::serial_write_str(" buckets-exact=");
+            write_hex_u64(et.buckets_exact as u64);
+            tb_hal::serial_write_str(" clean=");
+            write_hex_u64(et.clean_ok as u64);
+            tb_hal::serial_write_str(" inclusion=");
+            write_hex_u64(et.inclusion_ok as u64);
+            tb_hal::serial_write_str(" tamper-caught=");
+            write_hex_u64(et.tamper_caught as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the run-
+        // scripts positively require): the classifier-reuse + histogram + fold + tamper
+        // verifiers provably RAN at boot over a synthetic exit vector. `signal=
+        // OBSERVATIONAL-NONCAUSAL` is a LITERAL honesty token -- the marker mechanically
+        // cannot claim the telemetry is a validated causal state-signal (it is recorded,
+        // not learned-from; the confounding loop is not closed this milestone).
+        tb_hal::serial_write_str("exittel: head=");
+        write_hex_u64(et.head);
+        tb_hal::serial_write_str(" records=");
+        write_hex_u64(et.records);
+        tb_hal::serial_write_str(" classes=");
+        write_hex_u64(et.classes);
+        tb_hal::serial_write_str(" class-total=");
+        write_hex_u64(et.class_total as u64);
+        tb_hal::serial_write_str(" buckets-exact=");
+        write_hex_u64(et.buckets_exact as u64);
+        tb_hal::serial_write_str(" fold-verified=");
+        write_hex_u64((et.clean_ok && et.inclusion_ok) as u64);
+        tb_hal::serial_write_str(" tamper-caught=");
+        write_hex_u64(et.tamper_caught as u64);
+        tb_hal::serial_write_str(" signal=OBSERVATIONAL-NONCAUSAL\n");
+        // The marker -- emitted ONLY when class-totality holds, the buckets are exact,
+        // the clean fold + inclusion verify, AND the injected tamper was caught. The
+        // telemetry is IN-RAM + synthetic (a real EL2 exit producer drains here in M27+),
+        // so there is NO '(no exits, skipped)' variant -- a skip is never legitimate. The
+        // marker uses ONLY recorded / observational terminology (no validated/causal/
+        // learned -- the PRODUCER-only honesty discipline).
+        tb_hal::serial_write_str("M26: exit-telemetry OK\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();

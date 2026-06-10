@@ -3595,3 +3595,62 @@ pub struct OpframeProof {
 pub fn opframe_selftest() -> OpframeProof {
     mem::opframe_selftest()
 }
+
+// ===========================================================================
+// M26: the verified EL2 EXIT-TELEMETRY producer self-test facade. The learning
+// pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux
+// (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a bounded,
+// no-float, injective TELEMETRY record folded into a per-instance `tel_head` via
+// the M22 fold reused verbatim -- the OS *records* its own virtualization
+// workload. The math is the Kani-proven `tb_encode::exittel`; the verdict is a
+// pure-data struct the `#![forbid(unsafe_code)]` kernel matches on. PRODUCER-ONLY:
+// the telemetry is recorded + folded, NEVER fed to a policy whose decisions change
+// the future exit distribution (the confounding loop the M24 adversary named is
+// structurally avoided), and the `tel_head` is SEPARATE from the M23 `xp_head`
+// (zero regression). The marker emits `signal=OBSERVATIONAL-NONCAUSAL` so it
+// cannot claim a causal state-signal.
+// ===========================================================================
+
+/// M26 exit-telemetry self-test outcome (returned to the kernel for marker rendering).
+/// A closed, pure-data verdict -- mirroring [`ExpProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitTelemetryProof {
+    /// CLASS-TOTALITY: every synthetic ESR mapped to an in-range class tag AND the six
+    /// synthetic exits hit six DISTINCT classes (the reused classifier distinguished
+    /// them). The kernel requires this (rendered `class-total=1`).
+    pub class_total: bool,
+    /// BUCKETS-EXACT: each recorded bucket equals an independent `bucket_index` of the
+    /// cost-proxy delta AND the per-`(class, bucket)` cell count is exact. The kernel
+    /// requires this (rendered `buckets-exact=1`).
+    pub buckets_exact: bool,
+    /// CLEAN: independently re-folding the committed record ids equals the running
+    /// `tel_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for the first committed record verified against the
+    /// clean `tel_head`. The kernel requires this (folded into `fold-verified=1`).
+    pub inclusion_ok: bool,
+    /// A single-byte tamper of a committed record's canonical bytes was caught on BOTH
+    /// legs (head-mismatch AND inclusion-fail). The kernel requires this (rendered
+    /// `tamper-caught=1`) -- the structural tamper-evidence claim.
+    pub tamper_caught: bool,
+    /// The number of DISTINCT exit classes observed (6 on the synthetic vector),
+    /// rendered as `classes=<m>`.
+    pub classes: u64,
+    /// A u64 WITNESS folded from the 32-byte committed `tel_head`, rendered as
+    /// `head=<hex16>`.
+    pub head: u64,
+    /// The number of committed telemetry records (6), rendered as `records=<n>`.
+    pub records: u64,
+}
+
+/// M26: feed a fixed synthetic ESR_EL2 vector through the reused L2.2 exit classifier,
+/// count each exit into a bounded no-float histogram, fold each as an injective
+/// telemetry record into a per-instance `tel_head` (the M22 fold reused), and verify
+/// class-totality + bucket-exactness + the clean fold + a genuine inclusion proof + a
+/// single-byte tamper rejection. See [`ExitTelemetryProof`]. Pure value computation
+/// over the Kani-proven `tb_encode::exittel` leaf; touches NO device, NO scheduler.
+/// PRODUCER-ONLY (the telemetry is recorded + folded, not fed to any policy) and the
+/// `tel_head` is SEPARATE from the M23 `xp_head` (zero regression).
+pub fn exittel_selftest() -> ExitTelemetryProof {
+    mem::exittel_selftest()
+}

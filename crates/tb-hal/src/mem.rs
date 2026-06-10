@@ -1579,6 +1579,157 @@ pub(crate) fn opframe_selftest() -> crate::OpframeProof {
     }
 }
 
+// --- M26: the verified EL2 exit-telemetry producer self-test (the marker body) -
+
+/// M26: feed a fixed synthetic ESR_EL2 vector (one of each [`ExitClass`]) through the
+/// REUSED L2.2 [`tb_encode::el2_trap::classify_exit`] demux, COUNT each exit into a
+/// bounded no-float [`tb_encode::exittel::ExitHistogram`], record each as an injective
+/// [`tb_encode::exittel::ExitTelemetryRecord`] folded into a per-instance `tel_head`
+/// (the M22 fold REUSED verbatim), and report the outcome to the kernel as a pure-data
+/// [`crate::ExitTelemetryProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::exittel` leaf.
+///
+/// It proves: (a) CLASS-TOTALITY -- every synthetic ESR maps to an in-range class tag
+/// AND the six synthetic exits hit six DISTINCT classes (the classifier distinguishes
+/// them); (b) BUCKETS-EXACT -- each recorded bucket equals an independent
+/// [`tb_encode::exittel::bucket_index`] of the cost-proxy delta AND the per-`(class,
+/// bucket)` cell count is exact; (c) CLEAN -- the independently re-folded committed
+/// record ids equal the running `tel_head` + a genuine inclusion proof verifies; (d)
+/// TAMPER -- a single-byte flip of a committed record's canonical bytes is caught (head-
+/// mismatch AND inclusion-fail). The marker is withheld unless every leg holds. HONEST:
+/// PRODUCER-ONLY -- the telemetry is recorded + folded, NEVER fed to a policy whose
+/// decisions change the future exit distribution (the confounding loop the M24 adversary
+/// named is structurally avoided); the `tel_head` is SEPARATE from the M23 `xp_head`
+/// (zero regression). The witness token `signal=OBSERVATIONAL-NONCAUSAL` is machine-
+/// emitted so the marker cannot claim a causal state-signal.
+pub(crate) fn exittel_selftest() -> crate::ExitTelemetryProof {
+    use tb_encode::el2_trap::{EC_DABT_LOW, EC_HVC64, EC_SMC64, EC_SYS64, EC_WFX};
+    use tb_encode::exittel::{
+        self, bucket_index, canon as et_canon, class_tag, classify_exit, tel_chain_mix,
+        tel_head_witness, tel_hash, tel_recompute, tel_verify_inclusion, ExitHistogram,
+        ExitTelemetryRecord, EXITTEL_CANON_LEN, PROV_HASH_LEN,
+    };
+
+    let fail = |head: u64, records: u64| crate::ExitTelemetryProof {
+        class_total: false,
+        buckets_exact: false,
+        clean_ok: false,
+        inclusion_ok: false,
+        tamper_caught: false,
+        classes: 0,
+        head,
+        records,
+    };
+
+    // Six synthetic exits: (ESR_EL2 with the EC in [31:26], cost-proxy delta). The
+    // deltas are chosen so the log2 buckets vary + are predictable (the bucket of
+    // 2^k is k). EC<<26 places the EC in the ESR_EL2.EC field the classifier reads.
+    let exits: [u64; 6] = [
+        EC_DABT_LOW << 26, // StageTwoAbort
+        EC_HVC64 << 26,    // Hvc
+        EC_SMC64 << 26,    // Smc
+        EC_SYS64 << 26,    // Sys64
+        EC_WFX << 26,      // Wfx
+        0x07u64 << 26,     // Undef (FP/SIMD EC 0x07 -> the fail-closed default)
+    ];
+    let deltas: [u64; 6] = [1, 4, 16, 64, 256, 1024]; // buckets 0,2,4,6,8,10
+
+    let mut hist = ExitHistogram::new();
+    let mut tel_head = [0u8; PROV_HASH_LEN];
+    let mut ids: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = alloc::vec::Vec::new();
+    let mut rows: alloc::vec::Vec<[u8; EXITTEL_CANON_LEN]> = alloc::vec::Vec::new();
+    let mut scratch = [0u8; EXITTEL_CANON_LEN + 8];
+    let mut class_total = true;
+    let mut buckets_exact = true;
+    let mut seen_classes: u32 = 0; // a bitmask of distinct class tags observed
+
+    let mut i = 0usize;
+    while i < 6 {
+        let esr = exits[i];
+        let delta = deltas[i];
+        let c = classify_exit(esr); // the REUSED, Kani-proven-total classifier
+        let tag = class_tag(c);
+        if (tag as usize) >= tb_encode::exittel::N_CLASSES {
+            class_total = false;
+        }
+        seen_classes |= 1u32 << (tag as u32);
+
+        let (bucket, count) = hist.record(c, delta);
+        // BUCKETS-EXACT: the recorded bucket equals an independent bucket_index, and the
+        // cell count is exactly 1 (each synthetic class is seen once).
+        if (bucket as usize) != bucket_index(delta) {
+            buckets_exact = false;
+        }
+        if hist.count(c, bucket as usize) != 1 {
+            buckets_exact = false;
+        }
+
+        let rec = ExitTelemetryRecord {
+            kind: exittel::kind::EXIT_TELEMETRY,
+            exit_class: tag,
+            bucket,
+            vmid: 1,
+            count_in_bucket: count,
+            logical_time: i as u64,
+        };
+        let n = et_canon(&rec, &mut scratch);
+        if n == 0 {
+            return fail(0, 0);
+        }
+        let id = tel_hash(&scratch[..n]);
+        tel_head = tel_chain_mix(tel_head, id);
+        let mut row = [0u8; EXITTEL_CANON_LEN];
+        row.copy_from_slice(&scratch[..n]);
+        rows.push(row);
+        ids.push(id);
+        i += 1;
+    }
+
+    // CLASS-TOTALITY also requires the six synthetic exits hit six DISTINCT classes
+    // (the classifier provably distinguished StageTwoAbort/Hvc/Smc/Sys64/Wfx/Undef).
+    let distinct = seen_classes.count_ones() as u64;
+    if distinct != 6 {
+        class_total = false;
+    }
+
+    let records = ids.len() as u64;
+    if records != 6 {
+        return fail(tel_head_witness(tel_head), records);
+    }
+
+    // CLEAN + INCLUSION: independently re-fold the committed ids -> the running head.
+    let leaf = ids[0];
+    let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+    let clean_ok = tel_recompute(leaf, &siblings) == tel_head;
+    let inclusion_ok = tel_verify_inclusion(leaf, &siblings, tel_head);
+
+    // TAMPER: flip one byte of the FIRST committed record's canonical bytes; the re-hash
+    // must differ AND both the head recompute and the inclusion proof must REJECT.
+    let mut tamper_caught = false;
+    {
+        let leaf0 = tel_hash(&rows[0]);
+        if leaf0 == ids[0] {
+            let mut tampered = rows[0];
+            tampered[5] ^= 0x01; // perturb the count_in_bucket low byte (a real field)
+            let bad = tel_hash(&tampered);
+            tamper_caught = bad != ids[0]
+                && tel_recompute(bad, &siblings) != tel_head
+                && !tel_verify_inclusion(bad, &siblings, tel_head);
+        }
+    }
+
+    crate::ExitTelemetryProof {
+        class_total,
+        buckets_exact,
+        clean_ok,
+        inclusion_ok,
+        tamper_caught,
+        classes: distinct,
+        head: tel_head_witness(tel_head),
+        records,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.
