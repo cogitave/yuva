@@ -3310,3 +3310,55 @@ pub struct KanProof {
 pub fn kan_selftest() -> KanProof {
     mem::kan_selftest()
 }
+
+// ===========================================================================
+// M22: verified memory-PROVENANCE-LEDGER self-test facade. A per-agent, append-
+// only, content-addressed HASH-CHAIN ledger over the M13 substrate: every memory
+// mutation (write / forget-tombstone / skill-admit) appends a typed entry whose
+// 256-bit STRUCTURAL digest folds into a running `chain_head`. The boot self-test
+// writes N>=3 real records, demotes one through the REAL M17 forget_sweep (a
+// provable tombstone), builds a genuine inclusion proof, then flips ONE byte of a
+// COMMITTED entry's canonical bytes and proves the head + inclusion proof BOTH
+// catch it. The math is the Kani-proven `tb_encode::prov`; the verdict is a pure-
+// data struct the `#![forbid(unsafe_code)]` kernel matches on (mirroring
+// [`KanProof`]). STRUCTURAL tamper-evidence only -- NOT cryptographic (proposal
+// §2): a crypto hash + signed root is a tracked successor. The head is kept IN-RAM
+// this milestone (it does NOT ride the M20 superblock), so the M20 two-phase
+// commit + persist_selftest gen-continuity stay byte-identical (zero M20/M21
+// regression).
+// ===========================================================================
+
+/// M22 provenance-ledger self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`KanProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProvProof {
+    /// The CLEAN ledger verified: the independently re-folded committed entry ids
+    /// equal the running `chain_head` AND the tamper-leg's committed entry was
+    /// faithfully reconstructed (`prov_hash(canon) == committed id`). The kernel
+    /// requires this (a false here withholds the marker).
+    pub clean_ok: bool,
+    /// A single-byte tamper of a COMMITTED entry's canonical bytes was caught on
+    /// BOTH legs: the recomputed head MISMATCHED the committed head AND the
+    /// tampered entry's inclusion proof FAILED. The kernel requires this -- it is
+    /// the load-bearing tamper-evidence claim.
+    pub tamper_caught: bool,
+    /// A genuine inclusion proof for a known committed entry verified `== true`
+    /// against the clean head. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// A u64 WITNESS folded from the 32-byte committed head (every head byte
+    /// contributes), rendered as `head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of committed ledger entries after the round-trip (the N writes
+    /// plus any tombstone), rendered as `entries=<n>`.
+    pub entries: u64,
+}
+
+/// M22: run the provenance-ledger round-trip self-test (both arches) and report
+/// the outcome. See [`ProvProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::prov` leaf and the real `mem::MemSubstrate` mutation path -- writes
+/// N>=3 real records, demotes one via the real M17 forget_sweep (a tombstone),
+/// builds a genuine inclusion proof, and injects a single-byte tamper into a
+/// committed entry's canonical bytes; touches NO device and NO scheduler.
+pub fn prov_selftest() -> ProvProof {
+    mem::prov_selftest()
+}

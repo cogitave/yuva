@@ -58,7 +58,24 @@ set -euo pipefail
 # reproducible (no float on the path); kani_kan_envelope_no_widening -- the
 # heuristic pin verdict (IMP_PIN/UTIL_PIN/MIN_AGE) is INVARIANT under every
 # kan_score value (the safety seam keeps the policy strictly downstream of the
-# gate, can rank WITHIN the safe set but never widen it) + M20 blkfmt
+# gate, can rank WITHIN the safe set but never widen it) + M22 prov verified
+# memory-PROVENANCE-LEDGER leaf x6: kani_prov_canon_injective -- THE LOAD-BEARING
+# proof: canon is TOTAL (fails closed to 0 on a too-small buffer, no partial write)
+# AND INJECTIVE (a distinct kind/tier/payload_tok/writer_cap_id/t_created/parent-
+# count encodes to distinct bytes -- the length-prefixed parent list is the
+# disambiguator); kani_prov_hash_total -- prov_hash is TOTAL/no-overflow (wrapping
+# FNV) + deterministic + full 32-byte width over a bounded symbolic buffer;
+# kani_prov_chain_mix_tamper -- the fold is TAMPER-SENSITIVE: flipping the bit at a
+# symbolic index of entry_id (or head) changes chain_mix (the head folds every
+# byte; an identity/constant fold fails it); kani_prov_inclusion_sound -- verify_
+# inclusion is SOUND (accept IFF recompute(leaf,siblings)==head) and a single-byte
+# tamper of the leaf/sibling/head is REJECTED (siblings are load-bearing -- a
+# verifier that ignored them accepts a forgery and fails the harness); kani_prov_
+# canon_roundtrip -- the canonical scalar fields read back from their FIXED offsets
+# via independent LE shifts (the blkfmt round-trip pattern); kani_prov_head_
+# deterministic -- the same entry sequence folds to the same head bit-for-bit AND
+# the fold is ORDER-SENSITIVE (a swapped chain yields a different head, so a
+# reordered ledger is caught -- a commutative XOR fold fails it) + M20 blkfmt
 # durable-persistence codecs x6: blk_req_header_roundtrip
 # -- the 16-byte virtio-blk request header {le32 type, le32 reserved, le64 sector}
 # round-trips + T_IN/T_OUT/T_FLUSH are well-formed; blk_superblock_identity -- the
@@ -76,7 +93,7 @@ set -euo pipefail
 # fails closed (Full), record_sector is strictly monotone in the log head (replay
 # reproduces on-disk order), and gen+1 strictly increases (the two-phase commit).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=40
+EXPECTED_HARNESSES=46
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

@@ -53,6 +53,10 @@ use crate::smmuv3::{
     ste_vtcr, ste_vtcr_from_vtcr_el2, CMD_OP_CFGI_STE, CMD_OP_CMD_SYNC, CMD_OP_TLBI_S12_VMALL,
     STE_0_V, STE_2_S2AA64, STE_2_S2R, STE_2_VTCR_SHIFT, STE_3_S2TTB_MASK, STE_CFG_S2_TRANS,
 };
+use crate::prov::{
+    canon, canon_len, chain_mix, prov_hash, recompute, verify_inclusion, ProvEntry,
+    CANON_PREFIX_LEN, PROV_HASH_LEN,
+};
 use crate::paging::{
     entry_addr, ept_leaf_2mib, ept_nonleaf, eptp, level_index, make_entry, ENTRIES,
     ENTRY_ADDR_MASK, EPT_MAPS_PAGE, EPT_MEMTYPE_WB, EPT_RWX, EPT_WALK_LEN_MINUS_1, SHIFT_1G,
@@ -1515,4 +1519,313 @@ fn kani_kan_envelope_no_widening() {
     let pinned_b = is_pinned(importance, util, age);
     let _ = (score_a, score_b); // the scores exist but DO NOT feed the gate
     assert_eq!(pinned_a, pinned_b);
+}
+
+// ===========================================================================
+// M22 prov: the verified memory-PROVENANCE LEDGER leaf (the EXPECTED_HARNESSES
+// 40 -> 46 bump in verify-encode.sh). SIX harnesses, each with a REAL negative
+// control: (1) canon INJECTIVITY + TOTALITY -- the LOAD-BEARING proof (a distinct
+// entry encodes to distinct bytes; canon never panics + fails closed on a small
+// buffer); (2) prov_hash TOTALITY + no-overflow; (3) chain_mix TAMPER-SENSITIVITY
+// (the fold folds every input byte); (4) verify_inclusion SOUNDNESS (accept IFF
+// recompute==head; siblings are load-bearing); (5) canon round-trip (the canonical
+// bytes decode back to the entry's fields); (6) head-DETERMINISM (the same append
+// sequence folds to the same head bit-for-bit). Bounded symbolic inputs / small
+// fixed parent + sibling counts keep them in CBMC's decidable regime (the blkfmt /
+// kancell precedent: a fully-symbolic 32-byte-array FNV equality is the #49 state-
+// explosion trap, so the hash/fold harnesses use SMALL fixed-length symbolic
+// buffers and bounded byte-flip indices).
+// ===========================================================================
+
+/// (1) THE LOAD-BEARING PROOF (proposal §5.1): `canon` is TOTAL (never panics;
+/// fails closed to `0` on a too-small buffer with no partial write) AND INJECTIVE
+/// on the fixed entry struct -- two entries that differ in ANY field encode to
+/// DIFFERENT bytes. Proven field-by-field over symbolic scalars + a bounded parent
+/// count (0 or 1, the #49-safe small-array regime): a `kind`/`tier`/`payload_tok`/
+/// `writer_cap_id`/`t_created` difference lands at its FIXED offset, and a differing
+/// parent COUNT changes the `[26..34]` length-prefix (and the total length), so no
+/// two distinct entries can collide.
+///
+/// NEGATIVE CONTROL: dropping the `n_parents` length-prefix from `canon` would let
+/// a 0-parent entry whose trailing bytes happen to equal a 1-parent entry's parent
+/// alias it -> the count-difference half of this proof FAILS. Writing two scalars
+/// to the SAME offset (a layout bug) makes the corresponding field-difference
+/// assertion FAIL (a differing field no longer changes the bytes).
+#[kani::proof]
+fn kani_prov_canon_injective() {
+    // Symbolic scalar fields; a single bounded parent (count 0 or 1).
+    let kind: u8 = kani::any();
+    let tier: u8 = kani::any();
+    let payload_tok: u64 = kani::any();
+    let writer_cap_id: u64 = kani::any();
+    let t_created: u64 = kani::any();
+    let parent: [u8; PROV_HASH_LEN] = kani::any();
+
+    let p0: [[u8; PROV_HASH_LEN]; 1] = [parent];
+    let base = ProvEntry {
+        kind,
+        payload_tok,
+        tier,
+        writer_cap_id,
+        t_created,
+        parent_ids: &p0[..1], // one parent
+    };
+
+    // TOTALITY + a tight, large-enough buffer: canon writes exactly canon_len.
+    let mut a = [0u8; CANON_PREFIX_LEN + PROV_HASH_LEN];
+    let na = canon(&base, &mut a);
+    assert_eq!(na, canon_len(&base));
+    assert_eq!(na, CANON_PREFIX_LEN + PROV_HASH_LEN);
+
+    // FAIL-CLOSED TOTALITY: a one-byte-too-small buffer yields 0, no partial write.
+    let mut small = [0u8; CANON_PREFIX_LEN + PROV_HASH_LEN - 1];
+    assert_eq!(canon(&base, &mut small), 0);
+
+    // INJECTIVITY, field by field. Each variant differs from `base` in exactly one
+    // field; its encoding must differ from `a` somewhere. We compare the encodings
+    // by recomputing them into a fresh buffer and asserting inequality.
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; CANON_PREFIX_LEN + PROV_HASH_LEN];
+            let nb = canon(&$e, &mut b);
+            // Same parent count -> same length here; the difference is in the body.
+            assert_eq!(nb, na);
+            // At least one byte differs (injectivity).
+            let mut any_diff = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any_diff = true;
+                }
+                i += 1;
+            }
+            any_diff
+        }};
+    }
+
+    // kind: only differ when the symbolic kind actually changes.
+    let k2: u8 = kani::any();
+    kani::assume(k2 != kind);
+    assert!(differs!(ProvEntry { kind: k2, ..base }));
+
+    let t2: u8 = kani::any();
+    kani::assume(t2 != tier);
+    assert!(differs!(ProvEntry { tier: t2, ..base }));
+
+    let pt2: u64 = kani::any();
+    kani::assume(pt2 != payload_tok);
+    assert!(differs!(ProvEntry { payload_tok: pt2, ..base }));
+
+    let wc2: u64 = kani::any();
+    kani::assume(wc2 != writer_cap_id);
+    assert!(differs!(ProvEntry { writer_cap_id: wc2, ..base }));
+
+    let tc2: u64 = kani::any();
+    kani::assume(tc2 != t_created);
+    assert!(differs!(ProvEntry { t_created: tc2, ..base }));
+
+    // A DIFFERENT parent COUNT (0 vs 1): the length-prefix + total length differ,
+    // so the encodings are different lengths (the load-bearing length-prefix half).
+    let zero = ProvEntry {
+        parent_ids: &p0[..0],
+        ..base
+    };
+    let mut z = [0u8; CANON_PREFIX_LEN + PROV_HASH_LEN];
+    let nz = canon(&zero, &mut z);
+    assert_eq!(nz, CANON_PREFIX_LEN); // shorter than the 1-parent encoding
+    assert!(nz != na);
+}
+
+/// (2) `prov_hash` is TOTAL (panic / overflow / shift-overflow FREE -- wrapping
+/// FNV arithmetic) over a bounded-length symbolic buffer, returns exactly
+/// `PROV_HASH_LEN` bytes, and is DETERMINISTIC. The buffer is a small FIXED-LENGTH
+/// symbolic array (the #49 state-explosion lesson: a fully-symbolic long FNV is
+/// the documented trap; the totality is structural over the loop, so a short
+/// bound covers the no-panic property). Mirrors the existing `fnv1a64` harness.
+///
+/// NEGATIVE CONTROL: replacing a `wrapping_mul` with a checked `*` in `fnv1a64`
+/// (the lane primitive) would panic on overflow inside this harness, turning it
+/// RED -- the wrapping arithmetic is load-bearing for totality.
+#[kani::proof]
+fn kani_prov_hash_total() {
+    const N: usize = 6;
+    let data: [u8; N] = kani::any();
+    let h1 = prov_hash(&data);
+    let h2 = prov_hash(&data);
+    // DETERMINISTIC (no float, no nondeterminism) + the full 32-byte width.
+    assert_eq!(h1, h2);
+    assert_eq!(h1.len(), PROV_HASH_LEN);
+    // The empty input also hashes without panic (the len-0 loop edge).
+    let e = prov_hash(&[]);
+    assert_eq!(e.len(), PROV_HASH_LEN);
+}
+
+/// (3) `chain_mix` is TAMPER-SENSITIVE (proposal §5.3 fold non-degeneracy): for a
+/// symbolic `head` and `entry_id`, flipping the single bit at a symbolic byte
+/// index changes the fold output -- so the head is a function of EVERY entry-id
+/// byte (no degenerate fold can drop an entry). Also DETERMINISTIC. The byte index
+/// is bounded to `0..PROV_HASH_LEN`; the flip is a fixed `^ 0x01` (the bounded-
+/// nondeterminism regime).
+///
+/// NEGATIVE CONTROL: an identity/constant fold (`chain_mix(h, _) == h`, ignoring
+/// `entry_id`) would make the flipped-vs-original outputs EQUAL -> the `!=` assert
+/// FAILS. (Equivalently, a fold that XORed only entry_id[0] would pass byte 0 but
+/// FAIL for a flip at any other index.)
+#[kani::proof]
+fn kani_prov_chain_mix_tamper() {
+    let head: [u8; PROV_HASH_LEN] = kani::any();
+    let entry_id: [u8; PROV_HASH_LEN] = kani::any();
+    let base = chain_mix(head, entry_id);
+    // DETERMINISTIC.
+    assert_eq!(chain_mix(head, entry_id), base);
+
+    // Flip the bit at a symbolic index of entry_id: the fold output must change.
+    let idx: usize = kani::any();
+    kani::assume(idx < PROV_HASH_LEN);
+    let mut tampered = entry_id;
+    tampered[idx] ^= 0x01;
+    assert!(chain_mix(head, tampered) != base);
+
+    // Symmetrically, a flip in the HEAD also changes the fold (chained tamper).
+    let hidx: usize = kani::any();
+    kani::assume(hidx < PROV_HASH_LEN);
+    let mut htamper = head;
+    htamper[hidx] ^= 0x01;
+    assert!(chain_mix(htamper, entry_id) != base);
+}
+
+/// (4) `verify_inclusion` is SOUND (proposal §5.4): for a small fixed chain
+/// (leaf + ONE sibling), `verify_inclusion(leaf, sibs, head) == (recompute(leaf,
+/// sibs) == head)` for ALL symbolic inputs, and on the GENUINE head it accepts,
+/// while a single-byte tamper of the leaf, the sibling, OR the head drives it to
+/// `false`. The sibling count is fixed at 1 (the bounded-fold regime); the tamper
+/// index is a fixed byte. This exercises the REAL verifier fold, not a constant.
+///
+/// NEGATIVE CONTROL: a verifier that ignored `siblings` (e.g. `recompute(leaf)`
+/// only) would ACCEPT a forged proof whose sibling was replaced -> the
+/// "tampered sibling rejects" assert FAILS. The genuine `head` is computed by the
+/// SAME `recompute`, so the accept half is non-vacuous.
+#[kani::proof]
+fn kani_prov_inclusion_sound() {
+    let leaf: [u8; PROV_HASH_LEN] = kani::any();
+    let sib: [u8; PROV_HASH_LEN] = kani::any();
+    let sibs = [sib];
+
+    // The GENUINE committed head for (leaf, [sib]).
+    let head = recompute(leaf, &sibs);
+
+    // SOUNDNESS (the iff): verify == (recompute == head), over an ARBITRARY head.
+    let any_head: [u8; PROV_HASH_LEN] = kani::any();
+    assert_eq!(
+        verify_inclusion(leaf, &sibs, any_head),
+        recompute(leaf, &sibs) == any_head
+    );
+
+    // The genuine proof is ACCEPTED (non-vacuity).
+    assert!(verify_inclusion(leaf, &sibs, head));
+
+    // A single-byte tamper of the LEAF is REJECTED (the fold caught it). We assume
+    // the flip lands where it actually changes the recomputed value: chain_mix is
+    // tamper-sensitive (harness 3), so a real leaf change yields a different head.
+    let mut bad_leaf = leaf;
+    bad_leaf[0] ^= 0x01;
+    assert!(!verify_inclusion(bad_leaf, &sibs, head));
+
+    // A single-byte tamper of the SIBLING is REJECTED (siblings are load-bearing).
+    let mut bad_sib = sib;
+    bad_sib[0] ^= 0x01;
+    assert!(!verify_inclusion(leaf, &[bad_sib], head));
+
+    // A single-byte tamper of the HEAD is REJECTED.
+    let mut bad_head = head;
+    bad_head[0] ^= 0x01;
+    assert!(!verify_inclusion(leaf, &sibs, bad_head));
+}
+
+/// (5) CANONICAL ROUND-TRIP (proposal §5.5): `canon` lays the scalar fields out at
+/// their documented FIXED offsets, so reading them back via INDEPENDENT LE
+/// shifts (NOT through `canon`) recovers the entry -- the `blkfmt` round-trip
+/// pattern. Symbolic scalars + a bounded single parent; the parent bytes land
+/// verbatim after the length-prefix. (There is no `decode` fn -- the entry is a
+/// borrow-bearing struct -- so the round-trip is asserted as a field-by-field
+/// offset read, which is the same injectivity witness in the other direction.)
+///
+/// NEGATIVE CONTROL: encoding `t_created` at the `writer_cap_id` offset (a layout
+/// swap) would make the independent `[18..26]` read recover `writer_cap_id`, not
+/// `t_created` -> the `t_created` readback assert FAILS.
+#[kani::proof]
+fn kani_prov_canon_roundtrip() {
+    let kind: u8 = kani::any();
+    let tier: u8 = kani::any();
+    let payload_tok: u64 = kani::any();
+    let writer_cap_id: u64 = kani::any();
+    let t_created: u64 = kani::any();
+    let parent: [u8; PROV_HASH_LEN] = kani::any();
+    let parents = [parent];
+    let e = ProvEntry {
+        kind,
+        payload_tok,
+        tier,
+        writer_cap_id,
+        t_created,
+        parent_ids: &parents[..1],
+    };
+    let mut buf = [0u8; CANON_PREFIX_LEN + PROV_HASH_LEN];
+    let n = canon(&e, &mut buf);
+    assert_eq!(n, CANON_PREFIX_LEN + PROV_HASH_LEN);
+
+    // INDEPENDENT offset reads (the literal layout, never via canon).
+    assert_eq!(buf[0], kind);
+    assert_eq!(buf[1], tier);
+    let rd = |o: usize| {
+        u64::from_le_bytes([
+            buf[o],
+            buf[o + 1],
+            buf[o + 2],
+            buf[o + 3],
+            buf[o + 4],
+            buf[o + 5],
+            buf[o + 6],
+            buf[o + 7],
+        ])
+    };
+    assert_eq!(rd(2), payload_tok);
+    assert_eq!(rd(10), writer_cap_id);
+    assert_eq!(rd(18), t_created);
+    assert_eq!(rd(26), 1); // the length-prefix == parent count
+                           // The parent bytes land verbatim after the 34-byte prefix.
+    let mut b = 0usize;
+    while b < PROV_HASH_LEN {
+        assert_eq!(buf[CANON_PREFIX_LEN + b], parent[b]);
+        b += 1;
+    }
+}
+
+/// (6) HEAD-DETERMINISM (proposal §5.6): the SAME entry sequence folds to the SAME
+/// head bit-for-bit (no float, no platform dependence -- the reproducibility
+/// guarantee the persisted/replayed head relies on). Two independent recomputes of
+/// the same (leaf, siblings) chain are equal; AND the fold is ORDER-SENSITIVE --
+/// swapping two distinct entries yields a different head (so a reordered ledger is
+/// caught, not silently accepted). One symbolic sibling keeps it in the bounded
+/// regime.
+///
+/// NEGATIVE CONTROL: any nondeterminism in `chain_mix`/`prov_hash` (a `kani::any`
+/// redraw, a float intermediate) makes the two recomputes disagree -> the equality
+/// FAILS. A COMMUTATIVE fold (e.g. XOR-only) would make the swapped chain equal the
+/// original -> the order-sensitivity `!=` FAILS (proving the chain is a sequence,
+/// not a set).
+#[kani::proof]
+fn kani_prov_head_deterministic() {
+    let a: [u8; PROV_HASH_LEN] = kani::any();
+    let b: [u8; PROV_HASH_LEN] = kani::any();
+
+    // DETERMINISM: same sequence -> same head, twice.
+    let h1 = recompute(a, &[b]);
+    let h2 = recompute(a, &[b]);
+    assert_eq!(h1, h2);
+
+    // ORDER-SENSITIVITY: when a != b, swapping leaf/sibling changes the head.
+    kani::assume(a != b);
+    let swapped = recompute(b, &[a]);
+    assert!(swapped != h1);
 }

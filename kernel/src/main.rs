@@ -3916,6 +3916,61 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M21: kan-policy OK (heuristic floor, gate-not-met)\n");
     }
 
+    // ---- M22: verified memory PROVENANCE LEDGER (mnemonic sovereignty) ---------
+    // A per-agent, append-only, content-addressed HASH-CHAIN provenance ledger over
+    // the M13 substrate: every memory mutation (write / forget-tombstone / skill-
+    // admit) appends a typed entry whose 256-bit STRUCTURAL digest folds into a
+    // running per-agent `chain_head`. The boot self-test writes N>=3 REAL Region
+    // records, DEMOTES one through the ACTUAL M17 forget_sweep (a provable TOMBSTONE
+    // -- M17's silent demote becomes a verifiable redaction), builds a GENUINE
+    // inclusion proof + asserts verify==true on the clean ledger, then FLIPS ONE
+    // BYTE of a COMMITTED entry's canonical bytes and asserts BOTH head-mismatch AND
+    // inclusion-failure -- exercising the real verifier path, not a constant compare.
+    // ALL value computation is the host-verifiable, Kani-proven `tb_encode::prov`
+    // (no_std, forbid(unsafe), NO float); the digest is two+ domain-separated
+    // `blkfmt::fnv1a64` lanes -- STRUCTURAL tamper-evidence, NOT cryptographic
+    // (proposal §2 -- a crypto hash + signed root is a tracked successor). This
+    // kernel stays zero-unsafe and only branches on the returned `ProvProof` bools.
+    // The head is kept IN-RAM this milestone (it does NOT ride the M20 superblock),
+    // so the M20 two-phase commit + persist_selftest gen-continuity stay byte-
+    // identical (zero M20/M21 regression). DoD: "M22: provenance OK".
+    {
+        let pp = tb_hal::prov_selftest();
+        // FAIL-CLOSED: the clean ledger must verify (recompute==head + faithful
+        // reconstruction) AND a genuine inclusion proof must verify AND the injected
+        // single-byte tamper must be caught on BOTH legs (head-mismatch AND
+        // inclusion-fail). Any failure withholds the marker (renders a FAIL line
+        // with NO 'provenance OK' substring) and exits red NOW, like the M20/M21
+        // Failed arms (the #65 fail-closed idiom).
+        if !pp.clean_ok || !pp.inclusion_ok || !pp.tamper_caught {
+            tb_hal::serial_write_str("M22: provenance FAIL clean=");
+            write_hex_u64(pp.clean_ok as u64);
+            tb_hal::serial_write_str(" inclusion=");
+            write_hex_u64(pp.inclusion_ok as u64);
+            tb_hal::serial_write_str(" tamper-caught=");
+            write_hex_u64(pp.tamper_caught as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the
+        // run-scripts positively require): the verifiers provably RAN at boot over
+        // real written + demoted records. `head` is a u64 fold of the 32-byte head.
+        tb_hal::serial_write_str("prov: head=");
+        write_hex_u64(pp.head);
+        tb_hal::serial_write_str(" entries=");
+        write_hex_u64(pp.entries);
+        tb_hal::serial_write_str(" tamper-caught=");
+        write_hex_u64(pp.tamper_caught as u64);
+        tb_hal::serial_write_str(" inclusion=");
+        write_hex_u64(pp.inclusion_ok as u64);
+        tb_hal::serial_write_byte(b'\n');
+        // The marker -- emitted ONLY when the clean head matches, the inclusion
+        // proof verifies, AND the injected tamper was caught on both legs. There is
+        // no device to be absent, so there is NO '(no ledger, skipped)' variant: a
+        // skip is never legitimate here (the run-scripts reject one).
+        tb_hal::serial_write_str("M22: provenance OK\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();
