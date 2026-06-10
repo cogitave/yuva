@@ -1,5 +1,7 @@
 # Build output
 /target
+# The tb-vmm crate (Firecracker-baseline harness) has its own target dir.
+/tb-vmm/target
 
 # QEMU serial capture logs produced by the M0 DoD assertion (BUILD.md)
 /serial-*.log
