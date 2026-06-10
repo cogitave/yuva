@@ -184,6 +184,17 @@
 //!    correct outcome. Reuses `kancell` (grid + `kan_score` + `DEMOTE_BAND`),
 //!    `exp::OutcomeLabel`/`policy_kind`, and `memscore::ln_fixed`; NO float, all
 //!    saturating integer, totality/soundness/round-down Kani-proven.
+//!  * [`tpsched`] -- the M27 verified TWO-VMID TIME-PARTITION SCHEDULER math: the
+//!    decidable timing geometry of a fixed two-slot major frame -- `tpsched::next_slot`
+//!    (round-robin successor, total, neither slot a fixed point -> no VMID starves),
+//!    `tpsched::slot_deadline_delta` (the `CNTHP_TVAL_EL2` countdown, clamped up to
+//!    `MIN_SLOT_TICKS`), `tpsched::frame_total` (the conserved saturating major-frame
+//!    length) -- plus the fixed-width injective `tpsched::canon`/`decode` of a
+//!    `SchedDecision` {frame_seq, slot, vmid_from, vmid_to, t_logical} folded into a
+//!    `sched_head` via the M22 [`prov`] fold reused verbatim (the sovereignty -> learning
+//!    record). The silicon (arm the timer, switch `VTTBR_EL2`/VMID on the PPI) stays in
+//!    `tb-hal`. OBSERVATIONAL not learned (fixed round-robin); NOT real-time / NOT
+//!    schedulability-proven (`realtime=NOT-CLAIMED`).
 //!  * [`el2_trap`] -- the L2.1 EL2 trap-syndrome decoders: `esr_ec`/`esr_dfsc`/
 //!    `esr_is_translation_fault`/`esr_wnr`/`esr_s1ptw` + `hpfar_fault_ipa`/
 //!    `far_page_offset`, the pure `ESR_EL2`/`HPFAR_EL2`/`FAR_EL2` bit extraction
@@ -224,6 +235,7 @@ pub mod prov;
 pub mod route;
 pub mod smmuv3;
 pub mod stage2;
+pub mod tpsched;
 pub mod vmx;
 
 // The Kani proof harnesses. Gated on `cfg(kani)` (set ONLY under `cargo kani`)

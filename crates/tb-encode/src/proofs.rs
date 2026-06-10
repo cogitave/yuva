@@ -69,6 +69,10 @@ use crate::exittel::{
     bucket_index, canon as et_canon, class_from_tag, class_tag, decode as et_decode,
     ExitHistogram, ExitTelemetryRecord, EXITTEL_CANON_LEN, N_BUCKETS, N_CLASSES,
 };
+use crate::tpsched::{
+    canon as tp_canon, decode as tp_decode, frame_total, next_slot, slot_deadline_delta,
+    FramePlan, SchedDecision, MIN_SLOT_TICKS, N_SLOTS, SCHED_CANON_LEN,
+};
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
     eb_lower_bound, gate_clears, label_reward, smoothness_floor_mean, survival_label,
@@ -3060,6 +3064,173 @@ fn kani_exittel_fold_tamper() {
 
     let idx: usize = kani::any();
     kani::assume(idx < EXITTEL_CANON_LEN);
+    let mut tampered = bytes;
+    tampered[idx] ^= 0x01;
+    let bad = prov_hash(&tampered);
+    assert!(bad != leaf);
+    assert!(recompute(bad, &[sib]) != head);
+    assert!(!verify_inclusion(bad, &[sib], head));
+}
+
+// ===========================================================================
+// M27 tpsched: the verified TWO-VMID TIME-PARTITION SCHEDULER. Five harnesses
+// (per proposal §4), each with a NEGATIVE CONTROL. The codec/arithmetic proofs
+// are cheap; the FOLD harness keeps the record concrete + the flip index
+// symbolic (the #49 symbolic-FNV trap).
+// ===========================================================================
+
+/// (1) NEXT_SLOT TOTALITY + ROUND-ROBIN LIVENESS: `next_slot` is total over ALL `usize`
+/// (fail-closed to 0 for an out-of-range slot), strictly cycles `0 -> 1 -> 0`, and
+/// NEITHER slot is a fixed point -- so neither VMID can starve.
+///
+/// NEGATIVE CONTROL: an `% (N_SLOTS-1)` typo makes slot 1 a fixed point (`next_slot(1)
+/// == 1`) -> VMID 1 starves -> the "no fixed point" assert FAILS.
+#[kani::proof]
+fn kani_tpsched_next_slot_roundrobin() {
+    // Total over ALL usize: the result is always a valid slot, no panic.
+    let s: usize = kani::any();
+    let n = next_slot(s);
+    assert!(n < N_SLOTS);
+    // Round-robin + liveness on the two valid slots: neither is a fixed point.
+    assert_eq!(next_slot(0), 1);
+    assert_eq!(next_slot(1), 0);
+    assert!(next_slot(0) != 0);
+    assert!(next_slot(1) != 1);
+    // An out-of-range slot fail-closes to 0 (restarts the frame).
+    let big: usize = kani::any();
+    kani::assume(big >= N_SLOTS);
+    assert_eq!(next_slot(big), 0);
+}
+
+/// (2) FRAME CONSERVATION: over a SYMBOLIC `FramePlan`, `frame_total == Σ
+/// slot_deadline_delta`, every slot's delta is clamped UP to `MIN_SLOT_TICKS` (so no
+/// slot starves) and is `<= frame_total` (so no slot monopolizes), and the saturating
+/// sum never overflows/panics.
+///
+/// NEGATIVE CONTROL: a `slot_deadline_delta` WITHOUT the `MIN_SLOT_TICKS` clamp would
+/// return 0 for a zero-budget slot -> that VMID never runs -> the `>= MIN_SLOT_TICKS`
+/// assert FAILS; a non-saturating `+` would panic on the `u64::MAX` budgets.
+#[kani::proof]
+fn kani_tpsched_frame_conserved() {
+    let st0: u64 = kani::any();
+    let st1: u64 = kani::any();
+    let plan = FramePlan {
+        slot_ticks: [st0, st1],
+        vmid: [1, 2],
+    };
+    let d0 = slot_deadline_delta(&plan, 0);
+    let d1 = slot_deadline_delta(&plan, 1);
+    // No slot starves (clamped up to the floor).
+    assert!(d0 >= MIN_SLOT_TICKS);
+    assert!(d1 >= MIN_SLOT_TICKS);
+    // Conservation: the frame is the saturating sum of the two slots.
+    let total = frame_total(&plan);
+    assert_eq!(total, d0.saturating_add(d1));
+    // No slot monopolizes (each <= the frame) and the frame is at least the floor sum.
+    assert!(d0 <= total);
+    assert!(d1 <= total);
+    assert!(total >= (N_SLOTS as u64).saturating_mul(MIN_SLOT_TICKS));
+}
+
+/// (3) CANON INJECTIVITY + TOTALITY: `tpsched::canon` is TOTAL (fails closed to 0 on a
+/// too-small buffer) AND INJECTIVE -- two decisions differing in ANY field encode to
+/// different bytes (every field at a fixed offset).
+///
+/// NEGATIVE CONTROL: writing `vmid_to` at the `vmid_from` offset would let two decisions
+/// differing only in those fields alias -> a field-difference assert FAILS.
+#[kani::proof]
+fn kani_tpsched_canon_injective() {
+    let base = SchedDecision {
+        frame_seq: kani::any(),
+        slot: kani::any(),
+        vmid_from: kani::any(),
+        vmid_to: kani::any(),
+        t_logical: kani::any(),
+    };
+    let mut a = [0u8; SCHED_CANON_LEN];
+    let na = tp_canon(&base, &mut a);
+    assert_eq!(na, SCHED_CANON_LEN);
+    let mut small = [0u8; SCHED_CANON_LEN - 1];
+    assert_eq!(tp_canon(&base, &mut small), 0);
+
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; SCHED_CANON_LEN];
+            let nb = tp_canon(&$e, &mut b);
+            assert_eq!(nb, na);
+            let mut any = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any = true;
+                }
+                i += 1;
+            }
+            any
+        }};
+    }
+    let f2: u64 = kani::any();
+    kani::assume(f2 != base.frame_seq);
+    assert!(differs!(SchedDecision { frame_seq: f2, ..base }));
+    let s2: u8 = kani::any();
+    kani::assume(s2 != base.slot);
+    assert!(differs!(SchedDecision { slot: s2, ..base }));
+    let vf2: u16 = kani::any();
+    kani::assume(vf2 != base.vmid_from);
+    assert!(differs!(SchedDecision { vmid_from: vf2, ..base }));
+    let vt2: u16 = kani::any();
+    kani::assume(vt2 != base.vmid_to);
+    assert!(differs!(SchedDecision { vmid_to: vt2, ..base }));
+    let t2: u64 = kani::any();
+    kani::assume(t2 != base.t_logical);
+    assert!(differs!(SchedDecision { t_logical: t2, ..base }));
+}
+
+/// (4) CANON ROUND-TRIP: `tpsched::decode(tpsched::canon(rec)) == rec` for a symbolic
+/// decision (the fixed-width bijection; every field read back from its fixed offset).
+///
+/// NEGATIVE CONTROL: a layout swap (frame_seq at the t_logical offset) transposes the
+/// fields -> the equality FAILS.
+#[kani::proof]
+fn kani_tpsched_canon_roundtrip() {
+    let rec = SchedDecision {
+        frame_seq: kani::any(),
+        slot: kani::any(),
+        vmid_from: kani::any(),
+        vmid_to: kani::any(),
+        t_logical: kani::any(),
+    };
+    let mut buf = [0u8; SCHED_CANON_LEN];
+    let n = tp_canon(&rec, &mut buf);
+    assert_eq!(n, SCHED_CANON_LEN);
+    assert!(tp_decode(&buf) == Some(rec));
+}
+
+/// (5) FOLD TAMPER-SENSITIVITY: a single-byte flip of a committed decision's CANONICAL
+/// bytes changes the recomputed `sched_head` -- REUSING the proven M22 fold over the
+/// tpsched record (M27 writes NO fold math). Concrete record/sibling, symbolic flip
+/// index (the #49 symbolic-FNV trap).
+///
+/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original ids
+/// EQUAL -> the `!=` assert FAILS.
+#[kani::proof]
+fn kani_tpsched_fold_tamper() {
+    let rec = SchedDecision {
+        frame_seq: 7,
+        slot: 1,
+        vmid_from: 1,
+        vmid_to: 2,
+        t_logical: 0xCAFE,
+    };
+    let mut bytes = [0u8; SCHED_CANON_LEN];
+    let n = tp_canon(&rec, &mut bytes);
+    assert_eq!(n, SCHED_CANON_LEN);
+    let leaf = prov_hash(&bytes);
+    let sib: [u8; PROV_HASH_LEN] = [0x33u8; PROV_HASH_LEN];
+    let head = recompute(leaf, &[sib]);
+    assert!(verify_inclusion(leaf, &[sib], head));
+    let idx: usize = kani::any();
+    kani::assume(idx < SCHED_CANON_LEN);
     let mut tampered = bytes;
     tampered[idx] ^= 0x01;
     let bad = prov_hash(&tampered);
