@@ -1,0 +1,1089 @@
+//! The verified-leaf SELF-TEST FACADE seam: the L2.0..L2.6 sovereignty-track proofs
+//! (VmxProof/El2Proof/Stage2Proof/ExitsProof/TrapProof/GuestProof/VgicProof/SmmuProof)
+//! and the M19..M26 device-I/O + memory + learning-loop proofs (VirtioProof/
+//! PersistProof/KanProof/ProvProof/ExpProof/BakeoffProof/OpframeProof/
+//! ExitTelemetryProof) plus their `*_selftest()` facade fns. Each facade is a SAFE
+//! entry point the `#![forbid(unsafe_code)]` kernel calls to drive a verified-leaf
+//! round-trip (the silicon-unsafe / pure-value work lives in `arch/`, `mem`, or the
+//! `tb-encode` leaves); the kernel only branches on the returned pure-data verdict to
+//! render a milestone marker. Extracted VERBATIM from the lib.rs root for readability;
+//! the crate-root `pub use verified_leaf::*;` re-export preserves every `tb_hal::*Proof`
+//! / `tb_hal::*_selftest` (kernel) and `crate::*Proof` (internal) path -- a 100%
+//! behaviour-preserving move with ZERO coupling to the task/agent/scheduler core.
+#![allow(unused_imports)]
+use super::*;
+
+// ===========================================================================
+// L2.0: VMX-root self-test facade (the L2 sovereignty track).
+//
+// The first rung of `tb-core`, the from-scratch Type-1 microhypervisor: a SAFE
+// entry point the `#![forbid(unsafe_code)]` kernel calls to drive the silicon-
+// unsafe VMX bring-up confined to `arch/x86_64/vmx/`. On x86_64 it does the full
+// VMXON -> minimal VMCS -> EPT identity map -> 1-`CPUID` long-mode nested guest
+// -> world-switch -> caught VM-exit -> VMXOFF proof (or skips gracefully when VMX
+// is not exposed, the TCG `qemu64` case). On aarch64 (no VMX) it is N/A: the EL2
+// world-switch is a LATER L2 sub-milestone. Mirrors the `mmu_selftest`/`user_demo`
+// pattern — all unsafe stays in tb-hal/arch, the kernel only branches on a value.
+// ===========================================================================
+
+/// L2.0 VMX-root self-test outcome (returned to the kernel for marker rendering).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmxProof {
+    /// This arch has no VMX (aarch64): the EL2 path is a later sub-milestone.
+    NotApplicable,
+    /// VMX is not exposed or the BIOS locked VT-x off — graceful skip (no VMX
+    /// instruction was executed). The TCG `qemu64` case; mirrors the `vmm-boot`
+    /// `KVM_OK` allow-skip.
+    Unavailable,
+    /// VMXON itself failed (VMfail) — VMX advertised but the substrate could not
+    /// enter VMX operation (e.g. incomplete emulation under `-cpu max` TCG).
+    VmxonFailed,
+    /// VMXON succeeded but VM-entry failed; `vm_error` is the VMCS
+    /// VM-instruction-error (0 if even VMPTRLD failed before launch).
+    EntryFailed {
+        /// The VMCS VM-instruction-error code (Intel SDM Vol 3C §30.4).
+        vm_error: u64,
+    },
+    /// THE PROOF: the world switch ran and the nested guest's VM-exit was caught;
+    /// `exit_reason` is the basic exit reason (10 = CPUID, the expected value).
+    Proven {
+        /// The basic VM-exit reason (VMCS field 0x4402, bits 15:0).
+        exit_reason: u32,
+    },
+}
+
+/// L2.0: run the VMX-root + nested-guest + caught-VM-exit self-test (x86_64), or
+/// report [`VmxProof::NotApplicable`] on aarch64. See [`VmxProof`].
+#[cfg(target_arch = "x86_64")]
+pub fn vmx_selftest() -> VmxProof {
+    arch::vmx_selftest()
+}
+
+/// L2.0: aarch64 has no VMX — the EL2 world-switch is the aarch64 realization of
+/// this rung (see [`el2_selftest`]), so this reports [`VmxProof::NotApplicable`]
+/// (the kernel prints the n/a marker).
+#[cfg(target_arch = "aarch64")]
+pub fn vmx_selftest() -> VmxProof {
+    VmxProof::NotApplicable
+}
+
+// ===========================================================================
+// L2.0: EL2 (nVHE) world-switch self-test facade (the aarch64 L2 sovereignty
+// track — the ARM realization of the x86 VMX-root rung).
+//
+// The aarch64 proof that TABOS *is* the hypervisor: booted at EL2 (QEMU
+// `virt,virtualization=on`), installed a resident nVHE EL2 monitor, dropped to
+// EL1 to run M0..M18 unchanged, then at this slot does a real EL1<->EL2
+// world-switch — a bootstrap `HVC #0` from the running EL1 kernel ERETs into a
+// tiny EL1 guest stub, whose `HVC #1` traps back to EL2 and is caught. ALL the
+// silicon-unsafe/asm is confined to tb-hal's `arch/aarch64/{boot,el2,el2_vectors}.rs`,
+// so the framekernel invariant SURVIVES: this crate stays unsafe-free and the
+// kernel only branches on the returned `El2Proof`. Unlike L2.0 vmxroot (which
+// only SKIPS under TCG), this proof actually EXECUTES under pure TCG. On x86_64
+// (no EL2) it is N/A — exactly mirroring the `VmxProof`/`vmx_selftest` block.
+// ===========================================================================
+
+/// L2.0 EL2 world-switch self-test outcome (returned to the kernel for marker
+/// rendering). Mirrors [`VmxProof`] one EL up: the proof is a closed
+/// ERET->guest->HVC->EL2 round-trip rather than a VMLAUNCH/VM-exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum El2Proof {
+    /// This arch has no EL2 hypervisor level (x86_64): VMX-root is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`, no `virtualization=on`): no
+    /// resident monitor exists, so no HVC is issued — a graceful green skip
+    /// (mirrors [`VmxProof::Unavailable`], no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and issued the bootstrap HVC, but the monitor reported a
+    /// fault instead of a clean round-trip; `code` is the nonzero diagnostic
+    /// (booted-EL2 but failed — surfaced honestly as a red marker).
+    RoundTripFailed {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the EL1->EL2->EL1-guest->EL2->EL1 world-switch ran and the
+    /// guest's HVC was caught with its magic verified; `hvc_imm` is the guest's
+    /// trap-back immediate (1, the expected value).
+    Proven {
+        /// The guest HVC immediate that closed the round-trip (1 == `hvc #1`).
+        hvc_imm: u64,
+    },
+}
+
+/// L2.0: run the EL2 (nVHE) world-switch self-test (aarch64), or report
+/// [`El2Proof::NotApplicable`] on x86_64. See [`El2Proof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_selftest() -> El2Proof {
+    arch::el2_selftest()
+}
+
+/// L2.0: x86_64 has no EL2 — the VMX-root world-switch (see [`vmx_selftest`]) is
+/// this arch's realization of the rung, so this reports
+/// [`El2Proof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_selftest() -> El2Proof {
+    El2Proof::NotApplicable
+}
+
+// ===========================================================================
+// L2.1: stage-2 demand-translation self-test facade (the aarch64 analog of x86
+// EPT-violation handling — the SECOND L2 sovereignty rung, one EL down from the
+// stage-1 MMU and built ON TOP of L2.0's resident EL2 monitor).
+//
+// Where L2.0 proved TABOS *is* the hypervisor (a real EL1<->EL2 world-switch),
+// L2.1 proves the R/W second-stage leaf is THE isolation primitive: inside a
+// short self-test window the EL2 monitor arms stage-2 (HCR_EL2.VM=1) over a
+// table that identity-maps everything the guest needs to RUN but leaves ONE IPA
+// gigabyte a deliberate HOLE; the EL1 guest stub touches it, faults to EL2 as a
+// stage-2 translation fault, the monitor reads HPFAR_EL2, demand-maps a leaf,
+// and ERETs WITHOUT advancing ELR so the guest re-executes the load and closes
+// the round-trip — the citable ARM equivalent of the x86 `touch-unmapped-GPA ->
+// reason-48 -> map -> INVEPT -> resume` loop. ALL the silicon-unsafe/asm is
+// confined to `arch/aarch64/{stage2,el2,el2_vectors}.rs` (stage-2 is OFF for the
+// whole M0..M18 + L2.0 run and torn down before this returns — zero regression),
+// so this crate stays unsafe-free and the kernel only branches on a closed enum.
+// On x86_64 (no EL2/stage-2) it is N/A — mirroring the `El2Proof` block one rung
+// up, with the stage-2 demand path standing in for VMX's nested-guest exit.
+// ===========================================================================
+
+/// L2.1 stage-2 demand-translation self-test outcome (returned to the kernel for
+/// marker rendering). A SIBLING of [`El2Proof`] (not an overload): the proof is a
+/// closed demand-fault round-trip (`fault -> demand-map -> ERET-retry`) rather
+/// than a trap-and-emulate HVC exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage2Proof {
+    /// This arch has no EL2/stage-2 (x86_64): VMX-root + EPT is its analog.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so
+    /// stage-2 is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean demand-translation (build OOM, S1PTW, the wrong fault
+    /// IPA, a non-translation abort, a missing pre-built table, a bad magic, or
+    /// an unserved fault); `code` is the nonzero diagnostic (surfaced honestly as
+    /// a red marker WITHOUT a "stage2 OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the EL1-guest stage-2 abort was caught, demand-mapped, and the
+    /// retried load succeeded — the demand-translation round-trip closed.
+    /// `fault_ipa` is the faulting Intermediate Physical Address the monitor read
+    /// from `HPFAR_EL2` (the deliberate hole, `0x1_4000_0000`).
+    Proven {
+        /// The demand-faulted IPA the stage-2 leaf was spliced for.
+        fault_ipa: u64,
+    },
+}
+
+/// L2.1: run the stage-2 demand-translation self-test (aarch64), or report
+/// [`Stage2Proof::NotApplicable`] on x86_64. See [`Stage2Proof`].
+#[cfg(target_arch = "aarch64")]
+pub fn stage2_selftest() -> Stage2Proof {
+    arch::stage2_selftest()
+}
+
+/// L2.1: x86_64 has no EL2/stage-2 — the VMX-root + EPT path (see
+/// [`vmx_selftest`]) is this arch's realization of the rung, so this reports
+/// [`Stage2Proof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn stage2_selftest() -> Stage2Proof {
+    Stage2Proof::NotApplicable
+}
+
+// ===========================================================================
+// L2.2: EL2 exit-dispatch self-test facade (the aarch64 analog of the x86
+// `arm_exit_handlers[]` table — the THIRD L2 sovereignty rung, built ON TOP of
+// L2.0's resident EL2 monitor and SIBLING to L2.1's stage-2 demand path).
+//
+// Where L2.0 proved TABOS *is* the hypervisor and L2.1 proved the stage-2 leaf
+// is the isolation primitive, L2.2 proves the EL2 *exit-dispatch table* itself:
+// inside a short self-test window the monitor routes EVERY guest exit through
+// the PURE, Kani-proven `tb_encode::el2_trap::classify_exit` (the ARM analog of
+// x86 `arm_exit_handlers[]`), then fires TWO distinct arms — a trapped `WFx`
+// (HCR_EL2.TWI|TWE) it RESUMES one instruction past, and an FP/SIMD access
+// (CPTR_EL2.TFP, EC 0x07, NOT in the MUST set) that hits the fail-closed
+// inject-UNDEF DEFAULT (the `[0..EC_MAX]=kvm_handle_unknown_ec` discipline,
+// software-synthesized exactly as KVM's `enter_exception64`). The injected UNDEF
+// is caught by the guest's OWN EL1 vector, which echoes a magic; the verdict
+// requires BOTH arms to have fired AND the magic to round-trip. ALL the
+// silicon-unsafe/asm is confined to `arch/aarch64/{exits,exits_vectors,el2,
+// el2_vectors}.rs` (the window is OFF for the whole M0..M19 + L2.0/L2.1 run and
+// torn down before this returns — zero regression), so this crate stays
+// unsafe-free and the kernel only branches on a closed enum. On x86_64 (no EL2)
+// it is N/A — mirroring the `El2Proof`/`Stage2Proof` blocks above.
+// ===========================================================================
+
+/// L2.2 EL2 exit-dispatch self-test outcome (returned to the kernel for marker
+/// rendering). A SIBLING of [`El2Proof`]/[`Stage2Proof`]: the proof is a closed
+/// round-trip that fires TWO exit-table arms (the `WFx` resume AND the
+/// fail-closed inject-UNDEF default), rather than a single trap-and-emulate exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitsProof {
+    /// This arch has no EL2 exit-dispatch table (x86_64): the VMX
+    /// `arm_exit_handlers[]` analog is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// exit window is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean exit dispatch (the `WFx` arm missed, the inject-UNDEF
+    /// default missed, or the guest echoed the wrong magic); `code` is the
+    /// nonzero diagnostic (surfaced honestly as a red marker WITHOUT an
+    /// "el2-exits OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the exit-dispatch round-trip closed — the `WFx` trap was
+    /// resumed AND the FP/SIMD trap hit the fail-closed inject-UNDEF default,
+    /// whose injected exception the guest's EL1 vector caught and echoed.
+    /// `served` is the EL2 served mask (`WFX|UNDEF` bits, == `0b11`).
+    Proven {
+        /// The served-arm bitmask the monitor accumulated (`WFX(1) | UNDEF(2)`).
+        served: u64,
+    },
+}
+
+/// L2.2: run the EL2 exit-dispatch self-test (aarch64), or report
+/// [`ExitsProof::NotApplicable`] on x86_64. See [`ExitsProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_exits_selftest() -> ExitsProof {
+    arch::el2_exits_selftest()
+}
+
+/// L2.2: x86_64 has no EL2 exit-dispatch table — the VMX `arm_exit_handlers[]`
+/// analog (see [`vmx_selftest`]) is this arch's realization of the rung, so this
+/// reports [`ExitsProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_exits_selftest() -> ExitsProof {
+    ExitsProof::NotApplicable
+}
+
+// ===========================================================================
+// L2.3: EL2 trap-and-emulate self-test facade — the aarch64 trap-and-EMULATE
+// rung (the SYSREG + MMIO-abort emulate primitive), the FOURTH L2 rung built ON
+// TOP of L2.0's resident EL2 monitor.
+//
+// Inside a short self-test window the monitor traps a guest sysreg WRITE
+// (HCR_EL2.TVM, the `msr contextidr_el1` trigger) and a guest MMIO LDR/STR to an
+// unmapped device IPA (HCR_EL2.VM), DECODES each via the pure Kani-proven
+// `el2_trap` ISS decoders, EMULATES it (records the sysreg value; routes the
+// MMIO access through the `device_mmio` callback SEAM — the split-VMM upcall
+// point), and ADVANCES ELR_EL2 past the trapped instruction (the OPPOSITE of
+// L2.1's demand-retry, exactly KVM's `kvm_incr_pc`). The verdict requires ALL
+// THREE arms (SYSREG emulate + MMIO write + MMIO read) AND the recorded values
+// to round-trip. ALL the silicon-unsafe/asm is confined to
+// `arch/aarch64/{el2mmio,el2,stage2}.rs` (the window is OFF for the whole
+// M0..M19 + L2.0/L2.1/L2.2 run and torn down before this returns — zero
+// regression), so this crate stays unsafe-free and the kernel only branches on a
+// closed enum. On x86_64 (no EL2) it is N/A — mirroring the `ExitsProof` block.
+// ===========================================================================
+
+/// L2.3 EL2 trap-and-emulate self-test outcome (returned to the kernel for marker
+/// rendering). A SIBLING of [`El2Proof`]/[`Stage2Proof`]/[`ExitsProof`]: the proof
+/// is a closed round-trip that trap-and-EMULATES THREE accesses (a sysreg WRITE,
+/// an MMIO WRITE, an MMIO READ), advancing ELR past each rather than re-executing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapProof {
+    /// This arch has no EL2 trap-and-emulate seam (x86_64): the VMX
+    /// trap-and-emulate path is its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// trap window is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean trap-and-emulate (an arm missed, a decoded value was
+    /// wrong, the SYS64 was not the expected trigger, or the MMIO abort was
+    /// non-decodable ISV=0); `code` is the nonzero diagnostic (surfaced honestly
+    /// as a red marker WITHOUT an "el2-trap OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the trap-and-emulate round-trip closed — the SYS64 sysreg WRITE
+    /// was decoded + emulated, the MMIO WRITE was routed through the device seam,
+    /// and the MMIO READ returned the device value into the transfer register
+    /// (the guest's own compare confirmed it). `served` is the EL2 served mask
+    /// (`SYSREG|MMIO_WR|MMIO_RD` bits, == `0b111`).
+    Proven {
+        /// The served-arm bitmask the monitor accumulated (`SYSREG(1) |
+        /// MMIO_WR(2) | MMIO_RD(4)`).
+        served: u64,
+    },
+}
+
+/// L2.3: run the EL2 trap-and-emulate self-test (aarch64), or report
+/// [`TrapProof::NotApplicable`] on x86_64. See [`TrapProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_trap_selftest() -> TrapProof {
+    arch::el2_trap_selftest()
+}
+
+/// L2.3: x86_64 has no EL2 trap-and-emulate seam — the VMX trap-and-emulate path
+/// is this arch's realization of the rung, so this reports
+/// [`TrapProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_trap_selftest() -> TrapProof {
+    TrapProof::NotApplicable
+}
+
+// ===========================================================================
+// aL2.4: EL2 nested-guest (GENUINE two-stage) self-test facade — a REAL minimal
+// TABOS guest that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU
+// live, the FIFTH L2 rung built ON TOP of L2.0's resident EL2 monitor.
+//
+// The monitor arms the GiB0+GiB1 identity stage-2 (HCR_EL2.VM=1) and erets into a
+// minimal guest that BUILDS its own 3-level stage-1 (reusing the REAL kernel M3
+// `tb_encode::paging` encoders + the mmu.rs MAIR/TCR geometry), ENABLES it
+// (SCTLR_EL1.M=1 — the Kani-proven `sctlr_el1_guest_enable` "S1 after S2" step),
+// and stores+reads back a sentinel through a VA that has NO flat meaning — a
+// GENUINE VA->(guest stage-1)->IPA->(our stage-2)->PA two-stage walk, the
+// guest's own stage-1 walk itself re-translated by our stage-2 (S1PTW). It then
+// installs its OWN VBAR_EL1 and takes its OWN EL1 `brk` exception (an EL1->EL1
+// trap, NOT an EL2 exit — proof the guest's exception delivery works under
+// stage-2), and HVCs done. The verdict requires BOTH the guest's two-stage
+// readback AND its EL1 trap to have fired, with an INDEPENDENT EL2-side identity-
+// alias readback of the sentinel as corroboration the guest cannot fake. The
+// stage-2 is torn down (HCR.VM=0) BEFORE the monitor unwinds, and the facade
+// restores the kernel's saved TTBR0_EL1/TCR_EL1/MAIR_EL1/SCTLR_EL1/VBAR_EL1 (the
+// EL1-side teardown — a new surface the guest mutated, vs L2.0..L2.3) so the
+// kernel resumes on its OWN stage-1 (zero regression — M19 still prints after).
+// ALL the new asm/unsafe is confined to tb-hal's arch/aarch64/{el2,
+// el2_nested_vectors,stage2}.rs, so this crate stays unsafe-free and the kernel
+// only branches on a closed enum. On x86_64 (no EL2) it is N/A — mirroring the
+// `TrapProof` block above.
+// ===========================================================================
+
+/// aL2.4 EL2 nested-guest self-test outcome (returned to the kernel for marker
+/// rendering). A SIBLING of [`El2Proof`]/[`Stage2Proof`]/[`ExitsProof`]/
+/// [`TrapProof`]: the proof is a closed round-trip in which a REAL minimal guest
+/// runs at EL1 UNDER our stage-2 with its OWN stage-1 live — a GENUINE two-stage
+/// walk — and takes its OWN EL1 exception, rather than the single-stage rungs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NestedGuestProof {
+    /// This arch has no EL2 / two-stage translation (x86_64): the nested-VMX
+    /// path would be its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// stage-2 is never armed — a graceful green skip (mirrors
+    /// [`El2Proof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean two-stage proof (the guest's S1 walk faulted stage-2,
+    /// the EL2-side alias readback was wrong, the guest's readback failed, or its
+    /// EL1 trap was not taken); `code` is the nonzero diagnostic (surfaced
+    /// honestly as a red marker WITHOUT an "el2-guest OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the nested-guest round-trip closed — the guest built + enabled
+    /// its OWN stage-1 under our stage-2, the GENUINE two-stage store/load
+    /// resolved (corroborated by the EL2-side identity-alias readback), AND the
+    /// guest took its OWN EL1 exception. `magic` is `0x2E5` ("2 stages").
+    Proven {
+        /// The guest's two-stage magic (`0x2E5` iff both gates passed).
+        magic: u64,
+    },
+}
+
+/// aL2.4: run the EL2 nested-guest (two-stage) self-test (aarch64), or report
+/// [`NestedGuestProof::NotApplicable`] on x86_64. See [`NestedGuestProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_nested_guest_selftest() -> NestedGuestProof {
+    arch::el2_nested_guest_selftest()
+}
+
+/// aL2.4: x86_64 has no EL2 / two-stage translation — the (deferred) nested-VMX
+/// path would be this arch's realization of the rung, so this reports
+/// [`NestedGuestProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_nested_guest_selftest() -> NestedGuestProof {
+    NestedGuestProof::NotApplicable
+}
+
+// ===========================================================================
+// aL2.5: EL2 vGIC virtual-interrupt injection + WFI scheduler-hook self-test
+// facade — the SIXTH L2 rung, built ON TOP of L2.0's resident EL2 monitor.
+//
+// The proof is a closed round-trip in which the monitor SOFTWARE-INJECTS a
+// virtual interrupt into a guest that PARKS on WFI: the guest enables its OWN
+// GICV virtual CPU interface, parks on WFI (the canonical scheduler yield
+// point); the WFI traps to EL2 (HCR_EL2.TWI) where the monitor writes a PENDING
+// vIRQ into GICH_LR0 (via the Kani-proven `tb_encode::el2_trap::gich_lr_encode`)
+// and resumes the guest past the WFI; with HCR_EL2.IMO routing the VIRQ to EL1 +
+// the guest's GICV_CTLR.En + PSTATE.I clear, the guest immediately takes the
+// vIRQ at its OWN EL1 IRQ vector, reads GICV_IAR == the injected vINTID, sets a
+// sentinel, and writes GICV_EOIR. The verdict requires the CONJUNCTION of the
+// guest-side magic AND the monitor-side independent confirmation (the WFI park
+// was observed AND GICH_ELRSR0 shows LR0 retired — a fact the guest cannot fake
+// by merely writing a magic). The window is torn down (HCR_EL2 baseline,
+// GICH_HCR.En=0, GICH_LR0 zeroed) BEFORE the monitor unwinds, and the facade
+// restores the kernel's VBAR_EL1 (the EL1-side teardown — the guest installed
+// its OWN vGIC vectors) so the kernel resumes on its OWN exception table (zero
+// regression — M19 still prints after). ALL the new asm/unsafe is confined to
+// tb-hal's arch/aarch64/{el2,el2vgic,el2_vgic_vectors}.rs (the GICH_LR encoder
+// in tb-encode is `forbid(unsafe_code)` + Kani-proven), so this crate stays
+// unsafe-free and the kernel only branches on a closed enum. On x86_64 (no EL2)
+// it is N/A — mirroring the `NestedGuestProof` block above.
+// ===========================================================================
+
+/// aL2.5 EL2 vGIC virtual-interrupt-injection self-test outcome (returned to the
+/// kernel for marker rendering). A SIBLING of [`NestedGuestProof`]/[`ExitsProof`]:
+/// the proof is a closed round-trip in which the monitor SOFTWARE-INJECTS a
+/// virtual interrupt into a guest that PARKS on WFI and the guest takes + acks
+/// the vIRQ via its GICV virtual CPU interface, rather than the two-stage /
+/// trap-and-emulate rungs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VgicProof {
+    /// This arch has no EL2 / GIC virtualization (x86_64): the (deferred) APIC
+    /// virtualization / posted-interrupt path would be its rung.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`): no resident monitor, so the
+    /// vGIC window is never armed — a graceful green skip (mirrors
+    /// [`NestedGuestProof::Unavailable`]; no privileged instruction executed).
+    Unavailable,
+    /// We booted at EL2 and ran the round-trip, but the monitor reported a fault
+    /// instead of a clean vGIC injection proof (the WFI park was not observed,
+    /// the guest presented the wrong magic, the injected list register never
+    /// retired, the board exposed no list registers, or the WFI re-looped);
+    /// `code` is the nonzero diagnostic (surfaced honestly as a red marker
+    /// WITHOUT a "vgic OK" substring).
+    Faulted {
+        /// The nonzero failure code the EL2 monitor returned in x0.
+        code: u64,
+    },
+    /// THE PROOF: the vGIC injection round-trip closed — the guest parked on WFI,
+    /// the monitor injected a pending vIRQ via GICH_LR0 and resumed it, the guest
+    /// took the vIRQ at its OWN EL1 IRQ vector and acked + EOIed it via GICV, AND
+    /// the monitor independently confirmed the injected list register retired
+    /// (GICH_ELRSR0 — a fact the guest cannot fake). `vintid` is the injected +
+    /// acknowledged virtual interrupt ID.
+    Proven {
+        /// The injected + acknowledged virtual interrupt ID (vINTID).
+        vintid: u64,
+    },
+}
+
+/// aL2.5: run the EL2 vGIC virtual-interrupt-injection self-test (aarch64), or
+/// report [`VgicProof::NotApplicable`] on x86_64. See [`VgicProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_vgic_selftest() -> VgicProof {
+    arch::el2_vgic_selftest()
+}
+
+/// aL2.5: x86_64 has no EL2 / GIC virtualization — the (deferred) APIC-
+/// virtualization / posted-interrupt path would be this arch's realization of
+/// the rung, so this reports [`VgicProof::NotApplicable`] (the kernel prints the
+/// n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_vgic_selftest() -> VgicProof {
+    VgicProof::NotApplicable
+}
+
+// ===========================================================================
+// aL2.6: SMMUv3 stage-2 DMA-isolation table-programming self-test facade — the
+// SEVENTH L2 rung, the IOMMU twin of the L2.1 CPU stage-2 demand-translation.
+//
+// Unlike L2.0..L2.5 (which world-switch through the resident EL2 monitor), this
+// rung runs ENTIRELY at EL1: the SMMUv3 is a memory-mapped platform device
+// (QEMU `virt` MMIO base 0x0905_0000, already inside the GiB0 Device-nGnRnE
+// identity gigabyte `mmu_init` covers), programmed directly. The kernel probes
+// SMMU_IDR0.S2P==1 (stage-2 supported), builds a 1-entry LINEAR stream table +
+// ONE stage-2-only STE (Config==0b110) whose S2TTB == the SAME stage-2 L1 root
+// `build_identity_stage2()` produced, S2VMID == the CPU's VMID, and STE.VTCR ==
+// the projection of the CPU's `compute_vtcr()` (via the Kani-proven
+// `tb_encode::smmuv3::ste_vtcr_from_vtcr_el2` LEMMA), programs STRTAB_BASE/_CFG +
+// CMDQ_BASE + EVENTQ_BASE + CR0 (SMMUEN|CMDQEN|EVTQEN), pushes CMD_CFGI_STE +
+// CMD_TLBI_S12_VMALL + CMD_SYNC, and observes the SYNC drain (CMDQ_CONS catches
+// CMDQ_PROD) with GERROR clean (no CMDQ_ERR, no C_BAD_STE in the event queue) —
+// i.e. the SMMU ACCEPTED the STE. This EXECUTES for real under TCG (QEMU walks +
+// accepts the STE) on a QEMU that advertises IDR0.S2P — the IOMMU twin of
+// "stage2 OK", NOT a skip. NOTE: stage-2 SMMUv3 support (the Mostafa series)
+// landed in QEMU 9.0 (2024), NOT 8.1 — QEMU 8.2.2 (the current CI image)
+// advertises S1P=1 but S2P=0, so on it (and on local qemu-6.2) the IDR0.S2P gate
+// takes the honest GREEN skip until the CI QEMU is bumped to >= 9.0, at which
+// point the Proven path runs for real.
+//
+// THE HONEST CLAIM: the marker asserts ONLY "tables programmed + SMMU accepted
+// them (CMD_CFGI_STE synced, no GERROR/C_BAD_STE)". The ACTUAL DMA-isolation
+// GUARANTEE — that a rogue physical device is BLOCKED from memory outside its
+// grant — needs REAL SILICON (declared in assumptions.md, the L2.8/VT-d twin):
+// QEMU emulation cannot prove isolation against silicon errata, ATS/PRI corners,
+// peer-to-peer DMA bypass, or a non-ACS-clean topology. So this proves the
+// PROGRAMMING is well-formed and ACCEPTED, never that silicon enforces it.
+//
+// ALL the SMMU MMIO/asm unsafe is confined to tb-hal's arch/aarch64/smmu.rs (the
+// STE/command-queue value computation in tb-encode::smmuv3 is forbid(unsafe) +
+// Kani-proven), so this crate stays unsafe-free and the kernel only branches on a
+// closed enum. On x86_64 the VT-d/L2.8 path is x86's IOMMU rung, so this reports
+// NotApplicable — mirroring the `VgicProof` block above. The SMMU is left
+// DISABLED (CR0.SMMUEN=0, STE.V cleared) before M19 (teardown-clean), so M19's
+// virtio-mmio path (NOT behind the SMMU) is untouched.
+// ===========================================================================
+
+/// aL2.6 SMMUv3 stage-2 DMA-isolation table-programming self-test outcome
+/// (returned to the kernel for marker rendering). A SIBLING of [`VgicProof`]:
+/// the proof is the SMMU ACCEPTING a well-formed stage-2-only STE that points at
+/// the SAME stage-2 root the CPU uses, rather than a CPU-side world-switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmmuProof {
+    /// This arch has no Arm SMMUv3 (x86_64): the (deferred) Intel VT-d / L2.8
+    /// path would be its IOMMU rung.
+    NotApplicable,
+    /// No stage-2 SMMUv3: SMMU_IDR0 reads open-bus `0xFFFF_FFFF` (booted WITHOUT
+    /// `iommu=smmuv3` — the plain-`virt`/`tb-vmm` lanes) OR the SMMU does NOT
+    /// advertise stage-2 (`IDR0.S2P == 0` — an S1-only SMMU). The latter is the
+    /// case for QEMU older than 9.0: stage-2 SMMUv3 support (the Mostafa series)
+    /// landed in QEMU 9.0 (2024), so QEMU 8.2.2 advertises `S1P=1` but `S2P=0`. A
+    /// GRACEFUL GREEN skip — NO privileged stage-2 STE write is attempted (an
+    /// S1-only SMMU would reject it), so non-stage-2-SMMU boot lanes stay green
+    /// (the IDR0.S2P gate, the IOMMU analog of the `BOOTED_AT_EL2` gate).
+    Unavailable,
+    /// We probed S2P==1 and ran the table-programming round-trip, but it faulted
+    /// instead of a clean acceptance (a frame OOM, CR0ACK never reflected enable,
+    /// the CMD_SYNC never drained before the bounded cap, a GERROR fired, or a
+    /// C_BAD_STE event was recorded); `code` is the nonzero diagnostic (surfaced
+    /// honestly as a red marker WITHOUT a "smmu OK" substring).
+    Faulted {
+        /// The nonzero failure code the SMMU self-test returned.
+        code: u64,
+    },
+    /// THE PROOF: the kernel built + wrote a stage-2-only STE whose geometry IS
+    /// the CPU stage-2 geometry, programmed the SMMU registers, pushed
+    /// CMD_CFGI_STE + CMD_SYNC, observed the SYNC drain with GERROR clean and no
+    /// C_BAD_STE event — i.e. the SMMU ACCEPTED the STE. `stream_id` is the
+    /// programmed StreamID (0 for the single-entry linear stream table).
+    Proven {
+        /// The StreamID the accepted stage-2-only STE was programmed for.
+        stream_id: u32,
+    },
+}
+
+/// aL2.6: run the SMMUv3 stage-2 DMA-isolation table-programming self-test
+/// (aarch64), or report [`SmmuProof::NotApplicable`] on x86_64. See [`SmmuProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn smmu_selftest() -> SmmuProof {
+    arch::smmu_selftest()
+}
+
+/// aL2.6: x86_64 has no Arm SMMUv3 — the (deferred) Intel VT-d / L2.8 path would
+/// be this arch's realization of the IOMMU rung, so this reports
+/// [`SmmuProof::NotApplicable`] (the kernel prints the n/a marker).
+#[cfg(target_arch = "x86_64")]
+pub fn smmu_selftest() -> SmmuProof {
+    SmmuProof::NotApplicable
+}
+
+// ===========================================================================
+// M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
+// real device I/O.
+//
+// A single, NON-cfg-gated facade ([`virtio_selftest`]) over an `arch` arm that
+// exists on BOTH architectures (mirroring `mmu_selftest`/`timer_demo`, NOT the
+// cfg-split `vmx_selftest`/`el2_selftest` pair — virtio-mmio is identical on
+// x86_64 `microvm` and aarch64 `virt`). Each arm drives a MODERN (Version=2)
+// virtio-rng (DeviceID 4) over ONE virtqueue: a hard-coded slot scan, the
+// reset->ACK->DRIVER->features->FEATURES_OK->queue->DRIVER_OK handshake, one
+// WRITE-ONLY descriptor pointing at an entropy buffer in a single identity-
+// mapped DMA frame, a poll-only (`VIRTQ_AVAIL_F_NO_INTERRUPT`) used-ring
+// completion, and a fail-closed iteration cap so a dead device bails to
+// [`VirtioProof::Failed`] instead of hanging. ALL the MMIO/DMA/asm unsafe is
+// confined to `arch/{x86_64,aarch64}/virtio.rs` (the UC device-window map +
+// `dmb`/`dsb` barriers live there too); this crate stays unsafe-free and the
+// `#![forbid(unsafe_code)]` kernel only branches on the returned `VirtioProof`.
+// Absent (no DeviceID==4 in any slot) is a GRACEFUL GREEN skip — so a runner
+// with no virtio-rng backend (e.g. `tb-vmm` with no `-device`, where the scan
+// reads open-bus `0xFFFF_FFFF` != magic) stays green with no backend added.
+// ===========================================================================
+
+/// M19 virtio-rng self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict the `#![forbid(unsafe_code)]` kernel
+/// matches on — mirroring [`VmxProof`]/[`El2Proof`] but arch-neutral.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VirtioProof {
+    /// No virtio-rng (DeviceID 4) in any scanned slot — a GRACEFUL GREEN skip.
+    /// The `tb-vmm`-with-no-`-device` case (open-bus read != magic) and any
+    /// QEMU run that omits `-device virtio-rng-device`.
+    Absent,
+    /// A virtio-rng was found but it is LEGACY (`Version` != 2) — an honest skip
+    /// (this driver speaks only the modern transport); still GREEN.
+    LegacyUnsupported,
+    /// THE PROOF: the full modern handshake + one write-only descriptor + a
+    /// polled used-ring completion ran, and the entropy buffer came back
+    /// non-trivially filled. `slot` is the bus slot index, `device_id` == 4,
+    /// `len` is the device-reported `used.ring[0].len` (bytes written).
+    Proven {
+        /// The virtio-mmio slot index the entropy device was found at.
+        slot: u32,
+        /// The probed DeviceID (4 == entropy/rng; the expected value).
+        device_id: u32,
+        /// The device-reported number of entropy bytes written (`> 0`).
+        len: u32,
+    },
+    /// Found + driven, but the round-trip failed fail-closed (handshake
+    /// rejected, FEATURES_OK cleared, queue unready, or `used.idx` never
+    /// advanced before the cap). `stage` localises the failure; the kernel
+    /// renders it WITHOUT a "virtio OK" substring, so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (1 map .. 6 completion-validate).
+        stage: u32,
+    },
+}
+
+/// M19: run the poll-based virtio-rng round-trip self-test (both arches) and
+/// report the outcome. See [`VirtioProof`]. Brings up no interrupt controller
+/// (poll-only) and touches NO scheduler; all raw work is in `arch::*::virtio`.
+pub fn virtio_selftest() -> VirtioProof {
+    arch::virtio_selftest()
+}
+
+// ===========================================================================
+// M20: durable persistence self-test facade -- the first time ANYTHING in TABOS
+// outlives a boot. Mirrors the `VirtioProof` pattern verbatim: a pure-data
+// verdict the `#![forbid(unsafe_code)]` kernel matches on. ALL silicon-unsafe
+// (the virtio-blk MMIO/DMA ring) is in `arch::*::virtio`; the on-disk codecs are
+// the Kani-proven `tb_encode::blkfmt`; the orchestration (mount/replay/two-phase
+// commit) is 100% safe in `mem::VirtioBlkStore`. Absent (no DeviceID==2 in any
+// slot -- e.g. a lane with no `-drive`) is a GRACEFUL GREEN skip.
+// ===========================================================================
+
+/// M20 durable-persistence self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`VirtioProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistProof {
+    /// No virtio-blk (DeviceID 2) in any scanned slot -- a GRACEFUL GREEN skip
+    /// (a lane with no `-drive`; the open-bus read != magic case). The kernel
+    /// renders `M20: persist OK (no disk, skipped)`.
+    Absent,
+    /// A virtio-blk was found but it is LEGACY (`Version` != 2) -- an honest skip
+    /// (this driver speaks only the modern transport); still GREEN.
+    LegacyUnsupported,
+    /// THE PROOF: N sentinel records were written through a real Region behind
+    /// the [`VirtioBlkStore`], the two-phase flush committed (data sectors ->
+    /// FLUSH -> superblock at gen+1 -> FLUSH), the store was RE-MOUNTED (super-
+    /// block re-read + Region logs replayed into a freshly-rebuilt journal), and
+    /// the replayed records == the read-after-flush values AND `gen` bumped by 1.
+    Proven {
+        /// The committed checkpoint generation after the round-trip's flush.
+        gen: u64,
+        /// The number of sentinel records replayed back on the re-mount.
+        replayed: u64,
+        /// The prior generation observed on the FIRST mount (`0` on a fresh disk,
+        /// `> 0` if a previous boot left a committed checkpoint -- the two-boot
+        /// durability witness).
+        prior: u64,
+    },
+    /// Found + driven, but the durability round-trip failed fail-closed. `stage`
+    /// localises the failure (0x1 probe/feature, 0x2 DMA-frame OOM, 0x3 mount/
+    /// superblock-decode, 0x4 write/flush, 0x5 re-mount/replay, 0x6 equality-or-
+    /// generation mismatch). The kernel renders it WITHOUT a "persist OK"
+    /// substring, so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (see the variant doc).
+        stage: u32,
+    },
+}
+
+/// M20: run the durable-persistence round-trip self-test (both arches) and
+/// report the outcome. See [`PersistProof`]. Poll-only (no completion IRQ),
+/// touches NO scheduler; all raw device work is in `arch::*::virtio`, the on-disk
+/// codecs are the Kani-proven `tb_encode::blkfmt`, the orchestration is safe
+/// `mem::VirtioBlkStore`. Absent (no `-drive`) is a GRACEFUL GREEN skip.
+pub fn persist_selftest() -> PersistProof {
+    mem::persist_selftest()
+}
+
+// ===========================================================================
+// M21: verified fixed-point ADDITIVE-policy leaf self-test facade. The
+// fail-closed loader + real round-trip the kernel runs at boot over the FROZEN
+// `tb_encode::kancell` integer artifact, returned as a pure-data verdict the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`PersistProof`]). SHIPS
+// DORMANT: `active == false` this milestone -- the heuristic floor in
+// `mem::forget_sweep` owns every demote decision; the spline is WIRED + validated
+// at load but never on the decision path (turning it on is gated on an offline
+// trace bake-off, proposal §7). The math is the Kani-proven `tb-encode::kancell`;
+// the validators/round-trip are pure value computation -- no device, no `unsafe`.
+// ===========================================================================
+
+/// M21 policy-leaf load-time self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`PersistProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KanProof {
+    /// The shipped table passed the solver-free MonoKAN sign check
+    /// (`kan_table_is_monotone`): every sign-constrained feature is monotone by
+    /// construction (staler never scored more keepable). The kernel requires this.
+    pub monotone: bool,
+    /// The shipped table passed the headroom check (`kan_table_overflow_safe`):
+    /// every knot is within `KAN_KNOT_MAX`, so `kan_score` cannot overflow. The
+    /// kernel requires this.
+    pub ovf_safe: bool,
+    /// The recomputed round-trip deviation `delta = max|expected - kan_score(probe)|`
+    /// over the baked probe vector. The kernel requires `q_err <= bound`.
+    pub q_err: i64,
+    /// The shipped checked error bound `B`. `q_err > bound` fails closed (the kan
+    /// path is aborted, the marker withheld -- so an over-error table can never
+    /// reach the comparator).
+    pub bound: i64,
+    /// Whether the spline is on the decision path. `false` this milestone (DORMANT,
+    /// gate-not-met): the heuristic floor decides. The run-scripts require
+    /// `active=0` for this lane (and would reject a future `(no table, skipped)`).
+    pub active: bool,
+}
+
+/// M21: run the verified-policy-leaf load-time self-test (both arches) over the
+/// frozen integer table and report the outcome. See [`KanProof`]. Pure value
+/// computation -- re-runs the `tb_encode::kancell` MonoKAN + headroom validators
+/// and the `kan_score` round-trip over the baked probe vector; touches NO device
+/// and NO scheduler. SHIPS DORMANT (`active == false`).
+pub fn kan_selftest() -> KanProof {
+    mem::kan_selftest()
+}
+
+// ===========================================================================
+// M22: verified memory-PROVENANCE-LEDGER self-test facade. A per-agent, append-
+// only, content-addressed HASH-CHAIN ledger over the M13 substrate: every memory
+// mutation (write / forget-tombstone / skill-admit) appends a typed entry whose
+// 256-bit STRUCTURAL digest folds into a running `chain_head`. The boot self-test
+// writes N>=3 real records, demotes one through the REAL M17 forget_sweep (a
+// provable tombstone), builds a genuine inclusion proof, then flips ONE byte of a
+// COMMITTED entry's canonical bytes and proves the head + inclusion proof BOTH
+// catch it. The math is the Kani-proven `tb_encode::prov`; the verdict is a pure-
+// data struct the `#![forbid(unsafe_code)]` kernel matches on (mirroring
+// [`KanProof`]). STRUCTURAL tamper-evidence only -- NOT cryptographic (proposal
+// §2): a crypto hash + signed root is a tracked successor. The head is kept IN-RAM
+// this milestone (it does NOT ride the M20 superblock), so the M20 two-phase
+// commit + persist_selftest gen-continuity stay byte-identical (zero M20/M21
+// regression).
+// ===========================================================================
+
+/// M22 provenance-ledger self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`KanProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProvProof {
+    /// The CLEAN ledger verified: the independently re-folded committed entry ids
+    /// equal the running `chain_head` AND the tamper-leg's committed entry was
+    /// faithfully reconstructed (`prov_hash(canon) == committed id`). The kernel
+    /// requires this (a false here withholds the marker).
+    pub clean_ok: bool,
+    /// A single-byte tamper of a COMMITTED entry's canonical bytes was caught on
+    /// BOTH legs: the recomputed head MISMATCHED the committed head AND the
+    /// tampered entry's inclusion proof FAILED. The kernel requires this -- it is
+    /// the load-bearing tamper-evidence claim.
+    pub tamper_caught: bool,
+    /// A genuine inclusion proof for a known committed entry verified `== true`
+    /// against the clean head. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// A u64 WITNESS folded from the 32-byte committed head (every head byte
+    /// contributes), rendered as `head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of committed ledger entries after the round-trip (the N writes
+    /// plus any tombstone), rendered as `entries=<n>`.
+    pub entries: u64,
+}
+
+/// M22: run the provenance-ledger round-trip self-test (both arches) and report
+/// the outcome. See [`ProvProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::prov` leaf and the real `mem::MemSubstrate` mutation path -- writes
+/// N>=3 real records, demotes one via the real M17 forget_sweep (a tombstone),
+/// builds a genuine inclusion proof, and injects a single-byte tamper into a
+/// committed entry's canonical bytes; touches NO device and NO scheduler.
+pub fn prov_selftest() -> ProvProof {
+    mem::prov_selftest()
+}
+
+// ===========================================================================
+// M23: verified EXPERIENCE-CODEC self-test facade. A SEPARATE per-agent, fixed-
+// capacity, tamper-evident EXPERIENCE LOG over the M17 forget/recall decisions:
+// at each decision the OS records an injective ExperienceRecord (the features it
+// ALREADY computes + the heuristic action + the COUNTERFACTUAL kan_score the
+// DORMANT cell would produce + RESERVED-but-unset propensity/outcome fields) into a
+// fixed-capacity drop-oldest ring folded into a SEPARATE per-agent `xp_head`
+// (REUSING the M22 fold -- the M22 `chain_head` is UNTOUCHED, so M22's persist/prov
+// witnesses stay byte-identical). The learned cell stays DORMANT (`KAN_ACTIVE ==
+// false`): the shadow is logged ONLY, never changing a demote, so the live
+// forget/demote decision is BYTE-IDENTICAL to M22's. The boot self-test seeds a
+// memory-pressure scenario that forces >=3 forget-decisions + >=1 recall-touch,
+// then proves replay-determinism (a recorded feats row replays through kan_score to
+// the logged shadow BIT-IDENTICALLY) + structural tamper-evidence + heuristic
+// faithfulness. M23 claims ONLY replay-determinism + structural tamper-evidence --
+// NOT policy validity (deterministic logging -> degenerate propensity; validity is
+// M24's burden, the exogenous human-operator oracle is M25's). The math is the
+// Kani-proven `tb_encode::exp`; the verdict is a pure-data struct the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`ProvProof`]).
+// ===========================================================================
+
+/// M23 experience-codec self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ProvProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpProof {
+    /// The CLEAN experience log verified: the independently re-folded committed
+    /// record ids equal the running `xp_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for a known committed record verified `== true`
+    /// against the clean `xp_head`. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// REPLAY-DETERMINISM (the headline): a recorded `feats` row replayed through the
+    /// dormant `kan_score` reproduced the logged `kan_score_shadow` BIT-IDENTICALLY.
+    /// The kernel requires this (rendered `replay-bitexact=0x1`).
+    pub replay_bitexact: bool,
+    /// HEURISTIC FAITHFULNESS: a recorded `FORGET_DECISION`'s `action_taken` /
+    /// `envelope_verdict` re-derive from the live record's heuristic envelope. The
+    /// kernel requires this (the log faithfully recorded the action actually served).
+    pub heuristic_faithful: bool,
+    /// A single-byte tamper of a COMMITTED record's canonical bytes was caught on
+    /// BOTH legs (head-mismatch AND inclusion-fail). The kernel requires this -- the
+    /// load-bearing structural tamper-evidence claim (rendered `tamper-caught=0x1`).
+    pub tamper_caught: bool,
+    /// Whether the learned cell is on the decision path. `false` this milestone (the
+    /// shadow is logged only, never changing a demote -- the live decision is
+    /// byte-identical to M22's). The run-scripts REQUIRE `kan_active=0` for this lane.
+    pub kan_active: bool,
+    /// A u64 WITNESS folded from the 32-byte committed `xp_head` (every head byte
+    /// contributes), rendered as `head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of committed experience records (the >=3 forget-decisions plus any
+    /// recall-touch), rendered as `records=<n>`.
+    pub records: u64,
+}
+
+/// M23: run the experience-codec round-trip self-test (both arches) and report the
+/// outcome. See [`ExpProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::exp` leaf and the real `mem::MemSubstrate` forget/recall path --
+/// seeds a memory-pressure scenario that forces >=3 forget-decisions + >=1
+/// recall-touch into a SEPARATE per-agent `xp_head` (the M22 head untouched),
+/// replays a recorded feats row through the dormant `kan_score` to prove bit-exact
+/// determinism, and injects a single-byte tamper into a committed record's canonical
+/// bytes; touches NO device and NO scheduler. `KAN_ACTIVE` stays `false` (the shadow
+/// changes zero demotes).
+pub fn exp_selftest() -> ExpProof {
+    mem::exp_selftest()
+}
+
+// ===========================================================================
+// M24: the verified HONEST ACTIVATION GATE self-test facade. The honest
+// resolution of the M21 activation gate (#72): shielded epsilon-greedy
+// exploration (restores statistical overlap, populating the M23-reserved
+// propensity field) + a deterministic 3-way right-censored survival label + a
+// partial-identification (Manski + Lipschitz-smoothness) lower-bound estimator +
+// an empirical-Bernstein HCPI lower-bound activation gate. `KAN_ACTIVE` flips
+// `false -> true` ONLY if the conjunctive one-shot gate clears (`V_lower(kancell)
+// - V_upper(heuristic) >= MARGIN` over a distribution-shifted held-out split AND
+// the re-asserted envelope-no-widening proof). On the (necessarily SYNTHETIC)
+// traces this milestone the gate WILL NOT clear -- `gate-not-met` (the cell stays
+// DORMANT) is the DESIGNED, CORRECT outcome (the M21 idiom -- an honest gate that
+// REFUSES is a success, not a failure). The math is the Kani-proven
+// `tb_encode::explore` + `tb_encode::bakeoff`; the verdict is a pure-data enum the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`ExpProof`]). The
+// experience stays IN-RAM this milestone (durable spill deferred -- see the M24
+// proposal §3 / the self-test note): the gate self-test runs on the in-RAM
+// accumulated experience, so M20's two-phase commit + persist_selftest stay
+// byte-identical.
+// ===========================================================================
+
+/// M24 honest-gate bake-off self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ExpProof`]. The witness
+/// fields (`vlo_kan`/`vhi_heur`/`margin`/...) are POSITIVELY required on the boot
+/// witness line so the marker mechanically cannot claim an activation the lower
+/// bound does not support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BakeoffProof {
+    /// THE (counterfactual this milestone) ACTIVATION: the conjunctive one-shot gate
+    /// CLEARED -- the cell's worst-case value `vlo_kan` beat the heuristic's best-case
+    /// value `vhi_heur` by at least `margin` over a sufficiently-supported, overlap-
+    /// restored held-out split, AND the envelope-no-widening proof re-asserted. NOT
+    /// reached on synthetic traces (the cell would flip ACTIVE -- a real activation
+    /// awaits M25's human oracle).
+    Cleared {
+        /// The integer lower bound on the kancell policy's value (`V_lower`).
+        vlo_kan: i64,
+        /// The integer upper bound on the heuristic floor's value (`V_upper`).
+        vhi_heur: i64,
+        /// The cleared margin (`vlo_kan - vhi_heur`).
+        margin: i64,
+    },
+    /// THE DESIGNED, CORRECT OUTCOME this milestone: the machinery executed (label +
+    /// estimator + gate + the in-RAM replay) and the gate was EVALUABLE but the margin
+    /// was NOT met on the (synthetic) traces -- the cell stays DORMANT. The honest M21
+    /// `(heuristic floor, gate-not-met)` idiom. Carries the witness so the boot line
+    /// proves the gate actually RAN (anti-hollow-pass).
+    NotMet {
+        /// The integer lower bound on the kancell policy's value (`V_lower`).
+        vlo_kan: i64,
+        /// The integer upper bound on the heuristic floor's value (`V_upper`).
+        vhi_heur: i64,
+        /// The (negative or sub-margin) gap (`vlo_kan - vhi_heur`).
+        margin: i64,
+        /// The count of RESOLVED (non-censored) labeled pairs the gate evaluated over.
+        resolved: u64,
+        /// The count of CENSORED (open-window, excluded) labeled pairs.
+        censored: u64,
+        /// The summed soft-greedy exploration mass (overlap-restored, SCALE==1000).
+        overlap_mass: u64,
+        /// The Manski no-overlap mass fraction (decisions epsilon could not explore).
+        no_overlap: u64,
+    },
+    /// Too few RESOLVED non-censored pairs / near-zero overlap mass: the gate is not
+    /// EVALUABLE (the eligibility pre-gate failed -- distinct from a genuine refusal).
+    NotEvaluable {
+        /// The count of RESOLVED labeled pairs (below the eligibility floor).
+        resolved: u64,
+        /// The summed soft-greedy exploration mass (below the eligibility floor).
+        overlap_mass: u64,
+    },
+    /// The self-test did NOT execute a required stage (seed/label/replay/gate). `stage`
+    /// localises the failure. The kernel renders this WITHOUT a "bakeoff OK" substring
+    /// (fail-closed: the marker is withheld), so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (0x1 seed, 0x2 replay/label, 0x3 envelope
+        /// re-assertion, 0x4 estimator/gate, 0x5 dormant-invariant violated).
+        stage: u32,
+    },
+}
+
+/// M24: run the honest-gate bake-off self-test (both arches) over the in-RAM
+/// accumulated experience and report the outcome. See [`BakeoffProof`]. Pure value
+/// computation over the Kani-proven `tb_encode::explore` + `tb_encode::bakeoff`
+/// leaves and the real `mem::MemSubstrate` forget/read-touch path -- seeds a
+/// shielded-epsilon-greedy labeled stream (stamping the M23-reserved propensity
+/// field), drives unfiltered `read_touch` to attach the deterministic 3-way survival
+/// label, replays the in-RAM stream through the frozen-heuristic AND dormant
+/// `kan_score` over an M18.2-style shifted split, computes `V_lower(kancell)` /
+/// `V_upper(heuristic)`, evaluates the conjunctive one-shot gate, and re-asserts the
+/// envelope-no-widening proof; touches NO device and NO scheduler. On synthetic
+/// traces the gate does NOT clear -> [`BakeoffProof::NotMet`] (the cell stays DORMANT)
+/// -- the designed, correct outcome. `KAN_ACTIVE` stays `false`.
+pub fn bakeoff_selftest() -> BakeoffProof {
+    mem::bakeoff_selftest()
+}
+
+// ===========================================================================
+// M25: the verified OPERATOR-TRANSCRIPT self-test facade. The COMMUNICATION
+// pillar's outbound half + the exogenous-oracle channel: a typed, tamper-
+// evident transcript the OS EMITS over serial to SURFACE what it recorded
+// (M23) and decided (M24) to a human, anchored to the live M22 provenance head
+// ("which instance am I"). TX-only this milestone (the inbound RX + an enrolled
+// operator credential by which a human could COMMAND the M24 gate is M26 -- it
+// fails the no-human CI gate today). The math is the Kani-proven
+// `tb_encode::opframe` (which REUSES the M22 `tb_encode::prov` fold verbatim);
+// the verdict is a pure-data struct the `#![forbid(unsafe_code)]` kernel matches
+// on (mirroring [`ExpProof`]). HONEST: the fold is keyless (structural tamper-
+// EVIDENCE, not authenticity -- `keyed=0`) and the boot self-test's verifier is
+// the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
+// ===========================================================================
+
+/// M25 operator-transcript self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ExpProof`]. The witness
+/// fields are POSITIVELY required on the boot witness line so the marker mechanically
+/// cannot claim a transcript property it did not verify.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpframeProof {
+    /// The CLEAN transcript verified: independently re-folding the committed frame ids
+    /// equals the running `op_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for the genesis frame verified `== true` against the
+    /// clean `op_head`. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// The `seq` is strictly `seqs[i] == i` (no gap / reorder / duplicate / non-zero
+    /// start) -- the strict-monotone reader check. The kernel requires this (rendered
+    /// `seq_monotone=1`).
+    pub seq_monotone: bool,
+    /// The genesis `INTRO` frame's `prev_head` binds the transcript to the LIVE M22
+    /// provenance head ("which instance am I" attestation). The kernel requires this
+    /// (rendered `intro_bound=1`).
+    pub intro_bound: bool,
+    /// The closing `GATE_VERDICT` commits the final `seq`, AND a reader expecting a
+    /// longer transcript (a truncated tail) is REJECTED -- the Ma-Tsudik FssAgg tail-
+    /// truncation guard. The kernel requires this (folded into `tamper-caught=1`).
+    pub truncation_caught: bool,
+    /// A single-byte tamper of a committed frame's canonical bytes was caught on BOTH
+    /// legs (head-mismatch AND inclusion-fail) -- the load-bearing structural tamper-
+    /// evidence claim. The kernel requires this (rendered `tamper-caught=1`).
+    pub tamper_caught: bool,
+    /// A u64 WITNESS folded from the 32-byte committed `op_head` (every head byte
+    /// contributes), rendered as `tx_head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// The number of emitted + committed transcript frames (4: intro/marker/digest/
+    /// gate-verdict), rendered as `frames=<n>`.
+    pub frames: u64,
+}
+
+/// M25: emit a short operator transcript and play the simulated operator-verifier on
+/// it (both arches), reporting the outcome. See [`OpframeProof`]. Pure value
+/// computation over the Kani-proven `tb_encode::opframe` leaf (which REUSES the M22
+/// `tb_encode::prov` fold) and the real `mem::MemSubstrate` M22-head + M23-experience
+/// state -- seeds the M23 memory-pressure scenario for a LIVE M22 head + forget-
+/// decisions, emits INTRO(binds the live head)/MARKER/EXPERIENCE_DIGEST(the most-
+/// borderline M23 record)/GATE_VERDICT(commits the final seq + the honest M24 verdict),
+/// and verifies the clean fold + a genuine inclusion proof + strict-monotone seq +
+/// the INTRO binding + the tail-truncation commit + a single-byte tamper rejection;
+/// touches NO device beyond the serial the kernel renders over, and NO scheduler. The
+/// fold is keyless (tamper-EVIDENCE, not authenticity) and the verifier is the OS's
+/// own plumbing, not a human (the marker's `keyed=0` / `oracle=HUMAN-DEFERRED-M26`
+/// honesty tokens).
+pub fn opframe_selftest() -> OpframeProof {
+    mem::opframe_selftest()
+}
+
+// ===========================================================================
+// M26: the verified EL2 EXIT-TELEMETRY producer self-test facade. The learning
+// pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux
+// (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a bounded,
+// no-float, injective TELEMETRY record folded into a per-instance `tel_head` via
+// the M22 fold reused verbatim -- the OS *records* its own virtualization
+// workload. The math is the Kani-proven `tb_encode::exittel`; the verdict is a
+// pure-data struct the `#![forbid(unsafe_code)]` kernel matches on. PRODUCER-ONLY:
+// the telemetry is recorded + folded, NEVER fed to a policy whose decisions change
+// the future exit distribution (the confounding loop the M24 adversary named is
+// structurally avoided), and the `tel_head` is SEPARATE from the M23 `xp_head`
+// (zero regression). The marker emits `signal=OBSERVATIONAL-NONCAUSAL` so it
+// cannot claim a causal state-signal.
+// ===========================================================================
+
+/// M26 exit-telemetry self-test outcome (returned to the kernel for marker rendering).
+/// A closed, pure-data verdict -- mirroring [`ExpProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitTelemetryProof {
+    /// CLASS-TOTALITY: every synthetic ESR mapped to an in-range class tag AND the six
+    /// synthetic exits hit six DISTINCT classes (the reused classifier distinguished
+    /// them). The kernel requires this (rendered `class-total=1`).
+    pub class_total: bool,
+    /// BUCKETS-EXACT: each recorded bucket equals an independent `bucket_index` of the
+    /// cost-proxy delta AND the per-`(class, bucket)` cell count is exact. The kernel
+    /// requires this (rendered `buckets-exact=1`).
+    pub buckets_exact: bool,
+    /// CLEAN: independently re-folding the committed record ids equals the running
+    /// `tel_head`. The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for the first committed record verified against the
+    /// clean `tel_head`. The kernel requires this (folded into `fold-verified=1`).
+    pub inclusion_ok: bool,
+    /// A single-byte tamper of a committed record's canonical bytes was caught on BOTH
+    /// legs (head-mismatch AND inclusion-fail). The kernel requires this (rendered
+    /// `tamper-caught=1`) -- the structural tamper-evidence claim.
+    pub tamper_caught: bool,
+    /// The number of DISTINCT exit classes observed (6 on the synthetic vector),
+    /// rendered as `classes=<m>`.
+    pub classes: u64,
+    /// A u64 WITNESS folded from the 32-byte committed `tel_head`, rendered as
+    /// `head=<hex16>`.
+    pub head: u64,
+    /// The number of committed telemetry records (6), rendered as `records=<n>`.
+    pub records: u64,
+}
+
+/// M26: feed a fixed synthetic ESR_EL2 vector through the reused L2.2 exit classifier,
+/// count each exit into a bounded no-float histogram, fold each as an injective
+/// telemetry record into a per-instance `tel_head` (the M22 fold reused), and verify
+/// class-totality + bucket-exactness + the clean fold + a genuine inclusion proof + a
+/// single-byte tamper rejection. See [`ExitTelemetryProof`]. Pure value computation
+/// over the Kani-proven `tb_encode::exittel` leaf; touches NO device, NO scheduler.
+/// PRODUCER-ONLY (the telemetry is recorded + folded, not fed to any policy) and the
+/// `tel_head` is SEPARATE from the M23 `xp_head` (zero regression).
+pub fn exittel_selftest() -> ExitTelemetryProof {
+    mem::exittel_selftest()
+}
