@@ -8,7 +8,7 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M26 cumulative tail is below. The authoritative, executable record is the
+M27 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
@@ -161,7 +161,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 16 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 17 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -204,7 +204,7 @@ KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
 QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
 **kani** (two jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and
-`prove-encode` over `tb-encode` = 69 harnesses); **miri** (the Tier-0 dynamic UB
+`prove-encode` over `tb-encode` = 74 harnesses); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI
