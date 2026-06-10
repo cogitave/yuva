@@ -203,8 +203,45 @@ pub(super) extern "C" fn x86_trap_handler(frame: *mut TrapFrame) {
             // #BP's saved RIP already points past int3 (see module header), so
             // `iretq` in __alltraps resumes the next instruction. Just return.
         }
-        crate::TrapAction::Halt => super::halt(),
+        crate::TrapAction::Halt => {
+            dump_fatal_frame(f);
+            super::halt()
+        }
     }
+}
+
+/// #71 diagnostic (fatal path ONLY): the x86 boot intermittently takes a fatal
+/// fault at the M8 first async timer interrupt on the CONTENDED GitHub CI runner
+/// (NOT locally reproducible after 80 clean boots, idle + fully saturated). The
+/// observed signature -- a `#GP` (vector 0x0d) whose error code has RESERVED bits
+/// set (`0xfffffffa`, an IMPOSSIBLE value for a real CPU-pushed selector error
+/// code) -- points to a misread/corrupted frame or an `iretq` fault rather than a
+/// clean descriptor `#GP`. Dump the full interrupt frame so the NEXT CI catch is
+/// decisive: `cs`/`ss` reveal an `iretq` #GP (bad saved selectors), `rsp`/`rbp`
+/// reveal a stack anomaly, `rflags` shows IF/alignment, `vec`/`err` confirm the
+/// classification. Serial-only, no state change; it never runs on a green boot
+/// (the run scripts still FAIL on the missing marker, exactly as today).
+fn dump_fatal_frame(f: &TrapFrame) {
+    fn hx(label: &str, v: u64) {
+        crate::serial_write_str(label);
+        crate::serial_write_str("0x");
+        let mut sh: i32 = 60;
+        while sh >= 0 {
+            let nib = ((v >> sh) & 0xf) as u8;
+            let c = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            crate::serial_write_byte(c);
+            sh -= 4;
+        }
+    }
+    crate::serial_write_str("  frame:");
+    hx(" vec=", f.vector);
+    hx(" err=", f.error_code);
+    hx(" cs=", f.cs);
+    hx(" ss=", f.ss);
+    hx(" rflags=", f.rflags);
+    hx(" rsp=", f.rsp);
+    hx(" rbp=", f.rbp);
+    crate::serial_write_byte(b'\n');
 }
 
 /// Read CR2 (the linear address of the last page-fault). Intel SDM Vol.3A
