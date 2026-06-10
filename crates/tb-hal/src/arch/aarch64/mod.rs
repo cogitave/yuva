@@ -41,6 +41,7 @@ mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
 mod pmm; // M6: QEMU `virt` boot memory-map source (hard-coded map + DTB reserve).
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
 mod serial; // PL011 @ 0x0900_0000 (QEMU `virt` UART0).
+mod smmu; // aL2.6: SMMUv3 stage-2 DMA-isolation table-programming (EL1-only; IOMMU twin of L2.1).
 mod stage2; // L2.1: stage-2 demand-translation builder/arm/abort glue (+ HOLE_IPA).
 mod timer; // M8: GICv2 + EL1 physical timer (PPI 30); IRQ ack/EOI/tick + CNTPCT.
 mod trap; // Rust trap dispatch + breakpoint(); the only raw-frame deref.
@@ -55,6 +56,7 @@ pub use el2::el2_trap_selftest; // L2.3: the safe trap-and-emulate self-test fac
 pub use el2::stage2_selftest; // L2.1: the safe stage-2 demand-translation self-test facade.
 pub use el2::el2_nested_guest_selftest; // aL2.4: the safe nested-guest (two-stage) self-test facade.
 pub use el2::el2_vgic_selftest; // aL2.5: the safe vGIC virtual-interrupt-injection self-test facade.
+pub use smmu::smmu_selftest; // aL2.6: the safe SMMUv3 stage-2 table-programming self-test facade.
 pub use virtio::virtio_selftest; // M19: the safe virtio-rng self-test facade.
 pub use mmu::{
     address_space_new, current_root, heap_window, m3_test_va_intact, map_heap_frames, map_in_root,

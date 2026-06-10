@@ -49,6 +49,20 @@ jobs:
             # ceiling un-raceable so it never SIGTERMs a slow-but-healthy boot
             # mid-chain (the aL2.4 M6 "stall" was that startup-race artifact).
             qemu_timeout: 240
+            # QEMU >= 9.0 IS REQUIRED for the aL2.6 SMMUv3 stage-2 PROVEN path:
+            # IDR0.S2P (the stage-2 capability the rung programs against) was only
+            # added by the Mostafa series in QEMU 9.0 (2024). The hosted
+            # ubuntu-latest runner's apt qemu-system-arm is 8.2.2 (S1P=1 but S2P=0),
+            # which would force aL2.6 into its honest green '(no stage-2 SMMU,
+            # skipped)' variant. The roadmap bar is that EVERY L2 rung RUNS (not
+            # skips) under TCG in CI, so this lane boots the freshly built ELF
+            # inside a debian:trixie-slim container (qemu 10.x via apt
+            # qemu-system-arm) instead of on the runner. The kernel + every OTHER
+            # lane is built on the runner exactly as before -- ONLY this boot step
+            # moves into the container, so the blast radius is one step on one
+            # arch. docker is preinstalled on ubuntu-latest. The container image
+            # tag is the single knob that pins the QEMU major.
+            boot_in_container: debian:trixie-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,7 +74,13 @@ jobs:
         with:
           components: rust-src, llvm-tools
 
+      # Runner-native QEMU for the lanes that boot on the runner (x86_64). The
+      # aarch64 lane gets its QEMU (>= 9.0) from the debian:trixie-slim container
+      # instead -- see the container boot step below -- so it does NOT apt-install
+      # qemu on the runner; this `if` keeps the slower-and-too-old 8.2.2 package
+      # off the aarch64 lane entirely.
       - name: Install QEMU (headless)
+        if: ${{ !matrix.boot_in_container }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }}
@@ -79,7 +99,11 @@ jobs:
 
       # The run script boots the freshly built ELF under QEMU (TCG), greps the
       # serial log for the milestone DoD marker, and exits 0 only on a hit.
+      #
+      # RUNNER-NATIVE boot (x86_64): the apt-installed runner QEMU is fine -- the
+      # x86 microvm/PVH path has no >= 9.0 dependency.
       - name: Boot under QEMU and assert milestone marker
+        if: ${{ !matrix.boot_in_container }}
         # TCG on a contended GitHub runner can take ~15s just to reach
         # rust_main; the kernel then prints the whole M0..M19 self-test chain in
         # a fraction of a second and parks, so QEMU runs to this wall-clock
@@ -95,3 +119,29 @@ jobs:
         env:
           QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
         run: bash ${{ matrix.run }}
+
+      # CONTAINERISED boot (aarch64): identical run script, but executed inside
+      # debian:trixie-slim so the QEMU that boots the ELF is >= 9.0 (10.x), which
+      # advertises SMMU IDR0.S2P=1 and therefore drives the aL2.6 SMMUv3 stage-2
+      # PROVEN path ('L2.6: smmu OK' after 'smmu: stage-2 STE accepted') instead
+      # of the honest '(no stage-2 SMMU, skipped)' the 8.2.2 runner QEMU would
+      # take. The kernel was already BUILT on the runner by the step above; the
+      # checkout (which includes target/) is bind-mounted read/write at /work and
+      # run-aarch64.sh resolves its REPO_ROOT to /work, so the freshly built ELF
+      # at target/aarch64-tabos-none/debug/tabos-kernel is exactly what boots.
+      # qemu-system-arm in trixie provides qemu-system-aarch64 (the binary the run
+      # script invokes); -semihosting works headless in the container. `docker run`
+      # exits with the container command's status, so a FAIL inside run-aarch64.sh
+      # (exit 1) propagates out and reds this step -- fail-closed end to end. ONLY
+      # this lane's boot moves into the container; the build + every other lane +
+      # the x86 lane stay on the runner untouched.
+      - name: Boot under QEMU (container, qemu >= 9.0) and assert milestone marker
+        if: ${{ matrix.boot_in_container }}
+        env:
+          QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e QEMU_TIMEOUT="${QEMU_TIMEOUT}" \
+            "${{ matrix.boot_in_container }}" \
+            bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"

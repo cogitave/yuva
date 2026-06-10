@@ -84,9 +84,9 @@ pub use self::aarch64::{
     boot_stack_headroom, el2_stack_headroom,
     pmm_collect_regions, read_cycle_counter, read_word, redzone_check_report, redzone_init,
     sched_irq_unmask, serial_init, serial_write_byte,
-    set_kernel_stack, stage2_selftest, switch_root, task_stack_init, task_stack_init_user,
-    tick_period, timer_demo, timer_disarm, timer_rearm, unmap_in_root, user_demo,
-    va_to_pa_in_root, virtio_selftest, REDZONE_PATTERN, REDZONE_WORDS,
+    set_kernel_stack, smmu_selftest, stage2_selftest, switch_root, task_stack_init,
+    task_stack_init_user, tick_period, timer_demo, timer_disarm, timer_rearm, unmap_in_root,
+    user_demo, va_to_pa_in_root, virtio_selftest, REDZONE_PATTERN, REDZONE_WORDS,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

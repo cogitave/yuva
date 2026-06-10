@@ -37,6 +37,11 @@ use crate::el2_trap::{
 };
 use crate::ipc_frame::{BoundedRing, FrameError, MessageFrame, FRAME_SIZE};
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
+use crate::smmuv3::{
+    cmd_cfgi_ste, cmd_sync, cmd_tlbi_s12_vmall, ste_cfg, ste_s2, ste_s2ttb, ste_s2vmid, ste_v,
+    ste_vtcr, ste_vtcr_from_vtcr_el2, CMD_OP_CFGI_STE, CMD_OP_CMD_SYNC, CMD_OP_TLBI_S12_VMALL,
+    STE_0_V, STE_2_S2AA64, STE_2_S2R, STE_2_VTCR_SHIFT, STE_3_S2TTB_MASK, STE_CFG_S2_TRANS,
+};
 use crate::paging::{
     entry_addr, ept_leaf_2mib, ept_nonleaf, eptp, level_index, make_entry, ENTRIES,
     ENTRY_ADDR_MASK, EPT_MAPS_PAGE, EPT_MEMTYPE_WB, EPT_RWX, EPT_WALK_LEN_MINUS_1, SHIFT_1G,
@@ -856,4 +861,160 @@ fn kani_gich_lr_encode_roundtrip() {
     let vtr: u32 = kani::any();
     let n = vtr_list_regs(vtr);
     assert!(n >= 1 && n <= 64);
+}
+
+// ===========================================================================
+// aL2.6 -- SMMUv3 STE / command-queue encoder harnesses.
+// ===========================================================================
+
+/// A stage-2-only SMMUv3 Stream Table Entry round-trips: for a symbolic
+/// `s2ttb`(aligned)/`vmid`(16-bit)/`ste_vtcr`(19-bit), the `ste_*` accessors
+/// recover each field via INDEPENDENT literal shifts, `Config == 0b110`, `V` is
+/// set, the documented `S2AA64`/`S2R` flags are set + `S2ENDI`/`S2PTW` clear, and
+/// the address/VMID/VTCR fields are bit-disjoint (no field bleed). The IOMMU twin
+/// of `kani_gich_lr_encode_roundtrip` + `kani_s2_table_and_vttbr`.
+///
+/// DOMAIN: `s2ttb` masked to the STE `[51:4]` field, `vmid` a 16-bit value (the
+/// widest FEAT_VMID16 VMID -- the 8-bit VMID is a subset), `ste_vtcr` a 19-bit
+/// value (the full `VTCR_EL2[18:0]` projection envelope).
+///
+/// NEGATIVE CONTROL: packing `Config` at `<< 2` instead of `<< 1` (i.e. into
+/// `[4:2]` instead of `[3:1]`) would leave `V` (bit0) clear yet `0b110<<2` would
+/// set bit3 -- so `ste_cfg` (which reads `[3:1]`) would recover `0b011`, not
+/// `0b110`, and `ste_v` would read 0; the `ste_cfg == STE_CFG_S2_TRANS` AND
+/// `ste_v == STE_0_V` conjunction would FAIL. The reference shifts (`& STE_0_V`,
+/// `>> 1 & 0b111`, the `[15:0]`/`<<32`/`[51:4]` slices) never route through the
+/// encoder, so the readback references are independent.
+#[kani::proof]
+fn kani_ste_s2_roundtrip() {
+    let s2ttb: u64 = kani::any();
+    kani::assume(s2ttb & 0xFFF == 0); // 4 KiB-aligned stage-2 L1 root
+    kani::assume(s2ttb <= STE_3_S2TTB_MASK); // fits the [51:4] S2TTB field
+    let vmid: u64 = kani::any();
+    kani::assume(vmid < (1u64 << 16)); // 16-bit VMID envelope
+    let ste_vtcr_field: u64 = kani::any();
+    kani::assume(ste_vtcr_field < (1u64 << 19)); // 19-bit VTCR projection
+
+    let ste = ste_s2(s2ttb, vmid, ste_vtcr_field);
+
+    // (a) FIELD ROUND-TRIP via the accessors under test...
+    assert_eq!(ste_v(&ste), STE_0_V); // V set
+    assert_eq!(ste_cfg(&ste), STE_CFG_S2_TRANS); // Config == 0b110 (stage-2 translate)
+    assert_eq!(ste_s2vmid(&ste), vmid); // S2VMID
+    assert_eq!(ste_vtcr(&ste), ste_vtcr_field); // VTCR projection
+    assert_eq!(ste_s2ttb(&ste), s2ttb); // S2TTB preserved
+
+    // ...and via INDEPENDENT literal-shift references (never via the accessors).
+    assert_eq!(ste[0] & 1, 1); // V bit0
+    assert_eq!((ste[0] >> 1) & 0b111, STE_CFG_S2_TRANS); // Config [3:1] == 0b110
+    assert_eq!(ste[2] & 0xFFFF, vmid); // S2VMID [15:0]
+    assert_eq!((ste[2] >> STE_2_VTCR_SHIFT) & 0x7_FFFF, ste_vtcr_field); // VTCR [50:32]
+    assert_eq!(ste[3] & STE_3_S2TTB_MASK, s2ttb); // S2TTB [51:4]
+
+    // (b) DOCUMENTED FLAGS: S2AA64 (AArch64 stage-2) + S2R (record faults) set;
+    // the stage-2-only LE default leaves S2ENDI + S2PTW clear.
+    assert!(ste[2] & STE_2_S2AA64 != 0);
+    assert!(ste[2] & STE_2_S2R != 0);
+
+    // (c) STAGE-2-ONLY: NO S1ContextPtr / stage-1 config -- dwords 1,4..7 zero.
+    assert_eq!(ste[1], 0);
+    assert_eq!(ste[4], 0);
+    assert_eq!(ste[5], 0);
+    assert_eq!(ste[6], 0);
+    assert_eq!(ste[7], 0);
+
+    // (d) NO FIELD BLEED: VMID[15:0], VTCR[50:32] and the flag bits are mutually
+    // disjoint (the VMID never overlaps the VTCR slot, which starts at bit32), and
+    // the V/Config field in dword0 is disjoint from the S2TTB field in dword3.
+    assert_eq!((0xFFFFu64) & (0x7_FFFFu64 << STE_2_VTCR_SHIFT), 0); // VMID vs VTCR
+    assert_eq!(STE_3_S2TTB_MASK & 0xF, 0); // S2TTB starts at bit4 (low nibble clear)
+}
+
+/// THE LEMMA: the SMMU stage-2 geometry IS the CPU stage-2 geometry. For a
+/// symbolic `VTCR_EL2` built by [`crate::stage2::vtcr`] over bounded fields,
+/// `ste_vtcr_from_vtcr_el2(vtcr_el2)` recovers `S2T0SZ`/`S2SL0`/`S2TG`/`S2PS`
+/// BIT-IDENTICALLY to `VTCR_EL2[18:0]`, proving the projection into the STE `VTCR`
+/// slot is the SAME 19 bits the CPU's `VTCR_EL2` carries (minus the EL2-only RES1
+/// bit31). The const-checkable "SMMU S2 config == CPU S2 config" fact.
+///
+/// DOMAIN: each `vtcr` field bounded to its real width (T0SZ 6-bit, SL0/TG0/
+/// cacheability 2-bit, PS 3-bit) -- the reachable stage-2 programming space, the
+/// same envelope `kani_vtcr_wellformed` proves.
+///
+/// NEGATIVE CONTROL: an off-by-one on `S2SL0`'s `[7:6]` slot -- reading SL0 from
+/// `[6:5]` (`>> 5`) instead of `[7:6]` (`>> 6`) -- would diverge from `VTCR_EL2.
+/// SL0` for any nonzero T0SZ bit5 / SL0 combination, so the `(proj >> 6) & 0x3 ==
+/// sl0` equality would FAIL. The references read DIRECTLY off the symbolic input
+/// fields, not via the encoder, so they are independent.
+#[kani::proof]
+fn kani_ste_vtcr_matches_cpu_stage2() {
+    let t0sz: u64 = kani::any();
+    kani::assume(t0sz < (1 << 6));
+    let sl0: u64 = kani::any();
+    kani::assume(sl0 < (1 << 2));
+    let tg0: u64 = kani::any();
+    kani::assume(tg0 < (1 << 2));
+    let ps: u64 = kani::any();
+    kani::assume(ps < (1 << 3));
+    let sh0: u64 = kani::any();
+    kani::assume(sh0 < (1 << 2));
+    let orgn0: u64 = kani::any();
+    kani::assume(orgn0 < (1 << 2));
+    let irgn0: u64 = kani::any();
+    kani::assume(irgn0 < (1 << 2));
+
+    // The CPU's VTCR_EL2 (the EXACT same packer the CPU stage-2 calls), carrying
+    // RES1 bit31; the STE projection drops bit31 but keeps [18:0] bit-identically.
+    let cpu_vtcr = vtcr(t0sz, sl0, tg0, ps, sh0, orgn0, irgn0);
+    assert!(cpu_vtcr & VTCR_RES1 != 0); // the CPU word has RES1 set...
+    let proj = ste_vtcr_from_vtcr_el2(cpu_vtcr);
+    assert_eq!(proj & VTCR_RES1, 0); // ...the STE projection drops it.
+
+    // BIT-IDENTITY: every stage-2 geometry field is recovered from the projection
+    // identically to the symbolic input (the SMMU S2 == CPU S2 lemma). References
+    // taken directly off the symbolic fields, never via the encoder.
+    assert_eq!(proj & 0x3F, t0sz); // S2T0SZ  [5:0]
+    assert_eq!((proj >> 6) & 0x3, sl0); // S2SL0   [7:6] (the off-by-one control)
+    assert_eq!((proj >> 8) & 0x3, irgn0); // S2IR0   [9:8]
+    assert_eq!((proj >> 10) & 0x3, orgn0); // S2OR0   [11:10]
+    assert_eq!((proj >> 12) & 0x3, sh0); // S2SH0   [13:12]
+    assert_eq!((proj >> 14) & 0x3, tg0); // S2TG    [15:14]
+    assert_eq!((proj >> 16) & 0x7, ps); // S2PS    [18:16]
+    // The projection IS exactly VTCR_EL2[18:0] -- the whole 19-bit slice.
+    assert_eq!(proj, cpu_vtcr & 0x7_FFFF);
+}
+
+/// The SMMUv3 command-queue encoders are TOTAL: `cmd_cfgi_ste`/
+/// `cmd_tlbi_s12_vmall`/`cmd_sync` place the right opcode in word0`[7:0]` for ALL
+/// symbolic operands, never panic, and land each operand in its documented field
+/// (StreamID `[63:32]` of CFGI_STE, VMID `[47:32]` of TLBI_S12_VMALL). Clone of
+/// `kani_dabt_iss_decode_total`'s totality style.
+///
+/// DOMAIN: `sid` any 32-bit StreamID, `vmid` any 16-bit VMID (the whole operand
+/// space the kernel can pass).
+///
+/// NEGATIVE CONTROL: encoding the opcode at `[15:8]` (`<< 8`) instead of `[7:0]`
+/// would make the `word0 & 0xFF == op` readback recover 0, not the opcode -- the
+/// `& 0xFF == CMD_OP_*` assertions would FAIL. The references mask `& 0xFF` /
+/// `>> 32` directly, never through a decoder.
+#[kani::proof]
+fn kani_smmu_cmd_encode_total() {
+    let sid: u32 = kani::any();
+    let c = cmd_cfgi_ste(sid);
+    assert_eq!(c[0] & 0xFF, CMD_OP_CFGI_STE); // opcode [7:0]
+    assert_eq!(c[0] >> 32, sid as u64); // StreamID [63:32]
+    assert_eq!(c[1] & 1, 1); // Leaf bit set (single-leaf invalidate)
+
+    let vmid: u16 = kani::any();
+    let t = cmd_tlbi_s12_vmall(vmid);
+    assert_eq!(t[0] & 0xFF, CMD_OP_TLBI_S12_VMALL); // opcode [7:0]
+    assert_eq!((t[0] >> 32) & 0xFFFF, vmid as u64); // VMID [47:32]
+
+    let s = cmd_sync();
+    assert_eq!(s[0] & 0xFF, CMD_OP_CMD_SYNC); // opcode [7:0]
+
+    // The three opcodes are distinct (the SMMU routes on them).
+    assert!(CMD_OP_CFGI_STE != CMD_OP_TLBI_S12_VMALL);
+    assert!(CMD_OP_TLBI_S12_VMALL != CMD_OP_CMD_SYNC);
+    assert!(CMD_OP_CFGI_STE != CMD_OP_CMD_SYNC);
 }

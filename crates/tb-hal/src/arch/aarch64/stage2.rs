@@ -501,6 +501,14 @@ pub(super) fn compute_vttbr(root: u64) -> u64 {
     vttbr(root, VMID)
 }
 
+/// The stage-2 [`VMID`] the CPU stage-2 regime uses. Exposed `pub(super)` so the
+/// aL2.6 SMMU self-test ([`super::smmu`]) packs the SAME VMID into the STE's
+/// `S2VMID` field — the "SMMU stage-2 VMID == CPU stage-2 VMID" half of the
+/// shared-stage-2 thesis.
+pub(super) fn s2_vmid() -> u64 {
+    VMID
+}
+
 // ===========================================================================
 // EL2-only: arm / disarm stage-2 (the msr VTCR/VTTBR/HCR.VM writes).
 // ===========================================================================
