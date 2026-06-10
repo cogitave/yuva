@@ -50,7 +50,7 @@
 //!  * Frame size `0x110`; B0 == B1 + 0x110 (one frame, never popped).
 
 use core::arch::{asm, naked_asm};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tb_encode::el2_trap::{
     classify_exit, dabt_access_size_bytes, dabt_is_emulatable, dabt_iss_sf, dabt_iss_srt,
@@ -395,6 +395,90 @@ const _: () = assert!(FAIL_NG_BAD_MAGIC != 0 && FAIL_NG_BAD_IPA != 0);
 const _: () = assert!(FAIL_NG_BUILD != FAIL_NG_BAD_IPA && FAIL_NG_S1PTW != FAIL_NG_BAD_IPA);
 
 // ===========================================================================
+// aL2.5 vGIC constants (the sixth L2 rung: SOFTWARE-INJECT a virtual interrupt
+// into a guest that PARKS on WFI, prove the guest takes + acks the vIRQ via its
+// GICV virtual CPU interface and the GIC virtualization HW retires the injected
+// list register).
+// ===========================================================================
+
+/// aL2.5: the kernel's vGIC bootstrap HVC immediate (`hvc #10`) -- "arm the vGIC
+/// window (HCR_EL2 = RW|IMO|TWI + GICH_HCR.En) and eret into the aL2.5 guest
+/// stub with PSTATE.I UNMASKED". The guest enables its GICV CPU interface, parks
+/// on WFI (which traps -> the monitor injects the vIRQ + resumes), takes the
+/// vIRQ at its EL1 IRQ vector, acks/EOIs, and HVCs done.
+const HVC_VGIC_ARM: u64 = 10;
+/// aL2.5: the guest's vGIC done HVC immediate (`hvc #11`) -- "round-trip
+/// complete; TEAR the window DOWN (HCR_EL2 = RW, GICH_HCR.En=0, zero GICH_LR0)
+/// FIRST, then verify the guest magic + the monitor-side LR-retired observation,
+/// and unwind". Teardown-first (leaving TWI armed would trap the kernel's own
+/// halt() WFI -- instant regression).
+const HVC_VGIC_DONE: u64 = 11;
+
+/// aL2.5: the vINTID the monitor injects + the guest acks (an SGI/PPI-style
+/// software-injected ID; `0x2A` = 42 fits a single MOVZ and is below the GICV
+/// 10-bit vINTID field). The guest's IRQ vector + the monitor's LR encode BOTH
+/// use this; locked against `el2_vgic_vectors.rs`'s `movz x11, #0x2A` so a drift
+/// silently breaks the ack-match.
+const VGIC_VINTID: u64 = 0x2A;
+/// aL2.5: the magic the guest presents in x0 -- `0x761` ("vIRQ") -- set ONLY when
+/// its EL1 IRQ handler fired, read GICV_IAR == VGIC_VINTID, set x28 =
+/// VGIC_IRQ_TAKEN, and wrote GICV_EOIR. A single MOVZ.
+const VGIC_GUEST_MAGIC: u64 = 0x761;
+/// aL2.5: the "vIRQ taken" sentinel the guest's OWN EL1 IRQ vector sets into x28
+/// (must match `el2_vgic_vectors.rs`'s `movz x28, #0x5A5`). The guest checks
+/// `x28 == this` before presenting `VGIC_GUEST_MAGIC`.
+const VGIC_IRQ_TAKEN: u64 = 0x5A5;
+
+/// aL2.5: the SPSR_EL2 for the eret into the vGIC guest -- EL1h (M=0x5) + D|A|F
+/// masked but **I CLEAR** = `0x345` (= `0x3C5 & !(1<<7)`). DISTINCT from the
+/// `SPSR_EL1H_DAIF` (0x3C5) every other rung uses, which MASKS I. The DAIF bits
+/// live at SPSR[9:6] (D=9, A=8, I=7, F=6), so I is bit 7; `0x3C5` has it set,
+/// `0x345` clears ONLY it (D/A/F + EL1h M field preserved). The injected VIRQ
+/// only reaches the guest if PSTATE.I is UNMASKED -- a copy-paste of 0x3C5 would
+/// silently never deliver the vIRQ and the guest would re-park forever (the #1
+/// aL2.5 risk).
+const SPSR_EL1H_VGIC: u64 = 0x345;
+
+// aL2.5 FAIL codes (distinct nonzero; any -> `VgicProof::Faulted` -> red marker,
+// rendered WITHOUT a "vgic OK" substring). Family 0x0761_....
+/// The guest presented the wrong x0 magic (its EL1 IRQ handler did not fire, or
+/// GICV_IAR != the injected vINTID, or the ack/EOI path did not complete).
+const FAIL_VGIC_BAD_MAGIC: u64 = 0x0000_0761_0000_0001;
+/// The WFI park was never observed (the guest did not reach its WFI, or TWI was
+/// not armed) -- the scheduler-hook precondition failed.
+const FAIL_VGIC_NO_PARK: u64 = 0x0000_0761_0000_0002;
+/// The injected GICH_LR0 never retired (GICH_ELRSR0 bit0 still 0 + LR0 not
+/// INVALID after the guest's EOIR) -- the GIC virtualization HW did not drive the
+/// vIRQ through pending->active->invalid (a fact the guest cannot fake).
+const FAIL_VGIC_NO_RETIRE: u64 = 0x0000_0761_0000_0003;
+/// The board exposed zero list registers (GICH_VTR.ListRegs+1 == 0) -- LR0 is not
+/// available, so injection is impossible. Fail closed (never write a missing LR).
+const FAIL_VGIC_NO_LR: u64 = 0x0000_0761_0000_0004;
+/// The guest's WFI trapped MORE THAN ONCE (a mis-injection livelock) -- the
+/// park-count cap fired. Fail closed instead of looping to the 90s ceiling.
+const FAIL_VGIC_RELOOP: u64 = 0x0000_0761_0000_0005;
+
+// Tier-1 compile-time locks on the aL2.5 dispatch constants (a drift is a build
+// error). The vINTID/sentinel/magic are mirrored into the asm guest stub +
+// vector table; pin them here.
+const _: () = assert!(HVC_VGIC_ARM == 10 && HVC_VGIC_DONE == 11);
+const _: () = assert!(VGIC_VINTID == 0x2A && VGIC_VINTID < 1024); // fits the 10-bit field
+const _: () = assert!(VGIC_GUEST_MAGIC == 0x761 && VGIC_IRQ_TAKEN == 0x5A5);
+// The vGIC SPSR MUST have PSTATE.I (bit7) CLEAR so the injected VIRQ is taken;
+// every other field matches the EL1h DAIF baseline except I. A const-assert pins
+// it: an accidental 0x3C5 (I set) turns this build red, not a silent boot hang.
+const _: () = assert!(SPSR_EL1H_VGIC & (1 << 7) == 0); // PSTATE.I UNMASKED
+const _: () = assert!(SPSR_EL1H_VGIC == 0x345);
+const _: () = assert!(SPSR_EL1H_VGIC == SPSR_EL1H_DAIF & !(1u64 << 7)); // == DAIF, ONLY I cleared
+const _: () = assert!(SPSR_EL1H_DAIF & (1 << 7) != 0); // the other rungs MASK I
+// The FAIL codes are distinct nonzero (a collision would mis-render the verdict).
+const _: () = assert!(FAIL_VGIC_BAD_MAGIC != 0 && FAIL_VGIC_NO_PARK != 0);
+const _: () = assert!(FAIL_VGIC_NO_RETIRE != 0 && FAIL_VGIC_NO_LR != 0 && FAIL_VGIC_RELOOP != 0);
+const _: () = assert!(FAIL_VGIC_BAD_MAGIC != FAIL_VGIC_NO_PARK);
+const _: () = assert!(FAIL_VGIC_NO_PARK != FAIL_VGIC_NO_RETIRE);
+const _: () = assert!(FAIL_VGIC_NO_RETIRE != FAIL_VGIC_NO_LR && FAIL_VGIC_NO_LR != FAIL_VGIC_RELOOP);
+
+// ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
 // ===========================================================================
 
@@ -433,6 +517,16 @@ fn read_esr_el2() -> u64 {
     // stack effect and leaves NZCV unchanged. The handler runs at EL2.
     unsafe {
         asm!("mrs {v}, esr_el2", v = out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Read `ELR_EL2` (the trapped lower-EL return PC) -- EL2-readable, no effects.
+fn read_elr_el2() -> u64 {
+    let v: u64;
+    // SAFETY: as `read_esr_el2`; ELR_EL2 is an EL2-readable system register.
+    unsafe {
+        asm!("mrs {v}, elr_el2", v = out(reg) v, options(nomem, nostack, preserves_flags));
     }
     v
 }
@@ -519,6 +613,37 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
         // `kvm_handle_wfx`), recording the arm fired; outside the window it is
         // unexpected -> fail closed.
         ExitClass::Wfx => {
+            // aL2.5: the vGIC injection branch (mutually exclusive with the L2.2
+            // exits window -- the self-tests run sequentially so at most one is
+            // armed; a debug-assert pins it). On the guest's trapped WFI (the
+            // scheduler yield point), INJECT a pending vIRQ into GICH_LR0 and
+            // resume past the WFI -- the now-pending VIRQ (HCR_EL2.IMO routes it,
+            // PSTATE.I clear) fires immediately at the guest's EL1 IRQ vector.
+            if super::el2vgic::armed() {
+                debug_assert!(
+                    !super::exits::armed(),
+                    "aL2.5: the exits and vgic WFx windows must be mutually exclusive"
+                );
+                // Park-count cap: a SECOND WFI-trap means the inject/resume
+                // mis-fired and the guest re-parked -> fail closed instead of
+                // looping to the 90s ceiling (the WFI-as-park livelock risk).
+                let parks = super::el2vgic::note_park();
+                if parks > 1 {
+                    el2_return_to_kernel(FAIL_VGIC_RELOOP, esr);
+                }
+                // Inject the pending vIRQ (GICH_HCR.En already set by the arm;
+                // gich_lr_encode composes the LR0 word, the store lands next to
+                // it inside el2vgic). Then advance ELR past the WFI + resume.
+                super::el2vgic::inject_virq(VGIC_VINTID);
+                // SAFETY: `frame` is the WFI trap frame on the single-accessor
+                // monitor stack; `elr` (0xF8) is the WFI PC. Advance it by 4
+                // (WFI is a 32-bit insn) so the restore-and-eret resumes PAST
+                // the WFI (the guest's WFI "returns", woken by the pending vIRQ).
+                unsafe { (*frame).elr += 4 };
+                el2_abort_retry(frame);
+            }
+            // L2.2: a trapped WFI/WFE (only while HCR_EL2.TWI|TWE armed). RESUME
+            // one insn PAST the WFx, recording the arm fired.
             if super::exits::armed() {
                 super::exits::set_exit_served(EXIT_WFX_BIT);
                 // SAFETY: `frame` is the WFx trap frame on the single-accessor
@@ -866,6 +991,80 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             };
             el2_return_to_kernel(outcome, magic);
         }
+        HVC_VGIC_ARM => {
+            // imm == 10: the kernel's aL2.5 bootstrap. No frame context rides in
+            // (the vGIC window is self-contained: the vINTID is a compile-time
+            // const, the guest builds nothing). The monitor arms the window
+            // (HCR_EL2 = RW|IMO|TWI + GICH_HCR.En), reads GICH_VTR to assert at
+            // least one list register exists (fail closed if 0), records
+            // el2vgic::set_armed(true), and `eret`s INTO the aL2.5 guest stub
+            // with SPSR = SPSR_EL1H_VGIC (EL1h, PSTATE.I UNMASKED -- REQUIRED so
+            // the injected VIRQ is taken). Leave this frame (B0 == __el2_stack_top
+            // - 0x110) resident (SP_EL2 reset to it) so the guest's WFI-trap +
+            // `hvc #11` stack below it and the done unwind hits B0.
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[3] carries the stub entry framed by SAVE_CONTEXT_EL2 (HVC #10
+            // args: x0..x2 unused/echoed, x3 = stub).
+            let stub = unsafe { (*frame).gpr[3] };
+            super::el2vgic::set_armed(true);
+            super::el2vgic::arm_vgic_el2();
+            // Risk: GICH_VTR.ListRegs small on the virt board -- assert >= 1 LR.
+            if super::el2vgic::num_lrs() == 0 {
+                super::el2vgic::disarm_vgic_el2();
+                super::el2vgic::set_armed(false);
+                el2_return_to_kernel(FAIL_VGIC_NO_LR, esr);
+            }
+            // SAFETY: reset SP_EL2 = &B0, program ELR_EL2 = stub + SPSR_EL2 =
+            // SPSR_EL1H_VGIC (I-unmasked), `eret`. `noreturn`: control leaves EL2
+            // for the guest (HCR_EL2.TWI armed, so its WFI re-enters EL2 via the
+            // Wfx arm; the injected vIRQ then fires at the guest's EL1 vector).
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_VGIC,
+                    options(noreturn),
+                );
+            }
+        }
+        HVC_VGIC_DONE => {
+            // imm == 11: the guest's aL2.5 done HVC (or a stray-exception fail
+            // trampoline). TEARDOWN IS THE FIRST ACTION (leaving HCR_EL2.TWI armed
+            // would trap the kernel's own halt() WFI -- instant regression; a
+            // stale GICH_HCR.En / GICH_LR0 could leak a virtual interrupt). The
+            // disarm clears HCR_EL2 to the boot baseline (RW only), GICH_HCR.En=0,
+            // and zeroes GICH_LR0.
+            // `frame` == &B1; read the guest magic (0x761 iff its EL1 IRQ handler
+            // fired, GICV_IAR == vINTID, x28 == VGIC_IRQ_TAKEN, GICV_EOIR written).
+            // SAFETY: `frame` == &B1 on the monitor stack; `gpr[0]` is the magic.
+            let magic = unsafe { (*frame).gpr[0] };
+            // Read the monitor-side completion proofs BEFORE teardown zeroes LR0:
+            // (a) the WFI park was observed, (b) GICH_LR0 retired (ELRSR0 bit0 +
+            // LR0 state INVALID -- a fact the guest cannot fake by writing a magic).
+            let parked = super::el2vgic::park_seen();
+            let retired = super::el2vgic::lr0_retired();
+            // TEARDOWN FIRST (after reading the LR-retired proof, before unwinding).
+            super::el2vgic::disarm_vgic_el2();
+            super::el2vgic::set_armed(false);
+            // The verdict requires the CONJUNCTION: the guest magic AND the WFI
+            // park AND the monitor-side LR-retired observation. Any miss routes to
+            // a distinct nonzero FAIL code (rendered WITHOUT a "vgic OK" substring).
+            let outcome = if !parked {
+                FAIL_VGIC_NO_PARK
+            } else if magic != VGIC_GUEST_MAGIC {
+                FAIL_VGIC_BAD_MAGIC
+            } else if !retired {
+                FAIL_VGIC_NO_RETIRE
+            } else {
+                0
+            };
+            el2_return_to_kernel(outcome, magic);
+        }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
             el2_return_to_kernel(FAIL_BAD_IMM, other);
@@ -1181,12 +1380,30 @@ fn el2_abort_retry(frame: *mut Frame) -> ! {
 // The EL2 fatal-vector handler: any non-(Lower-EL-sync) slot. Surfaces a FAIL by
 // unwinding to the kernel (never a silent loop / hang).
 // ===========================================================================
+/// DIAG (#65, probe P3): one-time latch for the unexpected-EL2-vector print,
+/// so a recurring fault cannot flood the serial log from EL2.
+static EL2_FAULT_REPORTED: AtomicBool = AtomicBool::new(false);
+
 /// Handle an unexpected EL2 exception (e.g. the guest stub aborting instead of
 /// HVC-ing): unwind to the kernel's resident B0 with a nonzero code carrying the
 /// EL2 syndrome, so [`el2_selftest`] reports `RoundTripFailed` (red marker).
 #[no_mangle]
 pub(super) extern "C" fn aarch64_el2_fault_handler(_frame: *mut Frame) -> ! {
     let esr = read_esr_el2();
+    // DIAG (#65, probe P3): an entry through ANY non-(Lower-EL-sync) EL2 slot
+    // is unexpected by construction (HCR_EL2.IMO/FMO/AMO=0 routes physical
+    // IRQ/FIQ/SError to EL1; the monitor itself never faults on the healthy
+    // path). Print the syndrome + trapped PC ONCE before unwinding: if the
+    // CI-only corruption enters here, the esr/elr pinpoint the trigger class.
+    // Serial is safe at EL2: the PL011 MMIO write needs no MMU (EL2 runs
+    // MMU-off, physical addressing) and the print is one-time latched.
+    if !EL2_FAULT_REPORTED.swap(true, Ordering::AcqRel) {
+        crate::serial_write_str("el2: UNEXPECTED vector entry esr=");
+        crate::diag_write_hex(esr);
+        crate::serial_write_str(" elr=");
+        crate::diag_write_hex(read_elr_el2());
+        crate::serial_write_byte(b'\n');
+    }
     el2_return_to_kernel(FAIL_EL2_FAULT, esr);
 }
 
@@ -1201,6 +1418,29 @@ pub(super) extern "C" fn aarch64_el2_fault_handler(_frame: *mut Frame) -> ! {
 /// transparent except x0 = `code`, x1 = `x1val` (both caller-saved / clobbered).
 fn el2_return_to_kernel(code: u64, x1val: u64) -> ! {
     let b0 = (el2_stack_top() - 0x110) as *mut Frame;
+    // DIAG (#65, probe P3): B0 is only initialised by the FIRST bootstrap
+    // `HVC #0` at L2.0 time. If an unexpected EL2 entry lands here EARLIER,
+    // the frame is still all-zeros (.bss) and the "unwind" would eret to
+    // EL0t at PC=0 with DAIF fully unmasked -- a silent corruption amplifier
+    // (the suspected manifestation-2/3 cascade). Detect the all-zero frame
+    // (a REAL kernel HVC always saves a nonzero ELR_EL2 and an EL1h SPSR),
+    // report ONCE, and PARK at EL2 instead of issuing the junk eret: the run
+    // then dies loudly at the 240 s ceiling with the line in the log.
+    // SAFETY: B0 lives in the single-accessor monitor stack; reading two u64
+    // fields of the linker-placed frame is a plain aligned load at EL2.
+    let (b0_elr, b0_spsr) = unsafe { ((*b0).elr, (*b0).spsr) };
+    if b0_elr == 0 && b0_spsr == 0 {
+        crate::serial_write_str("el2: B0 UNINITIALIZED (pre-L2.0 EL2 entry) -- parking, code=");
+        crate::diag_write_hex(code);
+        crate::serial_write_str(" x1=");
+        crate::diag_write_hex(x1val);
+        crate::serial_write_byte(b'\n');
+        loop {
+            // SAFETY: `wfi` is a hint with no memory/stack effects; parking at
+            // EL2 forever is the fail-closed alternative to an eret-to-PC=0.
+            unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
+        }
+    }
     // SAFETY: B0 lives in the single-accessor monitor stack (the EL1 kernel never
     // references it); it was fully initialised by the bootstrap HVC's
     // SAVE_CONTEXT_EL2. We overwrite only gpr[0]/gpr[1] (the result registers).
@@ -2056,4 +2296,169 @@ pub fn el2_nested_guest_selftest() -> crate::NestedGuestProof {
     } else {
         NestedGuestProof::Faulted { code: outcome }
     }
+}
+
+// ===========================================================================
+// aL2.5: the EL1 vGIC guest -- a small position-independent EL1 payload that
+// enables its OWN GICV virtual CPU interface, PARKS on WFI (which traps to EL2,
+// where the monitor injects a pending vIRQ via GICH_LR0 and resumes it), takes
+// the injected VIRTUAL interrupt at its OWN EL1 IRQ vector (GICV_IAR ack ->
+// x28 = VGIC_IRQ_TAKEN -> GICV_EOIR), and presents the vGIC magic iff the vIRQ
+// was taken+acked. Modeled on `guest_stub` / `el2_nested_guest_stub`. NO new
+// stack frame (SP_EL1 is the guest's own, untouched); only x9..x12 scratch +
+// the callee-saved x27/x28 handshake the IRQ vector agreed on.
+// ===========================================================================
+// (a) PRE : reached only by the `imm == 10` handler's `eret`, executing at EL1h
+//           (SPSR = SPSR_EL1H_VGIC, PSTATE.I UNMASKED) under the kernel's live
+//           stage-1 (HCR_EL2.VM=0). Its VA == PA: identity-mapped EL1-executable
+//           kernel `.text` in GiB1; the GICV frame (0x0804_0000) is in the GiB0
+//           Device identity block the kernel maps. POST: `hvc #11` (the monitor
+//           tears the window down + verifies; never returns here).
+// (b) ABI : `#[unsafe(naked)]` -- a register-only sequence (enable GICV, install
+//           VBAR, WFI, check sentinel, hvc). Uses NO new stack frame. The
+//           GICV_BASE / sentinels / vINTID are materialised as immediates; the
+//           magic + sentinel are locked against the consts (and the vector
+//           table) by const-asserts.
+// (c) TEST: scripts/run-aarch64.sh -- the vGIC round-trip prints "L2.5: vgic OK".
+/// The aL2.5 vGIC guest: enable GICV_CTLR.En + GICV_PMR=0xFF, install its OWN
+/// VBAR_EL1 (whose 0x280 SPx-IRQ slot acks/EOIs the vIRQ), park on WFI, then
+/// present `VGIC_GUEST_MAGIC` (0x761) iff x28 == VGIC_IRQ_TAKEN, and `hvc #11`.
+#[unsafe(naked)]
+extern "C" fn el2_vgic_guest_stub() -> ! {
+    naked_asm!(
+        // -- (1) ENABLE the guest's OWN GICV virtual CPU interface -------------
+        // x9 = GICV_BASE (0x0804_0000): the frame the guest touches as its GICC.
+        "movz x9, #0x0804, lsl #16",
+        // GICV_PMR = 0xFF (allow all priorities -- the injected pri-0 vIRQ passes).
+        "movz x10, #0xFF",
+        "str  w10, [x9, #0x04]",       // GICV_PMR @ 0x004
+        // GICV_CTLR.En = 1 (enable the virtual CPU interface).
+        "movz x10, #1",
+        "str  w10, [x9, #0x00]",       // GICV_CTLR @ 0x000
+        "dsb  ish",
+        "isb",
+        // -- (2) INSTALL the guest's OWN VBAR_EL1 (the vIRQ vector) ------------
+        "adrp x12, __l2_vgic_guest_vectors",
+        "add  x12, x12, :lo12:__l2_vgic_guest_vectors",
+        "msr  vbar_el1, x12",
+        "isb",
+        // -- (3) PARK on WFI (PSTATE.I left UNMASKED; do NOT msr DAIFSet) -------
+        // The WFI traps to EL2 (HCR_EL2.TWI=1); the monitor injects a pending
+        // vIRQ into GICH_LR0 and resumes past the WFI. On resume the now-pending
+        // VIRQ (IMO routes it, I clear) fires immediately at VBAR_EL1+0x280,
+        // whose handler reads GICV_IAR, sets x28 = VGIC_IRQ_TAKEN (iff the IAR
+        // matched the injected vINTID), writes GICV_EOIR, and erets back here.
+        "movz x28, #0",                // clear the vIRQ-taken sentinel
+        "wfi",                         // park -> trap -> inject -> resume -> vIRQ
+        // -- (4) VERDICT: magic 0x761 iff the vIRQ was taken + acked -----------
+        "mov  x0, #0xBAD",             // assume FAIL until the sentinel matches
+        "movz x9, #0x5A5",             // VGIC_IRQ_TAKEN expected in x28
+        "cmp  x28, x9",
+        "b.ne 1f",                     // vIRQ not taken/acked -> leave x0 = 0xBAD
+        "movz x0, #0x761",             // VGIC_GUEST_MAGIC -- the vIRQ round-trip closed
+        "1:",
+        "hvc  #11",                    // done: teardown + verify + unwind
+        "2:",
+        "b 2b",                        // unreachable: the monitor unwinds, never here
+    )
+}
+
+// ===========================================================================
+// aL2.5: the safe facade: el2_vgic_selftest() -> VgicProof.
+// ===========================================================================
+// (a) PRE : called once from the kernel at the L2.5 slot (right after aL2.4,
+//           before M19), at EL1h, with the resident monitor armed
+//           (BOOTED_AT_EL2 == 1). POST: SAVED the kernel's VBAR_EL1 (the guest
+//           installs its OWN), masked IRQs, issued ONE `HVC #10`, drove the
+//           arm -> guest-enables-GICV -> WFI-park -> WFI-trap-to-EL2 -> monitor
+//           injects vIRQ via GICH_LR0 -> resume -> guest takes the vIRQ at EL1
+//           -> ack(GICV_IAR)/EOI(GICV_EOIR) -> `hvc #11` -> TEARDOWN (HCR_EL2
+//           back to baseline, GICH_HCR.En=0, GICH_LR0 zeroed) -> unwind
+//           round-trip, RESTORED VBAR_EL1, and returns the outcome enum. The
+//           kernel resumes here at EL1 with the vGIC window fully torn down.
+//           Graceful skip when not booted at EL2.
+// (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `el2vgic.rs` /
+//           `el2_vgic_vectors.rs`, so the `#![forbid(unsafe_code)]` kernel only
+//           branches on the returned `VgicProof`.
+// (c) TEST: scripts/run-aarch64.sh -- "L2.5: vgic OK" iff this is `Proven`.
+/// Drive the EL1->EL2(arm)->EL1-guest(enable GICV + park on WFI)->EL2(WFI-trap:
+/// inject vIRQ + resume)->EL1-guest(take + ack the vIRQ)->EL2(done+teardown)->EL1
+/// vGIC injection round-trip and report the outcome. `Unavailable` if we did not
+/// boot at EL2 (a green skip); `Proven{vintid}` on a closed round-trip that fired
+/// the WFI park, delivered the vIRQ, AND retired the injected LR; `Faulted{code}`
+/// on any monitor-reported fault.
+pub fn el2_vgic_selftest() -> crate::VgicProof {
+    use crate::VgicProof;
+
+    // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
+    if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
+        return VgicProof::Unavailable;
+    }
+
+    let stub = el2_vgic_guest_stub as *const () as u64;
+    let _ = l2_vgic_guest_vectors_addr(); // keep the vector symbol referenced
+
+    // SAVE the kernel's VBAR_EL1 BEFORE the round-trip: the guest installs its
+    // OWN vGIC vectors, so the facade must restore the kernel's after (the
+    // EL1-side teardown -- mirrors the aL2.4 VBAR save/restore).
+    let saved_vbar = read_vbar_el1();
+
+    // Mask EL1 IRQs across the whole window (the guest runs with PSTATE.I clear
+    // so it CAN take the injected vIRQ, but the KERNEL side stays masked so no
+    // stray physical IRQ disturbs the round-trip).
+    let daif = super::timer::local_irq_save();
+
+    let outcome: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #10`, arms the vGIC window
+    // (HCR_EL2 = RW|IMO|TWI + GICH_HCR.En), and erets into the EL1 vGIC guest
+    // with PSTATE.I unmasked. The guest enables its GICV interface, parks on WFI
+    // (which traps to EL2 -- the monitor injects a pending vIRQ via GICH_LR0 and
+    // resumes past the WFI), takes the vIRQ at its EL1 vector, acks + EOIs it,
+    // and `hvc #11`s -- the monitor TEARS the window DOWN (HCR_EL2 baseline,
+    // GICH_HCR.En=0, GICH_LR0 zeroed) FIRST, reads the LR-retired proof, and
+    // unwinds here with x0 = outcome, x1 = guest magic (unused by the verdict,
+    // which reports the injected vINTID), every other kernel register restored
+    // from B0. The result arrives in registers -- nothing here touches the EL2
+    // stack. x3 carries the stub entry; clobber_abi("C") covers the rest.
+    unsafe {
+        asm!(
+            "hvc #10",
+            inout("x0") 0u64 => outcome,
+            out("x1") _, // x1 = guest magic (consumed at EL2 in the done verdict)
+            in("x3") stub,
+            clobber_abi("C"),
+        );
+    }
+
+    // EL1-side teardown: restore the kernel's VBAR_EL1 (the guest pointed it at
+    // its OWN vGIC vectors) + isb so the next kernel exception uses the kernel
+    // table. The marker discipline catches a miss: M19 must still print after.
+    write_vbar_el1(saved_vbar);
+
+    super::timer::local_irq_restore(daif);
+
+    if outcome == 0 {
+        VgicProof::Proven {
+            vintid: VGIC_VINTID,
+        }
+    } else {
+        VgicProof::Faulted { code: outcome }
+    }
+}
+
+/// EL1: compute `&__l2_vgic_guest_vectors` (the aL2.5 guest EL1 vector table in
+/// `el2_vgic_vectors.rs`) PC-relative -- no memory access.
+fn l2_vgic_guest_vectors_addr() -> u64 {
+    let v: u64;
+    // SAFETY: `adrp`/`add :lo12:` form the address of the linker-kept symbol with
+    // no memory access; NZCV preserved.
+    unsafe {
+        asm!(
+            "adrp {v}, __l2_vgic_guest_vectors",
+            "add  {v}, {v}, :lo12:__l2_vgic_guest_vectors",
+            v = out(reg) v,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    v
 }

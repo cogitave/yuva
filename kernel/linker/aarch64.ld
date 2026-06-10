@@ -15,8 +15,15 @@
  *
  * Symbols exported for crates/tb-hal/src/arch/aarch64/boot.rs (`_start`):
  *   __bss_start, __bss_end        -- .bss bounds, zeroed at boot
- *   __boot_stack_top              -- initial SP (16 KiB stack, grows down)
+ *   __boot_stack_top              -- initial SP (64 KiB stack, grows down)
  *   __exception_vectors           -- 2 KiB-aligned VBAR_EL1 table (in .text)
+ * Symbols exported for crates/tb-hal/src/arch/aarch64/diag.rs (#65 guards):
+ *   __boot_stack_guard_bottom     -- 4 KiB sacrificial guard BELOW the boot
+ *                                    stack (between the .bss statics and
+ *                                    __boot_stack_bottom)
+ *   __el2_stack_guard_bottom      -- 4 KiB sacrificial guard BELOW the EL2
+ *                                    stack (between __boot_stack_top and
+ *                                    __el2_stack_bottom)
  * Symbols exported for crates/tb-hal/src/pmm.rs (M6 frame allocator):
  *   __image_start, __image_end    -- whole-image bounds; the frame allocator
  *                                    reserves [__image_start, __image_end) so it
@@ -61,6 +68,7 @@ SECTIONS
         KEEP(*(.text._el2_vectors))/* L2.0 VBAR_EL2 table, self-aligned 2 KiB */
         KEEP(*(.text._l2_guest_vectors)) /* L2.2 guest VBAR_EL1 table, 2 KiB-aligned */
         KEEP(*(.text._el2_nested_vectors)) /* aL2.4 nested-guest VBAR_EL1 table, 2 KiB-aligned */
+        KEEP(*(.text._l2_vgic_vectors)) /* aL2.5 vGIC guest VBAR_EL1 table, 2 KiB-aligned */
         *(.text .text.*)
     } :text
 
@@ -79,13 +87,35 @@ SECTIONS
     .bss (NOLOAD) : ALIGN(16) {
         *(.bss .bss.*)
         *(COMMON)
+        /* #65 FIX (H1b boot-stack overflow): the -O0 boot chain (deepest in
+         * the M5 heap path) was measured running SP up to ~0x280 bytes BELOW
+         * the old 16 KiB stack's bottom, silently stomping whichever .bss
+         * statics the build's symbol order parked there (CARGO_INCREMENTAL=0
+         * layouts put LIVE statics first -> the three CI-only failure modes).
+         * Three defenses, all zero runtime cost (pure NOLOAD .bss):
+         *   1. the boot stack grows 16 -> 64 KiB (matching the x86_64 boot
+         *      stack) and the EL2 monitor stack 16 -> 32 KiB;
+         *   2. an explicit 4 KiB SACRIFICIAL GUARD sits between the .bss
+         *      statics and __boot_stack_bottom, so the first KiBs of any
+         *      future overflow land in dead, canary-painted memory instead
+         *      of live statics;
+         *   3. a second 4 KiB guard sits between __boot_stack_top and
+         *      __el2_stack_bottom, so an EL2-monitor stack overflow cannot
+         *      silently stomp the boot stack's top.
+         * tb-hal's diag.rs paints both guards with the red-zone pattern and
+         * re-checks them on every timer tick + milestone checkpoint (loud,
+         * one-time-latched serial line on a breach; silent when healthy). */
         . = ALIGN(16);
+        __boot_stack_guard_bottom = .;
+        . = . + 0x1000;            /* 4 KiB canary guard below the boot stack */
         __boot_stack_bottom = .;
-        . = . + 0x4000;            /* 16 KiB boot stack (SP_EL1)              */
+        . = . + 0x10000;           /* 64 KiB boot stack (SP_EL1)              */
         __boot_stack_top = .;
         . = ALIGN(16);
+        __el2_stack_guard_bottom = .;
+        . = . + 0x1000;            /* 4 KiB canary guard below the EL2 stack  */
         __el2_stack_bottom = .;
-        . = . + 0x4000;            /* L2.0: 16 KiB resident EL2-monitor stack */
+        . = . + 0x8000;            /* L2.0: 32 KiB resident EL2-monitor stack */
         __el2_stack_top = .;       /* SP_EL2; single-accessor, EL1 never used */
     } :data
     . = ALIGN(16);

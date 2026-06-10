@@ -201,6 +201,13 @@ fn timer_period() -> u64 {
     (read_cntfrq() / 1000).max(PERIOD_FLOOR)
 }
 
+/// DIAG (#65): the programmed periodic tick period in CNTPCT counts, exposed
+/// crate-internally so `dispatch_irq`'s tick-gap storm witness can compare
+/// inter-tick CNTPCT deltas against it. Pure re-read of `CNTFRQ_EL0`; no state.
+pub(super) fn tick_period() -> u64 {
+    timer_period()
+}
+
 /// Minimal single-core GICv2 init: enable Group0 forwarding + the timer PPI in
 /// the distributor, allow all priorities + enable the CPU interface, then a
 /// `dsb sy; isb` so the programming is visible before the first unmask.

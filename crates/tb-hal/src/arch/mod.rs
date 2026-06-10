@@ -77,13 +77,16 @@ pub mod aarch64;
 pub use self::aarch64::{
     address_space_new, agent_map_space, agent_traps_init, breakpoint, caps_user_probe,
     copy_from_user, copy_to_user, ctx_switch, current_root, el2_exits_selftest,
-    el2_nested_guest_selftest, el2_selftest, el2_trap_selftest, halt,
+    el2_nested_guest_selftest, el2_selftest, el2_trap_selftest, el2_vgic_selftest, halt,
+    qemu_exit_failure, qemu_exit_success, boot_entry_el, booted_at_el2,
     heap_window, install_traps, local_irq_restore, local_irq_save, m3_test_va_intact,
     map_heap_frames, map_in_root, map_user_in_root, mmu_init, mmu_selftest,
-    pmm_collect_regions, read_cycle_counter, sched_irq_unmask, serial_init, serial_write_byte,
+    boot_stack_headroom, el2_stack_headroom,
+    pmm_collect_regions, read_cycle_counter, read_word, redzone_check_report, redzone_init,
+    sched_irq_unmask, serial_init, serial_write_byte,
     set_kernel_stack, stage2_selftest, switch_root, task_stack_init, task_stack_init_user,
-    timer_demo, timer_disarm, timer_rearm, unmap_in_root, user_demo, va_to_pa_in_root,
-    virtio_selftest,
+    tick_period, timer_demo, timer_disarm, timer_rearm, unmap_in_root, user_demo,
+    va_to_pa_in_root, virtio_selftest, REDZONE_PATTERN, REDZONE_WORDS,
 };
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

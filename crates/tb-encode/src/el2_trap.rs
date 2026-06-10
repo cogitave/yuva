@@ -383,6 +383,147 @@ pub const fn dabt_is_emulatable(esr: u64) -> bool {
     dabt_iss_isv(esr) != 0 && esr_s1ptw(esr) == 0
 }
 
+// ===========================================================================
+// aL2.5: the GICv2 **GICH_LRn list-register** encoder/decoder -- the pure value
+// computation for a software-injected VIRTUAL INTERRUPT. The EL2 monitor's
+// `el2vgic.rs` CALLS `gich_lr_encode(...)` and `write_volatile`s the result into
+// GICH_LR0 to inject; it CALLS `lr_is_retired(...)` on the GICH_LRn readback to
+// confirm the injected interrupt retired after the guest's EOIR. Nothing here
+// touches hardware -- it is the same `forbid(unsafe_code)` leaf the stage-2/vtcr
+// encoders live in, Kani-proven (`kani_gich_lr_encode_roundtrip`), Miri-gated.
+//
+// Field layout (Arm GICv2 Architecture Spec IHI 0048B chapter 5 "GIC
+// virtualization" / §4.4 GICH_LRn, cross-checked against QEMU `hw/intc/
+// gic_internal.h` `REG32(GICH_LR0, 0x100)` + the `FIELD(GICH_LR0, ...)` defs,
+// byte-identical between v6.2.0 and v8.2.0):
+//   VirtualID  [9:0]    -- the vINTID presented to the guest at GICV_IAR.
+//   PhysicalID [19:10]  -- the physical INTID (used only when HW=1 for HW
+//                          de-activation; aL2.5 uses HW=0 so this is 0).
+//   EOI        bit19    -- request a maintenance interrupt on EOI (QEMU's
+//                          GICH_LR_EOI; aL2.5 leaves it 0, polls ELRSR instead).
+//   Priority   [27:23]  -- the LR stores priority[7:3] (the 5 MSBs); aL2.5
+//                          injects priority 0 (highest), so this field is 0.
+//   State      [29:28]  -- 00 invalid, 01 pending, 10 active, 11 active+pending.
+//   Grp1       bit30    -- 0 = Group0, 1 = Group1 (aL2.5 injects Group0).
+//   HW         bit31    -- 0 = software-injected (no physical de-activation),
+//                          1 = hardware interrupt (PhysicalID drives the
+//                          de-activation). aL2.5 is purely SW-injected (HW=0).
+
+/// `GICH_LRn.State` value for an INVALID (empty) list register (`0b00`). The
+/// monitor's done-side retire check reads back GICH_LR0 and asserts the state
+/// returned to this after the guest's EOIR (the cleanest proof of completion).
+pub const GICH_LR_STATE_INVALID: u64 = 0b00;
+/// `GICH_LRn.State` value for a PENDING virtual interrupt (`0b01`) -- the state
+/// the monitor injects so the GIC virtualization HW signals the VIRQ.
+pub const GICH_LR_STATE_PENDING: u64 = 0b01;
+/// `GICH_LRn.State` value for an ACTIVE virtual interrupt (`0b10`) -- the state
+/// after the guest reads GICV_IAR (pending -> active) but before it EOIRs.
+pub const GICH_LR_STATE_ACTIVE: u64 = 0b10;
+/// `GICH_LRn.State` value for ACTIVE+PENDING (`0b11`).
+pub const GICH_LR_STATE_ACTIVE_PENDING: u64 = 0b11;
+
+/// Shift of the `VirtualID` field in `GICH_LRn` (bit 0).
+pub const LR_VIRTID_SHIFT: u64 = 0;
+/// Shift of the `PhysicalID` field in `GICH_LRn` (bit 10).
+pub const LR_PHYSID_SHIFT: u64 = 10;
+/// The `EOI` (maintenance-on-EOI) bit of `GICH_LRn` (bit 19).
+pub const LR_EOI_BIT: u64 = 1 << 19;
+/// Shift of the `Priority` field in `GICH_LRn` (bit 23; stores priority[7:3]).
+pub const LR_PRIO_SHIFT: u64 = 23;
+/// Shift of the 2-bit `State` field in `GICH_LRn` (bit 28).
+pub const LR_STATE_SHIFT: u64 = 28;
+/// The `Grp1` bit of `GICH_LRn` (bit 30): 0 = Group0, 1 = Group1.
+pub const LR_GRP1_BIT: u64 = 1 << 30;
+/// The `HW` bit of `GICH_LRn` (bit 31): 0 = software-injected, 1 = hardware.
+pub const LR_HW_BIT: u64 = 1 << 31;
+
+/// The documented union mask of EVERY `GICH_LRn` field (== QEMU `GICH_LR_MASK`
+/// when projected to the GICv2 fields). VirtualID[9:0] | PhysicalID[19:10] |
+/// EOI(19) | Priority[27:23] | State[29:28] | Grp1(30) | HW(31). A composed LR
+/// must have NO bit set outside this mask (the no-field-bleed property).
+pub const GICH_LR_MASK: u32 = 0x3FF             // VirtualID[9:0]
+    | (0x3FF << 10)                                // PhysicalID[19:10]
+    | (1 << 19)                                    // EOI bit19
+    | (0x1F << 23)                                 // Priority[27:23]
+    | (0x3 << 28)                                  // State[29:28]
+    | (1 << 30)                                    // Grp1 bit30
+    | (1 << 31); // HW bit31
+
+/// Compose a 32-bit `GICH_LRn` list-register value from the GICv2 virtual-
+/// interrupt fields, EACH masked to its real width and shifted into place so no
+/// field bleeds into a neighbour (the field-bleed-prevention discipline the
+/// `vtcr`/`s2_leaf` encoders use). `vintid`/`pintid` are 10-bit, `priority` is
+/// 5-bit (the stored priority[7:3]), `state` is 2-bit; `group`/`hw`/`eoi` are
+/// single bits. Authority: IHI 0048B §4.4 GICH_LRn / QEMU `gic_internal.h`.
+///
+/// The result fits a `u32` (the LR is a 32-bit register); the monitor stores it
+/// with one `write_volatile((GICH_BASE + GICH_LR0) as *mut u32, ...)`.
+#[inline]
+pub const fn gich_lr_encode(
+    vintid: u64,
+    pintid: u64,
+    state: u64,
+    priority: u64,
+    group: u64,
+    hw: u64,
+    eoi: u64,
+) -> u32 {
+    let v = ((vintid & 0x3FF) << LR_VIRTID_SHIFT)
+        | ((pintid & 0x3FF) << LR_PHYSID_SHIFT)
+        | (if eoi & 1 != 0 { LR_EOI_BIT } else { 0 })
+        | ((priority & 0x1F) << LR_PRIO_SHIFT)
+        | ((state & 0x3) << LR_STATE_SHIFT)
+        | (if group & 1 != 0 { LR_GRP1_BIT } else { 0 })
+        | (if hw & 1 != 0 { LR_HW_BIT } else { 0 });
+    v as u32
+}
+
+/// Decode the 2-bit `State` field of a `GICH_LRn` value -- bits `[29:28]`.
+/// Always `< 4`. The monitor reads it back to observe the pending->active->
+/// invalid lifecycle of the injected vIRQ.
+#[inline]
+pub const fn lr_state(lr: u32) -> u64 {
+    ((lr as u64) >> LR_STATE_SHIFT) & 0x3
+}
+
+/// Decode the 10-bit `VirtualID` field of a `GICH_LRn` value -- bits `[9:0]`.
+/// Always `< 1024`. Equals the vINTID the guest reads from GICV_IAR.
+#[inline]
+pub const fn lr_virtid(lr: u32) -> u64 {
+    ((lr as u64) >> LR_VIRTID_SHIFT) & 0x3FF
+}
+
+/// Whether a `GICH_LRn` value is RETIRED (its `State` is INVALID, i.e. the LR
+/// went empty after the guest's GICV_EOIR). The monitor's done-side completion
+/// proof: an injected LR that retired is one the GIC virtualization HW actually
+/// drove through pending->active->invalid -- a fact the guest cannot fake by
+/// merely writing a magic.
+#[inline]
+pub const fn lr_is_retired(lr: u32) -> bool {
+    lr_state(lr) == GICH_LR_STATE_INVALID
+}
+
+/// `GICH_HCR.En` (bit 0): enable the virtual CPU interface so the list registers
+/// are presented to the guest as virtual interrupts. A thin one-bit packer
+/// mirroring the `vtcr`/`vttbr` style; the monitor OR-sets this to arm injection.
+#[inline]
+pub const fn gich_hcr(en: bool) -> u32 {
+    if en {
+        1
+    } else {
+        0
+    }
+}
+
+/// Decode `GICH_VTR.ListRegs` (bits `[5:0]`) into the NUMBER of list registers:
+/// `(vtr & 0x3F) + 1` (the field stores num_lrs - 1). The monitor reads GICH_VTR
+/// and asserts the result `>= 1` so it never writes an LR index the board lacks.
+/// Always `>= 1` and `<= 64` (the 6-bit field maxes at 63 -> 64 LRs).
+#[inline]
+pub const fn vtr_list_regs(vtr: u32) -> u64 {
+    ((vtr as u64) & 0x3F) + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +721,62 @@ mod tests {
         );
         // Idempotent: enabling an already-enabled word is a no-op.
         assert_eq!(sctlr_el1_guest_enable(enabled), enabled);
+    }
+
+    #[test]
+    fn gich_lr_encode_fields_round_trip() {
+        // A representative SW-injected PENDING vIRQ: vINTID=0x2A (42), pINTID=0,
+        // state=pending, priority=0, group0, HW=0, EOI=0 -- the exact aL2.5 LR0.
+        let lr = gich_lr_encode(0x2A, 0, GICH_LR_STATE_PENDING, 0, 0, 0, 0);
+        assert_eq!(lr_virtid(lr), 0x2A);
+        assert_eq!(lr_state(lr), GICH_LR_STATE_PENDING);
+        assert!(!lr_is_retired(lr));
+        // No bit set outside the documented union mask.
+        assert_eq!(lr & !GICH_LR_MASK, 0);
+        // The HW + Grp1 bits are clear (SW-injected, Group0).
+        assert_eq!(lr as u64 & LR_HW_BIT, 0);
+        assert_eq!(lr as u64 & LR_GRP1_BIT, 0);
+    }
+
+    #[test]
+    fn gich_lr_encode_all_fields_pack_disjoint() {
+        // Pack every field at its max so any bleed shows. vINTID=0x3FF, pINTID=
+        // 0x3FF, state=active+pending, priority=0x1F, group1, HW=1, EOI=1.
+        let lr = gich_lr_encode(0x3FF, 0x3FF, GICH_LR_STATE_ACTIVE_PENDING, 0x1F, 1, 1, 1);
+        let v = lr as u64;
+        assert_eq!(v & 0x3FF, 0x3FF); // VirtualID [9:0]
+        assert_eq!((v >> 10) & 0x3FF, 0x3FF); // PhysicalID [19:10]
+        assert_eq!((v >> 19) & 1, 1); // EOI bit19
+        assert_eq!((v >> 23) & 0x1F, 0x1F); // Priority [27:23]
+        assert_eq!((v >> 28) & 0x3, 0x3); // State [29:28]
+        assert_eq!((v >> 30) & 1, 1); // Grp1 bit30
+        assert_eq!((v >> 31) & 1, 1); // HW bit31
+        // The fully-packed value == the union mask (every documented bit set).
+        assert_eq!(lr, GICH_LR_MASK);
+    }
+
+    #[test]
+    fn lr_is_retired_iff_state_invalid() {
+        for (state, retired) in [
+            (GICH_LR_STATE_INVALID, true),
+            (GICH_LR_STATE_PENDING, false),
+            (GICH_LR_STATE_ACTIVE, false),
+            (GICH_LR_STATE_ACTIVE_PENDING, false),
+        ] {
+            let lr = gich_lr_encode(0x10, 0, state, 0, 0, 0, 0);
+            assert_eq!(lr_is_retired(lr), retired);
+        }
+    }
+
+    #[test]
+    fn gich_hcr_and_vtr_list_regs() {
+        assert_eq!(gich_hcr(true), 1);
+        assert_eq!(gich_hcr(false), 0);
+        // GICH_VTR.ListRegs stores num_lrs-1: 0 -> 1 LR, 3 -> 4 LRs, 0x3F -> 64.
+        assert_eq!(vtr_list_regs(0), 1);
+        assert_eq!(vtr_list_regs(3), 4);
+        assert_eq!(vtr_list_regs(0x3F), 64);
+        // High bits of VTR (ID/PRIbits/PREbits) are ignored -- only [5:0] count.
+        assert_eq!(vtr_list_regs(0xFFFF_FF03), 4);
     }
 }
