@@ -1,6 +1,24 @@
 # #71 root cause — the x86_64 CI "ghost interrupt" flake (QEMU TCG upstream bug; kernel blameless)
 
-**Status:** root-caused (2026-06-11, ultracode 3-modality investigation: CI-history mining over all retained runs + kernel code audit + upstream source verification; same-day disassembly confirmation) · **Verdict: NO TABOS kernel bug** — the fail-closed halt is the correct response to an emulator-injected, non-architectural `#GP`. This doc records the evidence chain, the landed diagnosis pair, and the upstream issue draft.
+**Status:** root-caused (2026-06-11, ultracode 3-modality investigation: CI-history mining over all retained runs + kernel code audit + upstream source verification; same-day disassembly confirmation) — and **CONFIRMED BY THE FIRST LIVE CATCH the same day** (see below) · **Verdict: NO TABOS kernel bug** — the fail-closed halt is the correct response to an emulator-injected, non-architectural `#GP`. This doc records the evidence chain, the landed diagnosis pair, the live-catch confirmation, and the upstream issue draft.
+
+## ✅ The live catch (2026-06-11, the diagnosis pair's FIRST CI encounter — close condition met)
+
+Hours after the diagnosis pair landed (PR #19), the flake fired on the M29 branch's `build & boot (x86_64)` lane (run 27348666428, attempt 1; green on re-run, as always). The `-d int` trace and the enriched frame dump were **decisive, exactly as designed**:
+
+```
+trap: fatal fault, halting
+  frame: vec=0x000000000000000d err=0xfffffffffffffffa cs=0x0000000000000008 ss=0x0000000000000000
+         rflags=0x0000000000000202 rsp=0x00000000001b71b0 rbp=0x0000000000000000
+         frameptr=0x00000000001b7100 ticks=0x0000000000000000
+>> [#71] qemu -d int trace tail (ghost-IRQ fingerprint = 'Servicing hardware INT=0xffffffff'):
+Servicing hardware INT=0xffffffff
+>> [#71] GHOST-IRQ SIGNATURE CONFIRMED: QEMU TCG injected intno=-1 (upstream bug, missing intno>=0 guard) -- kernel blameless
+```
+
+Reading the witness: the literal `Servicing hardware INT=0xffffffff` line IS QEMU rendering `intno = -1` via `%02x` immediately before delivering the bogus `#GP(0xfffffffa)` — hypothesis H1 confirmed by QEMU's own trace, not inference. The frame corroborates: `vec=0x0d`/`err=…fffffffa` (the arithmetic fingerprint; the slot shows the sign-extended push), `cs=0x8` sane, `frameptr=0x1b7100` inside the kernel's own stack region (in-place delivery, no wild RSP), `ticks=0x0` (the ghost fired at the very first recognition point of the IF=1 window — consistent with the TB-boundary mechanism; the "typically ≥1" prediction was the weaker form). `ss=0x0` is the kernel's genuine resting SS (null selector is architectural in 64-bit ring 0) — the earlier comment's "must be 0x10" expectation was wrong for this PVH-booted kernel and is corrected here.
+
+**Disposition:** #71 CLOSED as "emulator-injected ghost interrupt (QEMU TCG `intno=-1`), kernel blameless" per the pre-registered close condition (first fingerprint catch). The diagnosis pair stays in the lane permanently (it converts every future occurrence into a one-line confirmed verdict + auto-rerun candidates). Remaining (non-blocking): the operator files the upstream QEMU issue from the draft below; optionally adopt `-icount` later as the structural fix if the flake rate ever becomes a nuisance.
 
 ## The signature (10/10 retained CI instances, 2026-06-08 → 2026-06-10)
 
