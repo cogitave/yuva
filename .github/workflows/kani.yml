@@ -41,6 +41,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # #77: cache the Kani toolchain install + cargo registry + the Kani BUILD
+      # artifacts (target/kani). HONEST SCOPE: this caches COMPILATION outputs
+      # only -- `cargo kani` always re-executes every CBMC verification on every
+      # run (proof RESULTS are never cached, so a cache hit can never fake a
+      # proof); cargo's fingerprinting rebuilds anything whose source changed.
+      # Effect: docs-only/unchanged-crate pushes skip the toolchain install +
+      # codegen; pushes that touch the crate still pay their own codegen.
+      - name: Cache Kani toolchain + build artifacts (caps)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/registry
+            target/kani
+          key: kani-caps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/tb-caps-core/**') }}
+          restore-keys: |
+            kani-caps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
       # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
       - name: Run Kani over tb-caps-core
         uses: model-checking/kani-github-action@v1
@@ -160,6 +178,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # #77: same honest cache scope as prove-caps -- COMPILATION artifacts only,
+      # every CBMC verification re-executes per run (a cache hit can never fake a
+      # proof). The lane is codegen-dominated (~30-37 min at 80 harnesses), so
+      # unchanged-crate pushes (docs/scripts/kernel-only PRs) reclaim most of it;
+      # tb-encode-touching pushes still pay their own codegen + solving. This is
+      # the headroom guard for the M29 stage C fold-cost bump (see #86).
+      - name: Cache Kani toolchain + build artifacts (encode)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/registry
+            target/kani
+          key: kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/tb-encode/**') }}
+          restore-keys: |
+            kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
       - name: Run Kani over tb-encode
