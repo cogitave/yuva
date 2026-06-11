@@ -60,14 +60,16 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
   kernel path) + Kani harnesses + the Miri gate. tb-hal CALLS the leaf byte-identically.
 - **No float** on any kernel path (fixed-point only).
 - **Cumulative DoD**: each milestone prints an EXACT serial marker; the kernel runs
-  M0..latest every boot. The current tail is **`M28: operator-cmd OK`** — the marker
-  both run scripts grep for, printed after M26. (Chain: M0…M18, M18.1/.2, then on
+  M0..latest every boot. The current tail is **`M29: khash-mac OK`** — the marker
+  both run scripts grep for, printed after M28. (Chain: M0…M18, M18.1/.2, then on
   aarch64 L2.0…L2.6 and M27 sovereign-scheduler [two-VMID, M27a cooperative —
   mid-chain, before M19], then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT],
   M22 provenance, then the learning-loop arc M23 experience, M24 bakeoff [honest gate,
   gate-not-met], M25 operator-transcript, M26 exit-telemetry [PRODUCER-only], then
   M28 operator-cmd [the INBOUND dual of M25 — closes the loop; an Accept is
-  necessary-NOT-sufficient: kan_active=0, M24's statistical bar still gates].)
+  necessary-NOT-sufficient: kan_active=0, M24's statistical bar still gates], then
+  M29 khash-mac [the M28 MAC re-pointed at the verified BLAKE2s-256 khash leaf —
+  mac=KEYED-CRYPTO, sec=ASSUMED-FROM-LITERATURE, kat=RFC7693-PASS earned per boot].)
 - **Two arches** (x86_64 + aarch64) and **multiple boot paths** (PVH/microvm, tb-boot/
   tb-vmm, KVM/TCG) must stay green.
 - **The build + boot are the arbiter.** A reviewer that says "sound" is not enough;
@@ -139,10 +141,10 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      proven core — each reject arm iff its condition, plus the Accept-iff-all-conjuncts
      theorem over a fully-symbolic live head — and `decode_and_verify` delegates its
      verdict to it verbatim; all 7 verdict arms of the wrapper are host-tested.)
-   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **80**) AND the
-     `kani.yml` "currently 80" comment **in LOCKSTEP** — a vacuous/deleted harness must
+   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **84**) AND the
+     `kani.yml` "currently 84" comment **in LOCKSTEP** — a vacuous/deleted harness must
      fail the gate. The kani lane has 2 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
-     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 80
+     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 84
      harnesses, marker `V1: kani-encoders OK`, 45-min hard timeout). Never `--workspace`
      (drags tb-hal asm into CBMC).
 
@@ -156,7 +158,7 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
 
 6. **Boot + assert + regress (anti-hollow-pass).** Run `scripts/run-x86_64.sh` and
    `scripts/run-aarch64.sh`; confirm the new marker AND all prior markers (cumulative
-   regression — on aarch64 that is M4, L2.0..L2.6 in order, M27, then M19..M26, M28).
+   regression — on aarch64 that is M4, L2.0..L2.6 in order, M27, then M19..M26, M28, M29).
    - Update `MARKER=` to the new tail in `run-x86_64.sh`, `run-aarch64.sh`,
      `run-vmm-x86_64.sh` (tb-vmm stops at M19 because M20/M22 take the graceful-skip
      path with no disk/ledger).

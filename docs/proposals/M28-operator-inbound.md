@@ -54,7 +54,7 @@ The run-scripts require the witness with all `=1` flags + `kan_active=0` + both 
 ---
 
 ## 5. Honest caveats (conceded — encoded as witness tokens)
-- **`mac=KEYED-NONCRYPTO`** — a keyed FNV is NOT a cryptographic MAC; no forgery-resistance against a cryptanalytic / key-recovering adversary. Claims only enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary. Successor: a verified real keyed hash (`mac=KEYED-CRYPTO`).
+- **`mac=KEYED-NONCRYPTO`** — a keyed FNV is NOT a cryptographic MAC; no forgery-resistance against a cryptanalytic / key-recovering adversary. Claims only enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary. Successor: a verified real keyed hash (`mac=KEYED-CRYPTO`). **[SUCCESSOR LANDED — M29]:** the verified `tb-encode::khash` leaf (BLAKE2s-256, RFC 7693, native keyed mode) re-pointed `compute_mac` to derive-then-MAC and `key_evolve` to a domain-separated PRF call; the boot witness now emits `mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP` and the retired `KEYED-NONCRYPTO` token is guard-REJECTED (see [`M29-crypto-mac.md`](M29-crypto-mac.md)).
 - **`oracle=SIMULATED-ENROLLED-KEY`** — the CI verifier is a compiled-in test key, NOT a real human + NOT a real enrolment ceremony. Key management / enrolment is out of scope (deferred). The marker proves the auth PLUMBING, never that a human commanded.
 - **The command never directly activates the cell** — `kan_active=0` is REQUIRED on the witness; the human command is necessary-not-sufficient (M24's statistical bar still gates). On synthetic data the cell stays dormant even with the command.
 - **No real freshness clock** — the nonce is a per-boot epoch + counter (RFC 9334 §10.3 epoch-ID-style), not a trusted wall clock.
@@ -68,7 +68,7 @@ Composing **FssAgg forward-secure keyed aggregation + RATS nonce freshness + the
 ---
 
 ## 7. Roadmap context
-M28 closes the M23→M28 learning-loop + communication arc: the OS records (M23), honestly refuses to self-activate (M24), surfaces decisions to a human (M25), records its own workload (M26), schedules sovereignly (M27), and now **receives the human's authenticated command** (M28) — the exogenous oracle that lets the gate ever clear, on real data, with a human in the loop. The keyed-crypto MAC + a real enrolment ceremony + a trustworthy freshness clock are the named successors.
+M28 closes the M23→M28 learning-loop + communication arc: the OS records (M23), honestly refuses to self-activate (M24), surfaces decisions to a human (M25), records its own workload (M26), schedules sovereignly (M27), and now **receives the human's authenticated command** (M28) — the exogenous oracle that lets the gate ever clear, on real data, with a human in the loop. The keyed-crypto MAC + a real enrolment ceremony + a trustworthy freshness clock are the named successors. (The keyed-crypto MAC successor LANDED as **M29** — `tb-encode::khash`, BLAKE2s-256 keyed; enrolment + the freshness clock remain tracked.)
 
 ---
 

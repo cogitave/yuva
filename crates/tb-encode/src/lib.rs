@@ -55,6 +55,24 @@
 //!    in-kernel at load -- totality / overflow-freedom / structural monotonicity /
 //!    determinism / envelope-no-widening proven over the INTEGER artifact. SHIPS
 //!    DORMANT (the heuristic floor decides until an offline trace bake-off gate).
+//!  * [`khash`] -- the M29 verified KEYED-HASH primitive leaf: BLAKE2s-256
+//!    (RFC 7693) in its NATIVE KEYED MODE (`khash::khash(key32, msg) -> tag32`,
+//!    key zero-padded into data block 0 per §2.5/§2.10) plus the unkeyed form
+//!    (`khash::uhash` -- the #74 `prov_hash` successor body and the #75
+//!    Merkle-node hash), a one-shot API over a single contiguous slice
+//!    (deliberately NOT init/update/final). Pure wrapping 32-bit ARX, zero
+//!    deps, no float; .rodata = the 32-byte IV + 160-byte sigma schedule.
+//!    `khash::kat_ok` recomputes the OFFICIAL vectors (RFC 7693 Appendix B +
+//!    the BLAKE2 reference KAT) through the real compression -- the boot
+//!    self-test earns `kat=RFC7693-PASS` from it, fail-closed. HONEST
+//!    (machine-tokened): implementation totality/determinism/KAT-correctness/
+//!    tamper-sensitivity are PROVEN (Kani, concrete inputs -- the #49
+//!    discipline); collision/preimage/PRF/forgery resistance of the primitive
+//!    is ASSUMED-FROM-LITERATURE (Luykx-Mennink-Neves FSE 2016 keyed-mode
+//!    PRF proof; attack record ~7/10 rounds, pseudo settings only); NO
+//!    symbolic security harness exists, deliberately. `sidechannel=NOT-CLAIMED`
+//!    (constant-time-SHAPED only); RFC 7693 is informational, not a NIST
+//!    standard (`prim=BLAKE2S-256` names the trade).
 //!  * [`stage2`] -- the L2.1 aarch64 second-stage (stage-2) descriptor + control
 //!    algebra: the `s2_leaf_2mib`/`s2_leaf_4k`/`s2_table` VMSAv8-64 stage-2 entry
 //!    encoders (S2AP=RW, MemAttr Normal-WB, mandatory AF, block/page/table low
@@ -163,11 +181,13 @@
 //!    kind or truncation) by which a SIMULATED enrolled verifier answers the OS's
 //!    freshness CHALLENGE and submits a DUAL-AUTHORIZED `ACTIVATE_CMD` bound to the LIVE
 //!    M22 head -- the exogenous-oracle CLOSURE of the M23->M27 learning loop.
-//!    `opframe_rx::key_evolve` is the one-way-SHAPED forward key evolution (the FssAgg
-//!    `key_next = prov_hash(key)` shape, REUSING the M22 [`prov`] digest verbatim -- NO
-//!    new hash math), `opframe_rx::compute_mac` is the KEYED (NON-cryptographic) checksum
-//!    -- the nested envelope `prov_hash(prov_hash(prov_hash(key_a) || prov_hash(key_b)) ||
-//!    prov_hash(canon))` truncated to `MAC_LEN`, and
+//!    `opframe_rx::key_evolve` is the forward key evolution (M29: the domain-
+//!    separated keyed-PRF call `khash(key, "TABOS-KEY-EVOLVE-V1")` -- the
+//!    Bellare-Yee reduction shape, conditional on the tokened PRF assumption +
+//!    the seam-TESTED old-key erasure), `opframe_rx::compute_mac` is the KEYED
+//!    MAC (M29: the DERIVE-THEN-MAC `khash(khash(key_a, "TABOS-OPCMD-KDF-V1" ||
+//!    key_b), canon)[..MAC_LEN]` over the verified [`khash`] BLAKE2s-256 leaf --
+//!    the M28 nested-FNV envelope RETIRED; NO new hash math), and
 //!    `opframe_rx::decode_and_verify` returns `Accept` IFF the frame decodes, is an
 //!    ACTIVATE_CMD, echoes the expected nonce (FRESHNESS), binds the live head (the
 //!    Terrapin HEAD-BINDING), carries two DISTINCT credentials (DUAL-CUSTODY two-person
@@ -175,9 +195,10 @@
 //!    (`RejectStale`/`RejectWrongHead`/`RejectSingleCred`/`RejectBadMac`/`NotActivate`/
 //!    `Malformed`). `tb-hal` CALLS these to play a SIMULATED enrolled verifier at boot;
 //!    the self-test ACCEPTS the valid command and REJECTS stale-nonce/wrong-head/single-
-//!    cred/flipped-MAC. Claims ONLY enrolled-key replay/truncation resistance vs a non-
-//!    adaptive no-key adversary (`mac=KEYED-NONCRYPTO` -- a keyed FNV is NOT a secure MAC,
-//!    RFC 2104; `mac=KEYED-CRYPTO` is the named successor), NOT forgery-resistance; the CI
+//!    cred/flipped-MAC. The MAC tier is `mac=KEYED-CRYPTO` (M29 -- assumption-
+//!    conditional: the implementation is VERIFIED while the primitive's collision/
+//!    preimage/PRF/forgery resistance is `sec=ASSUMED-FROM-LITERATURE`, never proven;
+//!    the retired M28 `KEYED-NONCRYPTO` tier is guard-REJECTED); the CI
 //!    verifier is a compiled-in test key (`oracle=SIMULATED-ENROLLED-KEY`), NOT a human;
 //!    and an accepted command is NECESSARY-NOT-SUFFICIENT -- it does NOT flip `KAN_ACTIVE`
 //!    (`kan_active=0`; M24's statistical bar still gates).
@@ -256,6 +277,7 @@ pub mod exp;
 pub mod explore;
 pub mod ipc_frame;
 pub mod kancell;
+pub mod khash;
 pub mod memscore;
 pub mod opframe;
 pub mod opframe_rx;

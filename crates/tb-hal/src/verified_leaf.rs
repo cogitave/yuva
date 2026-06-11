@@ -1180,20 +1180,27 @@ pub fn exittel_selftest() -> ExitTelemetryProof {
 // well-formed, fresh, head-bound, DUAL-AUTHORIZED `ACTIVATE_CMD`; the RX path
 // ACCEPTS the valid command AND REJECTS (a) a stale-nonce replay, (b) a wrong-head
 // command, (c) a single-credential command, (d) a flipped-MAC command. The math is
-// the Kani-proven `tb_encode::opframe_rx` (which REUSES the M22 `tb_encode::prov`
-// digest verbatim for the keyed MAC + key-evolution); the verdict is a pure-data
-// struct the `#![forbid(unsafe_code)]` kernel matches on (mirroring [`OpframeProof`]).
+// the Kani-proven `tb_encode::opframe_rx` (whose keyed MAC + key-evolution, since
+// M29, call the verified `tb_encode::khash` BLAKE2s-256 leaf -- RFC 7693, native
+// keyed mode); the verdict is a pure-data struct the `#![forbid(unsafe_code)]`
+// kernel matches on (mirroring [`OpframeProof`]).
 //
 // CRITICAL HONESTY: the accepted command is NECESSARY-NOT-SUFFICIENT -- `KAN_ACTIVE`
 // stays `false` (a `const false`; the command does NOT flip it). The architectural
 // "pending flag -> M24 reads it" seam is described in the proposal, but for THIS
 // self-test the assertion is simply that an accepted command leaves `KAN_ACTIVE ==
 // false` because M24's statistical bar is unmet on synthetic data. The witness MUST
-// carry `kan_active=0`. The MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV, NOT forgery-
-// resistant) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test key, not a
-// human + not a real enrolment ceremony) -- the marker proves the auth PLUMBING,
-// never that a human commanded. The honesty tokens are machine-emitted so the
-// run-scripts reject any overclaim. DoD: "M28: operator-cmd OK".
+// carry `kan_active=0`. The MAC is `mac=KEYED-CRYPTO` (M29: a keyed BLAKE2s-256
+// derive-then-MAC -- implementation VERIFIED, primitive security
+// `sec=ASSUMED-FROM-LITERATURE`, never "proven secure") and the oracle is
+// `oracle=SIMULATED-ENROLLED-KEY` (a test key, not a human + not a real enrolment
+// ceremony) -- the marker proves the auth PLUMBING, never that a human commanded.
+// The self-test also recomputes the OFFICIAL RFC 7693 vectors through the real
+// compression (`khash::kat_ok`, fail-closed -- `kat=RFC7693-PASS` is EARNED per
+// boot) and TESTS old-key erasure (snapshot-evolve-zeroize-assert,
+// `oldkey-zeroized=1` -- the Bellare-Yee forward-security erasure condition,
+// TESTED not proven). The honesty tokens are machine-emitted so the run-scripts
+// reject any overclaim. DoD: "M28: operator-cmd OK" + "M29: khash-mac OK".
 // ===========================================================================
 
 /// M28 operator-inbound command self-test outcome (returned to the kernel for marker
@@ -1224,6 +1231,19 @@ pub struct OpcmdProof {
     /// -- the keyed-MAC tamper-sensitivity. The kernel requires this (rendered
     /// `badmac-rejected=1`).
     pub badmac_rejected: bool,
+    /// M29: the in-boot KAT verdict -- `tb_encode::khash::kat_ok()` RECOMPUTED the
+    /// official RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through the real
+    /// compression and they all matched. The kernel requires this BEFORE rendering
+    /// `kat=RFC7693-PASS` on the `khash:` witness line (the token is EARNED per
+    /// boot, never compiled-in -- fail-closed).
+    pub kat_ok: bool,
+    /// M29: the old-key ERASURE seam check -- the self-test snapshotted an epoch
+    /// key, evolved it forward via [`tb_encode::opframe_rx::key_evolve`], ZEROIZED
+    /// the old epoch's bytes and asserted the erasure took (rendered
+    /// `oldkey-zeroized=1`). Forward security (Bellare-Yee) is CONDITIONAL on
+    /// erasure -- a stateful-seam property the pure leaf cannot claim, so it is
+    /// TESTED here, not proven.
+    pub oldkey_zeroized: bool,
     /// The learned cell's activation state AFTER the accepted command. REQUIRED `false`
     /// this milestone (necessary-not-sufficient: the command un-blocks the M24 gate's
     /// oracle input, but M24's statistical bar is unmet on synthetic data, so the cell
@@ -1239,12 +1259,16 @@ pub struct OpcmdProof {
 /// [`OpcmdProof`]. Pure value computation -- a compiled-in test key (two creds)
 /// answers the OS's per-boot freshness CHALLENGE with a well-formed, fresh, head-
 /// bound, DUAL-AUTHORIZED `ACTIVATE_CMD`; the RX path ACCEPTS the valid command and
-/// REJECTS (a) stale-nonce, (b) wrong-head, (c) single-credential, (d) flipped-MAC.
-/// Touches NO device beyond the serial the kernel renders over, and NO scheduler. The
-/// accepted command is NECESSARY-NOT-SUFFICIENT: `KAN_ACTIVE` stays `false` (M24's bar
-/// is unmet on synthetic data). HONEST: the MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV,
-/// NOT forgery-resistant) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test
-/// key, not a human) -- the marker proves the auth PLUMBING, never that a human commanded.
+/// REJECTS (a) stale-nonce, (b) wrong-head, (c) single-credential, (d) flipped-MAC --
+/// and (M29) RECOMPUTES the official RFC 7693 KAT vectors fail-closed (`kat_ok`) +
+/// TESTS old-key erasure (`oldkey_zeroized`). Touches NO device beyond the serial the
+/// kernel renders over, and NO scheduler. The accepted command is
+/// NECESSARY-NOT-SUFFICIENT: `KAN_ACTIVE` stays `false` (M24's bar is unmet on
+/// synthetic data). HONEST: the MAC is `mac=KEYED-CRYPTO` (M29: a keyed BLAKE2s-256
+/// derive-then-MAC -- implementation verified; primitive security
+/// `sec=ASSUMED-FROM-LITERATURE`) and the oracle is `oracle=SIMULATED-ENROLLED-KEY`
+/// (a test key, not a human) -- the marker proves the auth PLUMBING, never that a
+/// human commanded.
 pub fn opcmd_selftest() -> OpcmdProof {
     mem::opcmd_selftest()
 }

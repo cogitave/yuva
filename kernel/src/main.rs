@@ -4364,6 +4364,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     // ---- M28: verified OPERATOR-INBOUND command (the exogenous-oracle CLOSURE) ----
+    // ---- + M29: the KEYED-CRYPTO MAC (the M28 §5 named successor LANDED) --------
     // The CAPSTONE that closes the M23->M24->M25->M26->M27 learning loop. M24's honest
     // gate REFUSES to activate the learned cell because a self-graded loop has no
     // EXOGENOUS oracle; M25 SURFACES the decisions to a human (TX-only); M28 delivers
@@ -4375,30 +4376,45 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // path ACCEPTS the valid command AND REJECTS a stale-nonce replay, a wrong-head
     // command, a single-credential command (the two-person rule), and a flipped-MAC
     // command. ALL value computation is the host-verifiable, Kani-proven
-    // `tb_encode::opframe_rx` (no_std, forbid(unsafe), NO float; it REUSES the M22 prov
-    // digest verbatim for the keyed MAC + key-evolution); this kernel stays zero-unsafe
-    // and only branches on the returned `OpcmdProof` bools. HONEST: the MAC is
-    // `mac=KEYED-NONCRYPTO` (a keyed FNV is NOT a cryptographic MAC -- no forgery-
-    // resistance; RFC 2104) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test
-    // key, NOT a human + NOT a real enrolment ceremony) -- the marker proves the auth
-    // PLUMBING, never that a human commanded. CRITICALLY the accepted command is
+    // `tb_encode::opframe_rx` (no_std, forbid(unsafe), NO float); since M29 its keyed
+    // MAC is the verified `tb_encode::khash` BLAKE2s-256 leaf (RFC 7693, native keyed
+    // mode) in a derive-then-MAC composition, and its key evolution is a domain-
+    // separated keyed-PRF call; this kernel stays zero-unsafe and only branches on the
+    // returned `OpcmdProof` bools. HONEST (M29 tier): `mac=KEYED-CRYPTO` -- the
+    // IMPLEMENTATION is verified (Kani totality/determinism/official-KAT/tamper on
+    // concrete inputs) while primitive security is `sec=ASSUMED-FROM-LITERATURE`
+    // (collision/preimage/PRF/forgery resistance of BLAKE2s is assumed from the
+    // cryptanalysis literature, NEVER proven -- the Appel/HACL*/mlkem-native claim
+    // boundary); `kat=RFC7693-PASS` is EARNED per boot (the self-test RECOMPUTES the
+    // official vectors through the real compression, fail-closed, in `kat_ok`);
+    // `sidechannel=NOT-CLAIMED` (constant-time-SHAPED code, no timing model);
+    // `oldkey-zeroized=1` (erasure TESTED in the seam -- the Bellare-Yee forward-
+    // security condition); and the oracle stays `oracle=SIMULATED-ENROLLED-KEY` (a
+    // test key, NOT a human + NOT a real enrolment ceremony) -- a real hash makes the
+    // key neither a human nor an activation. CRITICALLY the accepted command is
     // NECESSARY-NOT-SUFFICIENT: `kan_active=0` is REQUIRED (the command un-blocks the
     // M24 gate's oracle input, but M24's statistical bar is unmet on synthetic data, so
     // the cell stays DORMANT even WITH the command -- the designed, correct outcome).
-    // The honesty tokens are machine-emitted so the marker mechanically cannot overclaim.
-    // DoD: "M28: operator-cmd OK".
+    // The honesty tokens are machine-emitted so the marker mechanically cannot
+    // overclaim; the M29 marker deliberately avoids the substring 'crypto' (all crypto
+    // claims live ONLY in structured stripped tokens, so the run-scripts' bare-'crypto'
+    // prose reject stays maximally strict). DoD: "M28: operator-cmd OK" then
+    // "M29: khash-mac OK".
     {
         let oc = tb_hal::opcmd_selftest();
         // FAIL-CLOSED: the valid command must be ACCEPTED AND each of the four attacks
         // (stale-nonce / wrong-head / single-credential / flipped-MAC) must be REJECTED
-        // AND the cell must stay DORMANT (kan_active == false). Any miss withholds the
-        // marker (renders a FAIL line with NO 'operator-cmd OK' substring) and exits red
-        // NOW (the #65 fail-closed idiom).
+        // AND the M29 in-boot KAT must have passed AND the old-key erasure must have
+        // been demonstrated AND the cell must stay DORMANT (kan_active == false). Any
+        // miss withholds BOTH markers (renders a FAIL line with NO 'operator-cmd OK' /
+        // 'khash-mac OK' substring) and exits red NOW (the #65 fail-closed idiom).
         if !oc.accepted
             || !oc.stale_rejected
             || !oc.wronghead_rejected
             || !oc.single_cred_rejected
             || !oc.badmac_rejected
+            || !oc.kat_ok
+            || !oc.oldkey_zeroized
             || oc.kan_active
         {
             tb_hal::serial_write_str("M28: operator-cmd FAIL accepted=");
@@ -4411,18 +4427,35 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             write_hex_u64(oc.single_cred_rejected as u64);
             tb_hal::serial_write_str(" badmac-rejected=");
             write_hex_u64(oc.badmac_rejected as u64);
+            tb_hal::serial_write_str(" kat=");
+            write_hex_u64(oc.kat_ok as u64);
+            tb_hal::serial_write_str(" oldkey-zeroized=");
+            write_hex_u64(oc.oldkey_zeroized as u64);
             tb_hal::serial_write_str(" kan_active=");
             write_hex_u64(oc.kan_active as u64);
             tb_hal::serial_write_byte(b'\n');
             tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
         }
+        // The M29 khash WITNESS line (proposal §7): the primitive + the machine-emitted
+        // prove/assume boundary. `kat=RFC7693-PASS` is EARNED -- the fail-closed gate
+        // above already required `oc.kat_ok` (the self-test recomputed the official
+        // RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through the REAL
+        // compression), so this literal token is only ever reachable when the KAT
+        // genuinely passed this boot. `sec=ASSUMED-FROM-LITERATURE` concedes primitive
+        // security; `sidechannel=NOT-CLAIMED` concedes any timing/cache/power model;
+        // `tag=128` is the on-wire MAC truncation (RFC 2104 §5 / SP 800-107r1 §5.3.4).
+        tb_hal::serial_write_str(
+            "khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED\n",
+        );
         // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the run-
         // scripts positively require): the decode/verify accept + the four precise
         // rejects provably RAN at boot over a real sealed command anchored to the live
-        // M22 head + a fresh per-boot challenge. `mac=KEYED-NONCRYPTO` +
-        // `oracle=SIMULATED-ENROLLED-KEY` are LITERAL honesty tokens, and `kan_active=0`
-        // is the NECESSARY-NOT-SUFFICIENT marker -- the line mechanically cannot claim a
-        // cryptographic MAC, a human oracle, or an activation the M24 bar does not support.
+        // M22 head + a fresh per-boot challenge. `mac=KEYED-CRYPTO` +
+        // `kdf=DERIVE-THEN-MAC-DOMSEP` + `keyevolve=PRF-DOMSEP` +
+        // `oracle=SIMULATED-ENROLLED-KEY` are LITERAL honesty tokens, `oldkey-zeroized`
+        // is the TESTED erasure flag, and `kan_active=0` is the NECESSARY-NOT-
+        // SUFFICIENT marker -- the line mechanically cannot claim a proven-secure MAC,
+        // a human oracle, or an activation the M24 bar does not support.
         tb_hal::serial_write_str("opcmd: challenge=");
         write_hex_u64(oc.challenge);
         tb_hal::serial_write_str(" accepted=");
@@ -4435,18 +4468,26 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         write_hex_u64(oc.single_cred_rejected as u64);
         tb_hal::serial_write_str(" badmac-rejected=");
         write_hex_u64(oc.badmac_rejected as u64);
+        tb_hal::serial_write_str(" oldkey-zeroized=");
+        write_hex_u64(oc.oldkey_zeroized as u64);
         tb_hal::serial_write_str(" kan_active=");
         write_hex_u64(oc.kan_active as u64);
-        tb_hal::serial_write_str(" mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY\n");
-        // The marker -- emitted ONLY when the valid command was accepted, all four
+        tb_hal::serial_write_str(
+            " mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY\n",
+        );
+        // The M28 marker -- emitted ONLY when the valid command was accepted, all four
         // attacks were rejected, AND the cell stayed dormant. The command is IN-RAM +
-        // SIMULATED this milestone (a real enrolment ceremony + a trustworthy freshness
-        // clock are the named successors), so there is NO '(no key, skipped)' variant --
-        // a skip is never legitimate (the run-scripts reject one). The marker uses ONLY
+        // SIMULATED (a real enrolment ceremony + a trustworthy freshness clock are
+        // named successors), so there is NO '(no key, skipped)' variant -- a skip is
+        // never legitimate (the run-scripts reject one). The marker uses ONLY
         // auth-plumbing terminology (no validated/crypto/authenticated-human -- the
         // honest discipline: the channel + auth STRUCTURE works, NOT that a human
         // cryptographically authenticated a command).
         tb_hal::serial_write_str("M28: operator-cmd OK\n");
+        // The M29 marker -- the NEW cumulative tail: the M28 MAC genuinely ran on the
+        // verified khash leaf this boot (the KAT + the five gate legs above all held,
+        // fail-closed). Deliberately NO 'crypto' substring in the marker text.
+        tb_hal::serial_write_str("M29: khash-mac OK\n");
     }
 
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.

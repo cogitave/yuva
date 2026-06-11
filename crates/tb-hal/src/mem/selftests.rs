@@ -1082,12 +1082,23 @@ const OPCMD_CRED_B: u16 = 0xB202;
 /// architectural "pending flag -> M24 reads it" seam is the proposal's, but THIS self-
 /// test simply asserts an accepted command leaves `KAN_ACTIVE == false` because M24's
 /// statistical bar is unmet on synthetic data). The witness carries `kan_active=0`. The
-/// MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV, NOT forgery-resistant) and the oracle is
-/// `oracle=SIMULATED-ENROLLED-KEY` (a test key, NOT a human) -- the marker proves the
-/// auth PLUMBING, never that a human commanded.
+/// MAC is `mac=KEYED-CRYPTO` (M29: keyed BLAKE2s-256 derive-then-MAC over the verified
+/// `tb_encode::khash` leaf -- implementation verified, primitive security
+/// `sec=ASSUMED-FROM-LITERATURE`) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a
+/// test key, NOT a human) -- the marker proves the auth PLUMBING, never that a human
+/// commanded.
+///
+/// M29 additions: (e) the fail-closed in-boot KAT -- `tb_encode::khash::kat_ok()`
+/// RECOMPUTES the official RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through
+/// the real compression (`kat=RFC7693-PASS` is EARNED per boot, never compiled-in);
+/// (f) the old-key ERASURE seam check -- snapshot an epoch key, [`key_evolve`] it
+/// forward, ZEROIZE the old epoch's bytes, assert the erasure took
+/// (`oldkey-zeroized=1`; Bellare-Yee forward security is CONDITIONAL on erasure, a
+/// stateful-seam property the pure leaf cannot claim -- TESTED here, not proven).
 pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
     use tb_encode::opframe_rx::{
-        decode_and_verify, key_evolve, seal, CmdFrame, CmdVerdict, CMD_HEADER_LEN, MAC_LEN,
+        decode_and_verify, key_evolve, seal, CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN,
+        MAC_LEN,
     };
     use tb_encode::prov::{head_witness as prov_head_witness, PROV_HASH_LEN};
 
@@ -1097,9 +1108,17 @@ pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
         wronghead_rejected: false,
         single_cred_rejected: false,
         badmac_rejected: false,
+        kat_ok: false,           // fail-closed: no leg may claim the KAT passed
+        oldkey_zeroized: false,  // fail-closed
         kan_active: KAN_ACTIVE, // const false -- never flipped by an accepted command
         challenge,
     };
+
+    // (e) M29: the fail-closed in-boot KAT -- recompute the OFFICIAL RFC 7693
+    //     vectors through the REAL BLAKE2s compression. The kernel withholds the
+    //     `khash:` witness line's `kat=RFC7693-PASS` token (and the M29 marker)
+    //     unless this is true -- earned per boot, never compiled-in.
+    let kat_ok = tb_encode::khash::kat_ok();
 
     // (a) SEED the M23/M25 scenario so the substrate carries a live M22 head (the
     //     instance anchor the command binds; a command from a different boot binds a
@@ -1128,10 +1147,30 @@ pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
     let challenge: u64 = prov_head_witness(live_head) | 1;
 
     // (c) The SIMULATED enrolled verifier's two per-credential keys, derived from the
-    //     compiled-in test base key via the FssAgg forward-evolution shape (so the two
-    //     keys are distinct + not a single repeated byte). NOT a real enrolment.
+    //     compiled-in test base key via the forward evolution (M29: a domain-separated
+    //     keyed-BLAKE2s PRF call -- `khash(key, "TABOS-KEY-EVOLVE-V1")`), so the two
+    //     keys are distinct + not a single repeated byte. NOT a real enrolment.
     let key_a = key_evolve(&OPCMD_BASE_KEY);
     let key_b = key_evolve(&key_a);
+
+    // (f) M29: the old-key ERASURE seam (proposal open question 3 -- the Bellare-Yee
+    //     forward-security condition). Snapshot a prior-epoch key, evolve it forward
+    //     (the successor exists), then ZEROIZE the old epoch's bytes and ASSERT the
+    //     erasure took. TESTED in this stateful seam (the pure leaf cannot claim
+    //     erasure); the witness renders `oldkey-zeroized=1`.
+    let mut old_epoch: [u8; KEY_LEN] = OPCMD_BASE_KEY;
+    let _next_epoch = key_evolve(&old_epoch); // the forward step the old key feeds
+    let mut z = 0usize;
+    while z < KEY_LEN {
+        old_epoch[z] = 0;
+        z += 1;
+    }
+    let mut oldkey_zeroized = true;
+    let mut zc = 0usize;
+    while zc < KEY_LEN {
+        oldkey_zeroized = oldkey_zeroized && old_epoch[zc] == 0;
+        zc += 1;
+    }
 
     // The well-formed, fresh, head-bound, DUAL-AUTHORIZED ACTIVATE_CMD the verifier
     // submits over the (in-RAM, captured) RX path. A small fixed payload (the command
@@ -1203,6 +1242,8 @@ pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
         wronghead_rejected,
         single_cred_rejected,
         badmac_rejected,
+        kat_ok,
+        oldkey_zeroized,
         // NECESSARY-NOT-SUFFICIENT: an accepted command does NOT flip KAN_ACTIVE. It is
         // a `const false`; M24's statistical bar is unmet on synthetic data, so the cell
         // stays DORMANT even WITH the command (the designed, correct outcome).

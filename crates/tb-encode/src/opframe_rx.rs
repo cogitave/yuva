@@ -27,15 +27,24 @@
 //!   credential / flipped-MAC command is REJECTED. The freshness nonce + the
 //!   head-binding + the dual-custody + the keyed MAC are recomputed inside
 //!   [`decode_and_verify`].
-//! * **Does NOT claim cryptographic forgery-resistance / non-repudiation.** The
-//!   MAC is a KEYED-but-NON-CRYPTOGRAPHIC forward-secure checksum -- the NESTED
-//!   keyed-FNV envelope `cmd_hash(cmd_hash(cmd_hash(key_a) || cmd_hash(key_b)) ||
-//!   cmd_hash(canon))` truncated to [`MAC_LEN`] (the envelope shape avoids the raw
-//!   `key‖msg` RFC 2104 length-extension layout, but FNV itself is still not
-//!   collision/preimage resistant -- so the tier stays NON-crypto). The honesty token
-//!   `mac=KEYED-NONCRYPTO` is machine-emitted; `mac=KEYED-CRYPTO` (a verified real
-//!   keyed hash) is the named successor. **This is the single most important anti-
-//!   overclaim of M28** -- the biggest hollow-marker risk in the roadmap.
+//! * **The MAC tier is `mac=KEYED-CRYPTO` (M29 -- the M28 named successor
+//!   LANDED).** [`compute_mac`] is a DERIVE-THEN-MAC over the verified
+//!   [`crate::khash`] BLAKE2s-256 leaf (RFC 7693, native keyed mode):
+//!   `K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" || key_b)` then
+//!   `tag = khash(K_s, canon)[..MAC_LEN]` -- the M28 nested-FNV envelope is
+//!   RETIRED (it existed only to compensate for an unkeyed primitive; the
+//!   native keyed mode IS the MAC, with a PRF/MAC proof under standard
+//!   assumptions -- Luykx-Mennink-Neves FSE 2016 -- so no envelope and no HMAC
+//!   wrapper sit on top). HONEST CLAIM BOUNDARY: the forgery bound
+//!   (<= q_v * 2^-128 + Adv_PRF(BLAKE2s); RFC 2104 §5 / SP 800-107r1 §5.3.4
+//!   truncation floors) is ASSUMPTION-CONDITIONAL -- the implementation is
+//!   VERIFIED (Kani totality/determinism/official-KAT/tamper on concrete
+//!   inputs) while collision/preimage/PRF/forgery resistance of the primitive
+//!   is `sec=ASSUMED-FROM-LITERATURE`, never proven (the khash module honesty
+//!   note); the derive step's adversarially-chosen-component case rests on a
+//!   dual-PRF-style assumption (Backendal-Bellare-Guenther-Scarlata CRYPTO
+//!   2023), named, not claimed-around. The retired `mac=KEYED-NONCRYPTO` token
+//!   is guard-REJECTED by both run scripts.
 //! * **Does NOT claim a real human commanded.** The CI verifier holds a COMPILED-IN
 //!   test key, not a real enrolment ceremony. The token `oracle=SIMULATED-ENROLLED-
 //!   KEY` is machine-emitted so the marker mechanically cannot overclaim.
@@ -43,14 +52,19 @@
 //!   flag the M24 gate reads as ONE conjunctive input; it does NOT flip
 //!   `KAN_ACTIVE`. The witness carries `kan_active=0` (necessary-not-sufficient).
 //!
-//! ## Forward-secure key evolution (proposal §2.3 -- the FssAgg shape)
+//! ## Forward-secure key evolution (M29 -- the Bellare-Yee reduction shape)
 //!
-//! [`key_evolve`] is a one-way-SHAPED deterministic mix (`key_{i+1} =
-//! prov_hash(key_i)` truncated to a [`KEY_LEN`] key), the Ma-Tsudik FssAgg /
-//! Schneier-Kelsey forward-evolution shape: each epoch's key is derived by the
-//! one-way fold from the prior, so a captured later key cannot reconstruct an
-//! earlier one. The verifier evolves its key per challenge epoch; M28 ships the
-//! SHAPE (the secret-keyed successor to M25's keyless `keyed=0`).
+//! [`key_evolve`] is `key_{i+1} = khash(key_i, "TABOS-KEY-EVOLVE-V1")` -- a
+//! domain-separated call of the SAME verified keyed primitive (the evolve label
+//! is disjoint from MAC use: `keyevolve=PRF-DOMSEP`), upgrading the M28
+//! one-way-SHAPED FNV fold to the Bellare-Yee (CT-RSA 2003) forward-security
+//! reduction shape. CONDITIONAL, honestly: on (a) the PRF assumption (tokened
+//! `sec=ASSUMED-FROM-LITERATURE`), (b) domain separation (tokened), and (c)
+//! old-key ERASURE -- a stateful-seam property this pure leaf cannot claim, so
+//! the boot self-test demonstrates snapshot-evolve-zeroize-assert and the
+//! witness carries `oldkey-zeroized=1` (TESTED, not proven). What forward
+//! security still does NOT give: post-compromise healing -- a stolen `K_i`
+//! yields all `K_{j>i}` deterministically (fresh entropy is a named successor).
 //!
 //! ## Numeric format (no float, ever -- mirrors `opframe`/`prov`/`exittel`)
 //!
@@ -58,13 +72,41 @@
 //! HEADER, fixed-field-order, LENGTH-PREFIXED-payload LE byte layout into a caller
 //! buffer covering EVERYTHING EXCEPT the trailing [`MAC_LEN`]-byte MAC (the MAC'd
 //! bytes); [`decode`] is the inverse over a large-enough buffer, splitting the
-//! `canon|mac` boundary (fail-closed to `None`). The keyed MAC REUSES the proven
-//! [`crate::prov::prov_hash`] leaf -- NO new hash math is written here.
+//! `canon|mac` boundary (fail-closed to `None`). The keyed MAC + key evolution
+//! CALL the verified [`crate::khash`] BLAKE2s-256 leaf (M29) -- NO new hash math
+//! is written here, exactly as M25/M26 reuse the M22 fold.
 
-// The keyed MAC + key-evolution REUSE the M22 provenance digest, verbatim
-// (proposal §2.3: "reuse the M22 FNV fold but secret-keyed"). We import the proven
-// digest; M28 writes NONE of its own hash math, exactly as M25/M26 reuse the fold.
+// M29: the keyed MAC + key-evolution call the ONE verified keyed-hash primitive
+// (`crate::khash` -- BLAKE2s-256, RFC 7693 native keyed mode). The leaf writes
+// NONE of its own hash math. The M22 STRUCTURAL digest stays re-exported below
+// as `cmd_hash` (the #74 stage-C prov cutover upgrades its BODY in place; every
+// re-exporting consumer inherits with zero edits).
+use crate::khash::khash;
+
+// The M22 provenance digest re-export (the structural-digest alias consumers
+// name; since M29 the MAC itself no longer routes through it -- see above).
 pub use crate::prov::{prov_hash as cmd_hash, PROV_HASH_LEN};
+
+/// The derive-step domain separator (proposal §3): `K_s = khash(key_a,
+/// KDF_DOMAIN || key_b)`. A fixed leading label inside the keyed-hash message
+/// keeps the SESSION-KEY derivation disjoint from every other keyed use of the
+/// primitive (the libsodium `crypto_kdf` precedent); ORDER-SENSITIVE in
+/// `key_a`/`key_b` (dual custody preserved -- swapping custodians changes
+/// `K_s`). The witness token is `kdf=DERIVE-THEN-MAC-DOMSEP`.
+pub const KDF_DOMAIN: &[u8; 18] = b"TABOS-OPCMD-KDF-V1";
+
+/// The key-evolution domain separator (proposal §3): `key_{i+1} = khash(key_i,
+/// EVOLVE_DOMAIN)`. Disjoint from [`KDF_DOMAIN`] and from any MAC'd canon (the
+/// canon always begins with the 2-byte [`CMD_MAGIC`]), so an evolution output
+/// can never be confused with a MAC or a derived session key. The witness
+/// token is `keyevolve=PRF-DOMSEP`.
+pub const EVOLVE_DOMAIN: &[u8; 19] = b"TABOS-KEY-EVOLVE-V1";
+
+// Width sanity (compile-time): the khash leaf is WIDTH-EXACT to the M28 seam
+// constants -- the reason BLAKE2s-256 won the M29 candidate trade (research §3).
+const _: () = assert!(KEY_LEN == crate::khash::KHASH_KEY_LEN);
+const _: () = assert!(KEY_LEN == crate::khash::KHASH_TAG_LEN); // evolve: tag IS the next key
+const _: () = assert!(MAC_LEN <= crate::khash::KHASH_TAG_LEN); // sanctioned truncation
 
 /// The inbound command-frame format version (proposal §2.1). [`canon`]/[`decode`]
 /// reject any other value (fail-closed -- an unknown version is incompatible).
@@ -79,9 +121,11 @@ pub const CMD_MAGIC: u16 = 0x5443;
 /// A key is opaque secret bytes; [`key_evolve`] folds one key to the next.
 pub const KEY_LEN: usize = 32;
 
-/// The KEYED-MAC width (bytes): the leading [`MAC_LEN`] bytes of the NESTED keyed
-/// [`cmd_hash`] envelope (see [`compute_mac`]), the FssAgg aggregate authenticator
-/// truncated for the on-wire frame. NON-cryptographic (see the module honesty note).
+/// The KEYED-MAC width (bytes): the leading [`MAC_LEN`] bytes of the keyed
+/// BLAKE2s-256 tag (see [`compute_mac`]) -- a t=128 truncation sanctioned by
+/// RFC 2104 §5 / SP 800-107r1 §5.3.4 (and RFC 7693's own 1..=32-byte digest
+/// parameter). Tier: `mac=KEYED-CRYPTO`, assumption-conditional (the module
+/// honesty note).
 pub const MAC_LEN: usize = 16;
 
 /// The fixed command KIND tags (proposal §2.1 -- the typed inbound vocabulary). A
@@ -125,7 +169,8 @@ pub struct CmdFrame<'a> {
     /// The opaque payload bytes (length-prefixed in [`canon`]).
     pub payload: &'a [u8],
     /// The KEYED MAC over the canonical (MAC'd) bytes -- the leading [`MAC_LEN`]
-    /// bytes of the nested [`compute_mac`] envelope. NON-cryptographic.
+    /// bytes of the [`compute_mac`] derive-then-MAC keyed-BLAKE2s tag (M29;
+    /// `mac=KEYED-CRYPTO`, assumption-conditional).
     pub mac: [u8; MAC_LEN],
 }
 
@@ -312,88 +357,81 @@ pub fn decode(buf: &[u8]) -> Option<CmdFrame<'_>> {
     })
 }
 
-/// One-way-SHAPED forward key evolution (proposal §2.3 -- the FssAgg shape):
-/// `key_{i+1} = key_evolve(key_i)`, the leading [`KEY_LEN`] bytes of
-/// [`cmd_hash`] over the prior key. DETERMINISTIC (the same key always evolves to
-/// the same successor) and TAMPER-SENSITIVE (a single-byte change to the input key
-/// changes the output -- the FNV avalanche the M22 digest already proves). The
-/// forward-security SHAPE: deriving forward is the one-way fold; a captured later
-/// key does not structurally reconstruct an earlier one. REUSES [`cmd_hash`] -- NO
-/// new hash math. (Honest: structural one-way SHAPE, not a proven OWF -- the keyed-
-/// crypto tier is the named successor.)
+/// Forward key evolution (M29 -- the Bellare-Yee CT-RSA 2003 reduction shape):
+/// `key_{i+1} = khash(key_i, EVOLVE_DOMAIN)` -- the prior epoch key KEYS the
+/// verified BLAKE2s-256 primitive over the fixed [`EVOLVE_DOMAIN`] label, and
+/// the 32-byte tag IS the next epoch key ([`KEY_LEN`] == `KHASH_TAG_LEN`,
+/// width-exact). DETERMINISTIC (the same key always evolves to the same
+/// successor) and TAMPER-SENSITIVE (a single-byte key change moves the tag --
+/// the `kani_cmd_key_evolve` harness). One-wayness is now reduction-backed:
+/// recovering `key_i` from `key_{i+1}` is a key-recovery attack on the keyed
+/// primitive -- ASSUMED-FROM-LITERATURE, never proven (the khash honesty note).
+/// The evolve label is domain-separated from MAC/KDF use (`keyevolve=PRF-DOMSEP`).
+/// HONEST: forward security is CONDITIONAL on old-key ERASURE, which this pure
+/// leaf cannot perform -- the stateful seam zeroizes + the boot witness carries
+/// `oldkey-zeroized=1` (TESTED); post-compromise healing is NOT given (a stolen
+/// `K_i` yields all `K_{j>i}`). CALLS [`crate::khash::khash`] -- NO new hash math.
 #[inline]
 #[must_use]
 pub fn key_evolve(key: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
-    let digest = cmd_hash(key); // 32-byte FNV-lane digest, reused verbatim
-    let mut out = [0u8; KEY_LEN];
-    let mut i = 0usize;
-    while i < KEY_LEN {
-        out[i] = digest[i];
-        i += 1;
-    }
-    out
+    khash(key, EVOLVE_DOMAIN)
 }
 
-/// The KEYED (NON-cryptographic) MAC over `canon_bytes`: the leading [`MAC_LEN`]
-/// bytes of the NESTED [`cmd_hash`] envelope `cmd_hash( cmd_hash(cmd_hash(key_a) ||
-/// cmd_hash(key_b)) || cmd_hash(canon_bytes) )` (the exact three-stage construction
-/// in the body below). BOTH enrolled keys contribute (the two-person rule -- each
-/// credential keys the MAC, order-sensitively), and the canonical (MAC'd) bytes
-/// (kind/nonce/head/seq/creds/payload) are authenticated. TAMPER-SENSITIVE: a
-/// single-byte flip of `canon_bytes` (or either key) changes the MAC (the FNV
-/// avalanche). Total -- no panic, no alloc (fixed bounded scratch). REUSES
-/// [`cmd_hash`] -- NO new hash math.
+/// The KEYED MAC over `canon_bytes` (M29 -- DERIVE-THEN-MAC over the verified
+/// [`crate::khash`] BLAKE2s-256 leaf, proposal §3; the M28 nested-FNV envelope
+/// is RETIRED):
 ///
-/// **NON-cryptographic** (proposal §2.3 / §5): the nested-envelope shape avoids the
-/// raw `key‖msg` RFC 2104 length-extension layout, but the underlying FNV digest is
-/// not collision/preimage resistant, so the construction is NOT a secure MAC.
-/// It claims ONLY enrolled-key replay/truncation resistance vs a non-adaptive
-/// adversary who never sees the keys -- never forgery-resistance. The honesty token
-/// `mac=KEYED-NONCRYPTO` is machine-emitted by the seam.
+/// ```text
+///   K_s = khash(key_a, KDF_DOMAIN || key_b)   // the derived session key --
+///         //  order-sensitive: BOTH creds contribute (dual custody preserved)
+///   tag = khash(K_s, canon_bytes)[..MAC_LEN]  // the native keyed mode IS the MAC
+/// ```
+///
+/// Two khash calls per frame (vs five `cmd_hash` passes in the retired
+/// envelope). BOTH enrolled keys contribute order-sensitively (the two-person
+/// rule), and the canonical (MAC'd) bytes (kind/nonce/head/seq/creds/payload)
+/// are authenticated. TAMPER-SENSITIVE: a single-byte flip of `canon_bytes` (or
+/// either key) changes the tag (the `kani_cmd_mac_tamper` harness). Total -- no
+/// panic, no alloc (one fixed 50-byte derive buffer). CALLS [`crate::khash`] --
+/// NO new hash math.
+///
+/// **Honest claim boundary** (`mac=KEYED-CRYPTO`, assumption-conditional):
+/// the keyed mode carries a PRF/MAC proof under standard assumptions
+/// (Luykx-Mennink-Neves FSE 2016) and t=128 truncation satisfies the RFC 2104
+/// §5 / SP 800-107r1 §5.3.4 floors -- but the PRF leg itself is
+/// `sec=ASSUMED-FROM-LITERATURE` (never proven), and the derive step's
+/// one-custodian-adversarial case rests on a dual-PRF-style assumption
+/// (Backendal et al. CRYPTO 2023) -- recorded, not claimed-around. The tokens
+/// `kdf=DERIVE-THEN-MAC-DOMSEP` + `mac=KEYED-CRYPTO` are machine-emitted.
 #[must_use]
 pub fn compute_mac(
     key_a: &[u8; KEY_LEN],
     key_b: &[u8; KEY_LEN],
     canon_bytes: &[u8],
 ) -> [u8; MAC_LEN] {
-    // The keyed MAC is computed with the proven `cmd_hash` (which takes a SINGLE
-    // contiguous slice -- no streaming API), in three bounded fixed-width stages that
-    // bind BOTH keys and the full canon bytes, then truncate to MAC_LEN:
-    //   key_digest = cmd_hash( cmd_hash(key_a) || cmd_hash(key_b) )  -- the 32B key
-    //                commitment (both creds contribute; order-sensitive dual custody)
-    //   mac_full   = cmd_hash( key_digest || cmd_hash(canon_bytes) ) -- the keyed MAC
-    //                over the structural canon digest (tamper-sensitive in any canon
-    //                byte via the FNV avalanche the M22 digest already proves)
-    //   mac        = mac_full[..MAC_LEN]                             -- the on-wire tag
-    let ka = cmd_hash(key_a);
-    let kb = cmd_hash(key_b);
-    let mut keypair = [0u8; 2 * PROV_HASH_LEN];
+    // K_s = khash(key_a, KDF_DOMAIN || key_b): key_a KEYS the derivation; the
+    // fixed label + key_b are the message (a single contiguous 50-byte slice --
+    // the one-shot API needs no streaming state).
+    let mut kdf_msg = [0u8; KDF_DOMAIN.len() + KEY_LEN];
     let mut i = 0usize;
-    while i < PROV_HASH_LEN {
-        keypair[i] = ka[i];
-        keypair[PROV_HASH_LEN + i] = kb[i];
+    while i < KDF_DOMAIN.len() {
+        kdf_msg[i] = KDF_DOMAIN[i];
         i += 1;
     }
-    let key_digest = cmd_hash(&keypair); // 32-byte combined KEY digest
-
-    // The keyed MAC over the canon bytes: we fold `key_digest` and `canon_bytes`
-    // by hashing their concatenation. To keep a single contiguous slice for the
-    // proven `cmd_hash`, mix per-byte: seed the canon digest with the key digest by
-    // hashing (key_digest) then folding the canon digest with a domain-tagged second
-    // pass -- a deterministic keyed combine that is tamper-sensitive in BOTH inputs.
-    let canon_digest = cmd_hash(canon_bytes); // 32-byte structural canon digest
-    let mut combined = [0u8; 2 * PROV_HASH_LEN];
     let mut j = 0usize;
-    while j < PROV_HASH_LEN {
-        combined[j] = key_digest[j];
-        combined[PROV_HASH_LEN + j] = canon_digest[j];
+    while j < KEY_LEN {
+        kdf_msg[KDF_DOMAIN.len() + j] = key_b[j];
         j += 1;
     }
-    let mac_full = cmd_hash(&combined); // 32-byte keyed MAC digest
+    let k_s = khash(key_a, &kdf_msg); // the 32-byte derived session key
+
+    // tag = khash(K_s, canon)[..MAC_LEN]: the native keyed mode over the full
+    // canonical (MAC'd) bytes, truncated to the on-wire authenticator width.
+    let tag = khash(&k_s, canon_bytes);
     let mut mac = [0u8; MAC_LEN];
     let mut k = 0usize;
     while k < MAC_LEN {
-        mac[k] = mac_full[k]; // truncate to MAC_LEN (the on-wire authenticator)
+        mac[k] = tag[k];
         k += 1;
     }
     mac
@@ -483,15 +521,17 @@ pub fn verify_decoded(
 /// MAC conjunct fails closed, never a partial accept). FAIL-CLOSED: any single
 /// failing conjunct REJECTS -- no field is ignored.
 ///
-/// HONEST: the MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV envelope, NOT forgery-
-/// resistant) and an `Accept` is NECESSARY-NOT-SUFFICIENT (it does NOT flip
-/// `KAN_ACTIVE`; the M24 gate still enforces its statistical bar). REPLAY SCOPE:
+/// HONEST: the MAC is `mac=KEYED-CRYPTO` (M29 -- a keyed-BLAKE2s derive-then-MAC;
+/// implementation VERIFIED, primitive security ASSUMED-FROM-LITERATURE -- the
+/// [`compute_mac`] claim boundary) and an `Accept` is NECESSARY-NOT-SUFFICIENT
+/// (it does NOT flip `KAN_ACTIVE`; the M24 gate still enforces its statistical
+/// bar). REPLAY SCOPE:
 /// this verifier is PURE + STATELESS -- it rejects a nonce from a DIFFERENT
 /// challenge epoch (`RejectStale`), but it does NOT consume the nonce on Accept, so
 /// an identical valid wire re-verifies within the SAME epoch. The leaf claims
 /// per-epoch staleness rejection, NOT one-shot/per-challenge consumption; nonce
 /// consumption (rotate-on-accept / a used-nonce high-water mark in the stateful
-/// seam) is the named successor, exactly as `mac=KEYED-CRYPTO` is for the MAC tier.
+/// seam) remains the named successor (the MAC-tier successor landed as M29).
 #[must_use]
 pub fn decode_and_verify(
     buf: &[u8],
@@ -753,6 +793,32 @@ mod tests {
         assert_ne!(k1, k);
         let k2n = key_evolve(&k1);
         assert_ne!(k2n, k1);
+    }
+
+    // ---- compute_mac / key_evolve: the M29 construction is PINNED -----------
+
+    /// The exact proposal-§3 construction, asserted against the khash leaf
+    /// directly -- accidental drift in either the derive layout or the
+    /// truncation breaks this test even if every behavioral property survives.
+    #[test]
+    fn mac_is_derive_then_mac_and_evolve_is_domsep_prf() {
+        use crate::khash::khash as kh;
+        let (ka, kb) = (key(40), key(41));
+        let canon_bytes = b"pinned-construction-canon-bytes";
+        // K_s = khash(key_a, KDF_DOMAIN || key_b)
+        let mut kdf_msg = Vec::new();
+        kdf_msg.extend_from_slice(KDF_DOMAIN);
+        kdf_msg.extend_from_slice(&kb);
+        let k_s = kh(&ka, &kdf_msg);
+        // tag = khash(K_s, canon)[..MAC_LEN]
+        let tag = kh(&k_s, canon_bytes);
+        assert_eq!(compute_mac(&ka, &kb, canon_bytes), tag[..MAC_LEN]);
+        // key_evolve(k) = khash(k, EVOLVE_DOMAIN)
+        let k = key(42);
+        assert_eq!(key_evolve(&k), kh(&k, EVOLVE_DOMAIN));
+        // The two domain labels are disjoint (a shared label would alias the
+        // evolution with a degenerate empty-key derive).
+        assert_ne!(&KDF_DOMAIN[..], &EVOLVE_DOMAIN[..KDF_DOMAIN.len()]);
     }
 
     // ---- compute_mac: tamper-sensitive in canon AND keys --------------------

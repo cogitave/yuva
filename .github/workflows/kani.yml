@@ -81,7 +81,7 @@ jobs:
   # nor can break the M11 `prove-caps` lane above. Runs `cargo kani -p tb-encode`
   # (NEVER --workspace -- that would drag tb-hal's inline asm into CBMC), then
   # scripts/verify-encode.sh asserts ZERO failures AND that SUCCESSFUL == the
-  # pinned EXPECTED_HARNESSES (currently 80: the 15 original + the 5 L2.1 stage-2/
+  # pinned EXPECTED_HARNESSES (currently 84: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -153,13 +153,33 @@ jobs:
   # the gate's verdict is EXACTLY determined -- RejectSingleCred iff cred_a==cred_b, RejectBadMac
   # iff distinct-creds AND !mac_ok, Accept iff distinct-creds AND mac_ok -- the two-person rule +
   # the conjunctive-gate proof) / kani_cmd_mac_tamper (a single-byte flip of the keyed MAC's
-  # CONCRETE canon-bytes input changes the recomputed MAC, REUSING the M22 prov digest, SYMBOLIC
-  # flip index) / kani_cmd_key_evolve (key_evolve is deterministic + advances + tamper-sensitive --
-  # the FssAgg forward shape); claims ONLY enrolled-key replay/truncation resistance vs a
-  # non-adaptive no-key adversary (mac=KEYED-NONCRYPTO, NOT forgery-resistance;
+  # CONCRETE canon-bytes input changes the recomputed MAC -- since M29 the body under proof is the
+  # khash-backed DERIVE-THEN-MAC, 2 keyed-BLAKE2s calls; SYMBOLIC flip index, every compression
+  # concrete, re-measured at the swap) / kani_cmd_key_evolve (key_evolve is deterministic +
+  # advances + tamper-sensitive -- since M29 the domain-separated keyed-PRF call, the Bellare-Yee
+  # shape, re-measured at the swap); the MAC tier is mac=KEYED-CRYPTO (M29, assumption-conditional:
+  # implementation VERIFIED, primitive security ASSUMED-FROM-LITERATURE; the retired
+  # KEYED-NONCRYPTO tier is guard-REJECTED;
   # oracle=SIMULATED-ENROLLED-KEY; an accepted command is necessary-not-sufficient, kan_active=0;
   # per-epoch staleness rejection, NOT one-shot nonce consumption -- the stateless leaf does not
-  # consume the nonce on Accept); bump in LOCKSTEP with scripts/verify-encode.sh) before
+  # consume the nonce on Accept) + the 4 M29 khash verified KEYED-HASH primitive harnesses
+  # (BLAKE2s-256, RFC 7693, native keyed mode -- the mac=KEYED-CRYPTO primitive; CONCRETE-VECTOR-ONLY
+  # per the #49 discipline -- hash inputs concrete or a <=2-byte symbolic totality leg, only flip
+  # indexes symbolic; NO symbolic collision/preimage/PRF harness exists BY DESIGN -- primitive
+  # security stays ASSUMED-FROM-LITERATURE, machine-tokened): kani_khash_total_deterministic
+  # (the MINIMAL §3.3 path-covering set, digests computed once and reused per the measured #49
+  # budget: khash at {0,64,65} + uhash at {0,1,65} -- every block-split path panic-free;
+  # twice-equal determinism pinned to keyed-64/unkeyed-empty; the other boundary lengths are pinned
+  # by the official KAT sweep under cargo test + Miri; NO fully-symbolic message bytes through the
+  # compression by design;
+  # NEG: m64 vs m64||0x00 last-block bug + ""-vs-"\x00" t-counter-only separation) /
+  # kani_khash_vectors (the fail-closed boot KAT kat_ok() -- RFC 7693 Appendix B "abc" + the BLAKE2
+  # reference keyed KATs recomputed through the REAL compression; NEG: a symbolic one-byte-perturbed
+  # expected digest must NOT match) / kani_khash_tamper (a one-bit flip at a SYMBOLIC index over all
+  # 65 message + 32 key bytes of a concrete two-block input changes the tag; NEG: flip-then-flip-back
+  # restores the reference tag) / kani_khash_keyed_distinct (two concrete keys one byte apart give
+  # distinct tags + khash(k,m) != uhash(m) -- a skipped key block fails both);
+  # bump in LOCKSTEP with scripts/verify-encode.sh) before
   # emitting the DoD marker `V1: kani-encoders OK` (fail-closed).
   prove-encode:
     name: "prove #49 encoders (Kani)"
@@ -196,13 +216,22 @@ jobs:
           restore-keys: |
             kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
-      # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
-      - name: Run Kani over tb-encode
+      # Installs Kani's own pinned toolchain (the action has no install-only mode,
+      # so it proves ONE cheap smoke harness). M29 lesson: until M29 this step ran
+      # the FULL suite and verify-encode.sh then re-ran it -- the suite was being
+      # verified TWICE per lane. At 80 FNV-era harnesses the double pass fit the
+      # 45-min cap; at 84 with the khash BLAKE2s compressions (~9s per CONCRETE
+      # compression under CBMC -- measured, #86) one full pass is ~25 min, so the
+      # double pass timed the lane out. The COUNTED, fail-closed gate is and
+      # remains verify-encode.sh's single full pass below; this smoke only proves
+      # the toolchain works end-to-end on one harness first.
+      - name: Install Kani toolchain (one-harness smoke)
         uses: model-checking/kani-github-action@v1
         with:
-          args: '-p tb-encode --output-format=terse'
+          args: '-p tb-encode --harness kani_adjust_within_allowed --output-format=terse'
 
-      # Re-runs the proofs and FAILS CLOSED unless every harness verifies AND the
-      # SUCCESSFUL count matches the pinned constant, then emits the DoD marker.
+      # THE gate: the single FULL counted pass -- FAILS CLOSED unless every
+      # harness verifies AND the SUCCESSFUL count matches the pinned constant,
+      # then emits the DoD marker.
       - name: Assert encoder proof marker (fail-closed harness count)
         run: bash scripts/verify-encode.sh
