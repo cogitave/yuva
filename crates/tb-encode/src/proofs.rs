@@ -74,8 +74,8 @@ use crate::tpsched::{
     FramePlan, SchedDecision, MIN_SLOT_TICKS, N_SLOTS, SCHED_CANON_LEN,
 };
 use crate::opframe_rx::{
-    canon as cmd_canon, compute_mac, decode as cmd_decode, key_evolve, CmdFrame, CMD_HEADER_LEN,
-    KEY_LEN, MAC_LEN,
+    canon as cmd_canon, compute_mac, decode as cmd_decode, key_evolve, verify_decoded,
+    CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN, MAC_LEN,
 };
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
@@ -3354,20 +3354,24 @@ fn kani_cmd_canon_injective() {
 }
 
 // The freshness / head-binding / dual-custody REJECT harnesses (2..4) prove the
-// accept-gate's CONJUNCTIVE DISCRIMINATION at the leaf level -- WITHOUT invoking the
-// full `decode_and_verify` wrapper. `decode_and_verify` does a multi-buffer round-trip
-// (seal -> wire -> decode -> re-canon -> compute_mac) whose array theory CBMC cannot
-// constant-fold even for concrete inputs (observed: it does NOT terminate in minutes --
-// the same class as the #49 symbolic-FNV trap, here a buffer-array-theory blow-up). The
-// tractable codebase discipline (every M22/M23/M25 harness) proves the LEAF predicates
-// over concrete arrays, never a multi-stage wrapper. So these harnesses prove: (a)
-// `decode` faithfully recovers the symbolic fields from a `canon`+MAC wire (the codec
-// half -- pure byte layout, NO FNV, fully SYMBOLIC + tractable), and (b) the SAME
-// boolean field-comparisons `decode_and_verify` uses (nonce_echo vs expected, op_head_
-// bind vs live, cred_a vs cred_b) discriminate accept-vs-reject correctly. The keyed-
-// MAC gate is proven by `kani_cmd_mac_tamper`; the full integration (decode_and_verify
-// wiring the predicates + the MAC together) is exercised CONCRETELY by the host unit
-// tests (`verify_accepts_valid_and_rejects_each_leg`) + the boot self-test.
+// accept-gate's CONJUNCTIVE DISCRIMINATION by driving the REAL gate -- the pure
+// `verify_decoded` function `decode_and_verify` delegates its verdict to VERBATIM --
+// fully symbolically. `verify_decoded` is buffer-free + hash-free (pure field
+// compares), so CBMC handles it symbolically with no FNV/array-theory blow-up.
+// What is NOT driven by Kani is the `decode_and_verify` WRAPPER itself: its
+// multi-buffer round-trip (seal -> wire -> decode -> re-canon -> compute_mac) is
+// array theory CBMC cannot constant-fold even for concrete inputs (observed: it does
+// NOT terminate in minutes -- the same class as the #49 symbolic-FNV trap, here a
+// buffer-array-theory blow-up). So the split is: (a) `decode` faithfully recovers the
+// symbolic fields from a `canon`+MAC wire (the codec half -- pure byte layout, NO
+// FNV, fully SYMBOLIC); (b) `verify_decoded` -- THE GATE -- is proven branch-exact:
+// every reject branch live, `Accept` unreachable with ANY violated conjunct (genuine
+// negative controls: deleting/ignoring a reject branch in `verify_decoded` makes
+// these harnesses FAIL); (c) the keyed-MAC comparison input is proven by
+// `kani_cmd_mac_tamper`. The wrapper's buffer/MAC PLUMBING (decode -> re-canon ->
+// compute_mac -> verify_decoded) is exercised CONCRETELY by the host unit tests
+// (`verify_accepts_valid_and_rejects_each_leg`, all 7 verdict arms, run under the
+// Miri CI lane) + the both-arch boot self-test witness.
 
 /// Build an on-wire frame from a `CmdFrame` (canon MAC'd bytes + a fixed placeholder
 /// MAC) for the codec/discrimination harnesses -- pure byte layout, NO FNV (the MAC is
@@ -3387,15 +3391,17 @@ fn kani_cmd_wire(frame: &CmdFrame, out: &mut [u8]) -> usize {
 }
 
 /// (2) FRESHNESS -- stale-nonce rejection (proposal §4.2): the nonce the command echoes
-/// is recovered EXACTLY by `decode` (the codec half, fully symbolic), and the freshness
-/// comparison `decode(wire).nonce_echo == expected_nonce` -- the predicate
-/// `decode_and_verify` gates on -- is TRUE iff the echoed nonce equals the verifier's
-/// challenge. A command echoing any OTHER nonce (a replay from a prior epoch) fails it.
-/// FNV-free: `decode` is pure byte layout (no keyed MAC), so this is fully symbolic + tractable.
+/// is recovered EXACTLY by `decode` (the codec half, fully symbolic), AND the REAL gate
+/// (`verify_decoded` -- the exact function `decode_and_verify` delegates its verdict
+/// to) REJECTS a stale echo with the precise `RejectStale` verdict and can only
+/// `Accept` a fresh one. Fully symbolic challenge/head/mac_ok; FNV-free (`decode` +
+/// `verify_decoded` are pure byte layout / pure compares), so tractable.
 ///
-/// NEGATIVE CONTROL: a verifier that IGNORED `nonce_echo` (always treated it as fresh)
-/// would make the stale-mismatch assert FAIL -- a replay from a prior challenge would
-/// verify as fresh.
+/// NEGATIVE CONTROL (genuine -- the gate itself is driven): a `verify_decoded` that
+/// IGNORED `nonce_echo` (deleted/skipped the freshness branch) would make BOTH gate
+/// asserts FAIL -- a stale echo would Accept (breaking the iff) instead of RejectStale.
+/// Also proves the KIND conjunct dominates: any decoded non-ACTIVATE kind is
+/// `NotActivate` regardless of every other field.
 #[kani::proof]
 fn kani_cmd_stale_nonce() {
     // SYMBOLIC echoed nonce + SYMBOLIC verifier challenge.
@@ -3417,22 +3423,42 @@ fn kani_cmd_stale_nonce() {
     let d = cmd_decode(&wire[..n]).unwrap();
     assert_eq!(d.nonce_echo, echoed); // the codec recovers the echoed nonce EXACTLY
 
-    // FRESHNESS: the echoed nonce matches the challenge IFF the expected == echoed (the
-    // freshness predicate `decode_and_verify` gates on). A stale nonce (any != echoed)
-    // is rejected; the matching nonce is fresh.
+    // THE GATE: drive the REAL `verify_decoded` with a fully symbolic challenge, live
+    // head, and MAC result. The frame kind is ACTIVATE_CMD, so the verdict is
+    // `RejectStale` IFF the echoed nonce mismatches the challenge -- and an `Accept`
+    // PROVES the echo was fresh (the freshness conjunct is unskippable).
     let expected: u64 = kani::any();
-    assert_eq!((d.nonce_echo == expected), (expected == echoed));
+    let live: [u8; PROV_HASH_LEN] = kani::any();
+    let mac_ok: bool = kani::any();
+    let v = verify_decoded(&d, expected, &live, mac_ok);
+    assert_eq!(v == CmdVerdict::RejectStale, echoed != expected);
+    if v == CmdVerdict::Accept {
+        assert_eq!(d.nonce_echo, expected);
+    }
+
+    // KIND DOMINANCE: a decoded frame of ANY non-ACTIVATE kind is `NotActivate`
+    // regardless of nonce/head/creds/mac -- a NOP/CHALLENGE_REQ can never activate.
+    let k: u8 = kani::any();
+    let other = CmdFrame { kind: k, ..d };
+    let v2 = verify_decoded(&other, expected, &live, mac_ok);
+    assert_eq!(
+        v2 == CmdVerdict::NotActivate,
+        k != crate::opframe_rx::kind::ACTIVATE_CMD
+    );
 }
 
 /// (3) HEAD-BINDING -- wrong-head rejection (proposal §4.3, the Terrapin lesson): the
 /// `op_head_bind` the command binds is recovered EXACTLY by `decode` (the codec half,
-/// fully symbolic), and the head-binding comparison `decode(wire).op_head_bind ==
-/// live_head` is TRUE iff the bound head equals the verifier's live head -- a command
-/// captured from a DIFFERENT boot (a forged head, a symbolic single-byte flip) fails it.
-/// FNV-free (decode is pure byte layout) so fully symbolic + tractable.
+/// fully symbolic), AND the REAL gate (`verify_decoded` -- the exact function
+/// `decode_and_verify` delegates its verdict to), driven with a FULLY SYMBOLIC live
+/// head (covering every cross-boot / forged head, strictly more than a single-byte
+/// flip), returns the precise `RejectWrongHead` IFF the bound head differs from the
+/// live head -- and an `Accept` PROVES the heads matched. The nonce is pinned fresh so
+/// the head conjunct is the discriminating one. FNV-free, fully symbolic + tractable.
 ///
-/// NEGATIVE CONTROL: a verifier that IGNORED `op_head_bind` would make the forged-head
-/// rejection assert FAIL -- a cross-boot command would verify.
+/// NEGATIVE CONTROL (genuine -- the gate itself is driven): a `verify_decoded` that
+/// IGNORED `op_head_bind` (deleted/skipped the head-binding branch) would make the
+/// iff-assert FAIL -- a cross-boot command would Accept instead of RejectWrongHead.
 #[kani::proof]
 fn kani_cmd_head_binding() {
     let bound: [u8; PROV_HASH_LEN] = kani::any();
@@ -3452,27 +3478,32 @@ fn kani_cmd_head_binding() {
     let d = cmd_decode(&wire[..n]).unwrap();
     assert!(d.op_head_bind == bound); // the codec recovers the bound head EXACTLY
 
-    // HEAD-BINDING: the command binds the live head IFF the bound head == live (the
-    // predicate `decode_and_verify` gates on). SOUND ACCEPT against the true head:
-    assert!(d.op_head_bind == bound);
-    // FORGED head: flip a SYMBOLIC byte of the verifier's live head -> the bound head no
-    // longer matches -> the head-binding predicate is FALSE (reject).
-    let idx: usize = kani::any();
-    kani::assume(idx < PROV_HASH_LEN);
-    let mut forged = bound;
-    forged[idx] ^= 0x01;
-    assert!(!(d.op_head_bind == forged));
+    // THE GATE: drive the REAL `verify_decoded` against a FULLY SYMBOLIC verifier live
+    // head (every possible cross-boot head, not just a byte flip), with the nonce
+    // pinned FRESH (echo == expected) so head-binding is the discriminating conjunct.
+    let live: [u8; PROV_HASH_LEN] = kani::any();
+    let mac_ok: bool = kani::any();
+    let v = verify_decoded(&d, d.nonce_echo, &live, mac_ok);
+    assert_eq!(v == CmdVerdict::RejectWrongHead, d.op_head_bind != live);
+    if v == CmdVerdict::Accept {
+        assert!(d.op_head_bind == live);
+    }
 }
 
-/// (4) DUAL-CUSTODY -- the two-person rule (proposal §4.4): the two credential ids are
-/// recovered EXACTLY by `decode` (the codec half, fully symbolic), and the dual-custody
-/// predicate `cred_a_id != cred_b_id` -- the check `decode_and_verify` gates an
-/// activation on -- is TRUE iff the two enrolled credentials are DISTINCT. A single-
-/// credential command (`cred_a_id == cred_b_id`) fails it. FNV-free + fully symbolic.
+/// (4) DUAL-CUSTODY + THE ACCEPT-IFF-ALL THEOREM (proposal §4.4): the two credential
+/// ids are recovered EXACTLY by `decode` (the codec half, fully symbolic), AND the
+/// REAL gate (`verify_decoded` -- the exact function `decode_and_verify` delegates its
+/// verdict to), driven with the kind/freshness/head conjuncts pinned TRUE and the cred
+/// ids + MAC result fully symbolic, is BRANCH-EXACT over the remaining conjuncts:
+/// `RejectSingleCred` IFF `cred_a == cred_b` (the two-person rule), `RejectBadMac` IFF
+/// creds distinct AND the MAC failed, and `Accept` IFF creds distinct AND the MAC
+/// passed -- i.e. with the other conjuncts held, the verdict is EXACTLY determined and
+/// `Accept` requires EVERY remaining conjunct (the conjunctive-gate theorem).
 ///
-/// NEGATIVE CONTROL: a verifier that checked ONLY one credential (dropped the `!=`)
-/// would make the single-credential rejection assert FAIL -- a one-person break-glass
-/// would verify.
+/// NEGATIVE CONTROL (genuine -- the gate itself is driven): a `verify_decoded` that
+/// checked only one credential (dropped the `!=`) or ignored `mac_ok` would make the
+/// corresponding iff-assert FAIL -- a one-person break-glass / forged-MAC command
+/// would Accept.
 #[kani::proof]
 fn kani_cmd_dual_custody() {
     let ca: u16 = kani::any();
@@ -3494,10 +3525,17 @@ fn kani_cmd_dual_custody() {
     assert_eq!(d.cred_a_id, ca); // the codec recovers BOTH creds EXACTLY
     assert_eq!(d.cred_b_id, cb);
 
-    // DUAL-CUSTODY: the activation is permitted IFF the two creds are DISTINCT (the
-    // predicate `decode_and_verify` gates on). A single signer (ca == cb) is rejected;
-    // two distinct creds pass the two-person rule.
-    assert_eq!((d.cred_a_id != d.cred_b_id), (ca != cb));
+    // THE GATE: drive the REAL `verify_decoded` with kind==ACTIVATE_CMD (by
+    // construction), the nonce pinned FRESH, and the head pinned BOUND, so the verdict
+    // is exactly determined by the two remaining symbolic conjuncts (creds, MAC):
+    let mac_ok: bool = kani::any();
+    let v = verify_decoded(&d, d.nonce_echo, &d.op_head_bind, mac_ok);
+    // Two-person rule: a single signer is the precise RejectSingleCred...
+    assert_eq!(v == CmdVerdict::RejectSingleCred, ca == cb);
+    // ...a failed MAC (with distinct creds) is the precise RejectBadMac...
+    assert_eq!(v == CmdVerdict::RejectBadMac, ca != cb && !mac_ok);
+    // ...and Accept IFF every remaining conjunct holds (the conjunctive theorem).
+    assert_eq!(v == CmdVerdict::Accept, ca != cb && mac_ok);
 }
 
 /// (5) MAC TAMPER-SENSITIVITY (proposal §4.5): the KEYED MAC over a command's

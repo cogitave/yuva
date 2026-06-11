@@ -10,7 +10,7 @@ This is the synthesis of the M26 research survey's **Strand C** (promoted to its
 
 ## 1. Why this is the capstone
 
-The four pillars are built: memory (M20–22), learning (M23–24 + M26 producer), communication-outbound (M25), sovereignty (M27). But the learning loop is still **open**: M24's gate REFUSES, correctly, because a self-graded policy has no exogenous oracle (the conceded adversary verdict). M25 surfaces the decisions to a human (the only valid oracle — Christiano RLHF arXiv:1706.03741; Thomas Seldonian *Science* 2019) but is **TX-only** — the human can read, not command. M28 delivers the **command**: the channel + auth by which a human's adjudication becomes the M24 gate's pre-registered, one-shot input. It **closes the loop**.
+The four pillars are built: memory (M20–22), learning (M23–24 + M26 producer), communication-outbound (M25), sovereignty (M27). But the learning loop is still **open**: M24's gate REFUSES, correctly, because a self-graded policy has no exogenous oracle (the conceded adversary verdict). M25 surfaces the decisions to a human (the only valid oracle — Christiano RLHF arXiv:1706.03741; Thomas Seldonian *Science* 2019) but is **TX-only** — the human can read, not command. M28 delivers the **command**: the channel + auth by which a human's adjudication becomes the M24 gate's pre-registered exogenous input. It **closes the loop**. (Honest scope: the verified leaf rejects a nonce from a *different* challenge epoch, but it is pure/stateless — it does NOT consume the nonce on accept, so the leaf claims per-epoch staleness rejection, **not** one-shot/per-challenge consumption; nonce consumption in the stateful seam is a named successor — see §5.)
 
 ---
 
@@ -45,9 +45,9 @@ The run-scripts require the witness with all `=1` flags + `kan_active=0` + both 
 
 ## 4. Kani obligations (each with a negative control)
 1. **canon injectivity + totality + decode fail-closed** (mirror `opframe`).
-2. **stale-nonce rejection** — a command echoing a nonce != the current challenge is rejected. *Neg:* ignoring the nonce accepts a replay.
-3. **head-binding rejection** — a command binding a wrong `op_head` is rejected. *Neg:* ignoring `op_head_bind` accepts a cross-boot command.
-4. **dual-custody** — a single-credential command is rejected; two distinct valid credentials accept. *Neg:* a one-credential check accepts a single-signer.
+2. **stale-nonce rejection** — the REAL gate (`verify_decoded`, the pure conjunctive core `decode_and_verify` delegates its verdict to) returns the precise `RejectStale` iff the echoed nonce mismatches the symbolic challenge, and an `Accept` proves freshness; plus the kind conjunct dominates (any non-ACTIVATE kind is `NotActivate`). *Neg:* deleting the freshness branch makes the iff-assert fail — a stale echo would Accept.
+3. **head-binding rejection** — the gate returns the precise `RejectWrongHead` iff the bound head differs from a FULLY SYMBOLIC live head (every cross-boot head), and an `Accept` proves the heads matched. *Neg:* deleting the head-binding branch accepts a cross-boot command.
+4. **dual-custody + Accept-iff-all** — with kind/freshness/head pinned true, the verdict is EXACTLY determined by the remaining symbolic conjuncts: `RejectSingleCred` iff `cred_a == cred_b`, `RejectBadMac` iff distinct-creds AND MAC-failed, `Accept` iff distinct-creds AND MAC-passed (the conjunctive-gate theorem). *Neg:* a one-credential check or an ignored MAC makes the corresponding iff fail.
 5. **MAC tamper-sensitivity** — a single-byte flip of the MAC'd bytes (or the MAC) is rejected (the keyed fold is sensitive). *Neg:* a constant/identity MAC accepts a forgery.
 6. **key forward-evolution** — `key_{i+1} = mix(key_i)` is one-way-shaped + deterministic (the FssAgg property, structurally).
 
@@ -58,6 +58,7 @@ The run-scripts require the witness with all `=1` flags + `kan_active=0` + both 
 - **`oracle=SIMULATED-ENROLLED-KEY`** — the CI verifier is a compiled-in test key, NOT a real human + NOT a real enrolment ceremony. Key management / enrolment is out of scope (deferred). The marker proves the auth PLUMBING, never that a human commanded.
 - **The command never directly activates the cell** — `kan_active=0` is REQUIRED on the witness; the human command is necessary-not-sufficient (M24's statistical bar still gates). On synthetic data the cell stays dormant even with the command.
 - **No real freshness clock** — the nonce is a per-boot epoch + counter (RFC 9334 §10.3 epoch-ID-style), not a trusted wall clock.
+- **No nonce consumption (same-epoch replay)** — `decode_and_verify` is a PURE, STATELESS verifier: it rejects a nonce from a different challenge epoch (`RejectStale`), but it does NOT consume the nonce on Accept, so an identical valid wire re-verifies within the same epoch. The leaf claims per-epoch staleness rejection, NOT one-shot/per-challenge consumption. (Not an activation bypass — `KAN_ACTIVE` stays `false` regardless; M24 still gates.) Successor: rotate-on-accept / a used-nonce high-water mark in the stateful seam.
 
 ---
 

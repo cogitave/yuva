@@ -122,20 +122,26 @@ jobs:
   # harnesses (the RX dual of M25 opframe -- the CAPSTONE): kani_cmd_canon_injective (the load-
   # bearing canon totality+injectivity proof -- the MAC'd bytes = everything EXCEPT the trailing
   # mac; the payload_len u32 prefix disambiguates the variable tail; decode fails closed without
-  # the trailing MAC) / kani_cmd_stale_nonce (decode recovers the echoed nonce EXACTLY + the
-  # freshness predicate echoed==expected discriminates a stale replay -- the freshness/head/cred
-  # discrimination is proven at the LEAF-predicate level, FNV-free + fully symbolic, NOT through
-  # the decode_and_verify wrapper whose multi-buffer round-trip CBMC cannot constant-fold; the
-  # wrapper integration is exercised concretely by the host tests + boot) / kani_cmd_head_binding
-  # (decode recovers the bound op_head EXACTLY + the head-binding predicate rejects a forged cross-
-  # boot head -- the Terrapin lesson) / kani_cmd_dual_custody (decode recovers BOTH cred ids EXACTLY
-  # + the dual-custody predicate cred_a!=cred_b rejects a single signer -- the two-person rule) /
-  # kani_cmd_mac_tamper (a single-byte flip of the keyed MAC's CONCRETE canon-bytes input changes
-  # the recomputed MAC, REUSING the M22 prov digest, SYMBOLIC flip index) / kani_cmd_key_evolve
-  # (key_evolve is deterministic + advances + tamper-sensitive -- the FssAgg forward shape); claims
-  # ONLY enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary
-  # (mac=KEYED-NONCRYPTO, NOT forgery-resistance; oracle=SIMULATED-ENROLLED-KEY; an accepted command
-  # is necessary-not-sufficient, kan_active=0); bump in LOCKSTEP with scripts/verify-encode.sh) before
+  # the trailing MAC) / kani_cmd_stale_nonce (decode recovers the echoed nonce EXACTLY + the REAL
+  # gate `verify_decoded` -- the pure buffer-free/hash-free conjunctive core decode_and_verify
+  # delegates its verdict to VERBATIM -- returns the precise RejectStale iff the echo mismatches a
+  # fully SYMBOLIC challenge, Accept proves freshness, + the kind conjunct dominates (NotActivate);
+  # only the decode_and_verify WRAPPER's multi-buffer plumbing stays out of CBMC (array-theory
+  # blow-up) -- that plumbing is exercised concretely by the host tests, all 7 verdict arms under
+  # the Miri lane, + boot) / kani_cmd_head_binding (decode recovers the bound op_head EXACTLY + the
+  # gate returns the precise RejectWrongHead iff the bound head differs from a FULLY SYMBOLIC live
+  # head, Accept proves the heads matched -- the Terrapin lesson) / kani_cmd_dual_custody (decode
+  # recovers BOTH cred ids EXACTLY + the ACCEPT-IFF-ALL theorem: with kind/fresh/head pinned true
+  # the gate's verdict is EXACTLY determined -- RejectSingleCred iff cred_a==cred_b, RejectBadMac
+  # iff distinct-creds AND !mac_ok, Accept iff distinct-creds AND mac_ok -- the two-person rule +
+  # the conjunctive-gate proof) / kani_cmd_mac_tamper (a single-byte flip of the keyed MAC's
+  # CONCRETE canon-bytes input changes the recomputed MAC, REUSING the M22 prov digest, SYMBOLIC
+  # flip index) / kani_cmd_key_evolve (key_evolve is deterministic + advances + tamper-sensitive --
+  # the FssAgg forward shape); claims ONLY enrolled-key replay/truncation resistance vs a
+  # non-adaptive no-key adversary (mac=KEYED-NONCRYPTO, NOT forgery-resistance;
+  # oracle=SIMULATED-ENROLLED-KEY; an accepted command is necessary-not-sufficient, kan_active=0;
+  # per-epoch staleness rejection, NOT one-shot nonce consumption -- the stateless leaf does not
+  # consume the nonce on Accept); bump in LOCKSTEP with scripts/verify-encode.sh) before
   # emitting the DoD marker `V1: kani-encoders OK` (fail-closed).
   prove-encode:
     name: "prove #49 encoders (Kani)"

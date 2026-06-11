@@ -166,7 +166,8 @@
 //!    `opframe_rx::key_evolve` is the one-way-SHAPED forward key evolution (the FssAgg
 //!    `key_next = prov_hash(key)` shape, REUSING the M22 [`prov`] digest verbatim -- NO
 //!    new hash math), `opframe_rx::compute_mac` is the KEYED (NON-cryptographic) checksum
-//!    `prov_hash(key_a || key_b || canon)` truncated to `MAC_LEN`, and
+//!    -- the nested envelope `prov_hash(prov_hash(prov_hash(key_a) || prov_hash(key_b)) ||
+//!    prov_hash(canon))` truncated to `MAC_LEN`, and
 //!    `opframe_rx::decode_and_verify` returns `Accept` IFF the frame decodes, is an
 //!    ACTIVATE_CMD, echoes the expected nonce (FRESHNESS), binds the live head (the
 //!    Terrapin HEAD-BINDING), carries two DISTINCT credentials (DUAL-CUSTODY two-person

@@ -28,10 +28,11 @@
 //!   head-binding + the dual-custody + the keyed MAC are recomputed inside
 //!   [`decode_and_verify`].
 //! * **Does NOT claim cryptographic forgery-resistance / non-repudiation.** The
-//!   MAC is a KEYED-but-NON-CRYPTOGRAPHIC forward-secure checksum -- a keyed FNV
-//!   over the M22 [`crate::prov::prov_hash`] (`key_a || key_b || canon`) truncated
-//!   to [`MAC_LEN`]. A naive keyed-FNV / `key‖msg` is NOT a secure MAC (RFC 2104
-//!   length-extension; FNV is not collision/preimage resistant). The honesty token
+//!   MAC is a KEYED-but-NON-CRYPTOGRAPHIC forward-secure checksum -- the NESTED
+//!   keyed-FNV envelope `cmd_hash(cmd_hash(cmd_hash(key_a) || cmd_hash(key_b)) ||
+//!   cmd_hash(canon))` truncated to [`MAC_LEN`] (the envelope shape avoids the raw
+//!   `key‖msg` RFC 2104 length-extension layout, but FNV itself is still not
+//!   collision/preimage resistant -- so the tier stays NON-crypto). The honesty token
 //!   `mac=KEYED-NONCRYPTO` is machine-emitted; `mac=KEYED-CRYPTO` (a verified real
 //!   keyed hash) is the named successor. **This is the single most important anti-
 //!   overclaim of M28** -- the biggest hollow-marker risk in the roadmap.
@@ -78,8 +79,8 @@ pub const CMD_MAGIC: u16 = 0x5443;
 /// A key is opaque secret bytes; [`key_evolve`] folds one key to the next.
 pub const KEY_LEN: usize = 32;
 
-/// The KEYED-MAC width (bytes): the leading [`MAC_LEN`] bytes of the keyed
-/// [`cmd_hash`] over `key_a || key_b || canon`, the FssAgg aggregate authenticator
+/// The KEYED-MAC width (bytes): the leading [`MAC_LEN`] bytes of the NESTED keyed
+/// [`cmd_hash`] envelope (see [`compute_mac`]), the FssAgg aggregate authenticator
 /// truncated for the on-wire frame. NON-cryptographic (see the module honesty note).
 pub const MAC_LEN: usize = 16;
 
@@ -124,7 +125,7 @@ pub struct CmdFrame<'a> {
     /// The opaque payload bytes (length-prefixed in [`canon`]).
     pub payload: &'a [u8],
     /// The KEYED MAC over the canonical (MAC'd) bytes -- the leading [`MAC_LEN`]
-    /// bytes of `cmd_hash(key_a || key_b || canon)`. NON-cryptographic.
+    /// bytes of the nested [`compute_mac`] envelope. NON-cryptographic.
     pub mac: [u8; MAC_LEN],
 }
 
@@ -334,17 +335,18 @@ pub fn key_evolve(key: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
 }
 
 /// The KEYED (NON-cryptographic) MAC over `canon_bytes`: the leading [`MAC_LEN`]
-/// bytes of [`cmd_hash`] over the concatenation `key_a || key_b || canon_bytes`.
-/// BOTH enrolled keys contribute (the two-person rule -- each credential keys the
-/// MAC), and the canonical (MAC'd) bytes (kind/nonce/head/seq/creds/payload) are
-/// authenticated. TAMPER-SENSITIVE: a single-byte flip of `canon_bytes` (or either
-/// key) changes the MAC (the FNV avalanche). Total -- no panic, no alloc (a fixed
-/// scratch over the two keys + a streaming fold is avoided by hashing the
-/// concatenation through a small bounded buffer). REUSES [`cmd_hash`] -- NO new
-/// hash math.
+/// bytes of the NESTED [`cmd_hash`] envelope `cmd_hash( cmd_hash(cmd_hash(key_a) ||
+/// cmd_hash(key_b)) || cmd_hash(canon_bytes) )` (the exact three-stage construction
+/// in the body below). BOTH enrolled keys contribute (the two-person rule -- each
+/// credential keys the MAC, order-sensitively), and the canonical (MAC'd) bytes
+/// (kind/nonce/head/seq/creds/payload) are authenticated. TAMPER-SENSITIVE: a
+/// single-byte flip of `canon_bytes` (or either key) changes the MAC (the FNV
+/// avalanche). Total -- no panic, no alloc (fixed bounded scratch). REUSES
+/// [`cmd_hash`] -- NO new hash math.
 ///
-/// **NON-cryptographic** (proposal §2.3 / §5): a keyed-FNV / `key‖msg` is NOT a
-/// secure MAC (RFC 2104 length-extension; FNV is not collision/preimage resistant).
+/// **NON-cryptographic** (proposal §2.3 / §5): the nested-envelope shape avoids the
+/// raw `key‖msg` RFC 2104 length-extension layout, but the underlying FNV digest is
+/// not collision/preimage resistant, so the construction is NOT a secure MAC.
 /// It claims ONLY enrolled-key replay/truncation resistance vs a non-adaptive
 /// adversary who never sees the keys -- never forgery-resistance. The honesty token
 /// `mac=KEYED-NONCRYPTO` is machine-emitted by the seam.
@@ -428,22 +430,68 @@ pub enum CmdVerdict {
     RejectBadMac,
 }
 
+/// THE CONJUNCTIVE GATE over an already-decoded frame -- the pure, buffer-free,
+/// hash-free core [`decode_and_verify`] delegates to VERBATIM (the wrapper only adds
+/// the `decode` + MAC-recompute plumbing). Returns [`CmdVerdict::Accept`] IFF, in
+/// conjunction: the kind is [`kind::ACTIVATE_CMD`], the echoed nonce equals
+/// `expected_nonce` (FRESHNESS), the bound head equals `live_head` (HEAD-BINDING --
+/// the Terrapin lesson), the two credential ids are DISTINCT (DUAL-CUSTODY -- the
+/// two-person rule), AND `mac_ok` (the caller's recomputed-MAC comparison). Otherwise
+/// the PRECISE reject, in this fixed precedence: `NotActivate` / `RejectStale` /
+/// `RejectWrongHead` / `RejectSingleCred` / `RejectBadMac`. TOTAL, pure compares only
+/// (no buffers, no FNV) -- which is exactly why the Kani gate harnesses
+/// (`kani_cmd_stale_nonce`/`_head_binding`/`_dual_custody`) can drive THIS function
+/// fully symbolically and prove every reject branch live + `Accept` unreachable with
+/// any violated conjunct.
+#[must_use]
+pub fn verify_decoded(
+    frame: &CmdFrame<'_>,
+    expected_nonce: u64,
+    live_head: &[u8; PROV_HASH_LEN],
+    mac_ok: bool,
+) -> CmdVerdict {
+    if frame.kind != kind::ACTIVATE_CMD {
+        return CmdVerdict::NotActivate;
+    }
+    // FRESHNESS: the echoed nonce must equal the current challenge nonce.
+    if frame.nonce_echo != expected_nonce {
+        return CmdVerdict::RejectStale;
+    }
+    // HEAD-BINDING: the bound head must equal the live M22 head (Terrapin lesson).
+    if frame.op_head_bind != *live_head {
+        return CmdVerdict::RejectWrongHead;
+    }
+    // DUAL-CUSTODY: the two enrolled credentials must be DISTINCT (two-person rule).
+    if frame.cred_a_id == frame.cred_b_id {
+        return CmdVerdict::RejectSingleCred;
+    }
+    // KEYED MAC: the caller recomputed the MAC over the frame's canonical bytes.
+    if !mac_ok {
+        return CmdVerdict::RejectBadMac;
+    }
+    CmdVerdict::Accept
+}
+
 /// Decode + VERIFY an inbound command (proposal §3) -- the RX dual of the M25 emit.
-/// Returns [`CmdVerdict::Accept`] IFF, in conjunction: the on-wire `buf` decodes,
-/// the kind is [`kind::ACTIVATE_CMD`], the echoed nonce equals `expected_nonce`
-/// (FRESHNESS), the bound head equals `live_head` (HEAD-BINDING -- the Terrapin
-/// lesson), the two credential ids are DISTINCT (DUAL-CUSTODY -- the two-person
-/// rule), AND the keyed MAC recomputed over the frame's canonical (MAC'd) bytes
-/// with `key_a`/`key_b` equals the frame's MAC (KEYED verification). Otherwise the
-/// PRECISE reject (`Malformed`/`NotActivate`/`RejectStale`/`RejectWrongHead`/
-/// `RejectSingleCred`/`RejectBadMac`). TOTAL -- no panic, no alloc beyond the caller
-/// scratch (`scratch` must hold the frame's [`canon_len`] MAC'd bytes; an undersized
-/// scratch yields `RejectBadMac` fail-closed, never a partial accept). FAIL-CLOSED:
-/// any single failing conjunct REJECTS -- no field is ignored.
+/// Decodes `buf` (fail-closed to `Malformed`), recomputes the keyed MAC over the
+/// decoded frame's canonical (MAC'd) bytes with `key_a`/`key_b`, then delegates the
+/// verdict to the pure conjunctive gate [`verify_decoded`] -- Accept IFF kind ==
+/// [`kind::ACTIVATE_CMD`] AND fresh nonce AND head-bound AND dual-custody AND the
+/// recomputed MAC equals the frame's MAC; otherwise the PRECISE reject. TOTAL -- no
+/// panic, no alloc beyond the caller scratch (`scratch` must hold the frame's
+/// [`canon_len`] MAC'd bytes; an undersized scratch yields `mac_ok == false`, so the
+/// MAC conjunct fails closed, never a partial accept). FAIL-CLOSED: any single
+/// failing conjunct REJECTS -- no field is ignored.
 ///
-/// HONEST: the MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV, NOT forgery-resistant) and
-/// an `Accept` is NECESSARY-NOT-SUFFICIENT (it does NOT flip `KAN_ACTIVE`; the M24
-/// gate still enforces its statistical bar).
+/// HONEST: the MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV envelope, NOT forgery-
+/// resistant) and an `Accept` is NECESSARY-NOT-SUFFICIENT (it does NOT flip
+/// `KAN_ACTIVE`; the M24 gate still enforces its statistical bar). REPLAY SCOPE:
+/// this verifier is PURE + STATELESS -- it rejects a nonce from a DIFFERENT
+/// challenge epoch (`RejectStale`), but it does NOT consume the nonce on Accept, so
+/// an identical valid wire re-verifies within the SAME epoch. The leaf claims
+/// per-epoch staleness rejection, NOT one-shot/per-challenge consumption; nonce
+/// consumption (rotate-on-accept / a used-nonce high-water mark in the stateful
+/// seam) is the named successor, exactly as `mac=KEYED-CRYPTO` is for the MAC tier.
 #[must_use]
 pub fn decode_and_verify(
     buf: &[u8],
@@ -457,32 +505,12 @@ pub fn decode_and_verify(
         Some(f) => f,
         None => return CmdVerdict::Malformed,
     };
-    if frame.kind != kind::ACTIVATE_CMD {
-        return CmdVerdict::NotActivate;
-    }
-    // FRESHNESS: the echoed nonce must equal the current challenge nonce.
-    if frame.nonce_echo != expected_nonce {
-        return CmdVerdict::RejectStale;
-    }
-    // HEAD-BINDING: the bound head must equal the live M22 head (Terrapin lesson).
-    if frame.op_head_bind != live_head {
-        return CmdVerdict::RejectWrongHead;
-    }
-    // DUAL-CUSTODY: the two enrolled credentials must be DISTINCT (two-person rule).
-    if frame.cred_a_id == frame.cred_b_id {
-        return CmdVerdict::RejectSingleCred;
-    }
     // KEYED MAC: recompute over the canonical (MAC'd) bytes and compare. We re-canon
-    // the decoded frame into the caller scratch (the MAC'd bytes are exactly canon).
+    // the decoded frame into the caller scratch (the MAC'd bytes are exactly canon),
+    // so the MAC is verified over the PARSED fields -- no wire/parse desync.
     let n = canon(&frame, scratch);
-    if n == 0 {
-        return CmdVerdict::RejectBadMac; // undersized scratch -> fail closed
-    }
-    let recomputed = compute_mac(key_a, key_b, &scratch[..n]);
-    if recomputed != frame.mac {
-        return CmdVerdict::RejectBadMac;
-    }
-    CmdVerdict::Accept
+    let mac_ok = n != 0 && compute_mac(key_a, key_b, &scratch[..n]) == frame.mac;
+    verify_decoded(&frame, expected_nonce, &live_head, mac_ok)
 }
 
 /// Convenience for the seam/tests: ENCODE a full on-wire command frame (the MAC'd
