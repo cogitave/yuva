@@ -181,11 +181,13 @@
 //!    kind or truncation) by which a SIMULATED enrolled verifier answers the OS's
 //!    freshness CHALLENGE and submits a DUAL-AUTHORIZED `ACTIVATE_CMD` bound to the LIVE
 //!    M22 head -- the exogenous-oracle CLOSURE of the M23->M27 learning loop.
-//!    `opframe_rx::key_evolve` is the one-way-SHAPED forward key evolution (the FssAgg
-//!    `key_next = prov_hash(key)` shape, REUSING the M22 [`prov`] digest verbatim -- NO
-//!    new hash math), `opframe_rx::compute_mac` is the KEYED (NON-cryptographic) checksum
-//!    -- the nested envelope `prov_hash(prov_hash(prov_hash(key_a) || prov_hash(key_b)) ||
-//!    prov_hash(canon))` truncated to `MAC_LEN`, and
+//!    `opframe_rx::key_evolve` is the forward key evolution (M29: the domain-
+//!    separated keyed-PRF call `khash(key, "TABOS-KEY-EVOLVE-V1")` -- the
+//!    Bellare-Yee reduction shape, conditional on the tokened PRF assumption +
+//!    the seam-TESTED old-key erasure), `opframe_rx::compute_mac` is the KEYED
+//!    MAC (M29: the DERIVE-THEN-MAC `khash(khash(key_a, "TABOS-OPCMD-KDF-V1" ||
+//!    key_b), canon)[..MAC_LEN]` over the verified [`khash`] BLAKE2s-256 leaf --
+//!    the M28 nested-FNV envelope RETIRED; NO new hash math), and
 //!    `opframe_rx::decode_and_verify` returns `Accept` IFF the frame decodes, is an
 //!    ACTIVATE_CMD, echoes the expected nonce (FRESHNESS), binds the live head (the
 //!    Terrapin HEAD-BINDING), carries two DISTINCT credentials (DUAL-CUSTODY two-person
@@ -193,9 +195,10 @@
 //!    (`RejectStale`/`RejectWrongHead`/`RejectSingleCred`/`RejectBadMac`/`NotActivate`/
 //!    `Malformed`). `tb-hal` CALLS these to play a SIMULATED enrolled verifier at boot;
 //!    the self-test ACCEPTS the valid command and REJECTS stale-nonce/wrong-head/single-
-//!    cred/flipped-MAC. Claims ONLY enrolled-key replay/truncation resistance vs a non-
-//!    adaptive no-key adversary (`mac=KEYED-NONCRYPTO` -- a keyed FNV is NOT a secure MAC,
-//!    RFC 2104; `mac=KEYED-CRYPTO` is the named successor), NOT forgery-resistance; the CI
+//!    cred/flipped-MAC. The MAC tier is `mac=KEYED-CRYPTO` (M29 -- assumption-
+//!    conditional: the implementation is VERIFIED while the primitive's collision/
+//!    preimage/PRF/forgery resistance is `sec=ASSUMED-FROM-LITERATURE`, never proven;
+//!    the retired M28 `KEYED-NONCRYPTO` tier is guard-REJECTED); the CI
 //!    verifier is a compiled-in test key (`oracle=SIMULATED-ENROLLED-KEY`), NOT a human;
 //!    and an accepted command is NECESSARY-NOT-SUFFICIENT -- it does NOT flip `KAN_ACTIVE`
 //!    (`kan_active=0`; M24's statistical bar still gates).

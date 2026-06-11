@@ -1,6 +1,6 @@
 # TABOS Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M28 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M29 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,11 +8,11 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M28 cumulative tail is below. The authoritative, executable record is the
+M29 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M28: operator-cmd OK` marker, then assert each milestone directly and reject the
+`M29: khash-mac OK` marker, then assert each milestone directly and reject the
 skip/dormant variant while positively requiring its witness line.
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
@@ -173,14 +173,17 @@ skip/dormant variant while positively requiring its witness line.
   (`NotActivate`) — with the negative controls MUTATION-TESTED (deleting each
   reject branch → VERIFICATION FAILED ×3), while the wrapper's buffer/MAC plumbing
   is host-tested (all 7 verdict arms, run under the Miri CI lane) plus a boot
-  self-test. Witness: `opcmd: challenge=<hex16> accepted=1 stale-rejected=1
-  wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1 kan_active=0
-  mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY`, whose machine-emitted
+  self-test. Witness (post-M29): `opcmd: challenge=<hex16> accepted=1
+  stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1
+  oldkey-zeroized=1 kan_active=0 mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP
+  keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY`, whose machine-emitted
   HONESTY TOKENS the run scripts enforce (overclaim words are rejected):
-  `mac=KEYED-NONCRYPTO` — the MAC is a NESTED keyed-FNV envelope
-  (`cmd_hash(cmd_hash(cmd_hash(key_a)||cmd_hash(key_b))||cmd_hash(canon))[..16]`),
-  genuinely keyed by two 256-bit creds but NOT cryptographic (FNV is not
-  collision/preimage resistant); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in
+  `mac=KEYED-CRYPTO` — at the M28 landing the MAC was a NESTED keyed-FNV envelope
+  (`mac=KEYED-NONCRYPTO`, genuinely keyed by two 256-bit creds but NOT
+  cryptographic — the loudest honesty concession on the board); **M29 landed the
+  named successor** (the keyed-BLAKE2s derive-then-MAC, below; the retired
+  `KEYED-NONCRYPTO` token is now guard-REJECTED, so the old tier cannot
+  impersonate the new); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in
   test key, NOT a human or an enrolment; `kan_active=0` — an Accept is
   NECESSARY-NOT-SUFFICIENT (`KAN_ACTIVE` is const false; M24's statistical bar
   still gates). Replay scope, honestly: the verifier is pure + stateless —
@@ -189,15 +192,47 @@ skip/dormant variant while positively requiring its witness line.
   within the same epoch). A pre-merge adversarial review (4 independent skeptics +
   a merge-verdict synthesis) confirmed the core sound and forced two honesty fixes
   before merge (the `verify_decoded` extraction; the one-shot de-overclaim above).
-  Named successors (tracked, not blockers): `mac=KEYED-CRYPTO` (a verified real
-  keyed hash), a real enrolment ceremony, one-shot nonce consumption
-  (rotate-on-accept in the stateful seam), the pending-flag→M24 activation seam
-  (the accepted command is today fully inert), and a trustworthy freshness clock.
+  Named successors (tracked, not blockers; `mac=KEYED-CRYPTO` LANDED as M29): a
+  real enrolment ceremony, one-shot nonce consumption (rotate-on-accept in the
+  stateful seam), the pending-flag→M24 activation seam (the accepted command is
+  today fully inert), and a trustworthy freshness clock.
   With M28 the loop the four pillars were built for is CLOSED — memory (M20–22) ·
   learning (M23–24 + the M26 producer) · communication (OUTBOUND M25 + INBOUND
   M28) · sovereignty (M27) — record (M23) → honestly-refuse (M24) →
   surface-to-human (M25) → record-workload (M26) → schedule (M27) →
   RECEIVE-HUMAN-COMMAND (M28).
+- **The KEYED-CRYPTO MAC (the M28 §5 named successor) — M29, the NEW cumulative
+  tail.** `M29: khash-mac OK` (printed after M28): ONE new verified primitive
+  leaf, `tb-encode::khash` — **BLAKE2s-256 (RFC 7693) in its native keyed mode**
+  (width-exact: 32-byte key == `KEY_LEN`, 32-byte digest == `PROV_HASH_LEN`,
+  spec-sanctioned 16-byte tag truncation == `MAC_LEN`; the keyed mode carries the
+  Luykx–Mennink–Neves FSE 2016 PRF/MAC proof, so NO envelope and NO HMAC wrapper
+  sit on top). `opframe_rx::compute_mac` became derive-then-MAC
+  (`K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" || key_b)`;
+  `tag = khash(K_s, canon)[..16]` — the libsodium `crypto_kdf` precedent; the
+  adversarially-chosen-component case rests on a dual-PRF-style assumption,
+  Backendal et al. CRYPTO 2023, named not claimed-around) and `key_evolve` became
+  `khash(key, "TABOS-KEY-EVOLVE-V1")` (Bellare–Yee forward-security shape,
+  domain-separated from MAC use) — signatures UNCHANGED, so `seal` /
+  `decode_and_verify` / the four hash-free M28 gate harnesses carry over
+  verbatim. The prove/assume boundary is MACHINE-EMITTED on the `khash:` witness
+  line — `prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS
+  sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED`: Kani proves totality /
+  determinism / official-KAT correctness / tamper-at-symbolic-flip-index on
+  CONCRETE inputs (4 `kani_khash_*` harnesses, each mutation-tested; deliberately
+  NO symbolic collision/preimage/PRF harness — the field proves implementations,
+  never primitives: Appel TOPLAS 2015, HACL*, aws-lc, mlkem-native), while
+  collision/preimage/PRF/forgery resistance is ASSUMED from the cryptanalysis
+  literature (best published attacks ~6.75–7.5 of 10 rounds, pseudo settings
+  only). `kat=RFC7693-PASS` is EARNED per boot — `khash::kat_ok()` recomputes the
+  RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through the REAL compression,
+  fail-closed, before the kernel renders the token. The selftest also TESTS
+  old-key erasure (snapshot → evolve → zeroize → assert; `oldkey-zeroized=1` —
+  forward security is conditional on erasure, so the stateful seam demonstrates
+  it; TESTED, not proven). khash is the named enabler for the #74
+  provenance-hash cutover (`prov_hash` → `khash::uhash`) and #75 Merkle
+  inclusion proofs; the #74 signed root is a separate signature primitive,
+  explicitly out of khash scope.
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the
@@ -221,7 +256,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 18 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 19 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -249,8 +284,13 @@ conservation, and the injective `SchedDecision` codec, the M22 fold reused), and
 `opframe_rx` (the **M28** operator-command RX codec — the RX dual of `opframe`: a
 fail-closed injective `CmdFrame` decode plus the pure `verify_decoded` conjunctive
 verdict core, proven Accept-iff-all over stale-nonce / wrong-head / single-cred /
-bad-MAC rejection, plus key forward-evolution). `scripts/verify-encode.sh`
-pins **`EXPECTED_HARNESSES=80`**
+bad-MAC rejection, plus key forward-evolution — the MAC + evolution bodies since
+M29 call the khash leaf), and `khash` (the **M29** keyed-hash primitive:
+BLAKE2s-256 per RFC 7693 in its native keyed mode + the unkeyed form, the ONE
+cryptographic primitive behind `mac=KEYED-CRYPTO` — official-KAT-pinned,
+concrete-input Kani proofs only, primitive security
+`sec=ASSUMED-FROM-LITERATURE` by design). `scripts/verify-encode.sh`
+pins **`EXPECTED_HARNESSES=84`**
 and fails closed unless that many harnesses verify and zero fail, then emits
 `V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
 the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
@@ -260,7 +300,7 @@ since the `prove-encode` lane has a hard timeout.
 
 *CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
-booting both arches under pure QEMU-TCG to the final `M28: operator-cmd OK` marker
+booting both arches under pure QEMU-TCG to the final `M29: khash-mac OK` marker
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64

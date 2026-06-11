@@ -3539,16 +3539,18 @@ fn kani_cmd_dual_custody() {
     assert_eq!(v == CmdVerdict::Accept, ca != cb && mac_ok);
 }
 
-/// (5) MAC TAMPER-SENSITIVITY (proposal §4.5): the KEYED MAC over a command's
-/// canonical (MAC'd) bytes is sensitive to a single-byte flip of those bytes -- a
-/// tampered command has a DIFFERENT recomputed MAC than the original (so a forgery
-/// that mutated the seq / head / payload is caught). The canon bytes + keys are
-/// CONCRETE so each `compute_mac` FNV is concrete; only the flip INDEX stays symbolic
-/// (the #49 trap -- the M22/M25 fold-tamper discipline).
+/// (5) MAC TAMPER-SENSITIVITY (M28 §4.5, re-measured at M29): the KEYED MAC over a
+/// command's canonical (MAC'd) bytes is sensitive to a single-byte flip of those
+/// bytes -- a tampered command has a DIFFERENT recomputed MAC than the original (so
+/// a forgery that mutated the seq / head / payload is caught). Since M29 the body
+/// under proof is the khash-backed DERIVE-THEN-MAC (2 keyed-BLAKE2s calls, ~4
+/// compressions per `compute_mac`); the canon bytes + keys are CONCRETE so every
+/// compression is concrete, only the flip INDEX stays symbolic (the #49 trap --
+/// the M22/M25 fold-tamper discipline; cost re-measured at the swap).
 ///
 /// NEGATIVE CONTROL: a constant/identity MAC (a `compute_mac` that ignored the canon
 /// bytes) would make the flipped-vs-original MACs EQUAL -> the `!=` assert FAILS (a
-/// forgery rides).
+/// forgery rides). Mutation-tested at M29 (a canon-ignoring body turned it RED).
 #[kani::proof]
 fn kani_cmd_mac_tamper() {
     // Concrete keys + a concrete canon-bytes buffer -> concrete FNV.
@@ -3567,16 +3569,19 @@ fn kani_cmd_mac_tamper() {
     assert!(compute_mac(&ka, &kb, &tampered) != base);
 }
 
-/// (6) KEY FORWARD-EVOLUTION (proposal §4.6, the FssAgg shape): `key_evolve` is
-/// DETERMINISTIC (the same key always evolves to the same successor), advances (the
-/// successor differs from the key -- not a fixed point), AND is TAMPER-SENSITIVE (a
-/// single-byte change to the input key changes the evolved key -- the one-way fold's
-/// FNV avalanche). The key is CONCRETE so each `key_evolve` FNV is concrete; only the
-/// flip INDEX is symbolic (the #49 trap).
+/// (6) KEY FORWARD-EVOLUTION (M28 §4.6, re-measured at M29 -- now the Bellare-Yee
+/// shape): `key_evolve` is DETERMINISTIC (the same key always evolves to the same
+/// successor), advances (the successor differs from the key -- not a fixed point),
+/// AND is TAMPER-SENSITIVE (a single-byte change to the input key changes the
+/// evolved key). Since M29 the body under proof is `khash(key, EVOLVE_DOMAIN)` (a
+/// domain-separated keyed-BLAKE2s call, 2 compressions per evolve); the key is
+/// CONCRETE so every compression is concrete, only the flip INDEX is symbolic (the
+/// #49 trap; cost re-measured at the swap).
 ///
 /// NEGATIVE CONTROL: an identity `key_evolve` (returning the key unchanged) would
 /// make the advance assert FAIL; a constant `key_evolve` would make the tamper assert
-/// FAIL (the evolved keys would be equal regardless of the input).
+/// FAIL (the evolved keys would be equal regardless of the input). Mutation-tested
+/// at M29 (an identity body turned it RED).
 #[kani::proof]
 fn kani_cmd_key_evolve() {
     let key: [u8; KEY_LEN] = [0x9Eu8; KEY_LEN];

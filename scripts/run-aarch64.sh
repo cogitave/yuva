@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M28: operator-cmd OK"
+MARKER="M29: khash-mac OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -345,34 +345,66 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     # the named successors), so a skip is NEVER legitimate. Reject any '(no key,
     # skipped)' variant, and POSITIVELY require the witness line 'opcmd: challenge=0x..
     # accepted=1 stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1
-    # badmac-rejected=1 kan_active=0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY'
+    # badmac-rejected=1 oldkey-zeroized=1 kan_active=0 mac=KEYED-CRYPTO
+    # kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY'
     # (so a marker printed WITHOUT running the decode/verify accept + the four precise
-    # rejects FAILS). All five flags MUST be =1 (the valid command accepted + each of
-    # the stale-nonce / wrong-head / single-credential / flipped-MAC attacks rejected)
-    # AND kan_active=0 is REQUIRED: the accepted command is NECESSARY-NOT-SUFFICIENT, it
-    # does NOT flip the cell (M24's statistical bar still gates). The mac=KEYED-NONCRYPTO
-    # + oracle=SIMULATED-ENROLLED-KEY honesty tokens MUST be present so the marker cannot
-    # claim a cryptographic MAC, a human oracle, or a real activation.
+    # rejects FAILS). All six flags MUST be =1 (the valid command accepted + each of
+    # the stale-nonce / wrong-head / single-credential / flipped-MAC attacks rejected +
+    # the M29 old-key erasure demonstrated) AND kan_active=0 is REQUIRED: the accepted
+    # command is NECESSARY-NOT-SUFFICIENT, it does NOT flip the cell (M24's statistical
+    # bar still gates). The M29 token set (mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP
+    # keyevolve=PRF-DOMSEP) + oracle=SIMULATED-ENROLLED-KEY MUST be present so the
+    # marker cannot claim a proven-secure MAC, a human oracle, or a real activation.
     if printf '%s' "${OUTPUT}" | grep -qF -- 'M28: operator-cmd OK (no key, skipped)'; then
         echo "[run-aarch64] FAIL -- M28 ran in SKIP mode (no key) -- the operator-inbound command verifier round-trip was NOT exercised (a skip is never legitimate here -- the command is in-RAM + simulated)" >&2
         exit 1
     fi
-    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'opcmd: challenge=0x[0-9a-fA-F]+ accepted=0x0*1 stale-rejected=0x0*1 wronghead-rejected=0x0*1 single-cred-rejected=0x0*1 badmac-rejected=0x0*1 kan_active=0x0+ mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY'; then
-        echo "[run-aarch64] FAIL -- M28 marker present but the real round-trip witness 'opcmd: challenge=0x.. accepted=0x1 stale-rejected=0x1 wronghead-rejected=0x1 single-cred-rejected=0x1 badmac-rejected=0x1 kan_active=0x0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY' was NOT seen (hollow M28 pass)" >&2
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'opcmd: challenge=0x[0-9a-fA-F]+ accepted=0x0*1 stale-rejected=0x0*1 wronghead-rejected=0x0*1 single-cred-rejected=0x0*1 badmac-rejected=0x0*1 oldkey-zeroized=0x0*1 kan_active=0x0+ mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY'; then
+        echo "[run-aarch64] FAIL -- M28 marker present but the real round-trip witness 'opcmd: challenge=0x.. accepted=0x1 stale-rejected=0x1 wronghead-rejected=0x1 single-cred-rejected=0x1 badmac-rejected=0x1 oldkey-zeroized=0x1 kan_active=0x0 mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY' was NOT seen (hollow M28 pass)" >&2
         exit 1
     fi
-    # TERMINOLOGY DISCIPLINE (proposal §5/§6): M28 proves the auth PLUMBING (the channel
-    # + the fresh + head-bound + dual-authorized + keyed STRUCTURE), it does NOT claim a
-    # cryptographic MAC, that a real human authenticated, or that the cell was activated.
-    # Reject any 'validated'/'crypto'/'authenticated-human'/'forgery' near the M28
-    # marker/witness so the marker can never silently overclaim. We FIRST strip the two
-    # honesty tokens (mac=KEYED-NONCRYPTO carries the substring 'CRYPTO', and
-    # oracle=SIMULATED-ENROLLED-KEY is benign) so the bare-'crypto' overclaim grep does
-    # NOT false-positive on the very token that DECLARES the non-crypto tier.
-    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M28:|opcmd:)' \
-         | sed -e 's/KEYED-NONCRYPTO//g' -e 's/SIMULATED-ENROLLED-KEY//g' \
-         | grep -qiE -- 'validated|crypto|authenticated-human|forgery'; then
-        echo "[run-aarch64] FAIL -- M28 marker/witness carries an overclaim ('validated'/'crypto'/'authenticated-human'/'forgery') -- M28 proves the auth PLUMBING at the mac=KEYED-NONCRYPTO / oracle=SIMULATED-ENROLLED-KEY tier, it does NOT cryptographically authenticate a human (proposal §5/§6 honesty discipline)" >&2
+    # M28 is no longer the top-level grep (M29 displaced it as the cumulative tail);
+    # assert it directly so the M28 -> M29 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M28: operator-cmd OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M28: operator-cmd OK' missing (M28 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M29 SOUNDNESS (anti-hollow-pass): the 'M29: khash-mac OK' marker must be backed
+    # by the khash WITNESS line with the FULL machine-emitted prove/assume boundary --
+    # 'khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS
+    # sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED'. kat=RFC7693-PASS is EARNED
+    # per boot (the self-test recomputes the official RFC 7693 vectors through the
+    # real compression, fail-closed) -- a marker without the witness is a hollow pass.
+    # The khash leaf is pure in-RAM value computation, so a skip is NEVER legitimate.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M29: khash-mac OK (no key, skipped)'; then
+        echo "[run-aarch64] FAIL -- M29 ran in SKIP mode -- the khash KAT + MAC round-trip was NOT exercised (a skip is never legitimate here -- pure in-RAM value computation)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED'; then
+        echo "[run-aarch64] FAIL -- M29 marker present but the khash witness 'khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED' was NOT seen (hollow M29 pass -- the in-boot KAT did not provably run)" >&2
+        exit 1
+    fi
+    # RETIRED-TIER REJECT (M29 proposal §7): the M28-era mac=KEYED-NONCRYPTO token
+    # RETIRES at M29 -- it must NEVER appear anywhere in a green boot, so the old
+    # keyed-FNV tier can never impersonate the khash-backed stage B chain.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'KEYED-NONCRYPTO'; then
+        echo "[run-aarch64] FAIL -- the RETIRED 'KEYED-NONCRYPTO' token appeared -- the M28-era keyed-FNV tier cannot impersonate the M29 KEYED-CRYPTO chain (proposal §7 retired-token discipline)" >&2
+        exit 1
+    fi
+    # TERMINOLOGY DISCIPLINE (M29 proposal §7): the markers/witnesses prove the auth
+    # PLUMBING + a verified IMPLEMENTATION of an ASSUMED-secure primitive -- never a
+    # proven-secure/unforgeable/collision-resistant/constant-time MAC, a human, or an
+    # activation. We FIRST strip the structured honesty tokens (KEYED-CRYPTO carries
+    # 'crypto'; collision-resistance lives ONLY inside ASSUMED-FROM-LITERATURE, etc.)
+    # so the post-strip overclaim grep bites on PROSE only; the reject list extends
+    # the M28 set with the M29 crypto-overclaim vocabulary.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M28:|M29:|opcmd:|khash:)' \
+         | sed -e 's/KEYED-CRYPTO//g' -e 's/BLAKE2S-256//g' -e 's/RFC7693-PASS//g' \
+               -e 's/ASSUMED-FROM-LITERATURE//g' -e 's/NOT-CLAIMED//g' \
+               -e 's/DERIVE-THEN-MAC-DOMSEP//g' -e 's/PRF-DOMSEP//g' \
+               -e 's/SIMULATED-ENROLLED-KEY//g' \
+         | grep -qiE -- 'validated|crypto|authenticated-human|forgery|provably[- ]secure|unforgeable|collision[- ]resistant|preimage[- ]resistant|constant[- ]time|tamper[- ]proof|quantum|FIPS[- ](certified|validated)|guaranteed|unbreakable'; then
+        echo "[run-aarch64] FAIL -- M28/M29 marker/witness carries an overclaim ('validated'/'crypto'/'authenticated-human'/'forgery'/'provably-secure'/'unforgeable'/'collision-resistant'/'preimage-resistant'/'constant-time'/'tamper-proof'/'quantum'/'FIPS-certified'/'guaranteed'/'unbreakable') -- the implementation is verified, the primitive is ASSUMED-FROM-LITERATURE; crypto claims live ONLY in the structured stripped tokens (M29 proposal §7 honesty discipline)" >&2
         exit 1
     fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
@@ -537,7 +569,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK')"
     exit 0
 fi
 

@@ -193,11 +193,14 @@ set -euo pipefail
 # Terrapin lesson, SYMBOLIC single-byte flip); kani_cmd_dual_custody -- decode recovers BOTH cred ids
 # EXACTLY and the dual-custody predicate (cred_a != cred_b) rejects a single signer (the two-person rule,
 # fully symbolic); kani_cmd_mac_tamper -- a single-byte flip of the keyed MAC's CONCRETE canon-bytes input
-# changes the recomputed MAC, REUSING the M22 prov::prov_hash digest (a SYMBOLIC flip index, CONCRETE
-# keys+canon so the FNV stays concrete -- the #49 trap); kani_cmd_key_evolve -- key_evolve is deterministic
-# + advances (not a fixed point) + tamper-sensitive (the FssAgg forward shape, SYMBOLIC flip index,
-# CONCRETE key). Claims ONLY enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary
-# (mac=KEYED-NONCRYPTO, NOT forgery-resistance); the oracle is a test key (oracle=SIMULATED-ENROLLED-KEY);
+# changes the recomputed MAC (since M29 the body under proof is the khash-backed DERIVE-THEN-MAC, 2
+# keyed-BLAKE2s calls; a SYMBOLIC flip index over CONCRETE keys+canon so every compression stays
+# concrete -- the #49 trap; re-measured at the M29 swap); kani_cmd_key_evolve -- key_evolve is
+# deterministic + advances (not a fixed point) + tamper-sensitive (since M29 the domain-separated
+# keyed-PRF call khash(key, "TABOS-KEY-EVOLVE-V1") -- the Bellare-Yee shape; SYMBOLIC flip index,
+# CONCRETE key; re-measured at the M29 swap). The MAC tier is mac=KEYED-CRYPTO (M29 --
+# assumption-conditional: implementation VERIFIED, primitive security ASSUMED-FROM-LITERATURE; the
+# retired KEYED-NONCRYPTO tier is guard-REJECTED); the oracle is a test key (oracle=SIMULATED-ENROLLED-KEY);
 # an accepted command is necessary-not-sufficient (kan_active=0).
 # + M29 khash verified KEYED-HASH primitive leaf x4 (BLAKE2s-256, RFC 7693, native keyed mode -- the
 # mac=KEYED-CRYPTO primitive; ALL khash harnesses are CONCRETE-VECTOR-ONLY per the #49 discipline:

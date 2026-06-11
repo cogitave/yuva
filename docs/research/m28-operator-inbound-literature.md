@@ -28,13 +28,13 @@ A **simulated enrolled verifier** holds a compiled-in test key: the OS emits a `
 ## Honesty boundary (encoded as witness tokens)
 | Property | M28? | Token |
 |---|---|---|
-| Enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary | YES | `mac=KEYED-NONCRYPTO` |
+| Enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary | YES | `mac=KEYED-NONCRYPTO` (since M29: `mac=KEYED-CRYPTO`) |
 | Freshness via challenge nonce + head-binding (Terrapin-aware) | YES | `stale-rejected=1 wronghead-rejected=1` |
 | Dual-custody (two-person rule) on activation | YES | `single-cred-rejected=1` |
-| Cryptographic forgery-resistance / non-repudiation | **NO** (keyed FNV) | `mac=KEYED-NONCRYPTO` |
+| Cryptographic forgery-resistance / non-repudiation | **NO at M28** (keyed FNV) — **upgraded at M29**: forgery-resistance now ASSUMPTION-CONDITIONAL on the keyed-BLAKE2s PRF (verified implementation, assumed primitive — never "proven secure") | `mac=KEYED-NONCRYPTO` → `mac=KEYED-CRYPTO sec=ASSUMED-FROM-LITERATURE` (M29) |
 | A real human commanded (vs a test key) | **NO** | `oracle=SIMULATED-ENROLLED-KEY` |
 | The command directly activated the cell | **NO** (necessary-not-sufficient) | `kan_active=0` |
 | A real enrolment ceremony / key management | **NO** (deferred) | (prose) |
 
 ## [BEYOND] the literature
-Composing FssAgg forward-secure keyed aggregation + RATS nonce freshness + the two-person rule + Terrapin head/seq-binding into a **no-float, verified-leaf, inbound, dual-authorized activation channel anchored to a live provenance head that is necessary-not-sufficient for a Seldonian gate** is a synthesis in no single source. The construction is novel; its security is **asserted-not-proven** at the `KEYED-NONCRYPTO` tier — the honest frontier, machine-encoded as the witness token. Successors: `KEYED-CRYPTO` (a verified real MAC), a real enrolment ceremony, a trustworthy freshness clock.
+Composing FssAgg forward-secure keyed aggregation + RATS nonce freshness + the two-person rule + Terrapin head/seq-binding into a **no-float, verified-leaf, inbound, dual-authorized activation channel anchored to a live provenance head that is necessary-not-sufficient for a Seldonian gate** is a synthesis in no single source. The construction is novel; its security at landing was **asserted-not-proven** at the `KEYED-NONCRYPTO` tier — the honest frontier, machine-encoded as the witness token. Successors: `KEYED-CRYPTO` (a verified real MAC — **LANDED as M29**, `tb-encode::khash` BLAKE2s-256 keyed; see [`m29-crypto-mac-literature.md`](m29-crypto-mac-literature.md)), a real enrolment ceremony, a trustworthy freshness clock.

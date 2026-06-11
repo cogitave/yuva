@@ -153,10 +153,13 @@ jobs:
   # the gate's verdict is EXACTLY determined -- RejectSingleCred iff cred_a==cred_b, RejectBadMac
   # iff distinct-creds AND !mac_ok, Accept iff distinct-creds AND mac_ok -- the two-person rule +
   # the conjunctive-gate proof) / kani_cmd_mac_tamper (a single-byte flip of the keyed MAC's
-  # CONCRETE canon-bytes input changes the recomputed MAC, REUSING the M22 prov digest, SYMBOLIC
-  # flip index) / kani_cmd_key_evolve (key_evolve is deterministic + advances + tamper-sensitive --
-  # the FssAgg forward shape); claims ONLY enrolled-key replay/truncation resistance vs a
-  # non-adaptive no-key adversary (mac=KEYED-NONCRYPTO, NOT forgery-resistance;
+  # CONCRETE canon-bytes input changes the recomputed MAC -- since M29 the body under proof is the
+  # khash-backed DERIVE-THEN-MAC, 2 keyed-BLAKE2s calls; SYMBOLIC flip index, every compression
+  # concrete, re-measured at the swap) / kani_cmd_key_evolve (key_evolve is deterministic +
+  # advances + tamper-sensitive -- since M29 the domain-separated keyed-PRF call, the Bellare-Yee
+  # shape, re-measured at the swap); the MAC tier is mac=KEYED-CRYPTO (M29, assumption-conditional:
+  # implementation VERIFIED, primitive security ASSUMED-FROM-LITERATURE; the retired
+  # KEYED-NONCRYPTO tier is guard-REJECTED;
   # oracle=SIMULATED-ENROLLED-KEY; an accepted command is necessary-not-sufficient, kan_active=0;
   # per-epoch staleness rejection, NOT one-shot nonce consumption -- the stateless leaf does not
   # consume the nonce on Accept) + the 4 M29 khash verified KEYED-HASH primitive harnesses
