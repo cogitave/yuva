@@ -47,12 +47,16 @@ const GICD_BASE: u64 = 0x0800_0000; // distributor
 const GICC_BASE: u64 = 0x0801_0000; // CPU interface
 
 const GICD_CTLR: u64 = 0x000;
-const GICD_ISENABLER0: u64 = 0x100;
+/// `GICD_ISENABLER0` (write-1-to-set per-INTID enable) -- `pub(super)` so the
+/// M27b CNTHP window (`tpsched_hal.rs`) can enable PPI 26 with the SAME accessor.
+pub(super) const GICD_ISENABLER0: u64 = 0x100;
 
 const GICC_CTLR: u64 = 0x000;
 const GICC_PMR: u64 = 0x004;
-const GICC_IAR: u64 = 0x00C;
-const GICC_EOIR: u64 = 0x010;
+/// `GICC_IAR` (read = acknowledge) -- `pub(super)` for the M27b EL2 timer handler.
+pub(super) const GICC_IAR: u64 = 0x00C;
+/// `GICC_EOIR` (write the IAR value to end) -- `pub(super)` for the M27b handler.
+pub(super) const GICC_EOIR: u64 = 0x010;
 
 const GICD_CTLR_ENABLE_GRP0: u32 = 1 << 0;
 const GICC_CTLR_ENABLE_GRP0: u32 = 1 << 0;
@@ -61,7 +65,8 @@ const GICC_PMR_ALLOW_ALL: u32 = 0xFF;
 /// PPI INTID of the EL1 non-secure physical generic timer (QEMU `virt` PPI 14).
 const TIMER_PPI: u32 = 30;
 /// IAR INTID field mask (GICv2: bits[9:0]); values >= 1020 are special/spurious.
-const GIC_INTID_MASK: u32 = 0x3FF;
+/// `pub(super)` so the M27b EL2 timer handler decodes its IAR the SAME way.
+pub(super) const GIC_INTID_MASK: u32 = 0x3FF;
 const GIC_SPURIOUS_MIN: u32 = 1020;
 
 /// CNTP_CTL_EL0.ENABLE (bit 0); IMASK (bit 1) left clear = unmasked.
@@ -82,18 +87,23 @@ const CANARY_MULT: u64 = 0xD1B5_4A32_D192_ED03;
 // GIC MMIO + system-register helpers (all the aarch64 M8 asm/unsafe).
 // ---------------------------------------------------------------------------
 
-fn gicd_write(offset: u64, value: u32) {
+/// GICD MMIO store (`pub(super)`: shared with the M27b CNTHP window arm/disarm,
+/// which enables/disables PPI 26 through the SAME accessor -- no second GIC map).
+pub(super) fn gicd_write(offset: u64, value: u32) {
     // SAFETY: GICD sits in the L1[0] Device-nGnRnE identity gigabyte mapped by
-    // `mmu_init`, so `GICD_BASE + offset` is a valid 32-bit MMIO address.
+    // `mmu_init`, so `GICD_BASE + offset` is a valid 32-bit MMIO address. At EL2
+    // (MMU off, flat physical) the same address is equally reachable.
     unsafe { write_volatile((GICD_BASE + offset) as *mut u32, value) }
 }
 
-fn gicc_write(offset: u64, value: u32) {
+/// GICC MMIO store (`pub(super)`: shared with the M27b EL2 timer handler's EOI).
+pub(super) fn gicc_write(offset: u64, value: u32) {
     // SAFETY: as `gicd_write`, for the GICC CPU interface.
     unsafe { write_volatile((GICC_BASE + offset) as *mut u32, value) }
 }
 
-fn gicc_read(offset: u64) -> u32 {
+/// GICC MMIO load (`pub(super)`: shared with the M27b EL2 timer handler's IAR ack).
+pub(super) fn gicc_read(offset: u64) -> u32 {
     // SAFETY: as `gicd_write`; a side-effecting MMIO load (IAR ack on read).
     unsafe { read_volatile((GICC_BASE + offset) as *const u32) }
 }

@@ -521,10 +521,11 @@ const _: () = assert!(FAIL_VGIC_NO_PARK != FAIL_VGIC_NO_RETIRE);
 const _: () = assert!(FAIL_VGIC_NO_RETIRE != FAIL_VGIC_NO_LR && FAIL_VGIC_NO_LR != FAIL_VGIC_RELOOP);
 
 // ===========================================================================
-// M27a sovereign-scheduler constants (the COOPERATIVE two-VMID time-partition
-// rung, built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam). THREE new
-// HVC immediates bookend + drive the window: #12 arm, #13 done, #14 the
-// voluntary yield. NO async IRQ (that is M27b) -- the guests HVC-yield.
+// M27 sovereign-scheduler constants (the two-VMID time-partition rung, built ON
+// TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam). HVC immediates: #12
+// arm, #13 done, #14 the RETIRED M27a cooperative yield (now a loud regression
+// trap), #15 the M27b CNTHP smoke. M27b: the slot switch is driven by the REAL
+// asynchronous CNTHP IRQ taken at EL2's 0x480 slot -- the guests never yield.
 // ===========================================================================
 
 /// M27a: the kernel's scheduler bootstrap HVC immediate (`hvc #12`) -- "populate
@@ -537,11 +538,18 @@ const HVC_SCHED_ARM: u64 = 12;
 /// tamper-caught + frame-conserved, and unwind". Teardown-first (returning to EL1
 /// with HCR.VM=1 instantly aborts the kernel -- the L2.1 discipline).
 const HVC_SCHED_DONE: u64 = 13;
-/// M27a: the guest's voluntary YIELD HVC immediate (`hvc #14`) -- "I made forward
-/// progress (bumped my MMIO cell); consult tpsched::next_slot, switch VTTBR_EL2 to
-/// the next VMID's root + fold a SchedDecision, and resume the next guest". The
-/// cooperative substitute for M27b's CNTHP timer preemption.
+/// M27a (RETIRED by M27b, the const + assert kept for vocabulary stability --
+/// imm 14 stays reserved): the guest's voluntary YIELD HVC. The M27b stubs are
+/// pure store-spins; ONLY the CNTHP IRQ transfers control, so an `hvc #14`
+/// arriving now is a stub/dispatch regression -> `FAIL_SCHED_YIELD_UNDER_TIMER`.
 const HVC_SCHED_YIELD: u64 = 14;
+/// M27b: the kernel's CNTHP SMOKE HVC immediate (`hvc #15`) -- "arm the CNTHP
+/// window with NO scheduler coupling (HCR = RW|IMO, no VM, no VTTBR), eret into
+/// a trivial EL1 spin stub, and let the 0x480 timer handler count
+/// `K_SMOKE_TICKS` asynchronous IRQs (re-arm-BEFORE-EOI each time), then disarm
+/// teardown-first + unwind with the count". Separates "the IRQ fires + no
+/// storm" from "the scheduler is correct" (plan Step 4's mandated smoke).
+const HVC_SCHED_TIMER_SMOKE: u64 = 15;
 
 // M27a FAIL codes (distinct nonzero; any -> `SchedProof::Faulted` -> red marker,
 // rendered WITHOUT a "sched OK" substring so the run grep stays fail-closed).
@@ -567,6 +575,26 @@ const FAIL_SCHED_FRAME: u64 = 0x0000_05CE_0000_0007;
 /// The bounded major-frame count was not reached (too few yields observed -- the
 /// orchestrator ended early or a guest hung instead of yielding).
 const FAIL_SCHED_SHORT: u64 = 0x0000_05CE_0000_0008;
+/// M27b: the 0x480 handler acked a `GICC_IAR` INTID that is NOT the CNTHP PPI
+/// (26) -- a wrong/spurious source. NEVER silently EOI-and-resume (fail loud).
+const FAIL_SCHED_TIMER_BAD_INTID: u64 = 0x0000_05CE_0000_0009;
+/// M27b: `CNTHP_CTL_EL2.ISTATUS` did NOT clear after the TVAL re-arm -- an EOI
+/// now would re-assert the level-sensitive PPI instantly (the storm precursor,
+/// plan risk #1). Fail loud instead of wedging.
+const FAIL_SCHED_TIMER_ISTATUS: u64 = 0x0000_05CE_0000_000A;
+/// M27b: the `eoi_count` HARD cap tripped -- an IRQ STORM, surfaced as a FAST
+/// red instead of the 240 s rc=124 wedge (the mandatory defensive cap).
+const FAIL_SCHED_TIMER_STORM: u64 = 0x0000_05CE_0000_000B;
+/// M27b: 0x480 was entered while NO timer window was armed (mode OFF) -- a
+/// stray routing leak (IMO left set?). Fail loud, never a silent resume.
+const FAIL_SCHED_TIMER_UNARMED: u64 = 0x0000_05CE_0000_000C;
+/// M27b: the smoke round-trip unwound clean but the tick count != K_SMOKE_TICKS
+/// (the facade-side recount of the x1 witness disagreed).
+const FAIL_SCHED_SMOKE_COUNT: u64 = 0x0000_05CE_0000_000D;
+/// M27b: a guest issued the retired M27a `HVC #14` yield while the timer window
+/// was armed -- the stubs are pure spins now; ONLY the CNTHP IRQ may transfer
+/// control. A yield arriving == a stub/dispatch regression (fail loud).
+const FAIL_SCHED_YIELD_UNDER_TIMER: u64 = 0x0000_05CE_0000_000E;
 
 /// M27a: the per-slot tick budgets of the fixed two-slot major frame (the
 /// `FramePlan.slot_ticks`). DISTINCT non-zero budgets so the conservation witness
@@ -584,6 +612,7 @@ const M27_VMID1: u16 = 1;
 // error). The HVC immediates are distinct from every existing rung's (0..11) and
 // from each other; the FAIL codes are distinct nonzero.
 const _: () = assert!(HVC_SCHED_ARM == 12 && HVC_SCHED_DONE == 13 && HVC_SCHED_YIELD == 14);
+const _: () = assert!(HVC_SCHED_TIMER_SMOKE == 15); // the next free imm after #14
 const _: () = assert!(M27_SLOT0_TICKS != 0 && M27_SLOT1_TICKS != 0);
 const _: () = assert!(M27_SLOT0_TICKS != M27_SLOT1_TICKS); // a non-trivial conserved sum
 const _: () = assert!(M27_VMID0 != M27_VMID1); // two DISTINCT VMIDs
@@ -591,6 +620,14 @@ const _: () = assert!(FAIL_SCHED_BUILD != 0 && FAIL_SCHED_VMID0_STARVED != 0);
 const _: () = assert!(FAIL_SCHED_VMID1_STARVED != 0 && FAIL_SCHED_ORDER != 0);
 const _: () = assert!(FAIL_SCHED_FOLD != 0 && FAIL_SCHED_TAMPER != 0);
 const _: () = assert!(FAIL_SCHED_FRAME != 0 && FAIL_SCHED_SHORT != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_BAD_INTID != 0 && FAIL_SCHED_TIMER_ISTATUS != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_STORM != 0 && FAIL_SCHED_TIMER_UNARMED != 0);
+const _: () = assert!(FAIL_SCHED_SMOKE_COUNT != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_BAD_INTID != FAIL_SCHED_SHORT); // fresh codes
+const _: () = assert!(FAIL_SCHED_TIMER_ISTATUS != FAIL_SCHED_TIMER_STORM);
+const _: () = assert!(FAIL_SCHED_TIMER_UNARMED != FAIL_SCHED_SMOKE_COUNT);
+const _: () = assert!(FAIL_SCHED_YIELD_UNDER_TIMER != 0);
+const _: () = assert!(FAIL_SCHED_YIELD_UNDER_TIMER != FAIL_SCHED_SMOKE_COUNT);
 
 // ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
@@ -717,8 +754,8 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
         // device seam + ELR ADVANCE), routed BEFORE the L2.1 demand path so the
         // device IPA never reaches the demand-map (it stays unmapped per access).
         ExitClass::StageTwoAbort => {
-            // M27a: the cooperative two-VMID scheduler window. A guest's store to
-            // its DISTINCT (unmapped) device IPA stage-2-faults here -> route it
+            // M27: the timer-preempted two-VMID scheduler window. A guest's store
+            // to its DISTINCT (unmapped) device IPA stage-2-faults here -> route it
             // through the per-VMID MMIO counter seam + advance ELR (the L2.3
             // emulate discipline, but counting per-VMID). Checked FIRST + gated on
             // the M27 armed flag, so when M27 is NOT armed this is byte-identical
@@ -1214,10 +1251,18 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             super::tpsched_hal::set_sched_context(&plan, vttbr0, vttbr1, entry0, entry1);
             super::el2mmio::reset_device_pair_m27();
             super::tpsched_hal::arm_sched_el2(vtcr_v, vttbr0);
+            // M27b: layer the CNTHP window ON TOP of the armed stage-2 -- mark
+            // the PREEMPT mode (AFTER set_sched_context, which resets it), then
+            // enable PPI 26 + program slot 0's deadline (slot_deadline_delta,
+            // recorded at arm time) + HCR_EL2 = RW|IMO|VM (VTTBR already set).
+            // From the eret on, ONLY the timer transfers control between guests.
+            super::tpsched_hal::set_timer_mode(super::tpsched_hal::TMODE_PREEMPT);
+            super::tpsched_hal::arm_cnthp_window_el2(super::tpsched_hal::slot_ticks(0), true);
             // SAFETY: reset SP_EL2 = &B0, program ELR_EL2/SPSR_EL2 for an EL1h
             // entry at slot 0's identity-mapped stub, `eret`. `noreturn`: control
             // leaves EL2 for slot 0's guest (now under its stage-2) and re-enters
-            // only via that guest's `hvc #14` yield.
+            // only via its device-IPA MMIO traps (0x400) or the CNTHP preemption
+            // (0x480) -- never a voluntary HVC.
             unsafe {
                 asm!(
                     "mov sp, {b0}",
@@ -1233,39 +1278,18 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             }
         }
         HVC_SCHED_YIELD => {
-            // imm == 14: a guest's voluntary YIELD (it bumped its MMIO cell). This
-            // is the cooperative substitute for M27b's timer preemption. Consult
-            // tpsched::next_slot, FOLD a SchedDecision into the running sched_head
-            // (the M22 prov fold reused verbatim, inside note_yield), switch
-            // VTTBR_EL2 to the next slot's root (+ tlbi vmalls12e1is), and RESUME
-            // the next guest. If the bounded major-frame count is reached, do NOT
-            // resume a guest -- instead fall through to the done verdict (the
-            // orchestrator is the EL2 monitor itself; there is no separate driver
-            // guest, so the LAST yield that completes frame K ends the run).
-            // SAFETY: `frame` is the yield frame on the single-accessor monitor
-            // stack; note_yield reads/writes only the EL2 SchedCtx cell.
-            let (next_slot_idx, next_vttbr, next_entry) = super::tpsched_hal::note_yield();
-            let _ = next_entry; // we resume PAST the yielding guest's hvc, not re-enter the stub
-            if super::tpsched_hal::frames_done() >= super::tpsched_hal::K_MAX_FRAMES {
-                // The bounded run is complete: end teardown-FIRST, then verdict.
-                m27_done_verdict(esr);
-            }
-            // Switch the stage-2 world to the next VMID's root (the world-switch),
-            // then ADVANCE ELR past the yielding guest's `hvc #14` (a 32-bit insn)
-            // and resume -- BUT the resumed instruction stream is the NEXT guest's
-            // stub, reached because we flipped VTTBR. The yielding guest never runs
-            // past its `hvc #14` under its OWN stage-2; instead we redirect ELR to
-            // the next slot's entry PC so the next guest's stub executes from its
-            // top under the now-switched stage-2.
-            let _ = next_slot_idx;
-            super::tpsched_hal::switch_vttbr_el2(next_vttbr);
-            // SAFETY: `frame.elr` (0xF8) is the yielding guest's PC; redirect it to
-            // the NEXT slot's stub entry so the next guest runs from its top under
-            // the switched VTTBR. The frame's GPRs are irrelevant (each stub
-            // materialises its own state from immediates), so el2_abort_retry
-            // restores them UNCHANGED and erets into the next guest.
-            unsafe { (*frame).elr = next_entry };
-            el2_abort_retry(frame);
+            // imm == 14: RETIRED (M27b). The M27a cooperative yield is GONE -- the
+            // guest stubs are pure bounded store-spins and ONLY the CNTHP IRQ
+            // (the 0x480 handler) transfers control between slots. The const +
+            // assert stay for vocabulary stability (imm 14 remains reserved,
+            // never reusable by another rung), but an `hvc #14` ARRIVING here is
+            // a stub/dispatch REGRESSION: tear BOTH windows down (teardown-first
+            // -- never unwind with IMO/VM armed) and fail LOUD. The disarms are
+            // idempotent, so a stray hvc #14 OUTSIDE any window fails identically
+            // instead of falling to the generic FAIL_BAD_IMM (more diagnosable).
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            super::tpsched_hal::disarm_sched_el2();
+            el2_return_to_kernel(FAIL_SCHED_YIELD_UNDER_TIMER, esr);
         }
         HVC_SCHED_DONE => {
             // imm == 13: the orchestrator's explicit done HVC (reached only if the
@@ -1273,6 +1297,44 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             // frames-done fall-through above -- kept for symmetry + a belt-and-
             // suspenders end path). Teardown-FIRST, then the verdict.
             m27_done_verdict(esr);
+        }
+        HVC_SCHED_TIMER_SMOKE => {
+            // imm == 15: the M27b CNTHP SMOKE bootstrap -- "the IRQ fires" with
+            // NO scheduler coupling (plan Step 4's mandated smoke-first). The
+            // stub entry rides the frame: x3 = the EL1 spin-stub PC (the
+            // HVC_VGIC_ARM gpr[3] convention). Reset the eoi count, mark the
+            // SMOKE mode, arm the CNTHP window with HCR = RW|IMO ONLY (no VM,
+            // no VTTBR -- the kernel's live stage-1 keeps running untranslated
+            // by stage-2), and eret into the spin stub. The 0x480 handler then
+            // counts K_SMOKE_TICKS asynchronous preemptions of the spinning EL1
+            // (re-arm-BEFORE-EOI each tick), disarms teardown-first, and
+            // unwinds back here through the resident B0 with x0 = 0, x1 = the
+            // tick count. NOTE the guest erets with PSTATE.I masked (SPSR
+            // 0x3C5) -- irrelevant: an IRQ targeted at a HIGHER EL is not
+            // masked by the lower EL's PSTATE.I (DDI 0487 D1.13.4).
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[3] was framed by SAVE_CONTEXT_EL2 and carries the HVC #15 arg.
+            let stub = unsafe { (*frame).gpr[3] };
+            super::tpsched_hal::reset_eoi();
+            super::tpsched_hal::set_timer_mode(super::tpsched_hal::TMODE_SMOKE);
+            super::tpsched_hal::arm_cnthp_window_el2(super::timer::tick_period(), false);
+            // SAFETY: reset SP_EL2 = &B0, program ELR_EL2/SPSR_EL2 for an EL1h
+            // entry at the identity-mapped spin stub, `eret`. `noreturn`:
+            // control leaves EL2 for the spinning EL1 and re-enters ONLY via
+            // the CNTHP IRQ at 0x480 (the first async EL2 entry ever).
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    options(noreturn),
+                );
+            }
         }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
@@ -1336,8 +1398,9 @@ fn el2_mmio_emulate_m27(frame: *mut Frame, esr: u64) -> ! {
             unsafe { (*frame).gpr[srt] = value };
         }
     }
-    // ADVANCE ELR past the 32-bit LDR/STR and resume the SAME guest (it will then
-    // `hvc #14` to yield). The guest never re-executes the access.
+    // ADVANCE ELR past the 32-bit LDR/STR and resume the SAME guest (M27b: it
+    // loops and stores again until its CNTHP deadline preempts it at 0x480).
+    // The guest never re-executes the access.
     // SAFETY: `frame.elr` (0xF8) is the faulting PC; +4 resumes PAST it.
     unsafe { (*frame).elr += 4 };
     el2_abort_retry(frame);
@@ -1408,11 +1471,11 @@ fn m27_done_verdict(esr: u64) -> ! {
     }
 
     // (e) FOLD-VERIFIED + TAMPER-CAUGHT: replay the EXACT folded decision sequence
-    // (the cooperative scheduler folds one SchedDecision per yield, identical to
-    // note_yield's), recompute the head from genesis, and require it EQUALS the
+    // (the scheduler folds one SchedDecision per slot switch, identical to
+    // note_switch's), recompute the head from genesis, and require it EQUALS the
     // committed running head; then flip a single byte of the FIRST decision and
     // require the recompute now DIFFERS (the M22 fold is tamper-sensitive). All
-    // pure tb-encode (no alloc): we rebuild each decision the same way note_yield
+    // pure tb-encode (no alloc): we rebuild each decision the same way note_switch
     // did and chain_mix them.
     let committed = super::tpsched_hal::head_bytes();
     let (recomputed, tampered) = m27_replay_head(yields);
@@ -1439,7 +1502,7 @@ fn m27_done_verdict(esr: u64) -> ! {
 
 // ===========================================================================
 // M27a: replay the folded decision sequence at done (EL2, no alloc). Rebuilds
-// each SchedDecision EXACTLY as note_yield did, recomputes the head from the
+// each SchedDecision EXACTLY as note_switch did, recomputes the head from the
 // all-zero genesis, and ALSO recomputes a head over a single-byte-tampered FIRST
 // decision. Returns (clean_head, tampered_head). The clean head must equal the
 // committed running head (fold-verified); the tampered head must DIFFER from it
@@ -1482,7 +1545,7 @@ fn m27_replay_head(yields: u64) -> ([u8; 32], [u8; 32]) {
                 tampered = tb_encode::tpsched::sched_chain_mix(tampered, id);
             }
         }
-        // Advance the replay state EXACTLY as note_yield did.
+        // Advance the replay state EXACTLY as note_switch did.
         t_logical = t_logical.wrapping_add(plan.slot_ticks[cur % 2]);
         if nxt == 0 {
             frame_seq += 1;
@@ -1798,6 +1861,125 @@ fn el2_abort_retry(frame: *mut Frame) -> ! {
 }
 
 // ===========================================================================
+// M27b: the EL2 CNTHP timer-IRQ handler -- the FIRST asynchronous IRQ ever taken
+// at EL2 in this codebase (the 0x480 Lower-EL-AArch64 IRQ slot; reachable ONLY
+// while the armed window holds HCR_EL2.IMO=1). SHALLOW by mandate: no alloc, no
+// deep calls -- volatile GIC MMIO + CNTHP sysregs + the SchedCtx cells only (the
+// EL2 stack is 32 KiB; the frame sits one below the resident B0). The
+// storm-killer order is LAW (plan risk #1): verify IAR==26 -> re-arm
+// CNTHP_TVAL BEFORE GICC_EOIR -> read back ISTATUS clear -> EOI -> hard
+// eoi-count cap. Every fail path disarms teardown-first THEN unwinds loud.
+// ===========================================================================
+// (a) PRE : entered at EL2h from the 0x480 vector after SAVE_CONTEXT_EL2 while
+//           a CNTHP window is armed (SMOKE: count-only; PREEMPT: the real
+//           scheduler); `frame` = SP_EL2 = the interrupted lower-EL context
+//           (one frame below the resident B0). POST: never returns --
+//           `el2_abort_retry(frame)` resumes the interrupted EL1 (UNCHANGED in
+//           smoke; ELR redirected to the next slot's entry under the switched
+//           VTTBR in preempt), or the done/fail paths disarm teardown-first
+//           and unwind to the kernel through B0.
+// (b) ABI : `extern "C"`, `#[no_mangle]` so `el2_vectors.rs` can `bl` it. `-> !`.
+// (c) TEST: scripts/run-aarch64.sh -- the smoke (K ticks counted, clean disarm)
+//           runs INSIDE sched_selftest before the timer-driven round-trip; then
+//           "M27: sched OK" + the witness with timing=TCG-NON-CYCLE-ACCURATE.
+/// Dispatch one CNTHP timer IRQ taken at EL2 (0x480): ack, verify, re-arm
+/// BEFORE EOI, count against the hard cap, then resume / world-switch /
+/// finish / fail-loud.
+#[no_mangle]
+pub(super) extern "C" fn aarch64_el2_timer_handler(frame: *mut Frame) -> ! {
+    // (1) ACK: the GICC_IAR read IS the acknowledge (GICv2 IHI 0048B section
+    // 4.4.4). Hard-verify the INTID is the CNTHP PPI -- anything else (incl. a
+    // 1020..1023 spurious) is a wiring/routing bug surfaced LOUD, never a
+    // silent EOI-and-resume.
+    let iar = super::timer::gicc_read(super::timer::GICC_IAR);
+    let intid = iar & super::timer::GIC_INTID_MASK;
+    if intid != super::tpsched_hal::CNTHP_PPI {
+        super::tpsched_hal::disarm_cnthp_window_el2();
+        super::tpsched_hal::disarm_sched_el2();
+        el2_return_to_kernel(FAIL_SCHED_TIMER_BAD_INTID, u64::from(iar));
+    }
+    let mode = super::tpsched_hal::timer_mode();
+    if mode == super::tpsched_hal::TMODE_SMOKE {
+        // (2) RE-ARM BEFORE EOI (the #1 storm killer): push the compare into
+        // the future -- which drops the level-sensitive ISTATUS -- and read it
+        // back CLEAR before the EOI may lower the running priority.
+        if !super::tpsched_hal::cnthp_rearm_checked(super::timer::tick_period()) {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_ISTATUS, u64::from(iar));
+        }
+        // (3) EOI: end the interrupt at the GIC (running priority drops; the
+        // line is already de-asserted by the re-arm, so no immediate re-entry).
+        super::timer::gicc_write(super::timer::GICC_EOIR, iar);
+        // (4) COUNT + the hard cap: a storm becomes a fast red, never a wedge.
+        let n = super::tpsched_hal::note_eoi();
+        if n > super::tpsched_hal::EOI_HARD_CAP {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_STORM, n);
+        }
+        // (5) K smoke ticks observed -> disarm TEARDOWN-FIRST and unwind clean
+        // (x0 = 0, x1 = the tick count) through the resident B0, exactly the
+        // HVC_SCHED_DONE unwind semantics.
+        if n >= super::tpsched_hal::K_SMOKE_TICKS {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(0, n);
+        }
+        // (6) Window still open: resume the interrupted EL1 spin UNCHANGED
+        // (ELR untouched -- an async IRQ resumes AT the interrupted insn).
+        el2_abort_retry(frame);
+    }
+    if mode == super::tpsched_hal::TMODE_PREEMPT {
+        // The REAL PREEMPTION (M27b): the slot's deadline expired while its
+        // guest spun. Drive the SAME slot logic the M27a yield branch drove --
+        // note_switch (the round-robin via the Kani-proven next_slot + the
+        // SchedDecision fold via the M22 prov fold, VERBATIM), so the order
+        // trace + slot budgets keep feeding m27_done_verdict's five properties
+        // unchanged. The preempted guest's frame stays UNTOUCHED except ELR
+        // (each stub materialises its state from immediates).
+        let (nxt, next_vttbr, next_entry) = super::tpsched_hal::note_switch();
+        if super::tpsched_hal::frames_done() >= super::tpsched_hal::K_MAX_FRAMES {
+            // The bounded run is COMPLETE. Quench the window FIRST (the timer
+            // is masked+disabled, so the level line drops before the EOI may
+            // lower the running priority -- no re-entry), EOI the ack we own,
+            // then take EXACTLY the done path the HVC_SCHED_DONE branch takes:
+            // m27_done_verdict (which itself disarms the sched window first).
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            super::timer::gicc_write(super::timer::GICC_EOIR, iar);
+            m27_done_verdict(0);
+        }
+        // RE-ARM BEFORE EOI (the storm-killer order) with the NEXT slot's
+        // deadline -- the per-slot slot_deadline_delta recorded at arm time --
+        // and read ISTATUS back CLEAR.
+        if !super::tpsched_hal::cnthp_rearm_checked(super::tpsched_hal::slot_ticks(nxt)) {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            super::tpsched_hal::disarm_sched_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_ISTATUS, u64::from(iar));
+        }
+        super::timer::gicc_write(super::timer::GICC_EOIR, iar);
+        let n = super::tpsched_hal::note_eoi();
+        if n > super::tpsched_hal::EOI_HARD_CAP {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            super::tpsched_hal::disarm_sched_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_STORM, n);
+        }
+        // The WORLD-SWITCH: flip VTTBR_EL2 to the next VMID's root (+ tlbi
+        // vmalls12e1is) and REDIRECT the resume PC to the next guest's entry --
+        // the M27a yield branch's exact mechanics, now timer-driven.
+        super::tpsched_hal::switch_vttbr_el2(next_vttbr);
+        // SAFETY: `frame.elr` (0xF8) is the preempted guest's PC; redirect it
+        // to the NEXT slot's stub entry so the next guest runs from its top
+        // under the switched VTTBR. The frame's GPRs are restored UNCHANGED by
+        // el2_abort_retry (each stub rebuilds its state from immediates).
+        unsafe { (*frame).elr = next_entry };
+        el2_abort_retry(frame);
+    }
+    // Mode OFF (or unknown): 0x480 fired with no armed window -- a routing leak
+    // (IMO set outside a window?). Disarm everything + fail LOUD.
+    super::tpsched_hal::disarm_cnthp_window_el2();
+    super::tpsched_hal::disarm_sched_el2();
+    el2_return_to_kernel(FAIL_SCHED_TIMER_UNARMED, mode);
+}
+
+// ===========================================================================
 // The EL2 fatal-vector handler: any non-(Lower-EL-sync) slot. Surfaces a FAIL by
 // unwinding to the kernel (never a silent loop / hang).
 // ===========================================================================
@@ -1958,83 +2140,154 @@ fn write_vbar_el1(v: u64) {
 }
 
 // ===========================================================================
-// M27a: the TWO EL1 guest stubs -- trivial position-independent EL1 payloads, one
-// per VMID. Each, when scheduled, STORES a magic to its DISTINCT device IPA (an
-// unmapped stage-2 IPA -> the store stage-2-faults -> the monitor's per-VMID MMIO
-// counter increments == this guest's forward-progress witness), then voluntarily
-// YIELDS with `hvc #14`. On each yield the monitor consults tpsched::next_slot,
-// switches VTTBR_EL2 to the OTHER VMID's root, folds a SchedDecision, and
-// REDIRECTS ELR to the next guest's entry -- so each scheduling runs the stub from
-// its top under its OWN stage-2 view (the `b 1b` is unreachable: the monitor never
-// resumes a yielding guest under its own stage-2; it world-switches away).
+// M27b: the TWO EL1 guest stubs -- trivial position-independent EL1 payloads,
+// one per VMID. Each, when scheduled, SPINS storing a magic to its DISTINCT
+// device IPA (an unmapped stage-2 IPA -> every store stage-2-faults -> the
+// monitor's per-VMID MMIO counter increments == this guest's forward-progress
+// witness, resumed one insn past each store). The stubs NEVER yield -- ONLY the
+// CNTHP timer IRQ (taken at EL2's 0x480 while the slot's deadline expires)
+// wrests control: the handler consults tpsched::next_slot, switches VTTBR_EL2
+// to the OTHER VMID's root, folds a SchedDecision, and REDIRECTS ELR to the
+// next guest's entry -- so each scheduling runs the stub from its top under its
+// OWN stage-2 view. (M27a's voluntary `hvc #14` is GONE; a yield arriving now
+// is the FAIL_SCHED_YIELD_UNDER_TIMER regression.)
 // ===========================================================================
-// (a) PRE : reached only by the `HVC #12` arm's eret (slot 0) or a `HVC #14`
-//           yield's VTTBR-switched redirect (either slot), at EL1h
-//           (SPSR_EL2 = 0x3C5) under the M27 stage-2 (HCR_EL2.VM=1). Its VA == PA:
-//           identity-mapped EL1-executable kernel `.text` in GiB1 (the M27
-//           stage-2 identity-covers GiB0+GiB1, so the fetch + stack never
-//           S1PTW-fault). POST: `hvc #14` (yield); the monitor world-switches +
-//           never resumes past it under this guest's stage-2.
+// (a) PRE : reached only by the `HVC #12` arm's eret (slot 0) or a CNTHP
+//           preemption's VTTBR-switched redirect (either slot), at EL1h
+//           (SPSR_EL2 = 0x3C5; PSTATE.I masked is irrelevant -- the PPI targets
+//           EL2 via IMO, DDI 0487 D1.13.4) under the M27 stage-2 (HCR_EL2.VM=1).
+//           Its VA == PA: identity-mapped EL1-executable kernel `.text` in GiB1
+//           (the M27 stage-2 identity-covers GiB0+GiB1, so the fetch + stack
+//           never S1PTW-fault). POST: never exits by itself -- the CNTHP IRQ
+//           preempts the spin; after the K-th major frame the monitor tears the
+//           window down and this stub never runs again.
 // (b) ABI : `#[unsafe(naked)]` -- PC-relative / immediate only (valid at its
 //           identity VA), NO stack (SP_EL1 untouched). A SINGLE-GPR STR (no
 //           LDP/STP, no writeback, no SIMD) so QEMU TCG sets ISV=1. The device VA
-//           is materialised MOVZ+MOVK (== stage2.rs M27_DEVICE_IPA_{0,1}).
-// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "M27: sched OK".
-/// M27a guest 0 (VMID 0): STORE a magic to `M27_DEVICE_IPA_0` (0x2_4000_0000),
-/// then `hvc #14` to yield. The store stage-2-faults -> VMID-0 counter ++.
+//           is materialised MOVZ+MOVK (== stage2.rs M27_DEVICE_IPA_{0,1}). The
+//           emulate path resumes at ELR+4 == the back-branch, closing the spin.
+// (c) TEST: scripts/run-aarch64.sh -- the round-trip prints "M27: sched OK" with
+//           timing=TCG-NON-CYCLE-ACCURATE.
+/// M27b guest 0 (VMID 0): SPIN storing a magic to `M27_DEVICE_IPA_0`
+/// (0x2_4000_0000). Every store stage-2-faults -> VMID-0 counter ++; only the
+/// CNTHP deadline ends the slice.
 #[unsafe(naked)]
 extern "C" fn m27_guest0_stub() -> ! {
     naked_asm!(
         "movz x4, #0x4000, lsl #16", // x4 = 0x0000_0000_4000_0000
         "movk x4, #0x0002, lsl #32", // x4 = 0x0000_0002_4000_0000 == M27_DEVICE_IPA_0
         "movz x5, #0x270",           // a forward-progress magic (value is irrelevant: the COUNT is the witness)
-        "str  x5, [x4]",             // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 0)++ -> ELR+=4
-        "hvc  #14",                  // voluntary YIELD: consult next_slot + world-switch
-        "1: b 1b",                   // unreachable: the monitor world-switches away, never resumes here
+        "1: str x5, [x4]",           // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 0)++ -> ELR+=4 resumes below
+        "b  1b",                     // spin: store again until the CNTHP IRQ preempts (NO yield)
     )
 }
 
-/// M27a guest 1 (VMID 1): STORE a magic to `M27_DEVICE_IPA_1` (0x2_8000_0000),
-/// then `hvc #14` to yield. The store stage-2-faults -> VMID-1 counter ++.
+/// M27b guest 1 (VMID 1): SPIN storing a magic to `M27_DEVICE_IPA_1`
+/// (0x2_8000_0000). Every store stage-2-faults -> VMID-1 counter ++; only the
+/// CNTHP deadline ends the slice.
 #[unsafe(naked)]
 extern "C" fn m27_guest1_stub() -> ! {
     naked_asm!(
         "movz x4, #0x8000, lsl #16", // x4 = 0x0000_0000_8000_0000
         "movk x4, #0x0002, lsl #32", // x4 = 0x0000_0002_8000_0000 == M27_DEVICE_IPA_1
         "movz x5, #0x271",           // a forward-progress magic (value is irrelevant)
-        "str  x5, [x4]",             // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 1)++ -> ELR+=4
-        "hvc  #14",                  // voluntary YIELD: consult next_slot + world-switch
-        "1: b 1b",                   // unreachable: the monitor world-switches away, never resumes here
+        "1: str x5, [x4]",           // DABT ISV=1 WnR=1 -> device_mmio_m27(vmid 1)++ -> ELR+=4 resumes below
+        "b  1b",                     // spin: store again until the CNTHP IRQ preempts (NO yield)
     )
 }
 
 // ===========================================================================
-// M27a: the safe facade: sched_selftest() -> SchedProof.
+// M27b: the SMOKE-window EL1 spin stub -- the minimal asynchronous-preemption
+// target. Unlike every other stub it performs NO store, NO hvc: it only spins,
+// and ONLY the CNTHP IRQ (taken at EL2's 0x480) ever wrests control from it.
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #15` smoke arm's eret, at EL1h (SPSR_EL2 =
+//           0x3C5, PSTATE.I masked -- irrelevant: the PPI targets EL2 via IMO
+//           and a higher-EL-targeted IRQ is not masked by EL1's PSTATE.I, DDI
+//           0487 D1.13.4) under the kernel's live stage-1 MMU (HCR_EL2.VM=0 --
+//           NO stage-2; the smoke has no scheduler coupling). VA == PA:
+//           identity-mapped EL1-executable kernel `.text`. POST: preempted
+//           K_SMOKE_TICKS times by the 0x480 handler (each resume re-enters the
+//           loop UNCHANGED); after the K-th tick the monitor disarms + unwinds
+//           to the kernel and this stub never runs again.
+// (b) ABI : `#[unsafe(naked)]` -- one PC-relative branch, NO stack, NO GPR use.
+// (c) TEST: scripts/run-aarch64.sh -- the smoke phase inside sched_selftest
+//           must return x0 == 0, x1 == K_SMOKE_TICKS before the timer-driven
+//           preemption round-trip runs.
+/// M27b smoke target: spin at EL1 until the CNTHP PPI preempts into EL2.
+#[unsafe(naked)]
+extern "C" fn m27_smoke_spin_stub() -> ! {
+    naked_asm!(
+        "1: b 1b", // the CNTHP IRQ (-> EL2 0x480) is the ONLY exit from this loop
+    )
+}
+
+// ===========================================================================
+// M27: the safe facade: sched_selftest() -> SchedProof (M27b timer-preempted).
 // ===========================================================================
 // (a) PRE : called once from the kernel at the M27 slot (right after L2.6, before
 //           M19), at EL1h, with the resident monitor armed (BOOTED_AT_EL2 == 1).
-//           POST: built TWO distinct stage-2 roots (VMID 0 + 1) + spliced the two
-//           stage-1 device blocks AT EL1, issued ONE `HVC #12`, drove the
-//           arm -> [slot0 store+yield -> world-switch -> slot1 store+yield ->
-//           world-switch] x K -> teardown-FIRST -> verdict -> unwind round-trip,
-//           and returns the outcome enum. The kernel resumes here at EL1 with the
-//           M27 window fully torn down (HCR back to RW baseline). Graceful skip
-//           when not booted at EL2.
+//           POST: FIRST drove the M27b CNTHP SMOKE round-trip (`HVC #15` ->
+//           K_SMOKE_TICKS async EL2 IRQs -> clean disarm; zero scheduler
+//           coupling), THEN built TWO distinct stage-2 roots (VMID 0 + 1) +
+//           spliced the two stage-1 device blocks AT EL1, issued ONE `HVC #12`,
+//           drove the arm -> [slotN store-spin -> CNTHP deadline -> 0x480
+//           preemption -> fold + world-switch] x 2K -> teardown-FIRST ->
+//           verdict -> unwind round-trip, and returns the outcome enum. The
+//           kernel resumes here at EL1 with the M27 window fully torn down
+//           (HCR back to RW baseline, CNTHP off, PPI 26 disabled). Graceful
+//           skip when not booted at EL2.
 // (b) ABI : plain safe `fn`; all asm/unsafe confined here + in `tpsched_hal.rs` /
 //           `stage2.rs` / `el2mmio.rs`, so the `#![forbid(unsafe_code)]` kernel
 //           only branches on the returned `SchedProof`.
 // (c) TEST: scripts/run-aarch64.sh -- "M27: sched OK" iff this returns `Proven`.
-/// Drive the cooperative two-VMID time-partition round-trip and report the
-/// outcome. `Unavailable` if we did not boot at EL2 (a green skip);
-/// `Proven{head, frames}` on a closed round-trip where both VMIDs progressed, the
-/// order was the round-robin, the fold verified + a tamper was caught, and the
-/// frame was conserved; `Faulted{code}` on any monitor-reported fault.
+/// Drive the CNTHP timer-preempted two-VMID time-partition round-trip (the
+/// smoke phase first) and report the outcome. `Unavailable` if we did not boot
+/// at EL2 (a green skip); `Proven{head, frames}` on a closed round-trip where
+/// both VMIDs progressed, the order was the round-robin, the fold verified + a
+/// tamper was caught, and the frame was conserved; `Faulted{code}` on any
+/// monitor-reported fault.
 pub fn sched_selftest() -> crate::SchedProof {
     use crate::SchedProof;
 
     // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
     if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
         return SchedProof::Unavailable;
+    }
+
+    // --- M27b SMOKE PHASE (banked separately; plan Step 4's "smoke `IRQ
+    // works` BEFORE wiring the VMID switch"): prove the FIRST async IRQ at EL2
+    // fires, counts K_SMOKE_TICKS with re-arm-before-EOI, never storms, and
+    // disarms teardown-first -- with ZERO scheduler coupling (no stage-2, no
+    // VTTBR, no SchedCtx decision state). EL1 IRQs are masked across the
+    // window (the proven aL2.5 IMO-window discipline); the CNTHP PPI targets
+    // EL2 and is not maskable by EL1's PSTATE.I. A smoke fail aborts the M27
+    // rung loud BEFORE the preemption run, cleanly separating "IRQ plumbing
+    // broke" from "scheduler broke".
+    let smoke_stub = m27_smoke_spin_stub as *const () as u64;
+    let daif_smoke = super::timer::local_irq_save();
+    let smoke_out: u64;
+    let smoke_ticks: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #15`, arms the CNTHP
+    // window (HCR = RW|IMO only), and erets into the spin stub; the 0x480
+    // handler counts K async ticks then disarms + unwinds here with x0 =
+    // outcome, x1 = the tick count, every other kernel register restored from
+    // B0. x3 carries the stub entry in; clobber_abi("C") covers the rest.
+    unsafe {
+        asm!(
+            "hvc #15",
+            inout("x0") 0u64 => smoke_out,
+            inout("x1") 0u64 => smoke_ticks,
+            in("x3") smoke_stub,
+            clobber_abi("C"),
+        );
+    }
+    super::timer::local_irq_restore(daif_smoke);
+    if smoke_out != 0 {
+        return SchedProof::Faulted { code: smoke_out };
+    }
+    if smoke_ticks != super::tpsched_hal::K_SMOKE_TICKS {
+        return SchedProof::Faulted { code: FAIL_SCHED_SMOKE_COUNT };
     }
 
     // Build TWO distinct stage-2 roots (VMID 0 + 1). Each is the GiB0+GiB1
@@ -2061,23 +2314,26 @@ pub fn sched_selftest() -> crate::SchedProof {
     let entry0 = m27_guest0_stub as *const () as u64;
     let entry1 = m27_guest1_stub as *const () as u64;
 
-    // Mask EL1 IRQs across the whole window (the guests run DAIF-masked too; M27a
-    // has NO async IRQ, so this is purely belt-and-suspenders -- no stray physical
-    // IRQ disturbs the round-trip).
+    // Mask EL1 IRQs across the whole window (the proven IMO-window discipline:
+    // HCR_EL2.IMO is global while armed, so EL1 must not expect deliveries; the
+    // guests run DAIF-masked too -- the CNTHP PPI targets EL2 and is not
+    // maskable by EL1's PSTATE.I).
     let daif = super::timer::local_irq_save();
 
     let outcome: u64;
     let head_witness: u64;
     // SAFETY: the resident EL2 monitor catches `hvc #12`, populates the SchedCtx,
-    // programs VTCR/VTTBR (slot-0 root) + HCR.VM=1, and erets into slot 0's stub.
-    // Each guest stores to its device IPA (stage-2-faults -> per-VMID counter ++),
-    // then `hvc #14`s -- the monitor folds a SchedDecision, switches VTTBR to the
-    // next VMID's root, and resumes the next guest. After K major frames the
-    // monitor TEARS the window DOWN (HCR=RW) FIRST, verifies the five properties,
-    // and unwinds here with x0 = outcome, x1 = the head-witness, every other
-    // kernel register restored from B0. The result arrives in registers -- nothing
-    // here touches the EL2 stack. x0..x4 carry the in-args; clobber_abi("C")
-    // covers the rest.
+    // programs VTCR/VTTBR (slot-0 root) + HCR.VM=1, layers the CNTHP window
+    // (PPI 26 + slot-0 deadline + HCR = RW|IMO|VM), and erets into slot 0's
+    // stub. Each guest SPINS storing to its device IPA (each store stage-2-
+    // faults -> per-VMID counter ++) until its deadline expires into the 0x480
+    // handler -- which folds a SchedDecision, re-arms the next deadline BEFORE
+    // the EOI, switches VTTBR to the next VMID's root, and resumes the next
+    // guest. After K major frames the handler TEARS the window DOWN (timer
+    // masked, HCR=RW) FIRST, verifies the five properties, and unwinds here
+    // with x0 = outcome, x1 = the head-witness, every other kernel register
+    // restored from B0. The result arrives in registers -- nothing here touches
+    // the EL2 stack. x0..x4 carry the in-args; clobber_abi("C") covers the rest.
     unsafe {
         asm!(
             "hvc #12",

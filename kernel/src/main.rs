@@ -3755,42 +3755,50 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
-    // --- M27a: the COOPERATIVE two-VMID sovereign time-partition scheduler --
-    // the sovereignty pillar's "TABOS owns time for two guests" rung, built ON TOP
-    // of L2.1's stage-2 + L2.3's trap-and-emulate seam + M22's fold. The EL2
-    // monitor arms TWO distinct stage-2 roots (VMID 0 + 1) and erets into the
-    // first of TWO trivial EL1 guest stubs; each, when scheduled, STORES to its
-    // DISTINCT (unmapped) device IPA -- which stage-2-faults to a per-VMID MMIO
-    // counter (the forward-progress witness a guest cannot fake) -- then
-    // voluntarily YIELDS with `hvc #14`. On each yield the monitor consults the
-    // Kani-proven tb_encode::tpsched::next_slot, switches VTTBR_EL2 to the next
-    // VMID's root (+ tlbi vmalls12e1is), folds a tb_encode::tpsched::SchedDecision
-    // into a running sched_head (the M22 tb_encode::prov fold REUSED VERBATIM --
-    // no new fold math), and resumes the next guest. After K bounded major frames
-    // the monitor tears the window down (HCR=RW, drop VTTBR) BEFORE unwinding and
+    // --- M27 (M27b): the CNTHP TIMER-PREEMPTED two-VMID sovereign time-partition
+    // scheduler -- the sovereignty pillar's "TABOS owns time for two guests" rung,
+    // built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam + M22's fold.
+    // The EL2 monitor arms TWO distinct stage-2 roots (VMID 0 + 1) + the CNTHP
+    // (EL2 physical timer) window -- the FIRST asynchronous IRQ ever taken at EL2
+    // (the 0x480 vector slot, HCR_EL2.IMO=1 inside the armed window only) -- and
+    // erets into the first of TWO trivial EL1 guest stubs; each, when scheduled,
+    // SPINS storing to its DISTINCT (unmapped) device IPA -- every store
+    // stage-2-faults to a per-VMID MMIO counter (the forward-progress witness a
+    // guest cannot fake) -- and NEVER yields. When the slot's CNTHP deadline
+    // expires, the 0x480 handler consults the Kani-proven
+    // tb_encode::tpsched::next_slot, switches VTTBR_EL2 to the next VMID's root
+    // (+ tlbi vmalls12e1is), folds a tb_encode::tpsched::SchedDecision into a
+    // running sched_head (the M22 tb_encode::prov fold REUSED VERBATIM -- no new
+    // fold math), RE-ARMS the next deadline BEFORE the GIC EOI (the storm-killer
+    // order, with an ISTATUS read-back + a hard eoi cap), and resumes the next
+    // guest. After K bounded major frames the handler tears the window down
+    // (timer masked, HCR=RW, drop VTTBR, PPI disabled) BEFORE unwinding and
     // verifies the CONJUNCTION: both VMIDs advanced their cell (both-progressed,
     // neither starved), the observed VMID order is the tpsched round-robin
     // (order-honored), recompute(sched_head) matches the committed fold
     // (fold-verified) AND a single-byte tamper flips it (tamper-caught), and the
-    // major frame is conserved (frame_total == Σ slot budgets). This is the
-    // COOPERATIVE (HVC-yield) path -- it exercises EVERYTHING EXCEPT the timer IRQ
-    // and CANNOT IRQ-storm; the marker emits timing=COOPERATIVE-HVC-YIELD +
-    // realtime=NOT-CLAIMED so it can NEVER impersonate the deferred M27b real-CNTHP
-    // claim. ALL the new asm/unsafe is confined to tb-hal's arch/aarch64/{el2,
-    // tpsched_hal,stage2,el2mmio}.rs (the tpsched leaf + the prov fold in tb-encode
-    // are forbid(unsafe) + Kani-proven); the kernel only branches on SchedProof. On
-    // x86_64 there is no EL2, so it reports the n/a path. DoD: "M27: sched OK".
+    // major frame is conserved (frame_total == Σ slot budgets). The preemption is
+    // REAL but runs under QEMU TCG, which is NOT cycle-accurate: the marker emits
+    // timing=TCG-NON-CYCLE-ACCURATE + realtime=NOT-CLAIMED -- an interleave/
+    // liveness witness, never a latency or schedulability claim. ALL the
+    // asm/unsafe is confined to tb-hal's arch/aarch64/{el2,el2_vectors,
+    // tpsched_hal,stage2,el2mmio,timer}.rs (the tpsched leaf + the prov fold in
+    // tb-encode are forbid(unsafe) + Kani-proven); the kernel only branches on
+    // SchedProof. On x86_64 there is no EL2, so it reports the n/a path.
+    // DoD: "M27: sched OK".
     match tb_hal::sched_selftest() {
         tb_hal::SchedProof::Proven { head, frames } => {
             // The honest witness line, fail-closed, positively required by the
             // run-script: render head=<hex16> + the bounded frame count + the six
-            // =1 flags + the COOPERATIVE-HVC-YIELD / NOT-CLAIMED honesty tokens.
+            // =1 flags + the TCG-NON-CYCLE-ACCURATE / NOT-CLAIMED honesty tokens
+            // (the run-script REJECTS the retired M27a COOPERATIVE-HVC-YIELD
+            // token, so M27b can never be impersonated by the cooperative path).
             tb_hal::serial_write_str("sched: head=");
             write_hex_u64(head);
             tb_hal::serial_write_str(" frames=");
             write_hex_u64(frames);
-            tb_hal::serial_write_str(" vmids=0x2 both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1 frame-conserved=1 timing=COOPERATIVE-HVC-YIELD realtime=NOT-CLAIMED\n");
-            tb_hal::serial_write_str("M27: sched OK\n"); // <-- the M27a aarch64 DoD marker
+            tb_hal::serial_write_str(" vmids=0x2 both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1 frame-conserved=1 timing=TCG-NON-CYCLE-ACCURATE realtime=NOT-CLAIMED\n");
+            tb_hal::serial_write_str("M27: sched OK\n"); // <-- the M27 aarch64 DoD marker
         }
         tb_hal::SchedProof::Unavailable => {
             // Not booted at EL2 (plain `virt`): graceful green skip, no scheduler armed.
@@ -3802,8 +3810,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_str("M27: sched OK (aarch64-only, n/a on x86_64)\n");
         }
         tb_hal::SchedProof::Faulted { code } => {
-            // Booted at EL2 but the cooperative round-trip faulted -- surfaced
-            // honestly, with NO 'sched OK' substring, so the run grep fails (red).
+            // Booted at EL2 but the timer-preempted round-trip (or its CNTHP
+            // smoke prelude) faulted -- surfaced honestly, with NO 'sched OK'
+            // substring, so the run grep fails (red).
             tb_hal::serial_write_str("M27: sched FAIL code=");
             write_hex_u64(code);
             tb_hal::serial_write_byte(b'\n');

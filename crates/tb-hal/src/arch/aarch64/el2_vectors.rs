@@ -14,9 +14,17 @@
 //!    x {Synchronous, IRQ, FIQ, SError}. (Arm ARM D1 exception vectors.)
 //!  * An `HVC` from EL1 (AArch64) is taken through the **"Lower EL using
 //!    AArch64, Synchronous"** slot: index 8, byte offset **0x400**. That is the
-//!    ONLY real handler (`__el2_vec_lower_sync` -> `aarch64_el2_sync_handler`),
+//!    synchronous handler (`__el2_vec_lower_sync` -> `aarch64_el2_sync_handler`),
 //!    which disambiguates the kernel bootstrap `HVC #0` from the guest's
-//!    `HVC #1` via `ESR_EL2.ISS`. Every OTHER slot routes to `__el2_vec_other`
+//!    `HVC #1` via `ESR_EL2.ISS`.
+//!  * **M27b**: the **"Lower EL using AArch64, IRQ"** slot (index 9, byte offset
+//!    **0x480**) routes to `__el2_vec_timer_irq` -> `aarch64_el2_timer_handler`
+//!    -- the FIRST asynchronous IRQ ever taken at EL2 in this codebase: the
+//!    CNTHP (EL2 physical timer) PPI, INTID 26, delivered ONLY while the armed
+//!    M27 window holds `HCR_EL2.IMO=1` (every other time IMO=0 keeps physical
+//!    IRQs at EL1 and this slot is never entered). The Current-EL IRQ slot
+//!    (0x280) stays FATAL: the monitor itself runs PSTATE.I-masked.
+//!    Every OTHER slot routes to `__el2_vec_other`
 //!    -> `aarch64_el2_fault_handler`, which surfaces a FAIL by unwinding back
 //!    to the kernel with a nonzero code (never a silent loop / hang).
 //!  * `SAVE_CONTEXT_EL2` mirrors the EL1 `SAVE_CONTEXT` byte-for-byte but uses
@@ -90,7 +98,7 @@ __el2_exception_vectors:
     VEC_SLOT_EL2 __el2_vec_other  // 0x380 SError
     // --- Lower EL using AArch64 (EL1) -- HVC #imm lands here -----------------
     VEC_SLOT_EL2 __el2_vec_lower_sync // 0x400 Synchronous <-- the HVC handler
-    VEC_SLOT_EL2 __el2_vec_other  // 0x480 IRQ (IMO=0: stays at EL1, never here)
+    VEC_SLOT_EL2 __el2_vec_timer_irq  // 0x480 IRQ: M27b CNTHP PPI 26 (ONLY inside the armed IMO=1 window; IMO=0 otherwise keeps IRQs at EL1, never here)
     VEC_SLOT_EL2 __el2_vec_other  // 0x500 FIQ
     VEC_SLOT_EL2 __el2_vec_other  // 0x580 SError
     // --- Lower EL using AArch32 -- no AArch32 guests; fatal ------------------
@@ -105,6 +113,11 @@ __el2_vec_lower_sync:             // Lower-EL-AArch64 synchronous: HVC #0 / #1
     SAVE_CONTEXT_EL2
     mov  x0, sp                   // AAPCS64 arg0 = &frame (x0..x30, ELR/SPSR_EL2)
     bl   aarch64_el2_sync_handler // el2.rs: erets itself (to guest / to kernel)
+    b    .                        // guard: the handler never returns
+__el2_vec_timer_irq:              // Lower-EL-AArch64 IRQ: the M27b CNTHP PPI (26)
+    SAVE_CONTEXT_EL2
+    mov  x0, sp                   // AAPCS64 arg0 = &frame (x0..x30, ELR/SPSR_EL2)
+    bl   aarch64_el2_timer_handler// el2/mod.rs: erets itself (resume / unwind)
     b    .                        // guard: the handler never returns
 __el2_vec_other:                  // every other vector: unexpected -> FAIL
     SAVE_CONTEXT_EL2

@@ -1,43 +1,52 @@
-//! aarch64 **M27a "sched"**: the COOPERATIVE (HVC-yield) two-VMID sovereign
+//! aarch64 **M27b "sched"**: the CNTHP TIMER-PREEMPTED two-VMID sovereign
 //! time-partition scheduler -- the EL2-only armed/decision context cell + the
 //! TWO-stage-2-root arm/disarm window (the teardown-first discipline), mirroring
-//! [`super::el2vgic`]'s `VgicCtx` + `arm_vgic_el2`/`disarm_vgic_el2` MINUS the
-//! async-IRQ (CNTHP/GIC/IMO) parts that belong to M27b.
+//! [`super::el2vgic`]'s `VgicCtx` + `arm_vgic_el2`/`disarm_vgic_el2` -- PLUS the
+//! **CNTHP window** (`arm_cnthp_window_el2`/`disarm_cnthp_window_el2`/
+//! `cnthp_rearm_checked`): the GIC + EL2-physical-timer + `HCR_EL2.IMO` glue
+//! behind the FIRST asynchronous IRQ ever taken at EL2 (the 0x480 slot). The
+//! SMOKE phase exercises that window with NO scheduler coupling (count K
+//! ticks, re-arm-before-EOI, hard eoi cap, teardown-first disarm) BEFORE the
+//! real preemption run, separating "IRQ plumbing" from "scheduler" failures.
 //!
 //! Where aL2.5 ([`super::el2vgic`]) injects a virtual interrupt into ONE guest,
-//! M27a TIME-PARTITIONS TWO guest VMIDs under TWO distinct stage-2 roots: each
-//! trivial EL1 stub, when running, bumps a DISTINCT MMIO cell (the L2.3
-//! trap-and-emulate seam, per-VMID) then voluntarily YIELDS with `HVC #14`. The
-//! EL2 sync handler, on each yield, consults the Kani-proven
+//! M27 TIME-PARTITIONS TWO guest VMIDs under TWO distinct stage-2 roots: each
+//! trivial EL1 stub, when running, repeatedly bumps a DISTINCT MMIO cell (the
+//! L2.3 trap-and-emulate seam, per-VMID) in a pure spin -- it NEVER yields. The
+//! CNTHP deadline (the slot's `slot_deadline_delta` budget) expires
+//! asynchronously into EL2's 0x480 handler, which consults the Kani-proven
 //! [`tb_encode::tpsched::next_slot`], switches `VTTBR_EL2` to the next VMID's
 //! root (+ `tlbi vmalls12e1is`), folds a [`tb_encode::tpsched::SchedDecision`]
 //! into a running `sched_head` (via the M22 [`tb_encode::prov`] fold reused
-//! VERBATIM -- NO new fold math), and `eret`s into the next guest. After K
-//! bounded major-frame iterations the orchestrator ends with `HVC #13`,
-//! teardown-FIRST, and the monitor verifies: both VMIDs' MMIO cells advanced
-//! (both-progressed, neither starved), the observed VMID order is the tpsched
-//! round-robin (order-honored), `recompute(sched_head)` matches + a single-byte
-//! tamper flips it (fold-verified + tamper-caught), and the frame is conserved.
+//! VERBATIM -- NO new fold math), re-arms the next deadline BEFORE the EOI, and
+//! `eret`s into the next guest. After K bounded major frames the handler ends
+//! the run teardown-FIRST, and the monitor verifies: both VMIDs' MMIO cells
+//! advanced (both-progressed, neither starved), the observed VMID order is the
+//! tpsched round-robin (order-honored), `recompute(sched_head)` matches + a
+//! single-byte tamper flips it (fold-verified + tamper-caught), and the frame
+//! is conserved. (M27a, the shipped green floor this replaced, drove the SAME
+//! decision sequence from a voluntary `HVC #14` yield -- the swap changed WHO
+//! transfers control, never the decision/fold math.)
 //!
-//! ## Honest scope (the marker claims ONLY COOPERATIVE timing)
+//! ## Honest scope (the marker claims ONLY TCG-grade timing)
 //!
-//! M27a exercises EVERYTHING EXCEPT the timer IRQ -- two VMIDs, two stage-2
-//! roots, two forward-progress cells, round-robin order, the fold, the tamper
-//! check, both-progressed -- and **cannot IRQ-storm** (there is no async IRQ at
-//! all). The marker emits `timing=COOPERATIVE-HVC-YIELD` so it can NEVER
-//! impersonate the M27b real-CNTHP-preemption claim (`timing=TCG-NON-CYCLE-
-//! ACCURATE`). `realtime=NOT-CLAIMED` always.
+//! The preemption is REAL (an asynchronous CNTHP IRQ at EL2 wrests control from
+//! spinning guests), but it runs under QEMU TCG, which is NOT cycle-accurate:
+//! the slot budgets are a relative shape, not a latency claim. The marker emits
+//! `timing=TCG-NON-CYCLE-ACCURATE` -- and the run script REJECTS the retired
+//! M27a `timing=COOPERATIVE-HVC-YIELD` token, so neither rung can impersonate
+//! the other. `realtime=NOT-CLAIMED` always: no schedulability/WCET guarantee.
 //!
 //! ## Arming (HCR_EL2 -- absolute writes, mirroring `stage2.rs::arm_stage2_el2`)
 //!
 //! The boot baseline is `HCR_EL2 = 1<<31` (RW only). [`arm_sched_el2`] programs
 //! `VTCR_EL2`/`VTTBR_EL2` (the FIRST slot's root) + `HCR_EL2 = RW|VM` (stage-2
 //! ON, so each guest's distinct MMIO IPA stage-2-faults to the device seam);
-//! [`switch_vttbr_el2`] flips `VTTBR_EL2` to the next slot's root + flushes on
-//! each yield; [`disarm_sched_el2`] restores `HCR_EL2 = RW` + drops `VTTBR_EL2`
-//! + `tlbi vmalls12e1is` (teardown-first, the L2.1 discipline) BEFORE the
-//! monitor unwinds. NO `HCR_EL2.IMO`, NO CNTHP arming, NO vector-table edit --
-//! those are M27b.
+//! [`arm_cnthp_window_el2`] then layers `RW|IMO|VM` + the CNTHP deadline + PPI
+//! 26; [`switch_vttbr_el2`] flips `VTTBR_EL2` to the next slot's root + flushes
+//! on each preemption; [`disarm_cnthp_window_el2`] + [`disarm_sched_el2`]
+//! restore `HCR_EL2 = RW` + drop `VTTBR_EL2` + `tlbi vmalls12e1is`
+//! (teardown-first, the L2.1 discipline) BEFORE the monitor unwinds.
 //!
 //! ## The armed/decision cell (EL2-only; the outcome leaves via the x0 register)
 //!
@@ -69,10 +78,19 @@ const HCR_RW: u64 = 1 << 31;
 /// distinct device IPA stage-2-faults -> the per-VMID MMIO emulate path). Same
 /// bit `stage2.rs`/`el2mmio.rs` use.
 const HCR_VM: u64 = 1 << 0;
+/// `HCR_EL2.IMO` (bit4, `kvm_arm.h HCR_IMO`; Arm ARM DDI 0487 D13.2.48): route
+/// physical IRQs to EL2 -- THE M27b bit. Inside the armed CNTHP window the timer
+/// PPI is taken at EL2's 0x480 Lower-EL-AArch64 IRQ slot instead of EL1; an
+/// interrupt targeted at a HIGHER EL is NOT masked by the lower EL's PSTATE.I
+/// (DDI 0487 D1.13.4 asynchronous-exception masking), so the DAIF-masked EL1
+/// guests are still preempted. OUTSIDE the window IMO stays 0 (the boot
+/// baseline) and 0x480 is never entered.
+const HCR_IMO: u64 = 1 << 4;
 
 // Tier-1 compile-time locks (a drift from the boot baseline is a build error).
 const _: () = assert!(HCR_RW == 1 << 31);
 const _: () = assert!(HCR_VM == 1);
+const _: () = assert!(HCR_IMO == 0x10);
 
 /// The compile-time MAJOR-FRAME cap (proposal §3, the bounded-iteration rule): K
 /// major frames, each switching both slots, then `HVC #13`. 8 is comfortably
@@ -86,6 +104,60 @@ pub(super) const MAX_YIELDS: usize = (2 * K_MAX_FRAMES) as usize;
 const _: () = assert!(N_SLOTS == 2); // M27a is the minimal two-slot frame
 const _: () = assert!(PROV_HASH_LEN == 32);
 const _: () = assert!(SCHED_CANON_LEN == 21);
+
+// ===========================================================================
+// M27b: the CNTHP (EL2 non-secure physical timer) window -- the FIRST
+// asynchronous IRQ ever taken at EL2 in this codebase. Registers (Arm ARM DDI
+// 0487 D17.11, "Counter-timer Hypervisor Physical Timer"): a CNTHP_TVAL_EL2
+// write sets CompareValue = CNTPCT + TVAL -- which also DROPS the level
+// condition ISTATUS (the storm-killer property the handler relies on);
+// CNTHP_CTL_EL2 carries ENABLE (bit0), IMASK (bit1), ISTATUS (bit2, RO). The
+// PPI is INTID 26 on QEMU `virt` (hw/arm/virt.h `ARCH_TIMER_NS_EL2_IRQ` = PPI
+// 10 -> INTID 16+10), GIC-routed exactly like M8's EL1 CNTP PPI 30.
+// ===========================================================================
+
+/// The CNTHP PPI INTID on QEMU `virt` (PPI 10 + 16 = 26; hw/arm/virt.h
+/// `ARCH_TIMER_NS_EL2_IRQ`). The 0x480 handler hard-verifies `GICC_IAR == 26`
+/// and fails LOUD on anything else (never a silent EOI-and-resume).
+pub(super) const CNTHP_PPI: u32 = 26;
+/// `CNTHP_CTL_EL2.ENABLE` (bit0): the timer asserts when CNTPCT reaches compare.
+const CNTHP_CTL_ENABLE: u64 = 1 << 0;
+/// `CNTHP_CTL_EL2.IMASK` (bit1): 1 masks the interrupt OUTPUT (disarm sets it
+/// FIRST so the level line can never re-assert during teardown).
+const CNTHP_CTL_IMASK: u64 = 1 << 1;
+/// `CNTHP_CTL_EL2.ISTATUS` (bit2, read-only): the LEVEL condition. It MUST read
+/// back 0 after a TVAL re-arm, or the PPI re-asserts the instant `GICC_EOIR`
+/// drops the running priority -- the #1 IRQ-storm cause (plan risk #1); the
+/// handler's mandatory read-back turns that into a loud red.
+const CNTHP_CTL_ISTATUS: u64 = 1 << 2;
+/// `GICD_ICENABLER0` (GICv2 IHI 0048B section 4.3.6, offset 0x180): write-1-to-
+/// CLEAR the per-INTID enable -- the disarm-side mirror of `GICD_ISENABLER0`.
+/// (`timer.rs` never needed it: M8/M9 leave PPI 30 enabled with the timer off.)
+const GICD_ICENABLER0: u64 = 0x180;
+
+/// M27b smoke (plan Step 4: "smoke `IRQ works` BEFORE wiring the VMID switch"):
+/// the 0x480 handler counts K async ticks (re-arm-before-EOI each time) with NO
+/// scheduler coupling, then disarms + unwinds clean. 4 proves fire/re-arm/
+/// resume/disarm without stretching the boot.
+pub(super) const K_SMOKE_TICKS: u64 = 4;
+/// M27b: the HARD eoi-count cap (the mandatory defensive checklist) -- 4x the
+/// worst legitimate tick count (2 ticks per frame x K_MAX_FRAMES). Tripping it
+/// turns an IRQ STORM into a FAST red instead of a 240 s rc=124 wedge.
+pub(super) const EOI_HARD_CAP: u64 = 4 * K_MAX_FRAMES;
+
+/// M27b timer-window mode: no window armed -- a 0x480 entry now is a loud FAIL.
+pub(super) const TMODE_OFF: u64 = 0;
+/// M27b timer-window mode: the SMOKE window (count K ticks, no scheduler).
+pub(super) const TMODE_SMOKE: u64 = 1;
+/// M27b timer-window mode: the REAL preemption window -- each CNTHP tick drives
+/// [`note_switch`] (the round-robin + fold), the VTTBR world-switch, and the
+/// per-slot deadline re-arm. ONLY the timer transfers control between guests.
+pub(super) const TMODE_PREEMPT: u64 = 2;
+
+const _: () = assert!(CNTHP_PPI == 26 && CNTHP_PPI < 32); // a PPI: one ISENABLER0 bit
+const _: () = assert!(GICD_ICENABLER0 == 0x180);
+const _: () = assert!(K_SMOKE_TICKS > 0 && K_SMOKE_TICKS < EOI_HARD_CAP);
+const _: () = assert!(TMODE_OFF != TMODE_SMOKE && TMODE_SMOKE != TMODE_PREEMPT);
 
 // ===========================================================================
 // The EL2 armed/decision context cell (single-accessor; EL1 NEVER references it).
@@ -103,6 +175,8 @@ const _: () = assert!(SCHED_CANON_LEN == 21);
 //   [13]      t_logical                   -- the SchedDecision logical clock
 //   [14..18]  sched_head[0..4]            -- the running 32-byte fold head (4xu64)
 //   [18..18+MAX_YIELDS] order_trace       -- the VMID that ran before each yield
+//   [18+MAX_YIELDS]   eoi_count           -- M27b: 0x480 handler EOIs (hard-capped)
+//   [19+MAX_YIELDS]   timer_mode          -- M27b: TMODE_OFF / TMODE_SMOKE
 // ===========================================================================
 
 const C_ARMED: usize = 0;
@@ -117,9 +191,11 @@ const C_FRAME_SEQ: usize = 12;
 const C_TLOGICAL: usize = 13;
 const C_HEAD: usize = 14; // [14..18] -- 4 u64 lanes of the 32-byte head
 const C_ORDER: usize = 18; // [18..18+MAX_YIELDS]
+const C_EOI: usize = C_ORDER + MAX_YIELDS; // M27b: the eoi_count word
+const C_TMODE: usize = C_EOI + 1; // M27b: the timer-window mode word
 
-/// Total u64 cells: the fixed prefix + the order trace.
-const CELL_WORDS: usize = C_ORDER + MAX_YIELDS;
+/// Total u64 cells: the fixed prefix + the order trace + the M27b timer words.
+const CELL_WORDS: usize = C_TMODE + 1;
 
 #[repr(C, align(64))]
 struct SchedCtx(UnsafeCell<[u64; CELL_WORDS]>);
@@ -183,6 +259,8 @@ pub(super) fn set_sched_context(
     put(C_SLOT_TICKS + 1, slot_deadline_delta(plan, 1));
     put(C_FRAME_SEQ, 0);
     put(C_TLOGICAL, 0);
+    put(C_EOI, 0); // M27b: a fresh window starts with a zero EOI count
+    put(C_TMODE, TMODE_OFF); // M27b: the ARM branch sets the mode AFTER this
     // Genesis head (all-zero, the `prov::recompute` start state).
     put(C_HEAD + 0, 0);
     put(C_HEAD + 1, 0);
@@ -254,7 +332,9 @@ fn store_head(head: &[u8; PROV_HASH_LEN]) {
     }
 }
 
-/// EL2: the count of voluntary yields observed (== world-switch count).
+/// EL2: the count of slot switches observed (M27b: CNTHP preemptions; the cell
+/// keeps its M27a `yields` name for vocabulary stability -- same semantics: one
+/// per world-switch).
 pub(super) fn yields_done() -> u64 {
     get(C_YIELDS_DONE)
 }
@@ -277,19 +357,50 @@ pub(super) fn order_at(i: usize) -> u64 {
     get(C_ORDER + i)
 }
 
-/// EL2: the M27a YIELD step -- the heart of the cooperative scheduler. Called by
-/// the `HVC #14` handler on each voluntary yield. It:
+// -- M27b: the timer-window cells (eoi count + mode) -------------------------
+
+/// EL2 (the 0x480 handler): bump + return the EOI count. The caller compares it
+/// against [`EOI_HARD_CAP`] and fails LOUD past it -- the mandatory defensive
+/// cap that turns an IRQ storm into a fast red instead of a 240 s wedge.
+pub(super) fn note_eoi() -> u64 {
+    let n = get(C_EOI) + 1;
+    put(C_EOI, n);
+    n
+}
+
+/// EL2: reset the EOI count (a fresh smoke window).
+pub(super) fn reset_eoi() {
+    put(C_EOI, 0);
+}
+
+/// EL2: the current timer-window mode ([`TMODE_OFF`] / [`TMODE_SMOKE`]). The
+/// 0x480 handler dispatches on it and fails LOUD on `TMODE_OFF` (a stray entry).
+pub(super) fn timer_mode() -> u64 {
+    get(C_TMODE)
+}
+
+/// EL2: set the timer-window mode (the arm handlers; disarm resets to OFF).
+pub(super) fn set_timer_mode(m: u64) {
+    put(C_TMODE, m);
+}
+
+/// EL2: the SLOT-SWITCH step -- the heart of the scheduler, SHARED VERBATIM
+/// between M27a's cooperative yield (historical: the `HVC #14` handler) and
+/// M27b's CNTHP timer preemption (the 0x480 handler) -- the rename keeps the
+/// round-robin + the `SchedDecision` fold byte-identical across the swap so
+/// `m27_done_verdict`'s five properties hold unchanged. It:
 ///   1. records the OUTGOING VMID into the order trace (forward-progress order),
 ///   2. computes the next slot via the Kani-proven [`next_slot`],
 ///   3. canon-encodes a [`SchedDecision`] for this preemption + FOLDS it into the
 ///      running head via the M22 fold REUSED VERBATIM (`sched_hash` ->
 ///      `sched_chain_mix`, NO new fold math),
-///   4. bumps the frame/yield counters + the logical clock,
+///   4. bumps the frame/switch counters + the logical clock,
 ///   5. advances `current_slot` to the next slot.
 /// Returns the next slot's `(vttbr, entry_pc)` so the caller flips `VTTBR_EL2`
 /// and `eret`s into the next guest. PURE cell arithmetic + the proven leaf -- no
-/// alloc, no deep calls (the EL2 stack red-zone discipline).
-pub(super) fn note_yield() -> (usize, u64, u64) {
+/// alloc, no deep calls (the EL2 stack red-zone discipline + the SHALLOW
+/// async-handler mandate).
+pub(super) fn note_switch() -> (usize, u64, u64) {
     let cur = current_slot();
     let nxt = next_slot(cur);
     let vmid_from = vmid_for(cur);
@@ -354,7 +465,8 @@ pub(super) fn arm_sched_el2(vtcr_val: u64, vttbr0_val: u64) {
     // THEN enable stage-2 (HCR.VM=1) and `isb` again so the regime is fully in
     // place before the next EL1 access. The tables were published (`dsb ishst`)
     // at build time. No stack/flags effect; not `nomem` (it reconfigures
-    // translation). NO IMO, NO timer -- M27a is cooperative.
+    // translation). NO IMO, NO timer here -- `arm_cnthp_window_el2` layers those
+    // immediately after (the M27b composition).
     unsafe {
         asm!(
             "msr vtcr_el2,  {vtcr}",
@@ -373,10 +485,127 @@ pub(super) fn arm_sched_el2(vtcr_val: u64, vttbr0_val: u64) {
     super::stage2::isb_pub();
 }
 
+// ===========================================================================
+// M27b EL2-only: arm / re-arm / disarm the CNTHP timer window -- the async-IRQ
+// analog of `el2vgic::arm_vgic_el2`/`disarm_vgic_el2` (THE named seam: IMO +
+// GIC + teardown-first), with the timer in place of the list register.
+// ===========================================================================
+
+/// EL2: arm the M27b CNTHP window. Order matters (each step cited inline):
+///  1. Distributor: enable the CNTHP PPI (`GICD_ISENABLER0` bit 26, write-1-to-
+///     set -- IHI 0048B section 4.3.5). The GIC core (GICD_CTLR Group0 forward,
+///     GICC_CTLR enable, GICC_PMR allow-all) is already up from M8's `gic_init`
+///     and is never disabled afterwards (`timer_stop`/`irq_mask` touch only
+///     CNTP_CTL/PSTATE), so no re-init is needed here.
+///  2. Timer: `CNTHP_TVAL_EL2 = delta` FIRST (compare moves into the future ->
+///     ISTATUS clear), THEN `CNTHP_CTL_EL2 = ENABLE` with IMASK=0 (Arm ARM DDI
+///     0487 D17.11) + `isb`.
+///  3. Routing LAST: `HCR_EL2 = RW|IMO(|VM)` + `isb` -- from here the pending
+///     PPI is taken at EL2's 0x480 the moment a LOWER EL runs.
+/// `stage2_vm` keeps `HCR_EL2.VM` set for the M27b preemption window (VTTBR
+/// already programmed by [`arm_sched_el2`]); the SMOKE window passes `false` --
+/// NO scheduler coupling, NO stage-2, NO VTTBR (setting VM with a null VTTBR
+/// would stage-2-fault the guest's first fetch).
+pub(super) fn arm_cnthp_window_el2(delta_ticks: u64, stage2_vm: bool) {
+    // (1) The distributor enable, through M8's own accessor (one GIC map).
+    super::timer::gicd_write(super::timer::GICD_ISENABLER0, 1 << CNTHP_PPI);
+    // (2) The timer: deadline first, then ENABLE unmasked, then `isb`.
+    // SAFETY: EL2. CNTHP_TVAL_EL2/CNTHP_CTL_EL2 are EL2-accessible timer
+    // registers (DDI 0487 D17.11); the `isb` makes the arming architecturally
+    // complete before IMO routes the PPI here. No memory/stack effect; NZCV
+    // preserved.
+    unsafe {
+        asm!(
+            "msr cnthp_tval_el2, {tval}",
+            "msr cnthp_ctl_el2,  {ctl}",
+            "isb",
+            tval = in(reg) delta_ticks,
+            ctl  = in(reg) CNTHP_CTL_ENABLE,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    // (3) The routing: IMO on (+ VM for the scheduler window). Absolute write,
+    // the el2vgic arm discipline.
+    let hcr = if stage2_vm { HCR_RW | HCR_IMO | HCR_VM } else { HCR_RW | HCR_IMO };
+    // SAFETY: EL2. Reprogram HCR_EL2 + `isb` so the IRQ routing (and stage-2
+    // enable, when armed) is in place before the eret into the lower EL. No
+    // stack/flags effect; not `nomem` (it reconfigures routing/translation).
+    unsafe {
+        asm!(
+            "msr hcr_el2, {hcr}",
+            "isb",
+            hcr = in(reg) hcr,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// EL2 (the 0x480 handler): RE-ARM the one-shot deadline **BEFORE** `GICC_EOIR`
+/// -- the #1 storm killer (plan risk #1). The `CNTHP_TVAL_EL2` write moves the
+/// compare into the future, DROPPING the level-sensitive ISTATUS; only then may
+/// the EOI lower the running priority. Returns `true` iff `CNTHP_CTL_EL2.
+/// ISTATUS` reads back CLEAR after the re-arm (the mandatory read-back); on
+/// `false` the caller must disarm + fail LOUD -- an EOI now would re-enter
+/// 0x480 forever (the 240 s rc=124 wedge signature).
+pub(super) fn cnthp_rearm_checked(delta_ticks: u64) -> bool {
+    let ctl: u64;
+    // SAFETY: EL2. Write TVAL, `isb` so the re-arm is architecturally complete,
+    // then read CTL back (ISTATUS is bit2, RO -- DDI 0487 D17.11). No memory/
+    // stack effect; NZCV preserved.
+    unsafe {
+        asm!(
+            "msr cnthp_tval_el2, {tval}",
+            "isb",
+            "mrs {ctl}, cnthp_ctl_el2",
+            tval = in(reg) delta_ticks,
+            ctl = out(reg) ctl,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ctl & CNTHP_CTL_ISTATUS == 0
+}
+
+/// EL2: tear the M27b CNTHP window DOWN -- TEARDOWN-FIRST (the L2.1/aL2.5
+/// discipline), strictly in this order:
+///  1. the timer OFF + masked (`CNTHP_CTL_EL2 = IMASK`, ENABLE=0) so the level
+///     condition can never re-assert mid-teardown,
+///  2. `HCR_EL2 = RW` (IMO+VM off: IRQ routing back to EL1, stage-2 off),
+///  3. drop `VTTBR_EL2` (harmless when the smoke window never set one),
+///  4. `tlbi vmalls12e1is; dsb ish; isb` (no stale stage-1&2 entries),
+///  5. Distributor: disable the PPI (`GICD_ICENABLER0` bit 26, write-1-to-clear
+///     -- IHI 0048B section 4.3.6).
+/// Also resets the mode word to [`TMODE_OFF`] so a late stray 0x480 entry is a
+/// loud FAIL, never a silent re-dispatch. MUST run before ANY unwind to EL1.
+pub(super) fn disarm_cnthp_window_el2() {
+    put(C_TMODE, TMODE_OFF);
+    // SAFETY: EL2. (1) mask+disable the timer, (2) HCR back to the boot
+    // baseline, (3) drop the stage-2 root; `isb`s order the three against the
+    // following TLB maintenance. No stack/flags effect; not `nomem` (it
+    // reconfigures routing/translation).
+    unsafe {
+        asm!(
+            "msr cnthp_ctl_el2, {ctl}", // IMASK=1, ENABLE=0 -- the PPI line drops
+            "isb",
+            "msr hcr_el2, {hcr}", // RW only: IRQs to EL1 again, stage-2 OFF
+            "msr vttbr_el2, xzr", // drop the stage-2 root
+            "isb",
+            ctl = in(reg) CNTHP_CTL_IMASK,
+            hcr = in(reg) HCR_RW,
+            options(nostack, preserves_flags),
+        );
+    }
+    super::stage2::tlbi_vmalls12e1is();
+    super::stage2::dsb_ish_pub();
+    super::stage2::isb_pub();
+    // (5) The distributor disable -- the smoke/preempt windows own PPI 26's
+    // enable bit end-to-end (M8 never touches bit 26).
+    super::timer::gicd_write(GICD_ICENABLER0, 1 << CNTHP_PPI);
+}
+
 /// EL2: switch `VTTBR_EL2` to the next slot's stage-2 root (the world-switch on
-/// each voluntary yield) + `isb` + flush ALL stage-1&2 for the (changing) VMID so
-/// the next guest runs under its OWN stage-2 view. HCR_EL2 stays `RW|VM` (the
-/// window remains armed). Called by the `HVC #14` yield handler after [`note_yield`]
+/// each CNTHP preemption) + `isb` + flush ALL stage-1&2 for the (changing) VMID
+/// so the next guest runs under its OWN stage-2 view. HCR_EL2 stays armed (the
+/// window remains open). Called by the 0x480 timer handler after [`note_switch`]
 /// before resuming the next guest.
 pub(super) fn switch_vttbr_el2(vttbr_val: u64) {
     // SAFETY: EL2. Reprogram only the stage-2 ROOT (VTTBR_EL2, which also carries
