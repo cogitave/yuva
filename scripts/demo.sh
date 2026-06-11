@@ -21,6 +21,12 @@
 #          x86_64 halts at the end — press Ctrl-A then X to leave QEMU.
 set -euo pipefail
 
+# `wsl -- bash script.sh` is a NON-login shell, so ~/.cargo/env is never sourced
+# and cargo/rustup are off PATH. Add the standard rustup bin dir (+ source the
+# env if present) so the demo works straight from `wsl -d ... bash scripts/demo.sh`.
+[[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
+case ":${PATH}:" in *":${HOME}/.cargo/bin:"*) :;; *) PATH="${HOME}/.cargo/bin:${PATH}";; esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCH="${1:-aarch64}"
 PROFILE="${PROFILE:-debug}"
