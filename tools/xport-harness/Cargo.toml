@@ -1,0 +1,42 @@
+# xport-harness — the M30 HOST peer for the QEMU chardev lanes (stage B).
+#
+# A small std, Linux-hosted binary that answers the kernel's inferwire ECHO_REQ
+# over the QEMU virtconsole chardev unix socket. It CUSTODIES the per-run echo
+# key K (32 B) + nonce N (16 B), both sampled from the host OS RNG at startup —
+# the key is NEVER in the guest image, on the guest command line, or in
+# guest-visible config space (the M30 proposal §4 anti-hollow custody rule);
+# the harness reveals K on the CHANNEL (cleartext trailer) for the kernel's
+# leg-1 recompute, and prints its OWN `xport-harness:` witness line so the run
+# script can string-compare challenge/tag CROSS-PROCESS (leg 2, the loopback
+# killer).
+#
+# It links the SAME `tb-encode` inferwire+khash leaves the kernel uses — never
+# a second codec implementation in shell/python (the M30 research §8 rule).
+# Like tb-vmm, this is its OWN nested workspace (the empty [workspace] below),
+# excluded from the root no_std workspace, so the kernel kbuild lanes and the
+# -Zbuild-std settings are entirely unaffected.
+
+[package]
+name = "xport-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "TABOS M30 host echo peer: answers inferwire ECHO_REQ over a QEMU chardev unix socket with a host-keyed khash echo."
+license = "Apache-2.0"
+
+# An independent nested workspace (the tb-vmm precedent): cargo auto-excludes
+# it from the parent workspace; it keeps its own Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "xport-harness"
+path = "src/main.rs"
+
+[dependencies]
+# The verified codec + keyed-hash leaves (no_std + forbid(unsafe_code), zero
+# deps — they build for the host triple by design, which is exactly what makes
+# this harness the SAME-math peer instead of a re-implementation).
+tb-encode = { path = "../../crates/tb-encode" }
+
+[profile.release]
+panic = "abort"

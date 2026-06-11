@@ -30,7 +30,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITER="${ITER:-10}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-20}"
 FIRST_MARKER="hello from rust_main"
-FINAL_MARKER="M29: khash-mac OK"
+# M30: the bench lane attaches NO host peer (no chardev/virtconsole), so the
+# chain tail prints its legitimate LOUD skip variant -- which CONTAINS the
+# marker substring below (the M19/M20 no-device-skip precedent for this lane).
+FINAL_MARKER="M30: infer-transport OK"
 
 case "${ARCH}" in
   x86_64)

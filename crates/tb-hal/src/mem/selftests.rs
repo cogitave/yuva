@@ -1252,6 +1252,212 @@ pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
     }
 }
 
+// --- M30: the verified inference-transport self-test (the marker body) --------
+
+/// The fixed echo-request body the M30 self-test sends (opaque to the codec;
+/// the host peer must echo it back BIT-EXACTLY -- `body-bitexact=1`).
+const XPORT_BODY_LEN: usize = 16;
+
+/// M30: run the HOST-KEYED echo round-trip over the virtio-console channel and
+/// report a [`crate::InferChanProof`] (proposal §3b). The LEG-1 (kernel-scope)
+/// half of the §4 anti-hollow composition:
+///
+/// 1. PROBE for a modern (Version==2) virtio-console (DeviceID 3); Absent /
+///    LegacyUnsupported are graceful (the run scripts decide per lane whether
+///    a skip is legitimate -- every peer-attached lane REJECTS it by name).
+/// 2. Mint the per-boot CHALLENGE: `uhash(label || cycle-counter)[..16]` (the
+///    proposal-§4 fallback source; M19's rng path returns no bytes to reuse).
+///    HONEST: C's entropy quality is NOT the anti-hollow load-bearer -- the
+///    host-custodied K is -- so no extra token is emitted for it.
+/// 3. Canon an `ECHO_REQ` via the Kani-proven `tb_encode::inferwire`, run ONE
+///    `chan_send_recv` session (poll-only, POLL_CAP-bounded), expecting
+///    EXACTLY `ECHO_RESP-frame || K-reveal` bytes (the response length is
+///    known a priori: the body echoes verbatim, the key trailer is fixed).
+/// 4. Re-frame the response through the STREAM accumulator (`FrameAccum`,
+///    byte-at-a-time -- the chardev lane is a boundary-free byte stream; this
+///    is the proven re-framer doing real work, not decoration), decode, and
+///    `verify_echo` against the CHANNEL-REVEALED key: kind + correlation id +
+///    challenge echo + body-bitexact + tag recompute, conjunctive fail-closed.
+/// 5. Fire the four IN-BOOT NEGATIVES (the runtime mirror of the Kani
+///    harnesses; each must REJECT or the whole proof is `Failed`): badtag (a
+///    flipped tag byte), wrongkey (a perturbed key byte), partial (a truncated
+///    frame fed to `decode` from a scratch buffer), desync (an oversize
+///    declared length fed to `decode` from a scratch buffer). HONESTY NOTE
+///    (proposal §10): partial/desync exercise the DECODER's rejection from
+///    scratch buffers, NOT live-ring recovery -- device reset-and-reinit is a
+///    named deferral.
+///
+/// HONEST (the §4 two-leg split): success here means "the kernel verified the
+/// tag against the key revealed on the channel and the response binds THIS
+/// boot's challenge" (`echo=HOST-KEYED-VERIFIED`, kernel-scope). It does NOT
+/// exclude a loopback -- that exclusion is the run-script guard's CROSS-PROCESS
+/// challenge/tag equality against the host peer's independently printed line
+/// (leg 2). The kernel never holds K before the response arrives, never prints
+/// K, and mechanically cannot mint the host lane token: the `peer_id` it maps
+/// to `transport=` is MAC-covered inside the tag it just verified.
+pub(crate) fn xport_selftest() -> crate::InferChanProof {
+    use tb_encode::inferwire::{
+        canon, decode, kind, peer, verify_echo, FrameAccum, InferFrame, INFER_ACCUM_CAP,
+        INFER_CHALLENGE_LEN, INFER_HEADER_LEN, INFER_KEY_LEN, INFER_KEY_REVEAL_LEN,
+        INFER_NONCE_LEN, INFER_PAYLOAD_CAP, INFER_TAG_LEN, OFF_PAYLOAD_LEN,
+    };
+    use tb_encode::khash::uhash;
+
+    // 1. PROBE for a modern virtio-console (DeviceID 3, Version==2 readback).
+    let slot = match crate::arch::chan_probe() {
+        Some(s) => s,
+        None => {
+            return if crate::arch::chan_saw_legacy() {
+                crate::InferChanProof::LegacyUnsupported
+            } else {
+                crate::InferChanProof::Absent
+            };
+        }
+    };
+
+    // 2. The per-boot challenge + correlation id from ONE uhash over a label +
+    //    the live cycle counter (varies per run under TCG/KVM alike).
+    let ticks = crate::read_cycle_counter();
+    let mut seed = [0u8; 22 + 8];
+    let label: &[u8; 22] = b"TABOS-M30-CHALLENGE-V1";
+    let mut i = 0usize;
+    while i < 22 {
+        seed[i] = label[i];
+        i += 1;
+    }
+    let tb = ticks.to_le_bytes();
+    let mut t = 0usize;
+    while t < 8 {
+        seed[22 + t] = tb[t];
+        t += 1;
+    }
+    let h = uhash(&seed);
+    let mut challenge = [0u8; INFER_CHALLENGE_LEN];
+    let mut c = 0usize;
+    while c < INFER_CHALLENGE_LEN {
+        challenge[c] = h[c];
+        c += 1;
+    }
+    let req_id = u64::from_le_bytes([
+        h[16], h[17], h[18], h[19], h[20], h[21], h[22], h[23],
+    ]);
+
+    // 3. The ECHO_REQ (nonce/peer/tag all ZERO in a request -- §2).
+    let mut body = [0u8; XPORT_BODY_LEN];
+    let mut b = 0usize;
+    while b < XPORT_BODY_LEN {
+        body[b] = (b as u8).wrapping_mul(29).wrapping_add(0xB0);
+        b += 1;
+    }
+    let req = InferFrame {
+        kind: kind::ECHO_REQ,
+        req_id,
+        challenge,
+        nonce: [0u8; INFER_NONCE_LEN],
+        peer_id: 0,
+        tag: [0u8; INFER_TAG_LEN],
+        payload: &body,
+    };
+    let mut req_wire = [0u8; INFER_HEADER_LEN + XPORT_BODY_LEN];
+    let req_len = canon(&req, &mut req_wire);
+    if req_len != INFER_HEADER_LEN + XPORT_BODY_LEN {
+        return crate::InferChanProof::Failed { stage: 0x2 };
+    }
+
+    // The expected response: the echoed frame + the cleartext key reveal.
+    const RESP_LEN: usize =
+        INFER_HEADER_LEN + XPORT_BODY_LEN + INFER_KEY_REVEAL_LEN;
+    let mut resp_buf = [0u8; RESP_LEN];
+    match crate::arch::chan_send_recv(slot, &req_wire[..req_len], &mut resp_buf) {
+        Some(n) if n == RESP_LEN => {}
+        // A found-then-silent/faulty peer is a hard fail, never a skip (§10).
+        _ => return crate::InferChanProof::Failed { stage: 0x3 },
+    }
+
+    // 4. STREAM re-framing: byte-at-a-time through the proven accumulator.
+    let mut acc: FrameAccum<INFER_ACCUM_CAP> = FrameAccum::new();
+    let mut frame_len = 0usize;
+    let mut fed = 0usize;
+    let mut p = 0usize;
+    while p < RESP_LEN {
+        if let Some(fl) = acc.push_byte(resp_buf[p]) {
+            frame_len = fl;
+            fed = p + 1;
+            break;
+        }
+        p += 1;
+    }
+    // The frame must emerge EXACTLY at its boundary (the peer prepends no
+    // garbage) and leave EXACTLY the key reveal trailing.
+    if frame_len == 0 || fed != frame_len || RESP_LEN - fed != INFER_KEY_REVEAL_LEN {
+        return crate::InferChanProof::Failed { stage: 0x4 };
+    }
+    let resp = match decode(&acc.bytes()[..frame_len]) {
+        Some(r) => r,
+        None => return crate::InferChanProof::Failed { stage: 0x4 },
+    };
+    // The CHANNEL-REVEALED per-run key (born in the host process; the guest
+    // image/cmdline never carried it -- key=HOST-CUSTODIED-PER-RUN).
+    let mut key = [0u8; INFER_KEY_LEN];
+    let mut kk = 0usize;
+    while kk < INFER_KEY_LEN {
+        key[kk] = resp_buf[fed + kk];
+        kk += 1;
+    }
+
+    // The host-supplied lane label must be a KNOWN peer (MAC-covered below).
+    if resp.peer_id != peer::QEMU_CHARDEV_HARNESS && resp.peer_id != peer::TB_VMM_HOST {
+        return crate::InferChanProof::Failed { stage: 0x5 };
+    }
+    let nonce = resp.nonce;
+    let tag = resp.tag;
+
+    // 5. LEG 1: the REAL echo must verify (kind + req_id binding + challenge
+    //    echo + body-bitexact + tag recompute -- conjunctive, fail-closed).
+    if !verify_echo(&key, &resp, &req) {
+        return crate::InferChanProof::Failed { stage: 0x6 };
+    }
+
+    // The four IN-BOOT NEGATIVES -- the tokens are EARNED per boot:
+    // (a) badtag: one flipped tag byte must reject.
+    let mut bad_tag = resp;
+    bad_tag.tag[0] ^= 0x01;
+    let badtag_rejected = !verify_echo(&key, &bad_tag, &req);
+    // (b) wrongkey: one perturbed key byte must reject.
+    let mut wrong_key = key;
+    wrong_key[0] ^= 0x01;
+    let wrongkey_rejected = !verify_echo(&wrong_key, &resp, &req);
+    // (c) partial: a truncated frame (scratch buffer) must fail decode.
+    let partial_rejected = decode(&acc.bytes()[..frame_len - 1]).is_none();
+    // (d) desync: an oversize declared length (scratch buffer) must fail decode.
+    let mut ds = [0u8; INFER_HEADER_LEN + XPORT_BODY_LEN];
+    let mut d = 0usize;
+    while d < frame_len {
+        ds[d] = acc.bytes()[d];
+        d += 1;
+    }
+    let bad_len = ((INFER_PAYLOAD_CAP as u32) + 1).to_le_bytes();
+    ds[OFF_PAYLOAD_LEN] = bad_len[0];
+    ds[OFF_PAYLOAD_LEN + 1] = bad_len[1];
+    ds[OFF_PAYLOAD_LEN + 2] = bad_len[2];
+    ds[OFF_PAYLOAD_LEN + 3] = bad_len[3];
+    let desync_rejected = decode(&ds[..frame_len]).is_none();
+
+    if !badtag_rejected || !wrongkey_rejected || !partial_rejected || !desync_rejected {
+        return crate::InferChanProof::Failed { stage: 0x7 };
+    }
+
+    crate::InferChanProof::Proven {
+        slot,
+        req_id,
+        resp_len: frame_len as u64,
+        challenge,
+        nonce,
+        tag,
+        peer_id: resp.peer_id,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.

@@ -33,6 +33,32 @@
 //!  * [`ipc_frame`] -- the mature 16-byte on-wire IPC [`MessageFrame`] codec
 //!    (`encode`/`decode`, fail-closed on malformed input) and a fixed-capacity
 //!    [`ipc_frame::BoundedRing`] with FIFO + capacity invariants.
+//!  * [`inferwire`] -- the M30 verified INFERENCE-TRANSPORT wire codec: the
+//!    typed, fixed-header, LENGTH-PREFIXED, injective [`inferwire::InferFrame`]
+//!    (house magic `0x5444`; magic/ver/kind{ECHO_REQ,ECHO_RESP,ERR}/reserved-
+//!    zero flags/req_id correlation u64/challenge[16]/nonce[16]/peer_id/tag[16]/
+//!    payload_len u32 prefix/payload cap 1024) the kernel exchanges with a HOST
+//!    peer over the modern virtio-console channel; `inferwire::canon`/`decode`
+//!    are TOTAL + fail-closed (bad magic/ver/reserved/kind, oversize length, or
+//!    truncation -> None, the opframe_rx discipline), `inferwire::
+//!    resp_binds_req` is the correlation iff-theorem, `inferwire::echo_tag` is
+//!    the host-keyed echo MAC -- EXACTLY ONE domain-separated [`khash`] call,
+//!    `khash(K, "TABOS-M30-ECHO-V1" || peer_id || nonce || challenge ||
+//!    body)[..16]`, binding the challenge + host nonce + lane peer_id INSIDE
+//!    the MAC (the M28/Terrapin lesson) -- and `inferwire::verify_echo` is the
+//!    kernel-scope leg-1 verifier (bind + challenge-echo + body-bitexact + tag
+//!    recompute, conjunctive fail-closed). `inferwire::FrameAccum` (the
+//!    [`ipc_frame::BoundedRing`] fixed-capacity pattern, length-delimited)
+//!    re-frames the byte STREAM lane fail-closed with scan-to-next-magic
+//!    resync and a proven never-overflow bound. HONEST (machine-tokened):
+//!    `echo=HOST-KEYED-VERIFIED` is KERNEL-SCOPE (khash-correctness of what
+//!    arrived against the channel-revealed key -- NEVER loopback exclusion,
+//!    which lives in the run-script cross-process guard); the host key is
+//!    `key=HOST-CUSTODIED-PER-RUN` (custody, not confidentiality -- K is
+//!    cleartext on the channel via the `INFER_KEY_REVEAL_LEN` trailer);
+//!    `backend=ECHO-ONLY` (transport only, no inference semantics until M31);
+//!    `sec=ASSUMED-FROM-LITERATURE` is inherited from [`khash`] -- NO symbolic
+//!    collision/preimage/PRF harness exists, deliberately.
 //!  * [`route`] -- the M16 `model:`-scheme routing helpers lifted out of
 //!    `tb-hal::infer`: the panic-free `model:<provider>/<path>` grammar parser
 //!    (`route::parse_scheme`) and the longest-prefix-match routing decision
@@ -275,6 +301,7 @@ pub mod el2_trap;
 pub mod exittel;
 pub mod exp;
 pub mod explore;
+pub mod inferwire;
 pub mod ipc_frame;
 pub mod kancell;
 pub mod khash;

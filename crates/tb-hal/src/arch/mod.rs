@@ -62,7 +62,8 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use self::x86_64::{
     address_space_new, agent_map_space, agent_traps_init, blk_flush, blk_probe, blk_read,
-    blk_saw_legacy, blk_write, boot_ready_signal, breakpoint,
+    blk_saw_legacy, blk_write, boot_ready_signal, breakpoint, chan_probe, chan_saw_legacy,
+    chan_send_recv,
     caps_user_probe, copy_from_user, copy_to_user, ctx_switch, current_root, halt, heap_window,
     install_traps, local_irq_restore, local_irq_save, m3_test_va_intact, map_heap_frames,
     map_in_root, map_user_in_root, mmu_init, mmu_selftest,
@@ -77,7 +78,8 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use self::aarch64::{
     address_space_new, agent_map_space, agent_traps_init, blk_flush, blk_probe, blk_read,
-    blk_saw_legacy, blk_write, breakpoint, caps_user_probe,
+    blk_saw_legacy, blk_write, breakpoint, caps_user_probe, chan_probe, chan_saw_legacy,
+    chan_send_recv,
     copy_from_user, copy_to_user, ctx_switch, current_root, el2_exits_selftest,
     el2_nested_guest_selftest, el2_selftest, el2_trap_selftest, el2_vgic_selftest, halt,
     qemu_exit_failure, qemu_exit_success, boot_entry_el, booted_at_el2,

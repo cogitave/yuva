@@ -33,7 +33,12 @@ members = [
 # workspace and the std host crate keep separate Cargo.lock files and never
 # cross-contaminate build-std / target settings. tb-vmm depends on crates/tb-boot
 # by path, which is allowed across workspaces.
-exclude = ["tb-vmm"]
+#
+# tools/xport-harness (M30) mirrors the same pattern: a host (std) binary in
+# its OWN nested workspace, excluded here so the kernel kbuild lanes and the
+# -Zbuild-std settings are entirely unaffected. It depends on crates/tb-encode
+# by path (the SAME verified inferwire/khash leaves the kernel links).
+exclude = ["tb-vmm", "tools/xport-harness"]
 
 # panic = abort everywhere. The custom target specs in /targets already set
 # "panic-strategy": "abort" (so -Zbuild-std rebuilds core without unwinding and
