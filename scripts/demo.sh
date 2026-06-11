@@ -37,11 +37,12 @@ if ! command -v "${QEMU}" >/dev/null 2>&1; then
   exit 2
 fi
 
-# Build the kernel if it is not there yet (same flags as CI: see BUILD.md).
-if [[ ! -f "${KERNEL}" ]]; then
-  echo "[demo] building the ${ARCH} kernel (cargo kbuild)…" >&2
-  ( cd "${REPO_ROOT}" && cargo kbuild --target "targets/${TARGET}.json" )
-fi
+# ALWAYS (re)build: cargo is incremental, so an up-to-date tree costs seconds —
+# while a stale leftover binary silently replays YESTERDAY'S chain (learned the
+# hard way: the first operator demo showed an M28-era kernel from an old
+# target/, missing M27b/M29/M30 entirely — convincingly real, silently dated).
+echo "[demo] cargo kbuild (${ARCH}) — incremental, seconds when fresh…" >&2
+( cd "${REPO_ROOT}" && cargo kbuild --target "targets/${TARGET}.json" )
 
 # Fresh throwaway disk for the M20 durable-persistence rung (auto-removed).
 IMG="$(mktemp)"; truncate -s 4M "${IMG}"
