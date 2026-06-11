@@ -93,14 +93,16 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   content-addressed, append-only **hash-chain ledger** over the M13 substrate.
   Every write/forget/skill-admit mutation site folds a canonical, length-prefixed
   `ProvEntry` into the agent's running head via the Kani-proven `tb-encode::prov`
-  leaf (injective `canon`, a 256-bit structural digest of four domain-separated
-  FNV-1a-64 lanes, an order-sensitive `chain_mix` fold, and a sound
+  leaf (injective `canon`, a 256-bit digest -- BLAKE2s-256 unkeyed via the M29
+  `khash` leaf since M29 stage C (four domain-separated FNV-1a-64 lanes at
+  landing), an order-sensitive `chain_mix` fold, and a sound
   `verify_inclusion`); a forget writes a **tombstone** rather than erasing the
   chain. The boot self-test proves any single-byte tamper of a committed entry
   invalidates both the head and its inclusion proof, witnessed by
-  `prov: head=.. entries=.. tamper-caught=1 inclusion=1`. This is
-  **structural** tamper-evidence (not cryptographic): a crypto hash + signed root
-  is a tracked successor.
+  `prov: head=.. entries=.. tamper-caught=1 inclusion=1`. Tamper-evidence is
+  **cryptographic since M29 stage C** (khash/BLAKE2s-256,
+  `sec=ASSUMED-FROM-LITERATURE` -- the at-landing structural-FNV concession
+  closed); a SIGNED root (authenticity) remains the tracked successor.
 - **The learning loop (§7 self-improvement) — M23 → M24 → M25.** On top of the
   memory substrate the OS now grows a verified, HONEST learning loop. **M23**
   (`M23: experience OK`) is the Monitor/log layer: each M17 forget/recall decision
@@ -122,7 +124,7 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   Kani-proven leaves over the SAME M22 fold; M25 is witnessed by
   `opframe: tx_head=.. frames=.. seq_monotone=1
   intro_bound=1 fold-verified=1 tamper-caught=1 keyed=0 oracle=HUMAN-DEFERRED-M26`
-  (TX-only; structural tamper-evidence + instance binding, NOT crypto authenticity
+  (TX-only; tamper-evidence (cryptographic-hash since M29-C, keyless) + instance binding, NOT crypto authenticity
   and NOT that a human replied — the inbound RX/auth half is **M28**, below).
 - **The exit-telemetry producer (§7 self-improvement) — M26.** `M26: exit-telemetry
   OK` adds the learning loop's SECOND experience producer: the EL2 (nVHE) monitor's
@@ -311,7 +313,7 @@ CPU stage-2 geometry), `blkfmt` (the **M20** durable-persistence codecs:
 superblock, record frame, sector/extent math), `kancell` (the **M21** verified
 fixed-point additive policy cell — spline totality, in-band score, structural
 monotonicity, envelope-no-widening), `prov` (the **M22** provenance-ledger
-math: injective `canon`, structural digest, order-sensitive fold, sound
+math: injective `canon`, BLAKE2s-256 digest (khash since M29-C), order-sensitive fold, sound
 inclusion), `exp` (the **M23** experience codec: fixed-width injective record +
 ring + replay-determinism, reusing the M22 fold), `explore` + `bakeoff` (the
 **M24** honest-gate math: shielded ε-greedy propensity, the 3-way censored survival
