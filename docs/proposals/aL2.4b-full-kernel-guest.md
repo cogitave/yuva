@@ -1,0 +1,116 @@
+# aL2.4b — the LITERAL full M0..M28 kernel as the EL1 guest under our stage-2 (the M34 hard prerequisite)
+
+**Status:** proposed (research-complete, build not started) · **Pillar:** sovereignty ("replace Firecracker" — and the substrate M34 stands on) · **Tracker:** #88 in [`docs/plans/sovereignty-plan.md`](../plans/sovereignty-plan.md) (Phase-C prerequisite; gates #92/M34; runnable in parallel with the Phase-A arc) · **Track:** B (aarch64-EL2) of [`SOVEREIGNTY-L2-ROADMAP.md`](../SOVEREIGNTY-L2-ROADMAP.md) §7 · **Arch:** **aarch64-only** (x86 Track A `L2.4: tabos-guest OK` stays parked on #37) · **Depends on:** aL2.4-v1 (the two-stage-MMU primitive), aL2.3 (the `device_mmio` trap seam), aL2.5 (the vGIC `GICH_LR` machinery), M27 (CNTHP EL2 deadline + two-VMID world-switch + monitor-counted progress cells), `tb_boot::aarch64::build_handoff` (the frozen, host-tested splice contract) · **Marker:** `L2.4b: el1-kernel-guest OK` · **Effort:** **XL, multi-iteration, boot-hang-aware** (Stages 1+2 are each ~M-sized and deliver the green marker; Stage 3 is the XL half)
+
+> **One-line:** no rung today boots a real kernel as a guest — aL2.4-v1's "guest" is an ~80-instruction stub inside the host's own identity-mapped `.text`, and M27's guests are store-spin stubs — so the sovereignty plan's verdict stands: **"M34 = direct composition of M27 + L2.4" is false as written**. aL2.4b creates the missing object: the **literal, unmodified full M0..M28 TABOS kernel image**, loaded into a **stage-2-confined guest-RAM carve** (the first non-identity stage-2 in the codebase), handed the frozen `build_handoff` block (`x0=TbBootInfo*`, `PC=_tb_start`, `SPSR=0x3C5`), running its own stage-1 MMU under our stage-2, its console **trapped and re-emitted as injection-proof `guestlog:` frames**, its completion proven by **monitor-witnessed non-text evidence** (a per-boot doorbell nonce + the final trapped WFI), and its self-test chain judged by a **NEW in-guest acceptance profile** in which the EL2-dependent rungs *legitimately* print `(no EL2, skipped)` — applied WITHOUT weakening one byte of the host profile.
+
+This is the synthesis of the aL2.4b research survey ([`docs/research/al2.4b-full-kernel-guest-literature.md`](../research/al2.4b-full-kernel-guest-literature.md)) + a 2026-06-11 in-tree audit, reconciled against the adopted sovereignty plan. Every mechanism is cited there; the honest caveats (UP-only, no rootfs, sole-guest GIC pass-through, TCG cache-coherence blindness, NOT a Firecracker/KVM-class VMM) are encoded as machine-checked witness tokens.
+
+---
+
+## 1. Why this is a HARD prerequisite, not a polish (the honesty correction)
+
+1. **aL2.4-v1's guest is NOT the kernel.** [`crates/tb-hal/src/arch/aarch64/el2/l24_nested.rs`]: an ~80-instruction `#[unsafe(naked)]` EL1 payload **inside the host kernel's own identity-mapped `.text`**. It genuinely proves the two-stage-MMU primitive — it builds its own 3-level stage-1 in 3 pre-`frame_alloc`'d frames, enables `SCTLR_EL1.{M,C,I}` (the Kani-locked `0x1005` mask), does one real two-stage store/readback through VA `0x2_0000_0000`, takes one EL1 `brk` trap, `hvc #9`s out, and the monitor corroborates via an EL2 identity-alias readback the guest cannot fake. But its stage-2 is the L2.1 identity builder verbatim: **identity GiB0 (all real devices) + identity GiB1 (ALL host RAM) — zero confinement**. Guest code IS host `.text`; the guest stack IS the kernel's `SP_EL1`; the guest could write any host frame. No loader, no separate image, no `TbBootInfo` consumption (only the `l24_nested.rs:303` `debug_assert` that the tb-boot PSTATE equals the splice SPSR — the documented future seam this proposal now exercises).
+2. **M27's guests are pure store-spin stubs** (per-slot `entry_pc` loops bumping device-IPA progress counters; [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md): "the guest stubs are pure store-spins with NO voluntary yield"). What M27 hands us, reusable as-is: two-VMID `VTTBR_EL2` switching + `tlbi vmalls12e1is`, the CNTHP deadline at EL2's `0x480` slot (re-arm-before-EOI, `EOI_HARD_CAP`), and the monitor-counted per-VMID MMIO progress cells ([`el2mmio.rs`]).
+
+So **M34 (#92, champion/challenger) has no kernel-guest to compose** — the sovereignty plan codifies aL2.4b as its hard prerequisite, and M34's trust-boundary rule ("candidate-printed serial is UNTRUSTED BYTES; marker-grep carries zero evidential weight") dictates aL2.4b's evidence design from day one (§2.7): build the monitor-witnessed channel NOW so M34 keeps the plumbing and merely drops the corroborating grep.
+
+---
+
+## 2. The design (mechanism by mechanism; citations in the survey)
+
+### 2.1 The guest-RAM carve + the FIRST non-identity stage-2 (the isolation flip)
+Carve a contiguous PA window out of the 128 MiB — the top 32 MiB, `0x4600_0000..0x4800_0000` — reserved from the host pmm at boot, and build a stage-2 mapping **guest IPA `0x4000_0000`+off → carve PA** whose GiB1 maps ONLY the carve (plus the §2.4 device windows in GiB0). `tb_encode::stage2::s2_leaf_2mib/s2_leaf_4k` already take an arbitrary `pa`; the builder generalizes — the new thing is the **confinement**, not the descriptor math. This *resolves* the standing "EPT MAPPING POLICY: identity vs relocated base" decision: the guest's IPA space **reproduces the canonical link address space** (image at IPA `0x4008_0000` = `AARCH64_IMAGE_LMA`, so `_tb_start`'s link address IS its IPA — **no relocation**); only the host PA underneath moves. Every stage-2 arm/edit carries `TLBI VMALLS12E1` + DSB under the guest VMID (survey §7b-8).
+
+**Prerequisite fix in the same landing:** [`pmm.rs`] hard-codes the QEMU `virt` 128 MiB window (FDT-header-only) and — unlike `x86_64/pmm.rs` — **never consumes `TbBootInfo.mem_regions`**; an unfixed guest believes it owns 128 MiB and `frame_alloc`s into unmapped stage-2 → spurious aborts. Port the x86 `BootMemMap` tb-boot branch to the aarch64 pmm (host FDT path must not regress — the both-arch boot gates catch it).
+
+### 2.2 The image producer (a logged external-dependency decision)
+A second kernel copy must land at IPA `0x4008_0000` inside the carve. **v1 takes the run-script route:** `-device loader,file=<objcopy flat bin>,addr=<carve_pa+0x8_0000>` — host-side, simplest, token **`loader=QEMU-DEVICE-LOADER`**, logged as an honest external-dependency decision in the sovereignty ledger sense. The self-hosting flavor (self-copy of the kernel's own `PT_LOAD` segments with a boot-time pristine-`.data` stash, `.bss` from linker symbols) is the named successor — it points at M36, not at this rung.
+
+### 2.3 The handoff + launch (`build_handoff` is already in the kernel)
+`tb_boot::aarch64::build_handoff` is `no_std` and **already compiles into the kernel** (deliberate — `aarch64.rs:47-51`): the host kernel calls it over the carve (`TbBootInfo` @ IPA `0x4000_1000`; `mem_regions` = the carve as ONE `Ram` region; `entry` = `_tb_start`, which **exists**, [`boot.rs:96`]). The splice contract is frozen by the host test `handoff_is_the_block_the_el2_monitor_splices_for_al2_4`: `gpr[0]=TbBootInfo*`, `x1..x3=0`, `ELR_EL2=PC`, `SPSR_EL2=0x3C5`. New HVC imms: **`#16` arm/launch**, **`#17` doorbell/done** (`#15` is the last used). A new `TbBootInfo` **flags bit `IN-GUEST`** (flags is passed 0 today): the kernel must NOT issue the semihosting QEMU-exit (from a TCG EL1 guest it **kills the whole VM, host included**) — it parks in `wfi` instead.
+
+### 2.4 The device paths (per-device verdicts, v1)
+- **PL011 @ `0x0900_0000` — TRAPPED-AND-EMULATED (required for the green landing, §2.5).** Stage-2 hole over its 2 MiB block; DABTs routed through the existing `el2mmio.rs` `device_mmio` seam keyed by IPA (`DR` write → buffer; `FR` → TXFF=0/RXFE=1; rest accept-and-ignore). `serial.rs` is single-GPR `str`/`ldr` → ISV=1, inside the proven decoder envelope; an ISV=0 abort on an emulated IPA renders as the named red `el2: nisv-abort ipa=<hex>` (TABOS has no instruction decoder; fail-closed = guest dead; audit any driver touching trapped regions for ldp/stp/writeback).
+- **GICv2 — identity pass-through of GICD+GICC**, honest for a sole guest with the host parked and `HCR_EL2.IMO=0`: token **`gic=PASSTHROUGH-SOLE-GUEST`**. Stage 3 does the canonical KVM split (GICD trap-and-emulate; GICC IPA `0x0801_0000` stage-2-remapped to the hardware GICV `0x0804_0000` via a 4 KiB L3 table; multi-LR injection — the aL2.5 single-LR window generalized).
+- **CNTP timer — sysreg passthrough, zero emulation:** `CNTHCTL_EL2=0x3` (already TABOS's value), `CNTVOFF_EL2` pinned 0 and asserted at entry; the grant must **survive M27's IMO window flips** (per-world — the survey's #1 first-boot-hang candidate otherwise). PPI 30 delivered straight to EL1 under `IMO=0`. Token **`timer=PHYS-PASSTHROUGH`**.
+- **virtio-mmio @ `0x0A00_0000` — NEVER identity-map** (two live drivers on one host device; a confined guest programs DMA with IPA-based addresses that are wrong on the host bus). Leave unmapped, emulate **open-bus RAZ/WI** → the guest probe finds no device → `M19: virtio OK (no device, skipped)` / `M20: persist OK (no disk, skipped)` — legitimate green skips. Token **`virtio=OPEN-BUS-ABSENT`**. Real device models are v2+/M30-arc.
+- **SMMU @ `0x0905_0000` — open-bus** (`IDR0` reads 0 → L2.6's existing green skip). **Semihosting** — neutered by the §2.3 flag (not cleanly EL2-trappable under TCG).
+
+### 2.5 The `guestlog:` frame codec (the injection-proofing leaf — and the guard-collision fix)
+**The verified problem:** the host guards in [`scripts/run-aarch64.sh`] are **unanchored substring greps over the whole serial stream**. A forwarded guest line `M20: persist OK (no disk, skipped)` trips the host lane's own anti-hollow REJECT (`run-aarch64.sh:148`); guest `(no EL2, skipped)` lines fire other reject/`::warning` paths; and raw guest text could **forge any host marker or witness line** — the same non-line-anchored hole the plan's M31 section names for model bytes. Line-prefixing does NOT fix substring greps. **The fix:** all guest serial leaves ONLY via the trapped PL011 and is re-emitted as framed, hex-or-escape-encoded **`guestlog:`** lines, produced by a new Kani-proven `tb-encode` leaf (no_std, forbid-unsafe, no-float, zero-dep): bounded-length frames, total encode/decode, injective, and **no marker-alphabet byte passes through raw** — guest bytes become regex-inert to every existing guard, injection-proof **by construction**. The same leaf is the encoder M31 needs for untrusted model bytes. Token **`guestlog=HEX-FRAMED-UNTRUSTED`**.
+
+### 2.6 The in-guest acceptance profile (separate profile; host profile untouched)
+The `_tb_start` path gives `BOOTED_AT_EL2=0` and `BOOT_ENTRY_EL=0xFF` for free — the kernel prints the discriminator **`boot: entry-el=0xff el2=0x0`** and **`tb-boot: contract v0 OK`**, and every EL2-gated selftest already takes its machine-emitted green skip with **zero kernel changes**. The partition (the sovereignty plan's full-M0..M28 widening):
+
+| Rungs | In-guest requirement | Why |
+|---|---|---|
+| **M0..M18** (+M18.1/M18.2) **and M21..M25 + M28** | **MUST be PROVEN** — any `(skipped)` rejected | in-RAM/deviceless pure-compute + serial; M8/M9/M10/M12 ride the v1 GIC/CNTP pass-through; M28's simulated-verifier self-test is host-independent and its `kan_active=0 oracle=SIMULATED-ENROLLED-KEY` tokens must survive the framing byte-faithfully |
+| **L2.0–L2.5, M27** | **MUST skip** — require the `(no EL2, skipped)` **form** | no EL2 of its own; a guest printing the REAL `L2.0: el2 OK` is **REJECTED** (it would mean it was not actually deprivileged) |
+| **L2.6** | require `(no stage-2 SMMU, skipped)` | open-bus SMMU, `IDR0.S2P` gate |
+| **M26** | **MUST skip** | no EL2 exits to observe in-guest |
+| **M19, M20** | require `(no device/disk, skipped)` under v1 | open-bus virtio absence |
+| x86-only vmxroot line | n/a | unchanged |
+
+**The script contract (strip-then-assert — the host profile is provably NOT weakened):** (1) capture the RAW stream; (2) **GUEST** = the decoded `guestlog:` frames, **HOST** = RAW with `guestlog:` lines stripped; (3) **every existing host guard runs byte-identical over HOST** — the guard block's diff is zero, machine-checkable in review; (4) the NEW guest guard set runs over GUEST per the table (positively requiring the chain, the skip forms, the discriminator, `tb-boot: contract v0 OK`, and rejecting the same overclaim tokens); (5) **anti-hollow canaries:** zero `guestlog:` residue in HOST; every host marker found ONLY in HOST; the `L2.4b` marker present iff the guest section ran.
+
+### 2.7 Marker custody (the M34 forward-pointer, binding now)
+`L2.4b: el1-kernel-guest OK` is emitted by the **HOST** from **monitor-witnessed evidence only**: doorbell MMIO store-count above threshold at a monitor-watched unmapped IPA (the M27 progress-cell pattern), carrying a **monitor-chosen per-boot nonce** echoed by the guest, plus the **final WFI trapped under `HCR_EL2.TWI`** — never from guest text. Pre-M34 the guest's framed markers are *corroborating* DoD evidence (it is OUR trusted image); across the M34 promotion boundary the same bytes drop to **zero evidential weight** — same plumbing, nothing rebuilt.
+
+---
+
+## 3. DoD — `L2.4b: el1-kernel-guest OK` (the host-side verdict)
+
+QEMU/TCG, no human/network/extra-hw. The host boots its full chain, launches the guest (HVC `#16`), the guest runs the full M0..M28 chain under the §2.6 profile, signals via the doorbell (HVC-`#17`-acknowledged), parks in WFI. The host prints, fail-closed:
+```
+guestboot: launched=1 carve=0x46000000+32M nonce=<hex16> doorbell=<n> nonce-echo=1 final-wfi=1 hostram-faults=0
+guestchain: contract-v0=1 entryel=0xff must-prove=<k>/<k> el2-block-skip-form=1 m28-tail=1 forged-markers=0
+guest: guest=FULL-KERNEL-EL1 ram=STAGE2-CONFINED-32M loader=QEMU-DEVICE-LOADER gic=PASSTHROUGH-SOLE-GUEST timer=PHYS-PASSTHROUGH uart=TRAPPED-EMULATED virtio=OPEN-BUS-ABSENT guestlog=HEX-FRAMED-UNTRUSTED exit=WFI-PARK-DOORBELL smp=UP-ONLY rootfs=NONE timing=TCG-NON-CYCLE-ACCURATE cachemodel=TCG-COHERENT-UNTESTED realtime=NOT-CLAIMED
+L2.4b: el1-kernel-guest OK
+```
+`run-aarch64.sh` (post-split, §2.6): **requires** the `guestboot:`/`guestchain:` witnesses with all `=1` flags + `hostram-faults=0` + `forged-markers=0` + every honesty token verbatim; **requires** the GUEST-stream profile (the table); **rejects** `isolated`/`verified-guest`/`sandboxed`/`KVM-class`/`Firecracker-replacement`/`SMP`/`cycle-accurate` near the marker; **rejects** the v1 token (`el2-guest OK` cannot impersonate `el1-kernel-guest OK`); and the canaries hold. **Adversarial DoD cases (Stage 2, mandatory):** (a) a guest store to a host-RAM IPA → witnessed stage-2 fault, named line, lane red if absent; (b) forged host-marker bytes emitted by the guest → appear ONLY hex-framed in HOST=clean; (c) a guest semihosting attempt is absent (the flag path proven). Hang classes render as the fast named red `L2.4b: HANG class=<storm|stall> last-trap=<EC/IPA>` via the monitor's CNTHP-armed boot deadline + storm cap — never a silent job timeout. **x86 lane:** a loud `L2.4b: el1-kernel-guest (aarch64-only, hardware-gated #37, skipped)` token — never a silent pass.
+
+---
+
+## 4. Kani obligations (genuine negative controls + the mutation-test rule)
+
+All silicon glue (loader, splice, stage-2 arm) lives in `tb-hal` outside the proof boundary; every new pure leaf lands in lockstep with a **pinned `EXPECTED_HARNESSES` bump** + `kani.yml`. **The mutation-test rule applies to every harness:** a harness counts only if a documented, seeded mutation of the leaf makes it FAIL — a harness that survives its own mutation is vacuous and is rejected in review.
+
+1. **`guestlog` frame codec (MANDATORY — the one new leaf, ~3–5 harnesses):** bounded-length frames; total `encode`/`decode` + round-trip; injectivity; and the load-bearing property — **no marker/guard-alphabet byte passes through raw** (output regex-inert to every host guard). *Neg/mutation:* an identity-passthrough encoder leaks a forged `M20: persist OK` substring — the harness must fail on exactly that mutant.
+2. **Non-identity stage-2 carve map (~2 harness extensions on `stage2`):** guest-IPA→carve-PA is **injective + range-bounded** (no IPA aliases; every mapped PA inside the carve; nothing reaches host RAM outside it). *Neg/mutation:* an off-by-one carve base aliases the guest's first page onto a host frame outside the slice — the range-bound assert must fail.
+3. **`TbBootInfo` handoff codec — only if the layout grows** (the IN-GUEST bit reuses the existing `flags` field; no growth expected): round-trip totality + injectivity over `mem_regions`. *Neg/mutation:* dropping a region-length field lets two layouts alias.
+4. **REUSE, do NOT duplicate:** `stage2.rs`/`el2_trap.rs`/`paging` already prove the descriptor algebra, the DABT/SYS64 ISS decode, `make_entry`/`level_index`. New harnesses only for genuinely new math, bounded by a documented `assume` envelope (the #49 over-quantification lesson). Residual silicon obligations (cache maintenance on the image/boot-block writes under `SCTLR_EL2.M=0`; TCG's cache-coherence making survey §7b-1 invisible on CI) go to [`assumptions.md`](../assumptions.md).
+
+---
+
+## 5. Honest caveats (conceded — encoded as witness tokens)
+- **`smp=UP-ONLY`** — one vCPU, no PSCI `CPU_ON`. No regression (the chain is single-core) but the marker must not imply SMP.
+- **`rootfs=NONE` / `virtio=OPEN-BUS-ABSENT`** — M19/M20 skip green by designed absence; no re-hosted block backend. Real virtio models are v2+/M30-arc.
+- **`gic=PASSTHROUGH-SOLE-GUEST` / `timer=PHYS-PASSTHROUGH`** — honest only because the host is parked and `IMO=0`; the trap-and-emulate multi-guest model is Stage 3.
+- **`loader=QEMU-DEVICE-LOADER`** — the image producer is host tooling, a logged external dependency; self-loading is the M36-direction successor.
+- **Confinement is NOT yet an adversarially-proven sandbox** — reject `isolated`/`verified-guest`/`sandboxed` near the marker; the Stage-2 adversarial cases are the floor, not the ceiling. The marker claims: *the literal full-chain kernel runs as the EL1 guest, stage-2-confined to its carve, with zero guest source changes* — nothing more.
+- **`cachemodel=TCG-COHERENT-UNTESTED`** — the stale-cache boot-corruption class (survey §7b-1) is invisible on the TCG CI lane; the `DC CVAC`/`IC IALLU` discipline ships untested-on-silicon.
+- **`timing=TCG-NON-CYCLE-ACCURATE` / `realtime=NOT-CLAIMED`** — a liveness/witness verdict, not a timing measurement.
+- **One level of nesting** — the guest legitimately skips the EL2 block; the marker never claims recursive EL2.
+- **NOT a Firecracker/KVM-class VMM** — no migration, hotplug, SMP, rootfs; production multi-tenancy is far ahead.
+
+---
+
+## 6. Staged landing (boot-hang-aware; the M27a→M27b smoke-first lesson)
+
+- **Stage 0 — docs (this proposal + the survey; parallel-safe now):** freeze the `guestlog:` codec shape, the carve geometry, HVC `#16`/`#17`, the IN-GUEST flag bit, the strip-then-assert contract. No code.
+- **Stage 1 — "confined boot" (one PR-loop landing; the smoke rung):** pmm `TbBootInfo`-regions port (x86 parity) + carve reservation + the non-identity stage-2 builder (+ its harnesses) + `-device loader` + the `build_handoff` write + HVC `#16` splice/`eret` + IN-GUEST flag + doorbell/final-WFI + the monitor-emitted marker. Guest UART may pass through TEMPORARILY, **but the lane does not merge green** (or merges behind a non-default profile flag) — the §2.5 guard collision exists until Stage 2. Measure boot wall-time vs the 90 s ceiling here (`QEMU_TIMEOUT` override exists).
+- **Stage 2 — "guestlog + in-guest profile" (one PR-loop landing; the FIRST green marker):** PL011 stage-2 hole + `el2mmio` forward + the `guestlog` leaf (pinned harness bump) + the run-script split (HOST guards byte-identical; the GUEST guard set) + virtio/SMMU open-bus + the §3 adversarial cases.
+- **Stage 3 — "monitor-preemptible guest" (v2, M34-prep, its own milestone):** `IMO=1` + CNTHP deadline over the guest (tpsched reuse — also M35's revert mechanism) + GICD emulate + GICC→GICV remap + multi-LR CNTP-PPI injection; optionally real virtio or the M30 tb-vmm backend.
+
+**Sequencing/conflicts:** aarch64-only; touches `tb-hal/el2` + `pmm.rs` + `run-aarch64.sh` + `tb-encode`. Conflicts with the in-flight M29 work ONLY on the tb-encode harness count + run-script edits — sequence those after M29 stages A/B land; everything else is disjoint. Biggest risks: the pmm port regressing the host FDT path (both-arch gates), ISV=0 forms in trapped regions (audit; fail-closed), the strip stage weakening host guards (the diff-zero check + the residue canary), TCG wall-time, and the semihosting kill (the flag is mandatory, not optional).
+
+---
+
+## 7. Roadmap context
+aL2.4b is the Phase-C keystone the sovereignty plan inserts under M34: it creates the kernel-guest that #92 (M34 champion/challenger), #93 (M35 A/B-rollback, monitor-custody slots + CNTHP revert deadline), and ultimately #96 (M37) presume. The witnessed-evidence custody (§2.7) is deliberately M34's acceptance substrate built early; the `guestlog` leaf is deliberately M31's untrusted-bytes encoder built early. Successors named: Stage 3 (preemptible guest), real virtio backends (M30 arc), self-loading (M36 direction), the GICD model + strict `TID3` ID-spoofing for foreign guests (B2 driver-VM territory).
+
+---
+
+### References
+Full survey + citations: [`docs/research/al2.4b-full-kernel-guest-literature.md`](../research/al2.4b-full-kernel-guest-literature.md) (boot protocol, kvmtool/Firecracker/crosvm datapoints, Dall & Nieh ASPLOS'14, Bao, the §7b hang/storm corpus). In-tree: [`docs/plans/sovereignty-plan.md`](../plans/sovereignty-plan.md) (#88, the M34 untrusted-bytes rule) · `crates/tb-hal/src/arch/aarch64/{el2/l24_nested.rs, el2/mod.rs, el2mmio.rs, stage2.rs, tpsched_hal.rs, boot.rs, pmm.rs}` · `crates/tb-boot/src/aarch64.rs` (`build_handoff` + the frozen splice test) · `kernel/src/main.rs` (the skip arms) · `scripts/run-aarch64.sh` (the :148 guard collision) · [`docs/proposals/M27-sovereign-scheduler.md`](./M27-sovereign-scheduler.md) · [`docs/proposals/M28-operator-inbound.md`](./M28-operator-inbound.md).
