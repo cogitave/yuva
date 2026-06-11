@@ -216,13 +216,22 @@ jobs:
           restore-keys: |
             kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
-      # Installs Kani's own pinned toolchain + runs `cargo kani` over the crate.
-      - name: Run Kani over tb-encode
+      # Installs Kani's own pinned toolchain (the action has no install-only mode,
+      # so it proves ONE cheap smoke harness). M29 lesson: until M29 this step ran
+      # the FULL suite and verify-encode.sh then re-ran it -- the suite was being
+      # verified TWICE per lane. At 80 FNV-era harnesses the double pass fit the
+      # 45-min cap; at 84 with the khash BLAKE2s compressions (~9s per CONCRETE
+      # compression under CBMC -- measured, #86) one full pass is ~25 min, so the
+      # double pass timed the lane out. The COUNTED, fail-closed gate is and
+      # remains verify-encode.sh's single full pass below; this smoke only proves
+      # the toolchain works end-to-end on one harness first.
+      - name: Install Kani toolchain (one-harness smoke)
         uses: model-checking/kani-github-action@v1
         with:
-          args: '-p tb-encode --output-format=terse'
+          args: '-p tb-encode --harness kani_adjust_within_allowed --output-format=terse'
 
-      # Re-runs the proofs and FAILS CLOSED unless every harness verifies AND the
-      # SUCCESSFUL count matches the pinned constant, then emits the DoD marker.
+      # THE gate: the single FULL counted pass -- FAILS CLOSED unless every
+      # harness verifies AND the SUCCESSFUL count matches the pinned constant,
+      # then emits the DoD marker.
       - name: Assert encoder proof marker (fail-closed harness count)
         run: bash scripts/verify-encode.sh
