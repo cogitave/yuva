@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="x86_64-tabos-none"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
-MARKER='M26: exit-telemetry OK'
+MARKER='M28: operator-cmd OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -304,7 +304,50 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M26 marker/witness carries a 'validated'/'causal'/'learned' overclaim -- M26 RECORDS observational exit telemetry, it does NOT validate a causal signal or learn from it (proposal §5 terminology discipline)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
+  # M26 is no longer the top-level grep (M28 displaced it as the cumulative tail);
+  # assert it directly so the M26 -> M28 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M26: exit-telemetry OK'; then
+    echo ">> FAIL: final marker present but 'M26: exit-telemetry OK' missing (M26 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M28 SOUNDNESS (anti-hollow-pass, the aL2.5/M20..M26 substring lesson): the
+  # 'M28: operator-cmd OK' marker -- the CAPSTONE that closes the learning loop --
+  # must be backed by the REAL operator-inbound command round-trip. The command is
+  # IN-RAM + SIMULATED (a real enrolment ceremony + a trustworthy freshness clock are
+  # the named successors), so a skip is NEVER legitimate. Reject any '(no key,
+  # skipped)' variant, and POSITIVELY require the witness line 'opcmd: challenge=0x..
+  # accepted=1 stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1
+  # badmac-rejected=1 kan_active=0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY'
+  # (so a marker printed WITHOUT running the decode/verify accept + the four precise
+  # rejects FAILS). All five flags MUST be =1 (the valid command accepted + each of
+  # the stale-nonce / wrong-head / single-credential / flipped-MAC attacks rejected)
+  # AND kan_active=0 is REQUIRED: the accepted command is NECESSARY-NOT-SUFFICIENT, it
+  # does NOT flip the cell (M24's statistical bar still gates). The mac=KEYED-NONCRYPTO
+  # + oracle=SIMULATED-ENROLLED-KEY honesty tokens MUST be present so the marker cannot
+  # claim a cryptographic MAC, a human oracle, or a real activation.
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M28: operator-cmd OK (no key, skipped)'; then
+    echo ">> FAIL: M28 ran in SKIP mode (no key) -- the operator-inbound command verifier round-trip was NOT exercised (a skip is never legitimate here -- the command is in-RAM + simulated)" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'opcmd: challenge=0x[0-9a-fA-F]+ accepted=0x0*1 stale-rejected=0x0*1 wronghead-rejected=0x0*1 single-cred-rejected=0x0*1 badmac-rejected=0x0*1 kan_active=0x0+ mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY'; then
+    echo ">> FAIL: M28 marker present but the real round-trip witness 'opcmd: challenge=0x.. accepted=0x1 stale-rejected=0x1 wronghead-rejected=0x1 single-cred-rejected=0x1 badmac-rejected=0x1 kan_active=0x0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY' was NOT seen (hollow M28 pass)" >&2
+    exit 1
+  fi
+  # TERMINOLOGY DISCIPLINE (proposal §5/§6): M28 proves the auth PLUMBING (the channel
+  # + the fresh + head-bound + dual-authorized + keyed STRUCTURE), it does NOT claim a
+  # cryptographic MAC, that a real human authenticated, or that the cell was activated.
+  # Reject any 'validated'/'crypto'/'authenticated-human'/'forgery' near the M28
+  # marker/witness so the marker can never silently overclaim. We FIRST strip the two
+  # honesty tokens (mac=KEYED-NONCRYPTO carries the substring 'CRYPTO', and
+  # oracle=SIMULATED-ENROLLED-KEY is benign) so the bare-'crypto' overclaim grep does
+  # NOT false-positive on the very token that DECLARES the non-crypto tier.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M28:|opcmd:)' \
+       | sed -e 's/KEYED-NONCRYPTO//g' -e 's/SIMULATED-ENROLLED-KEY//g' \
+       | grep -qiE -- 'validated|crypto|authenticated-human|forgery'; then
+    echo ">> FAIL: M28 marker/witness carries an overclaim ('validated'/'crypto'/'authenticated-human'/'forgery') -- M28 proves the auth PLUMBING at the mac=KEYED-NONCRYPTO / oracle=SIMULATED-ENROLLED-KEY tier, it does NOT cryptographically authenticate a human (proposal §5/§6 honesty discipline)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK')" >&2
   exit 0
 fi
 

@@ -4354,6 +4354,92 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M26: exit-telemetry OK\n");
     }
 
+    // ---- M28: verified OPERATOR-INBOUND command (the exogenous-oracle CLOSURE) ----
+    // The CAPSTONE that closes the M23->M24->M25->M26->M27 learning loop. M24's honest
+    // gate REFUSES to activate the learned cell because a self-graded loop has no
+    // EXOGENOUS oracle; M25 SURFACES the decisions to a human (TX-only); M28 delivers
+    // the human's authenticated COMMAND. The RX dual of M25: a SIMULATED enrolled
+    // verifier (a compiled-in test key, two creds) answers the OS's freshness CHALLENGE
+    // (a fresh per-boot nonce -- RATS RFC 9334 §10) and submits a well-formed, fresh,
+    // head-bound, DUAL-AUTHORIZED ACTIVATE_CMD bound to the LIVE M22 head (the Terrapin
+    // head-binding -- arXiv:2312.12422). The boot self-test plays the verifier: the RX
+    // path ACCEPTS the valid command AND REJECTS a stale-nonce replay, a wrong-head
+    // command, a single-credential command (the two-person rule), and a flipped-MAC
+    // command. ALL value computation is the host-verifiable, Kani-proven
+    // `tb_encode::opframe_rx` (no_std, forbid(unsafe), NO float; it REUSES the M22 prov
+    // digest verbatim for the keyed MAC + key-evolution); this kernel stays zero-unsafe
+    // and only branches on the returned `OpcmdProof` bools. HONEST: the MAC is
+    // `mac=KEYED-NONCRYPTO` (a keyed FNV is NOT a cryptographic MAC -- no forgery-
+    // resistance; RFC 2104) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test
+    // key, NOT a human + NOT a real enrolment ceremony) -- the marker proves the auth
+    // PLUMBING, never that a human commanded. CRITICALLY the accepted command is
+    // NECESSARY-NOT-SUFFICIENT: `kan_active=0` is REQUIRED (the command un-blocks the
+    // M24 gate's oracle input, but M24's statistical bar is unmet on synthetic data, so
+    // the cell stays DORMANT even WITH the command -- the designed, correct outcome).
+    // The honesty tokens are machine-emitted so the marker mechanically cannot overclaim.
+    // DoD: "M28: operator-cmd OK".
+    {
+        let oc = tb_hal::opcmd_selftest();
+        // FAIL-CLOSED: the valid command must be ACCEPTED AND each of the four attacks
+        // (stale-nonce / wrong-head / single-credential / flipped-MAC) must be REJECTED
+        // AND the cell must stay DORMANT (kan_active == false). Any miss withholds the
+        // marker (renders a FAIL line with NO 'operator-cmd OK' substring) and exits red
+        // NOW (the #65 fail-closed idiom).
+        if !oc.accepted
+            || !oc.stale_rejected
+            || !oc.wronghead_rejected
+            || !oc.single_cred_rejected
+            || !oc.badmac_rejected
+            || oc.kan_active
+        {
+            tb_hal::serial_write_str("M28: operator-cmd FAIL accepted=");
+            write_hex_u64(oc.accepted as u64);
+            tb_hal::serial_write_str(" stale-rejected=");
+            write_hex_u64(oc.stale_rejected as u64);
+            tb_hal::serial_write_str(" wronghead-rejected=");
+            write_hex_u64(oc.wronghead_rejected as u64);
+            tb_hal::serial_write_str(" single-cred-rejected=");
+            write_hex_u64(oc.single_cred_rejected as u64);
+            tb_hal::serial_write_str(" badmac-rejected=");
+            write_hex_u64(oc.badmac_rejected as u64);
+            tb_hal::serial_write_str(" kan_active=");
+            write_hex_u64(oc.kan_active as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+        }
+        // The REAL round-trip WITNESS line (the anti-hollow-pass non-vacuity the run-
+        // scripts positively require): the decode/verify accept + the four precise
+        // rejects provably RAN at boot over a real sealed command anchored to the live
+        // M22 head + a fresh per-boot challenge. `mac=KEYED-NONCRYPTO` +
+        // `oracle=SIMULATED-ENROLLED-KEY` are LITERAL honesty tokens, and `kan_active=0`
+        // is the NECESSARY-NOT-SUFFICIENT marker -- the line mechanically cannot claim a
+        // cryptographic MAC, a human oracle, or an activation the M24 bar does not support.
+        tb_hal::serial_write_str("opcmd: challenge=");
+        write_hex_u64(oc.challenge);
+        tb_hal::serial_write_str(" accepted=");
+        write_hex_u64(oc.accepted as u64);
+        tb_hal::serial_write_str(" stale-rejected=");
+        write_hex_u64(oc.stale_rejected as u64);
+        tb_hal::serial_write_str(" wronghead-rejected=");
+        write_hex_u64(oc.wronghead_rejected as u64);
+        tb_hal::serial_write_str(" single-cred-rejected=");
+        write_hex_u64(oc.single_cred_rejected as u64);
+        tb_hal::serial_write_str(" badmac-rejected=");
+        write_hex_u64(oc.badmac_rejected as u64);
+        tb_hal::serial_write_str(" kan_active=");
+        write_hex_u64(oc.kan_active as u64);
+        tb_hal::serial_write_str(" mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY\n");
+        // The marker -- emitted ONLY when the valid command was accepted, all four
+        // attacks were rejected, AND the cell stayed dormant. The command is IN-RAM +
+        // SIMULATED this milestone (a real enrolment ceremony + a trustworthy freshness
+        // clock are the named successors), so there is NO '(no key, skipped)' variant --
+        // a skip is never legitimate (the run-scripts reject one). The marker uses ONLY
+        // auth-plumbing terminology (no validated/crypto/authenticated-human -- the
+        // honest discipline: the channel + auth STRUCTURE works, NOT that a human
+        // cryptographically authenticated a command).
+        tb_hal::serial_write_str("M28: operator-cmd OK\n");
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();

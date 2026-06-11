@@ -1045,6 +1045,172 @@ pub(crate) fn exittel_selftest() -> crate::ExitTelemetryProof {
     }
 }
 
+// --- M28: the verified operator-inbound command self-test (the marker body) ---
+
+/// The compiled-in SIMULATED enrolled verifier's base key (a TEST key, NOT a real
+/// enrolment ceremony -- the `oracle=SIMULATED-ENROLLED-KEY` honesty token). The two
+/// per-credential keys are derived from this via [`tb_encode::opframe_rx::key_evolve`]
+/// (the FssAgg forward-evolution shape), so the keys are not a single repeated byte.
+const OPCMD_BASE_KEY: [u8; 32] = [0x4Bu8; 32];
+
+/// The two distinct enrolled credential ids the dual-authorized `ACTIVATE_CMD`
+/// carries (the two-person rule). Distinct so the dual-custody check passes.
+const OPCMD_CRED_A: u16 = 0xA101;
+/// See [`OPCMD_CRED_A`] -- the SECOND (distinct) enrolled credential id.
+const OPCMD_CRED_B: u16 = 0xB202;
+
+/// M28: play the SIMULATED enrolled operator-verifier over the Kani-proven
+/// `tb_encode::opframe_rx` RX path, reporting the outcome to the kernel as a pure-data
+/// [`crate::OpcmdProof`]. 100% SAFE, no device touched beyond the serial the kernel
+/// renders the marker over, no scheduler -- pure value computation over the RX dual of
+/// the M25 transcript (which REUSES the M22 `tb_encode::prov` digest for its keyed MAC
+/// + key-evolution).
+///
+/// It (a) SEEDS the same memory-pressure scenario as the M25/M23 self-tests so the
+/// substrate carries a LIVE M22 provenance `chain_head` (the head the command BINDS --
+/// the instance anchor); (b) derives a per-boot CHALLENGE nonce from the live head (a
+/// fresh-per-instance freshness anchor -- RATS RFC 9334 §10 epoch-id style); (c) the
+/// SIMULATED enrolled verifier (a compiled-in test key, two distinct creds) SEALS a
+/// well-formed, fresh, head-bound, DUAL-AUTHORIZED `ACTIVATE_CMD` and the RX path
+/// [`tb_encode::opframe_rx::decode_and_verify`] ACCEPTS it; (d) the verifier then
+/// proves the RX path REJECTS (a) a stale-nonce replay, (b) a wrong-head command, (c)
+/// a single-credential command, (d) a flipped-MAC command -- the precise reject in
+/// each case. The marker is withheld unless EVERY leg holds.
+///
+/// CRITICAL HONESTY: the accepted command is NECESSARY-NOT-SUFFICIENT. `KAN_ACTIVE`
+/// stays `false` (it is a `const false`; the command does NOT flip it -- the
+/// architectural "pending flag -> M24 reads it" seam is the proposal's, but THIS self-
+/// test simply asserts an accepted command leaves `KAN_ACTIVE == false` because M24's
+/// statistical bar is unmet on synthetic data). The witness carries `kan_active=0`. The
+/// MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV, NOT forgery-resistant) and the oracle is
+/// `oracle=SIMULATED-ENROLLED-KEY` (a test key, NOT a human) -- the marker proves the
+/// auth PLUMBING, never that a human commanded.
+pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
+    use tb_encode::opframe_rx::{
+        decode_and_verify, key_evolve, seal, CmdFrame, CmdVerdict, CMD_HEADER_LEN, MAC_LEN,
+    };
+    use tb_encode::prov::{head_witness as prov_head_witness, PROV_HASH_LEN};
+
+    let fail = |challenge: u64| crate::OpcmdProof {
+        accepted: false,
+        stale_rejected: false,
+        wronghead_rejected: false,
+        single_cred_rejected: false,
+        badmac_rejected: false,
+        kan_active: KAN_ACTIVE, // const false -- never flipped by an accepted command
+        challenge,
+    };
+
+    // (a) SEED the M23/M25 scenario so the substrate carries a live M22 head (the
+    //     instance anchor the command binds; a command from a different boot binds a
+    //     different head). Identical shape to opframe_selftest: writes -> recall ->
+    //     aged sweep.
+    let mut sub = MemSubstrate::new();
+    let mut w = 0u64;
+    while w < OPFRAME_SELFTEST_WRITES {
+        let key = 0x00F_5000 + w;
+        if sub.write(0, key, 0xFFF_0000 + w, 1).is_none() {
+            return fail(0);
+        }
+        w += 1;
+    }
+    let _ = sub.recall(0x00F_5000, 0, 1, 0);
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let _ = sub.forget_sweep();
+
+    // The LIVE M22 provenance head -- the command BINDS to THIS (head-binding).
+    let live_head: [u8; PROV_HASH_LEN] = sub.chain_head();
+
+    // (b) The per-boot CHALLENGE nonce: a deterministic fold of the live head (a
+    //     fresh-per-instance freshness anchor; a different boot's head yields a
+    //     different challenge, so a captured command cannot replay across boots). The
+    //     low bit is forced set so the stale-leg's `challenge ^ 1` is always distinct.
+    let challenge: u64 = prov_head_witness(live_head) | 1;
+
+    // (c) The SIMULATED enrolled verifier's two per-credential keys, derived from the
+    //     compiled-in test base key via the FssAgg forward-evolution shape (so the two
+    //     keys are distinct + not a single repeated byte). NOT a real enrolment.
+    let key_a = key_evolve(&OPCMD_BASE_KEY);
+    let key_b = key_evolve(&key_a);
+
+    // The well-formed, fresh, head-bound, DUAL-AUTHORIZED ACTIVATE_CMD the verifier
+    // submits over the (in-RAM, captured) RX path. A small fixed payload (the command
+    // body the seam layers meaning onto; opaque to the codec).
+    let payload: [u8; 4] = [0x00, 0x01, 0x02, 0x03];
+    let cmd = CmdFrame {
+        kind: tb_encode::opframe_rx::kind::ACTIVATE_CMD,
+        nonce_echo: challenge, // ECHO the challenge (freshness)
+        op_head_bind: live_head, // BIND the live head (Terrapin head-binding)
+        seq: 1,
+        cred_a_id: OPCMD_CRED_A, // two DISTINCT creds (dual custody)
+        cred_b_id: OPCMD_CRED_B,
+        payload: &payload,
+        mac: [0u8; MAC_LEN], // overwritten by seal's freshly computed keyed MAC
+    };
+
+    // SEAL the command (compute the keyed MAC over the canonical bytes). The wire is
+    // CMD_HEADER_LEN + 4 (payload) + MAC_LEN bytes.
+    const WIRE_CAP: usize = CMD_HEADER_LEN + 4 + MAC_LEN;
+    let mut wire = [0u8; WIRE_CAP];
+    let n = seal(&cmd, &key_a, &key_b, &mut wire);
+    if n != WIRE_CAP {
+        return fail(challenge);
+    }
+    let mut scratch = [0u8; CMD_HEADER_LEN + 4];
+
+    // THE ACCEPT: the valid fresh head-bound dual-authorized command is accepted.
+    let accepted = decode_and_verify(&wire[..n], challenge, live_head, &key_a, &key_b, &mut scratch)
+        == CmdVerdict::Accept;
+
+    // (d) THE FOUR REJECTS (each the precise verdict).
+    // (a) STALE nonce: the verifier expects a DIFFERENT (rotated) challenge.
+    let stale_rejected =
+        decode_and_verify(&wire[..n], challenge ^ 1, live_head, &key_a, &key_b, &mut scratch)
+            == CmdVerdict::RejectStale;
+
+    // (b) WRONG head: the live head moved (a cross-boot command).
+    let mut wrong_head = live_head;
+    wrong_head[0] ^= 0x01;
+    let wronghead_rejected =
+        decode_and_verify(&wire[..n], challenge, wrong_head, &key_a, &key_b, &mut scratch)
+            == CmdVerdict::RejectWrongHead;
+
+    // (c) SINGLE credential: re-seal a command whose two cred ids are EQUAL (a single
+    //     signer) -- the dual-custody check rejects it.
+    let single = CmdFrame {
+        cred_a_id: OPCMD_CRED_A,
+        cred_b_id: OPCMD_CRED_A, // SAME credential -- a single signer
+        ..cmd
+    };
+    let mut wire2 = [0u8; WIRE_CAP];
+    let n2 = seal(&single, &key_a, &key_b, &mut wire2);
+    let single_cred_rejected = n2 == WIRE_CAP
+        && decode_and_verify(&wire2[..n2], challenge, live_head, &key_a, &key_b, &mut scratch)
+            == CmdVerdict::RejectSingleCred;
+
+    // (d) FLIPPED MAC: flip one byte of the trailing MAC of the valid wire -- the keyed
+    //     MAC recompute no longer matches.
+    let mut tampered = wire;
+    let mac_off = n - MAC_LEN;
+    tampered[mac_off] ^= 0x01;
+    let badmac_rejected =
+        decode_and_verify(&tampered[..n], challenge, live_head, &key_a, &key_b, &mut scratch)
+            == CmdVerdict::RejectBadMac;
+
+    crate::OpcmdProof {
+        accepted,
+        stale_rejected,
+        wronghead_rejected,
+        single_cred_rejected,
+        badmac_rejected,
+        // NECESSARY-NOT-SUFFICIENT: an accepted command does NOT flip KAN_ACTIVE. It is
+        // a `const false`; M24's statistical bar is unmet on synthetic data, so the cell
+        // stays DORMANT even WITH the command (the designed, correct outcome).
+        kan_active: KAN_ACTIVE,
+        challenge,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.

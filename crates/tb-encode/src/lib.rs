@@ -153,6 +153,34 @@
 //!    is caught. Claims ONLY structural tamper-EVIDENCE + truncation/reorder/replay
 //!    detection (keyed=0, NO forgery-resistance) + instance binding -- NOT crypto
 //!    authenticity, NOT that a human replied (oracle=HUMAN-DEFERRED-M26).
+//!  * [`opframe_rx`] -- the M28 verified OPERATOR-INBOUND command codec, the RX dual of
+//!    [`opframe`]: the typed, fixed-header, LENGTH-PREFIXED, injective
+//!    [`opframe_rx::CmdFrame`] (magic, ver, kind(CHALLENGE_REQ/ACTIVATE_CMD/NOP),
+//!    reserved, nonce_echo, op_head_bind, seq, cred_a_id, cred_b_id, a payload_len u32
+//!    prefix, a trailing keyed MAC) encoder (`opframe_rx::canon` writes the MAC'd bytes
+//!    -- everything EXCEPT the trailing mac; `opframe_rx::decode` recovers the frame and
+//!    splits canon|mac; both TOTAL and fail-closed on a bad magic/ver/reserved/unknown-
+//!    kind or truncation) by which a SIMULATED enrolled verifier answers the OS's
+//!    freshness CHALLENGE and submits a DUAL-AUTHORIZED `ACTIVATE_CMD` bound to the LIVE
+//!    M22 head -- the exogenous-oracle CLOSURE of the M23->M27 learning loop.
+//!    `opframe_rx::key_evolve` is the one-way-SHAPED forward key evolution (the FssAgg
+//!    `key_next = prov_hash(key)` shape, REUSING the M22 [`prov`] digest verbatim -- NO
+//!    new hash math), `opframe_rx::compute_mac` is the KEYED (NON-cryptographic) checksum
+//!    -- the nested envelope `prov_hash(prov_hash(prov_hash(key_a) || prov_hash(key_b)) ||
+//!    prov_hash(canon))` truncated to `MAC_LEN`, and
+//!    `opframe_rx::decode_and_verify` returns `Accept` IFF the frame decodes, is an
+//!    ACTIVATE_CMD, echoes the expected nonce (FRESHNESS), binds the live head (the
+//!    Terrapin HEAD-BINDING), carries two DISTINCT credentials (DUAL-CUSTODY two-person
+//!    rule), AND the recomputed keyed MAC matches; else the precise reject
+//!    (`RejectStale`/`RejectWrongHead`/`RejectSingleCred`/`RejectBadMac`/`NotActivate`/
+//!    `Malformed`). `tb-hal` CALLS these to play a SIMULATED enrolled verifier at boot;
+//!    the self-test ACCEPTS the valid command and REJECTS stale-nonce/wrong-head/single-
+//!    cred/flipped-MAC. Claims ONLY enrolled-key replay/truncation resistance vs a non-
+//!    adaptive no-key adversary (`mac=KEYED-NONCRYPTO` -- a keyed FNV is NOT a secure MAC,
+//!    RFC 2104; `mac=KEYED-CRYPTO` is the named successor), NOT forgery-resistance; the CI
+//!    verifier is a compiled-in test key (`oracle=SIMULATED-ENROLLED-KEY`), NOT a human;
+//!    and an accepted command is NECESSARY-NOT-SUFFICIENT -- it does NOT flip `KAN_ACTIVE`
+//!    (`kan_active=0`; M24's statistical bar still gates).
 //!  * [`explore`] -- the M24 SHIELDED EPSILON-GREEDY exploration math: the
 //!    closed-form logging PROPENSITY `explore_propensity_q(eps_num, eps_den, m,
 //!    is_greedy) -> u16` (Open Bandit Pipeline arXiv:2008.07146) M24 stamps into
@@ -230,6 +258,7 @@ pub mod ipc_frame;
 pub mod kancell;
 pub mod memscore;
 pub mod opframe;
+pub mod opframe_rx;
 pub mod paging;
 pub mod prov;
 pub mod route;
