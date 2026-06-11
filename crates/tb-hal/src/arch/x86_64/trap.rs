@@ -210,17 +210,30 @@ pub(super) extern "C" fn x86_trap_handler(frame: *mut TrapFrame) {
     }
 }
 
-/// #71 diagnostic (fatal path ONLY): the x86 boot intermittently takes a fatal
-/// fault at the M8 first async timer interrupt on the CONTENDED GitHub CI runner
-/// (NOT locally reproducible after 80 clean boots, idle + fully saturated). The
-/// observed signature -- a `#GP` (vector 0x0d) whose error code has RESERVED bits
-/// set (`0xfffffffa`, an IMPOSSIBLE value for a real CPU-pushed selector error
-/// code) -- points to a misread/corrupted frame or an `iretq` fault rather than a
-/// clean descriptor `#GP`. Dump the full interrupt frame so the NEXT CI catch is
-/// decisive: `cs`/`ss` reveal an `iretq` #GP (bad saved selectors), `rsp`/`rbp`
-/// reveal a stack anomaly, `rflags` shows IF/alignment, `vec`/`err` confirm the
-/// classification. Serial-only, no state change; it never runs on a green boot
-/// (the run scripts still FAIL on the missing marker, exactly as today).
+/// #71 diagnostic (fatal path ONLY) -- ROOT-CAUSED to an upstream QEMU TCG bug;
+/// the kernel is blameless and this dump is the per-catch confirmation witness.
+/// The flake signature (always right after `M7: heap OK`, always `#GP` vector
+/// 0x0d with error code `0xfffffffa`, TCG lanes only, never under KVM) is
+/// bit-for-bit QEMU's `intno*8 + 2` arithmetic with `intno = -1`: TCG's
+/// userspace APIC can leave `CPU_INTERRUPT_HARD` pending with no deliverable
+/// IRR vector, `x86_cpu_exec_interrupt` passes `cpu_get_pic_interrupt()`'s `-1`
+/// UNGUARDED into `do_interrupt64`, whose IDT-limit check raises a guest-visible
+/// `#GP(0xfffffffa)` -- a NON-architectural error code (reserved bits) no real
+/// CPU can push, and one this kernel cannot forge (the thunk dummy is 0; vector
+/// 13 takes the CPU-pushed code verbatim). Verified unguarded in QEMU v8.2.2 and
+/// master; the faulting pcs sit at the `run_canary` loop-head TB boundary (all
+/// end in nibble 0xf -- the iretq sites do not), where TCG recognizes pending
+/// interrupts. Halting fail-closed on the bogus `#GP` is the CORRECT response --
+/// do NOT teach the kernel to tolerate reserved-bit error codes (that would hide
+/// real bugs forever). The frame dump discriminates per catch: `vec`/`err` carry
+/// the fingerprint, `cs`/`ss` (must be 0x8/0x10) + `rsp`/`rbp` rule out frame
+/// skew/stack anomalies, `frameptr` (the handler-side &TrapFrame) places the
+/// frame inside the 64 KiB `__boot_stack` (in-place delivery, not a wild RSP),
+/// and `ticks` separates first-delivery faults from a ghost arriving after N
+/// clean ticks (the ghost-IRQ mechanism predicts ticks >= 1). The run-script
+/// side (`run-x86_64.sh -d int -D <log>`) prints QEMU's own injection trace on
+/// failure -- a literal 'Servicing hardware INT=0xffffffff' line is the decisive
+/// upstream witness. Serial-only, no state change; never runs on a green boot.
 fn dump_fatal_frame(f: &TrapFrame) {
     fn hx(label: &str, v: u64) {
         crate::serial_write_str(label);
@@ -241,6 +254,8 @@ fn dump_fatal_frame(f: &TrapFrame) {
     hx(" rflags=", f.rflags);
     hx(" rsp=", f.rsp);
     hx(" rbp=", f.rbp);
+    hx(" frameptr=", f as *const TrapFrame as u64);
+    hx(" ticks=", crate::tick_count());
     crate::serial_write_byte(b'\n');
 }
 

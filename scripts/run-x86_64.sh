@@ -43,8 +43,12 @@ if [[ ! -f "${KERNEL}" ]]; then
 fi
 
 # Prefer KVM only when /dev/kvm is actually usable; otherwise pure-TCG so this
-# runs in any WSL2 / CI box without nested virt.
-ACCEL="tcg"
+# runs in any WSL2 / CI box without nested virt. TCG is pinned single-threaded
+# (#71 / parity with run-aarch64.sh): one TCG vCPU thread removes the
+# iothread-vs-vCPU interrupt-injection race window that produces the ghost-IRQ
+# flake (QEMU TCG can inject cpu_get_pic_interrupt()'s -1 unguarded -> a bogus
+# guest #GP with the non-architectural error code 0xfffffffa = (-1)*8+2).
+ACCEL="tcg,thread=single"
 CPU="qemu64"
 if [[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
   ACCEL="kvm"
@@ -61,7 +65,16 @@ echo ">> kernel=${KERNEL}" >&2
 # mmio transport variant, NOT virtio-blk-pci -- microvm has no PCI by default) is
 # correct + symmetric with the aarch64 rng/blk device pair.
 IMG="$(mktemp)"
-trap 'rm -f "$IMG"' EXIT
+# #71 diagnosis: capture QEMU's interrupt/exception trace (-d int) into a side
+# file (-D; NEVER bare -d -- this script merges qemu's 2>&1 into the
+# marker-grepped OUTPUT below, so an inline trace would pollute the witness
+# greps). The log is tiny on a green boot (~16 timer ticks + the self-test
+# traps) and is printed ONLY on failure. Decisive for the ghost-IRQ flake: the
+# fingerprint is a literal 'Servicing hardware INT=0xffffffff' line (QEMU
+# renders the unguarded intno=-1 via %02x) right before the v=0d e=fffffffa
+# exception trace. Harmless under KVM (in-kernel APIC: TCG trace points silent).
+INT_LOG="$(mktemp)"
+trap 'rm -f "$IMG" "$INT_LOG"' EXIT
 truncate -s 4M "$IMG"
 
 set +e
@@ -70,6 +83,7 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     -M microvm,rtc=off \
     -accel "${ACCEL}" -cpu "${CPU}" -m 256M -smp 1 \
     -kernel "${KERNEL}" \
+    -d int -D "${INT_LOG}" \
     -no-reboot \
     -nic none \
     -global virtio-mmio.force-legacy=false \
@@ -352,4 +366,18 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
 fi
 
 echo ">> FAIL: marker '${MARKER}' not seen (qemu/timeout rc=${RC})" >&2
+# #71 diagnosis (failure path ONLY): dump the QEMU interrupt-trace tail so a
+# single CI catch is decisive. The ghost-IRQ signature -- QEMU TCG injecting
+# cpu_get_pic_interrupt()'s -1 unguarded, surfacing as a guest #GP with the
+# non-architectural error code 0xfffffffa = (-1)*8+2 -- prints as a literal
+# 'Servicing hardware INT=0xffffffff' line immediately before the v=0d
+# e=fffffffa exception trace. That line confirms the upstream emulator bug
+# (kernel blameless); its absence on a caught flake falsifies the hypothesis.
+if [[ -s "${INT_LOG}" ]]; then
+  echo ">> [#71] qemu -d int trace tail (ghost-IRQ fingerprint = 'Servicing hardware INT=0xffffffff'):" >&2
+  tail -n 80 "${INT_LOG}" >&2
+  if grep -q 'Servicing hardware INT=0xffffffff' "${INT_LOG}"; then
+    echo ">> [#71] GHOST-IRQ SIGNATURE CONFIRMED: QEMU TCG injected intno=-1 (upstream bug, missing intno>=0 guard) -- kernel blameless" >&2
+  fi
+fi
 exit 1
