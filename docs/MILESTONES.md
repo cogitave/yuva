@@ -1,6 +1,6 @@
 # TABOS Milestones & Development Pipeline
 
-> Status: the agent-native milestone chain **M0 → M27 is complete and CI-green on
+> Status: the agent-native milestone chain **M0 → M28 is complete and CI-green on
 > both architectures** (x86_64 + aarch64), extended since the M18 capstone by a
 > tail of follow-on markers — **M14.1** (byte-payload IPC), **M14.2**
 > (blocking-recv), **M15.1** (block unmap + frame reclamation), **M18.1**
@@ -22,7 +22,7 @@
 > producer — the already-Kani-proven `el2_trap` guest-exit classifier becomes a
 > bounded, no-float, injective telemetry record folded into a separate `tel_head`; the
 > OS *records* its own virtualization workload; PRODUCER-ONLY, `signal=OBSERVATIONAL-
-> NONCAUSAL`; the LAST cumulative agent-native marker, `M26: exit-telemetry OK`) — plus
+> NONCAUSAL`; `M26: exit-telemetry OK`) — plus
 > the full aarch64 sovereignty-L2 chain, **L2.0**
 > (x86_64 VMX-root graceful-skip + aarch64 EL2 world-switch) through **L2.6**
 > (aarch64 stage-2 → exit-dispatch → trap-and-emulate → nested-EL1 guest → vGIC →
@@ -31,12 +31,20 @@
 > folding each Kani-proven scheduling decision into a tamper-evident `sched_head`;
 > shipped as **M27a**, the cooperative HVC-yield green floor, `timing=COOPERATIVE-
 > HVC-YIELD` — the real-CNTHP-timer upgrade M27b is the tracked successor;
-> `M27: sched OK`), all printed before M19 — every milestone verified by booting under QEMU
+> `M27: sched OK`), all printed before M19 — and finally **M28** (the operator
+> **INBOUND** command channel, the RX dual of M25's transcript — the
+> exogenous-oracle CAPSTONE that CLOSES the learning loop: a human holding TWO
+> enrolled credentials answers the OS's freshness challenge and submits a
+> dual-authorized `ACTIVATE_CMD` bound to the live M22 provenance head; honest
+> by construction, `mac=KEYED-NONCRYPTO` / `oracle=SIMULATED-ENROLLED-KEY` /
+> `kan_active=0` (an Accept is necessary-not-sufficient); the NEW cumulative-tail
+> marker, printed after M26, `M28: operator-cmd OK`) — every milestone verified
+> by booting under QEMU
 > (and, on x86_64, the project's own `tb-vmm`/KVM) on every change. A
 > **formally-verified core** now backs the chain: M11's capability rights-subset
 > invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
 > `crates/tb-caps-core`), the silicon-unsafe encoders/parsers + the memory/learning
-> leaves are **Kani-proven** over the 17-leaf `crates/tb-encode` (74 harnesses,
+> leaves are **Kani-proven** over the 18-leaf `crates/tb-encode` (80 harnesses,
 > `V1: kani-encoders OK`), and a
 > **Miri Tier-0 UB gate** interprets both leaf crates (`T0: miri OK`); CI now runs
 > **9 gates across 8 workflow files**. This
@@ -81,7 +89,7 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M27, + L2.0 … L2.6)
+## 2. The milestone chain (M0 → M28, + L2.0 … L2.6)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
@@ -96,9 +104,12 @@ marker, the `M20: persist OK` durable-persistence marker, the dormant
 marker, the learning-loop arc — `M23: experience OK` (the experience codec +
 counterfactual shadow), `M24: bakeoff OK (gate-not-met)` (the honest activation gate,
 correctly refusing on synthetic data), `M25: operator OK` (the operator transcript),
-and finally the cumulative-tail `M26: exit-telemetry OK` exit-telemetry-producer marker
+the `M26: exit-telemetry OK` exit-telemetry-producer marker, and finally the NEW
+cumulative-tail `M28: operator-cmd OK` operator-inbound marker (the RX dual of M25:
+a dual-credential, freshness-challenged human command bound to the live M22 head)
 (each preceded by its anti-hollow witness line: `prov: …`, `exp: …`, `bakeoff: …`,
-`opframe: …`, `exittel: …`) — the complete ordered sequence is listed further below.
+`opframe: …`, `exittel: …`, `opcmd: …`) — the ordered sequence (detailed through
+M22) is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -206,8 +217,9 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M23** | Verified **experience codec** + counterfactual shadow-recording — the learning loop's Monitor/log layer: each M17 forget/recall decision records a fixed-field injective `ExperienceRecord` (the features + the heuristic action + the COUNTERFACTUAL `kan_score` the dormant M21 cell WOULD produce + reserved-now propensity/outcome fields) into a fixed-capacity ring folded into a SEPARATE `xp_head` (reuses the M22 fold); a recorded row replays through the dormant `kan_score` BIT-IDENTICALLY; claims ONLY replay-determinism + structural tamper-evidence, NOT validity (`oracle=DECLARED-PROXY-DEFERRED-M24`) | `M23: experience OK` | none (codec / ring / replay in `tb-encode::exp`, Kani-proven; the M17 demote stays byte-identical, `kan_active=0`) |
 | **M24** | The **HONEST activation gate** — the honest resolution of the M21 ship-gate: shielded ε-greedy exploration restores statistical overlap (populating the M23-reserved propensity), a deterministic 3-way right-censored **survival label**, a partial-identification (Manski + Lipschitz-smoothness + empirical-Bernstein) **lower-bound** estimator, and a one-shot **HCPI** activation gate. On the necessarily-synthetic traces this milestone the gate does **NOT** clear — `gate-not-met` (the cell stays DORMANT) is the DESIGNED, CORRECT outcome (an honest gate that REFUSES is a success) | `M24: bakeoff OK (gate-not-met)` | none (estimators in `tb-encode::explore` + `tb-encode::bakeoff`, Kani-proven; `KAN_ACTIVE` stays `false`) |
 | **M25** | Verified **operator transcript** (the exogenous-oracle channel) — the COMMUNICATION pillar's outbound half: a typed, fixed-header, length-prefixed, INJECTIVE, tamper-evident frame the OS emits over serial to SURFACE what it recorded (M23) and decided (M24) to a human, anchored to the live M22 provenance head ("which instance am I", RATS RFC 9334), with a strictly-monotone `seq` folded into the canonical bytes + a closing `GATE_VERDICT` so a reader detects mutation/reorder/drop/truncation; a held-out-leakage guard fail-closes `canon` on the sealed M24 partition (Seldonian no-snoop). TX-only + claims ONLY structural tamper-evidence + instance binding (`keyed=0`), NOT crypto authenticity and NOT that a human replied (`oracle=HUMAN-DEFERRED-M26`) | `M25: operator OK` | none (canonical encoder / fold-reuse / seq / intro-binding / truncation verifier in `tb-encode::opframe`, Kani-proven; reuses the M22 `prov` fold verbatim) |
-| **M26** | Verified **EL2 exit-telemetry producer** — the learning pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a BOUNDED, no-float, injective telemetry record (exit-class + a saturating log2 cost-proxy histogram + logical time) folded into a per-instance `tel_head` via the M22 fold reused verbatim; the OS *records* its own virtualization workload. PRODUCER-ONLY (the telemetry is recorded + folded, NEVER fed to a policy whose decisions change the future exit distribution — the confounding loop the M24 adversary named is structurally avoided); the `tel_head` is SEPARATE from the M23 `xp_head` (zero regression). Claims injective bounded encoding + tamper-evidence, NOT a causal state-signal (`signal=OBSERVATIONAL-NONCAUSAL`); the LAST cumulative agent-native marker | `M26: exit-telemetry OK` | none (classifier-reuse / log2-bucket histogram / fixed-width injective codec / fold-reuse in `tb-encode::exittel`, Kani-proven) |
+| **M26** | Verified **EL2 exit-telemetry producer** — the learning pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a BOUNDED, no-float, injective telemetry record (exit-class + a saturating log2 cost-proxy histogram + logical time) folded into a per-instance `tel_head` via the M22 fold reused verbatim; the OS *records* its own virtualization workload. PRODUCER-ONLY (the telemetry is recorded + folded, NEVER fed to a policy whose decisions change the future exit distribution — the confounding loop the M24 adversary named is structurally avoided); the `tel_head` is SEPARATE from the M23 `xp_head` (zero regression). Claims injective bounded encoding + tamper-evidence, NOT a causal state-signal (`signal=OBSERVATIONAL-NONCAUSAL`); the last cumulative agent-native marker until the M28 tail landed (M28 now prints after it) | `M26: exit-telemetry OK` | none (classifier-reuse / log2-bucket histogram / fixed-width injective codec / fold-reuse in `tb-encode::exittel`, Kani-proven) |
 | **M27** | **Two-VMID sovereign time-partition scheduler** — the sovereignty pillar's "TABOS owns time for two guests" rung: the EL2 (nVHE) monitor arms TWO distinct stage-2 roots (VMID 0 + 1) and alternates two trivial EL1 guest stubs in a fixed two-slot major frame, each bumping a DISTINCT per-VMID MMIO forward-progress cell (a guest can't fake a non-trapping store), folding each `SchedDecision` into a tamper-evident `sched_head` via the M22 fold; the verdict genuinely checks both-progressed + round-robin order + frame-conservation + fold-verified + tamper-caught. **Shipped as M27a** — the cooperative HVC-yield green floor (exercises everything except the timer IRQ, can't IRQ-storm; `timing=COOPERATIVE-HVC-YIELD` so it can't impersonate the real-timer claim). The real-CNTHP-preemption upgrade (**M27b**, the first async IRQ at EL2) is the tracked successor. Prints in the L2-track position (after L2.6, before M19) | `M27: sched OK` | the verified `tb-encode::tpsched` leaf (next_slot/frame-conservation/`SchedDecision` codec + 5 Kani harnesses) + the EL2 HAL (`tpsched_hal`/`el2`/`stage2`/`el2mmio`); kernel zero-unsafe, branches on `SchedProof` |
+| **M28** | **Operator INBOUND command channel** — the COMMUNICATION pillar's inbound half, the RX dual of M25's `opframe`, and the exogenous-oracle CAPSTONE that CLOSES the learning loop (record M23 → honestly-refuse M24 → surface-to-human M25 → record-workload M26 → schedule M27 → **receive-human-command M28**): a human operator holding TWO enrolled credentials answers the OS's freshness challenge and submits a dual-authorized `ACTIVATE_CMD` bound to the live M22 provenance head. THE GATE IS MACHINE-PROVEN: the conjunctive verdict core is the pure, buffer-free/hash-free `opframe_rx::verify_decoded(frame, expected_nonce, live_head, mac_ok)` (`decode_and_verify` delegates its verdict to it verbatim) and Kani drives it fully symbolically — `RejectStale` iff echo ≠ challenge, `RejectWrongHead` iff the bound head ≠ a fully-symbolic live head, `RejectSingleCred` iff the two creds are equal, `RejectBadMac` iff distinct-creds AND `!mac_ok`, **Accept IFF every conjunct holds** (the Accept-iff-all theorem), plus kind-dominance (`NotActivate`); the reject branches are MUTATION-TESTED (deleting each → `VERIFICATION FAILED` ×3), and the `decode_and_verify` wrapper's buffer/MAC plumbing is host-tested (all 7 verdict arms, run under the Miri CI lane) + boot self-tested. Honest scope (machine-emitted tokens the run scripts enforce): `mac=KEYED-NONCRYPTO` — the MAC is a NESTED keyed-FNV envelope `cmd_hash(cmd_hash(cmd_hash(key_a)\|\|cmd_hash(key_b))\|\|cmd_hash(canon))[..16]`, genuinely keyed by two 256-bit creds but NOT cryptographic (FNV is not collision/preimage resistant); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in test key, NOT a human/enrolment ceremony; `kan_active=0` — an Accept is NECESSARY-NOT-SUFFICIENT (`KAN_ACTIVE` stays `false`, M24's statistical bar still gates, and the accepted command is currently fully inert). Replay scope is honest: the verifier is pure + stateless — per-EPOCH staleness rejection, NOT one-shot per-challenge nonce consumption (an identical valid wire re-verifies within the same epoch; rotate-on-accept in the stateful seam is a named successor). Witness: `opcmd: challenge=<hex16> accepted=1 stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1 kan_active=0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY`. The NEW cumulative-tail marker, printed after M26 (M27 keeps its L2-track position) | `M28: operator-cmd OK` | none (challenge/echo + the canonical command codec + the nested keyed-FNV MAC envelope + the pure `verify_decoded` verdict core in `tb-encode::opframe_rx`, Kani-proven — the 18th verified leaf, the six `kani_cmd_*` harnesses) |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
@@ -340,8 +352,10 @@ M22: provenance OK
 
 A skip is **never** legitimate here (there is no device to be absent), so the run
 scripts **reject** any `(no ledger, skipped)` variant and **positively require**
-the `prov:` witness — and `M22: provenance OK` is **the cumulative-tail marker
-both run scripts grep for** (replacing M20 as the final chain marker). The six
+the `prov:` witness — and `M22: provenance OK` became **the cumulative-tail marker
+both run scripts grep for** at its landing (replacing M20 as the final chain
+marker; the tail has since moved along the chain and is `M28: operator-cmd OK`
+today). The six
 `kani_prov_*` harnesses (each with a negative control; `canon`-injectivity is the
 load-bearing proof, written before the kernel seam) land in `tb-encode`, bumping
 `verify-encode.sh` `EXPECTED_HARNESSES` and the `kani.yml` count in lockstep.
@@ -386,7 +400,10 @@ green `n/a`:
 
 A green boot prints the M0–M4 foundation trace shown above, then the following
 markers in order — every milestone runs cumulatively, so each boot is a full
-regression of M0 through the cumulative tail `M22: provenance OK`:
+regression of M0 through the cumulative tail `M28: operator-cmd OK` (the listing
+below is detailed through M22; after it the M23→M26 learning-loop arc and the
+`M28: operator-cmd OK` tail print in the §2 order above, with `M27: sched OK` in
+its L2-track position between `L2.6` and M19):
 
 ```
 tb-boot: contract v0 OK          # only on the tb-vmm / tb-boot v0 path
@@ -425,7 +442,7 @@ L2.6: smmu OK                    # aarch64: genuine SMMUv3 stage-2 STE table-pro
 M19: virtio OK                   # the kernel's FIRST real device I/O (poll-based virtio-mmio virtio-rng); Proven under TCG (ci) + KVM (microvm-kvm), graceful "(no device, skipped)" under tb-vmm
 M20: persist OK                  # DURABLE PERSISTENCE -- a poll-only virtio-mmio virtio-blk (DeviceID 2) backs a log-structured store behind the M13 BackingStore seam; the selftest writes N sentinel records through a real Region, runs the TWO-PHASE flush (records -> VIRTIO_BLK_T_FLUSH -> superblock gen+1 -> FLUSH), DROPS the substrate (all RAM destroyed), RE-MOUNTS the same disk, replays the log, and asserts replayed==written + gen bumped by 1 -- a true durability round-trip (bytes left RAM, hit the device, came back on a fresh mount). All MMIO/DMA in arch/*/virtio.rs; the superblock/record-frame/req-header codecs are the Kani-proven tb-encode::blkfmt; the kernel branches on a pure-data PersistProof. Proven under TCG (ci) on both arches; graceful "(no disk, skipped)" where no -drive is attached (tb-vmm/vmm-boot stay green, unchanged)
 M21: kan-policy OK               # VERIFIED FIXED-POINT ADDITIVE-POLICY SEAM for the M17 forget/demote decision -- a Kani-proven total/bounded/monotone integer GAM (tb-encode::kancell) that may only RANK WITHIN the unchanged M17 heuristic envelope; SHIPS DORMANT (active=0). Witness: "kan: monotone=1 ovf-safe=1 q-err=0x.. bound=0x.. active=0" (the in-kernel q-err<=bound round-trip on the frozen integer table). DORMANT variant "(heuristic floor, gate-not-met)" is allowed and CONTAINS the grepped substring -> the run scripts REJECT "(no table, skipped)" and POSITIVELY REQUIRE the kan: witness with active=0; the spline is gated on a held-out trace bake-off that is a tracked follow-up
-M22: provenance OK               # the LAST cumulative marker: VERIFIED MEMORY PROVENANCE LEDGER -- a per-agent content-addressed hash-chain over M13; every mutation appends a typed ProvEntry whose 256-bit STRUCTURAL digest (Kani-proven tb-encode::prov; two domain-separated FNV-1a-64 lanes, NOT cryptographic) folds into a running chain_head; M17 forget emits a TOMBSTONE entry (deletion is provable, not silent). The selftest writes N>=3 records, demotes one via the real forget_sweep, asserts a clean inclusion proof verifies, then flips one byte of a COMMITTED entry and asserts BOTH head-mismatch AND inclusion-fail. Witness: "prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1". Head is in-RAM this milestone (M20-persisted head is a tracked successor); a "(no ledger, skipped)" variant is NEVER legitimate and the run scripts reject it. THE cumulative-tail marker both run scripts grep for
+M22: provenance OK               # VERIFIED MEMORY PROVENANCE LEDGER -- a per-agent content-addressed hash-chain over M13; every mutation appends a typed ProvEntry whose 256-bit STRUCTURAL digest (Kani-proven tb-encode::prov; two domain-separated FNV-1a-64 lanes, NOT cryptographic) folds into a running chain_head; M17 forget emits a TOMBSTONE entry (deletion is provable, not silent). The selftest writes N>=3 records, demotes one via the real forget_sweep, asserts a clean inclusion proof verifies, then flips one byte of a COMMITTED entry and asserts BOTH head-mismatch AND inclusion-fail. Witness: "prov: head=0x.. entries=0x.. tamper-caught=0x1 inclusion=0x1". Head is in-RAM this milestone (M20-persisted head is a tracked successor); a "(no ledger, skipped)" variant is NEVER legitimate and the run scripts reject it. The cumulative-tail marker from M22's landing until the M23 arc; the tail both run scripts grep for is now M28's
 ```
 
 Each line is a hard `grep` target in the per-arch run script; a missing or
@@ -461,8 +478,8 @@ Two machine-checked guarantees back the chain:
   wrong constant turns into a silent VM-entry failure — was extracted into a NEW
   pure `crates/tb-encode` (`no_std`, `#![forbid(unsafe_code)]`, host-buildable;
   `tb-hal` now CALLS it, the `vmwrite`/`read_volatile`/asm staying behind) and is
-  machine-proven by **Kani**. The suite now totals **46 `#[kani::proof]`
-  harnesses** across 11 leaves: the control-MSR adjust-legality gate (force all allowed-0 bits,
+  machine-proven by **Kani**. The suite now totals **80 `#[kani::proof]`
+  harnesses** across 18 leaves: the control-MSR adjust-legality gate (force all allowed-0 bits,
   clear all non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition),
   the CR0/CR4 fixed-bit clamp, the page-table / EPT entry encoders (address +
   flags preserved, level index < 512, EPTP well-formed), the 16-byte IPC frame
@@ -478,14 +495,19 @@ Two machine-checked guarantees back the chain:
   `0x16` HVC64) and the faulting IPA (`kani_esr_decode_total`,
   `kani_hpfar_fault_ipa`). The `.github/workflows/kani.yml` `prove-encode` job
   runs `cargo kani -p tb-encode` and **fails closed** unless every harness
-  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 46`
+  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 80`
   (`scripts/verify-encode.sh`, bumped from 15 in lockstep across the L2.1–L2.6
-  rungs and the M20/M21/M22 leaves: +5 stage-2/ESR, +1 exit-classifier, +2
+  rungs and the M20–M28 leaves: +5 stage-2/ESR, +1 exit-classifier, +2
   sysreg/DABT ISS, +1 SCTLR_EL1, +1 GICH_LR0 vIRQ, +3 SMMUv3 stage-2, +6 `blkfmt`
   durable-persistence codecs (M20), +6 `kancell` additive-policy (M21), +6 `prov`
-  ledger (M22)), then emits `V1: kani-encoders OK`. The eleven `tb-encode` leaves
-  are now `vmx`, `paging`, `ipc_frame`, `route`, `memscore`, `stage2`, `smmuv3`,
-  `el2_trap`, `blkfmt`, `kancell`, and `prov`. Each harness must be **tractable**
+  ledger (M22), +23 across the M23–M26 learning-loop / operator-transcript /
+  exit-telemetry leaves (`exp`, `explore`, `bakeoff`, `opframe`, `exittel`), +5
+  `tpsched` two-VMID scheduling (M27), and +6 `opframe_rx` operator-inbound
+  command-gate harnesses (M28, the `kani_cmd_*` suite)), then emits
+  `V1: kani-encoders OK`. The eighteen `tb-encode` leaves are now `vmx`,
+  `paging`, `ipc_frame`, `route`, `memscore`, `stage2`, `smmuv3`, `el2_trap`,
+  `blkfmt`, `kancell`, `prov`, `exp`, `explore`, `bakeoff`, `opframe`,
+  `exittel`, `tpsched`, and `opframe_rx`. Each harness must be **tractable**
   (bounded symbolic / concretized-hash inputs — the `#49` symbolic-array
   state-explosion is the documented trap) and carries a **negative control**. (The `tb-caps-core` M11 proof is the independent
   `prove-caps` job in the same workflow; neither can break the other.)
@@ -511,11 +533,11 @@ Nine CI gates across eight workflow files guard the tree:
 
 | Gate | Workflow | What it proves |
 |---|---|---|
-| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M22; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached) |
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M28; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached) |
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm`, asserting M4 + the boot-time bench (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | informational/continue-on-error — the **real** L2.0 VMX-root verdict under nested KVM (`-cpu host`), checking the chain reached `M18: evolve OK` |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain reaches `M18: evolve OK` (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the non-blocking `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
-| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 46 harnesses); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode lane has a hard timeout |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 80 harnesses); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode lane has a hard timeout |
 | **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
 | **clippy** | `clippy.yml` | static-lint `-D warnings` over the forbid-unsafe leaf crates (`tb-caps-core`/`tb-encode`/`tb-boot`) → `S0: clippy OK` |
 | **bench** | `bench.yml` | non-blocking `tb-vmm` vs Firecracker boot benchmark (BENCHMARKS Axis-A) |

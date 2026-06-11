@@ -1,6 +1,6 @@
 # TABOS Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M22 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M28 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,11 +8,11 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M27 cumulative tail is below. The authoritative, executable record is the
+M28 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M26: exit-telemetry OK` marker, then assert each milestone directly and reject the
+`M28: operator-cmd OK` marker, then assert each milestone directly and reject the
 skip/dormant variant while positively requiring its witness line.
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
@@ -117,11 +117,11 @@ skip/dormant variant while positively requiring its witness line.
   strictly-monotone `seq` + a closing `GATE_VERDICT` so a reader detects
   mutation/reorder/drop/truncation, and a canon-time held-out-leakage guard
   (Seldonian no-snoop). All four (`prov`/`exp`/`explore`+`bakeoff`/`opframe`) are
-  Kani-proven leaves over the SAME M22 fold; M25 is the cumulative-tail marker both
-  run scripts grep for, witnessed by `opframe: tx_head=.. frames=.. seq_monotone=1
+  Kani-proven leaves over the SAME M22 fold; M25 is witnessed by
+  `opframe: tx_head=.. frames=.. seq_monotone=1
   intro_bound=1 fold-verified=1 tamper-caught=1 keyed=0 oracle=HUMAN-DEFERRED-M26`
   (TX-only; structural tamper-evidence + instance binding, NOT crypto authenticity
-  and NOT that a human replied — the inbound RX/auth is the tracked M28 successor).
+  and NOT that a human replied — the inbound RX/auth half is **M28**, below).
 - **The exit-telemetry producer (§7 self-improvement) — M26.** `M26: exit-telemetry
   OK` adds the learning loop's SECOND experience producer: the EL2 (nVHE) monitor's
   guest-exit demux (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a
@@ -134,10 +134,64 @@ skip/dormant variant while positively requiring its witness line.
   (M22/M23 + M20's two-phase commit stay byte-identical). Witnessed by `exittel:
   head=.. records=.. classes=.. class-total=1 buckets-exact=1 fold-verified=1
   tamper-caught=1 signal=OBSERVATIONAL-NONCAUSAL` — the token machine-forbids claiming
-  a causal state-signal. The deferred siblings: **M27** (a two-VMID sovereign time-
-  partition scheduler, the sovereignty pillar) and **M28** (the operator INBOUND
-  channel — `opframe` RX + an enrolled-key activation command, the exogenous-oracle
-  capstone that finally lets a human command the M24 gate).
+  a causal state-signal.
+- **The sovereign time-partition scheduler (§5 scheduling) — M27.** `M27: sched OK`
+  is the sovereignty pillar's "TABOS owns time for two guests" rung, printed in the
+  L2-track position (after L2.6, before M19): the EL2 (nVHE) monitor arms TWO
+  distinct stage-2 roots (VMID 0 + 1) and alternates two EL1 guest stubs in a fixed
+  two-slot major frame, each bumping a DISTINCT per-VMID MMIO forward-progress cell
+  (a guest cannot fake a non-trapping store), with every `SchedDecision` folded into
+  a tamper-evident `sched_head` via the M22 fold — the slot-successor /
+  frame-conservation / decision-codec math is the verified `tb-encode::tpsched`
+  leaf. **Shipped as M27a**, the cooperative HVC-yield green floor, witnessed by
+  `sched: head=.. frames=.. vmids=0x2 both-progressed=1 order-honored=1
+  fold-verified=1 tamper-caught=1 frame-conserved=1 timing=COOPERATIVE-HVC-YIELD
+  realtime=NOT-CLAIMED` — the tokens machine-forbid impersonating M27b's real-timer
+  claim or any real-time/schedulability guarantee; the real-CNTHP timer-preemption
+  upgrade (**M27b**, #84) is the named next milestone.
+- **The operator INBOUND channel (§7.5 human approval, §9) — M28, the
+  exogenous-oracle CAPSTONE.** `M28: operator-cmd OK` is the NEW cumulative tail
+  marker (printed after M26; M27 stays mid-chain): the RX dual of M25's transcript —
+  a typed, fixed-width, injective `CmdFrame` over serial RX
+  (`tb-encode::opframe_rx`) by which a human holding TWO enrolled credentials
+  answers the OS's freshness challenge and submits a dual-authorized `ACTIVATE_CMD`
+  bound to the live M22 head — the channel that finally lets a human command the
+  M24 gate. The gate is MACHINE-PROVEN: the conjunctive verdict core is the pure,
+  buffer-free/hash-free
+  `opframe_rx::verify_decoded(frame, expected_nonce, live_head, mac_ok)`, to which
+  `decode_and_verify` delegates its verdict verbatim; Kani drives it fully
+  symbolically — `RejectStale` iff echo ≠ challenge, `RejectWrongHead` iff the
+  bound head ≠ a fully-symbolic live head, `RejectSingleCred` iff
+  `cred_a == cred_b`, `RejectBadMac` iff distinct-creds AND `!mac_ok`, and `Accept`
+  IFF every conjunct holds (the Accept-iff-all theorem), plus kind-dominance
+  (`NotActivate`) — with the negative controls MUTATION-TESTED (deleting each
+  reject branch → VERIFICATION FAILED ×3), while the wrapper's buffer/MAC plumbing
+  is host-tested (all 7 verdict arms, run under the Miri CI lane) plus a boot
+  self-test. Witness: `opcmd: challenge=<hex16> accepted=1 stale-rejected=1
+  wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1 kan_active=0
+  mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY`, whose machine-emitted
+  HONESTY TOKENS the run scripts enforce (overclaim words are rejected):
+  `mac=KEYED-NONCRYPTO` — the MAC is a NESTED keyed-FNV envelope
+  (`cmd_hash(cmd_hash(cmd_hash(key_a)||cmd_hash(key_b))||cmd_hash(canon))[..16]`),
+  genuinely keyed by two 256-bit creds but NOT cryptographic (FNV is not
+  collision/preimage resistant); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in
+  test key, NOT a human or an enrolment; `kan_active=0` — an Accept is
+  NECESSARY-NOT-SUFFICIENT (`KAN_ACTIVE` is const false; M24's statistical bar
+  still gates). Replay scope, honestly: the verifier is pure + stateless —
+  per-EPOCH staleness rejection (RejectStale for a different challenge epoch), NOT
+  one-shot per-challenge nonce consumption (an identical valid wire re-verifies
+  within the same epoch). A pre-merge adversarial review (4 independent skeptics +
+  a merge-verdict synthesis) confirmed the core sound and forced two honesty fixes
+  before merge (the `verify_decoded` extraction; the one-shot de-overclaim above).
+  Named successors (tracked, not blockers): `mac=KEYED-CRYPTO` (a verified real
+  keyed hash), a real enrolment ceremony, one-shot nonce consumption
+  (rotate-on-accept in the stateful seam), the pending-flag→M24 activation seam
+  (the accepted command is today fully inert), and a trustworthy freshness clock.
+  With M28 the loop the four pillars were built for is CLOSED — memory (M20–22) ·
+  learning (M23–24 + the M26 producer) · communication (OUTBOUND M25 + INBOUND
+  M28) · sovereignty (M27) — record (M23) → honestly-refuse (M24) →
+  surface-to-human (M25) → record-workload (M26) → schedule (M27) →
+  RECEIVE-HUMAN-COMMAND (M28).
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the
@@ -161,7 +215,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 17 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 18 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -181,10 +235,16 @@ ring + replay-determinism, reusing the M22 fold), `explore` + `bakeoff` (the
 label, the partial-id lower bound, the one-shot HCPI gate), `opframe` (the
 **M25** operator-transcript codec: injective length-prefixed frame, the held-out-
 leakage guard, strict-monotone seq, intro-binding, and tail-truncation detection,
-reusing the M22 fold), and `exittel` (the **M26** EL2 exit-telemetry codec: the
+reusing the M22 fold), `exittel` (the **M26** EL2 exit-telemetry codec: the
 reused L2.2 `classify_exit` + a no-float log2-bucket histogram + a fixed-width
-injective record + the M22 fold reused, PRODUCER-only). `scripts/verify-encode.sh`
-pins **`EXPECTED_HARNESSES=69`**
+injective record + the M22 fold reused, PRODUCER-only), `tpsched` (the **M27**
+two-VMID time-partition scheduler math: the round-robin slot successor, frame
+conservation, and the injective `SchedDecision` codec, the M22 fold reused), and
+`opframe_rx` (the **M28** operator-command RX codec — the RX dual of `opframe`: a
+fail-closed injective `CmdFrame` decode plus the pure `verify_decoded` conjunctive
+verdict core, proven Accept-iff-all over stale-nonce / wrong-head / single-cred /
+bad-MAC rejection, plus key forward-evolution). `scripts/verify-encode.sh`
+pins **`EXPECTED_HARNESSES=80`**
 and fails closed unless that many harnesses verify and zero fail, then emits
 `V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
 the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
@@ -194,7 +254,7 @@ since the `prove-encode` lane has a hard timeout.
 
 *CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
-booting both arches under pure QEMU-TCG to the final `M26: exit-telemetry OK` marker
+booting both arches under pure QEMU-TCG to the final `M28: operator-cmd OK` marker
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
@@ -204,7 +264,7 @@ KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
 QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
 **kani** (two jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and
-`prove-encode` over `tb-encode` = 74 harnesses); **miri** (the Tier-0 dynamic UB
+`prove-encode` over `tb-encode` = 80 harnesses); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI
