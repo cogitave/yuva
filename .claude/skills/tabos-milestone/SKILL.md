@@ -1,6 +1,6 @@
 ---
 name: tabos-milestone
-description: The end-to-end pipeline for shipping ONE TABOS kernel milestone (the cumulative M0..M27 + L2.0..L2.6 chain, or any new milestone from a research-first proposal). Use whenever implementing/continuing a TABOS milestone so NO step — research proposal, code, the tb-encode verified-leaf, adversarial review, both-arch build+boot (CARGO_INCREMENTAL=0), anti-hollow-pass guards, benchmark, every doc/script update, AND the PR-loop landing — is ever skipped. Invoke at the start of each milestone increment.
+description: The end-to-end pipeline for shipping ONE TABOS kernel milestone (the cumulative M0..M28 + L2.0..L2.6 chain, or any new milestone from a research-first proposal). Use whenever implementing/continuing a TABOS milestone so NO step — research proposal, code, the tb-encode verified-leaf, adversarial review, both-arch build+boot (CARGO_INCREMENTAL=0), anti-hollow-pass guards, benchmark, every doc/script update, AND the PR-loop landing — is ever skipped. Invoke at the start of each milestone increment.
 ---
 
 # TABOS milestone pipeline
@@ -60,11 +60,14 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
   kernel path) + Kani harnesses + the Miri gate. tb-hal CALLS the leaf byte-identically.
 - **No float** on any kernel path (fixed-point only).
 - **Cumulative DoD**: each milestone prints an EXACT serial marker; the kernel runs
-  M0..latest every boot. The current tail is **`M26: exit-telemetry OK`** — the marker
-  both run scripts grep for. (Chain: M0…M18, M18.1/.2, then on aarch64 L2.0…L2.6,
-  then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT], M22 provenance, then
-  the learning-loop arc M23 experience, M24 bakeoff [honest gate, gate-not-met], M25
-  operator-transcript, M26 exit-telemetry [PRODUCER-only], then on aarch64 M27 sovereign-scheduler [two-VMID, M27a cooperative].)
+  M0..latest every boot. The current tail is **`M28: operator-cmd OK`** — the marker
+  both run scripts grep for, printed after M26. (Chain: M0…M18, M18.1/.2, then on
+  aarch64 L2.0…L2.6 and M27 sovereign-scheduler [two-VMID, M27a cooperative —
+  mid-chain, before M19], then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT],
+  M22 provenance, then the learning-loop arc M23 experience, M24 bakeoff [honest gate,
+  gate-not-met], M25 operator-transcript, M26 exit-telemetry [PRODUCER-only], then
+  M28 operator-cmd [the INBOUND dual of M25 — closes the loop; an Accept is
+  necessary-NOT-sufficient: kan_active=0, M24's statistical bar still gates].)
 - **Two arches** (x86_64 + aarch64) and **multiple boot paths** (PVH/microvm, tb-boot/
   tb-vmm, KVM/TCG) must stay green.
 - **The build + boot are the arbiter.** A reviewer that says "sound" is not enough;
@@ -101,8 +104,9 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      current state (read the files).
 
 4. **Add the tb-encode verified leaf (when it ships value-computation).** Add a pure
-   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves: vmx, paging, ipc_frame,
-   route, memscore, stage2, smmuv3, el2_trap, blkfmt, kancell, prov). Add `#[kani::proof]`
+   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves — 18: vmx, paging,
+   ipc_frame, route, memscore, stage2, smmuv3, el2_trap, blkfmt, kancell, prov, exp,
+   explore, bakeoff, opframe, exittel, tpsched, opframe_rx). Add `#[kani::proof]`
    harnesses in `proofs.rs`, each:
    - **TRACTABLE — and MEASURED locally before pushing.** Run `cargo kani -p tb-encode
      --harness <name>` (WSL) on EVERY new/changed harness; the full gate is
@@ -118,11 +122,29 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      digest → 3s, and the whole gate then verifies in ~6 min locally.)
    - carrying a **NEGATIVE CONTROL** (an identity/constant/commutative variant the
      harness must REJECT).
-   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **74**) AND the
-     `kani.yml` "currently 74" comment **in LOCKSTEP** — a vacuous/deleted harness must
+   - **MUTATION-TESTED when it gates.** Every gate-level harness (one whose green
+     light admits a security/acceptance verdict) must be proven non-vacuous by
+     MUTATION: delete/neutralize the gated reject branch and the harness MUST go RED
+     (`VERIFICATION FAILED`). Tautology is the sneaky form of vacuity — a harness
+     that re-derives its expectation from the same predicate the code uses passes
+     forever, even over a broken gate. (M28: deleting each reject branch in turn →
+     VERIFICATION FAILED ×3.)
+   - **Extract the decision core when Kani cannot drive the wrapper.** If the
+     wrapper's buffers/arrays blow the proof up (the `#49` trap again), do NOT
+     imitate the wrapper with a weakened predicate harness — extract the verdict as
+     a PURE buffer-free/hash-free function the wrapper delegates to VERBATIM, and
+     prove THAT fully symbolically; the wrapper's buffer/MAC plumbing is then
+     host-tested (run under the Miri CI lane) + boot self-tested. (M28:
+     `opframe_rx::verify_decoded(frame, expected_nonce, live_head, mac_ok)` is the
+     proven core — each reject arm iff its condition, plus the Accept-iff-all-conjuncts
+     theorem over a fully-symbolic live head — and `decode_and_verify` delegates its
+     verdict to it verbatim; all 7 verdict arms of the wrapper are host-tested.)
+   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **80**) AND the
+     `kani.yml` "currently 80" comment **in LOCKSTEP** — a vacuous/deleted harness must
      fail the gate. The kani lane has 2 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
-     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 74
-     harnesses, marker `V1: kani-encoders OK`). Never `--workspace` (drags tb-hal asm into CBMC).
+     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 80
+     harnesses, marker `V1: kani-encoders OK`, 45-min hard timeout). Never `--workspace`
+     (drags tb-hal asm into CBMC).
 
 5. **Build — the real arbiter (CARGO_INCREMENTAL=0).** `export CARGO_INCREMENTAL=0`
    then `cargo kbuild` BOTH arches. This is THE CI discriminator: dtolnay/rust-toolchain
@@ -134,7 +156,7 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
 
 6. **Boot + assert + regress (anti-hollow-pass).** Run `scripts/run-x86_64.sh` and
    `scripts/run-aarch64.sh`; confirm the new marker AND all prior markers (cumulative
-   regression — on aarch64 that is M4, L2.0..L2.6 in order, M19, M20, M21, M22).
+   regression — on aarch64 that is M4, L2.0..L2.6 in order, M27, then M19..M26, M28).
    - Update `MARKER=` to the new tail in `run-x86_64.sh`, `run-aarch64.sh`,
      `run-vmm-x86_64.sh` (tb-vmm stops at M19 because M20/M22 take the graceful-skip
      path with no disk/ledger).
@@ -144,8 +166,22 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      The guard MUST reject the illegitimate skip variant AND positively require the real
      round-trip WITNESS line (M20: `persist: gen=.. records=.. replayed=..`; M21:
      `kan: monotone=1 ovf-safe=1 q-err=.. bound=.. active=0`; M22: `prov: head=..
-     tamper-caught=1 inclusion=1`). Then **negative-test that the guard FIRES** (force
-     the skip path and confirm the lane goes red).
+     tamper-caught=1 inclusion=1`; M28: `opcmd: challenge=.. accepted=1
+     stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1
+     kan_active=0 mac=KEYED-NONCRYPTO oracle=SIMULATED-ENROLLED-KEY`). Then
+     **negative-test that the guard FIRES** (force the skip path and confirm the lane
+     goes red).
+   - **HONESTY TOKENS in the witness — never overclaim.** Where a capability is
+     partial, the machine-emitted witness must SAY so, and the run scripts must
+     require the token AND reject overclaim words. M28's tokens, exactly:
+     `mac=KEYED-NONCRYPTO` — the MAC is a nested keyed-FNV envelope, genuinely keyed
+     by two 256-bit creds but NOT cryptographic (FNV is not collision/preimage
+     resistant); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in test key, NOT a
+     human/enrolment; `kan_active=0` — an Accept is necessary-NOT-sufficient
+     (KAN_ACTIVE is const false; M24's statistical bar still gates). State scope
+     honestly too: M28's verifier is pure + stateless — per-EPOCH staleness rejection,
+     NOT one-shot per-challenge nonce consumption (rotate-on-accept in the stateful
+     seam is a named successor, not a claim).
 
 7. **Benchmark the boot.** `ITER=8 bash scripts/bench-boot.sh x86_64` and `aarch64`.
    If the milestone changed boot characteristics (image size, new boot-path init work,
@@ -156,12 +192,19 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
 8. **Verify the tree INDEPENDENTLY on a branch.** Do NOT trust the agent's manifest:
    build + boot (CARGO_INCREMENTAL=0, dual-arch) + the leaf tests + clippy +
    `verify-encode.sh` harness-count yourself, and confirm the PRIOR chain unregressed.
-   The build+CI is the arbiter.
+   The build+CI is the arbiter. On HIGH-OVERCLAIM-RISK milestones (security gates,
+   "proven"/"authorized" claims), additionally run a pre-merge **ADVERSARIAL
+   VERIFICATION** workflow: independent skeptic agents, one per claim, + a
+   merge-verdict synthesis. It pays for itself — M28's four skeptics (mac-honesty /
+   gate-bypass / necessary-not-sufficient / harness-vacuity) confirmed the core sound
+   AND found two honesty defects (vacuous gate harnesses; a one-shot replay
+   overclaim), both FIXED before merge (the `verify_decoded` extraction + the
+   replay-scope doc honesty).
 
 9. **Align ALL relevant docs (never skip — ENGLISH ONLY).**
    - `docs/proposals/Mn-*.md` (+ `docs/research/`) — the proposal that drove the work.
    - `docs/ROADMAP-V2.md` §6 status table → mark done; advance the chain framing past
-     M22 + L2.6; refine any downstream milestone the work changed.
+     M28 + L2.6; refine any downstream milestone the work changed.
    - `docs/MILESTONES.md` — extend the marker sequence + summary table.
    - `docs/ARCHITECTURE.md` — update the as-built map.
    - `docs/BENCHMARKS.md` — boot numbers (Step 7).
