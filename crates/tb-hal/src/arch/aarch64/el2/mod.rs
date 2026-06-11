@@ -542,6 +542,13 @@ const HVC_SCHED_DONE: u64 = 13;
 /// the next VMID's root + fold a SchedDecision, and resume the next guest". The
 /// cooperative substitute for M27b's CNTHP timer preemption.
 const HVC_SCHED_YIELD: u64 = 14;
+/// M27b: the kernel's CNTHP SMOKE HVC immediate (`hvc #15`) -- "arm the CNTHP
+/// window with NO scheduler coupling (HCR = RW|IMO, no VM, no VTTBR), eret into
+/// a trivial EL1 spin stub, and let the 0x480 timer handler count
+/// `K_SMOKE_TICKS` asynchronous IRQs (re-arm-BEFORE-EOI each time), then disarm
+/// teardown-first + unwind with the count". Separates "the IRQ fires + no
+/// storm" from "the scheduler is correct" (plan Step 4's mandated smoke).
+const HVC_SCHED_TIMER_SMOKE: u64 = 15;
 
 // M27a FAIL codes (distinct nonzero; any -> `SchedProof::Faulted` -> red marker,
 // rendered WITHOUT a "sched OK" substring so the run grep stays fail-closed).
@@ -567,6 +574,22 @@ const FAIL_SCHED_FRAME: u64 = 0x0000_05CE_0000_0007;
 /// The bounded major-frame count was not reached (too few yields observed -- the
 /// orchestrator ended early or a guest hung instead of yielding).
 const FAIL_SCHED_SHORT: u64 = 0x0000_05CE_0000_0008;
+/// M27b: the 0x480 handler acked a `GICC_IAR` INTID that is NOT the CNTHP PPI
+/// (26) -- a wrong/spurious source. NEVER silently EOI-and-resume (fail loud).
+const FAIL_SCHED_TIMER_BAD_INTID: u64 = 0x0000_05CE_0000_0009;
+/// M27b: `CNTHP_CTL_EL2.ISTATUS` did NOT clear after the TVAL re-arm -- an EOI
+/// now would re-assert the level-sensitive PPI instantly (the storm precursor,
+/// plan risk #1). Fail loud instead of wedging.
+const FAIL_SCHED_TIMER_ISTATUS: u64 = 0x0000_05CE_0000_000A;
+/// M27b: the `eoi_count` HARD cap tripped -- an IRQ STORM, surfaced as a FAST
+/// red instead of the 240 s rc=124 wedge (the mandatory defensive cap).
+const FAIL_SCHED_TIMER_STORM: u64 = 0x0000_05CE_0000_000B;
+/// M27b: 0x480 was entered while NO timer window was armed (mode OFF) -- a
+/// stray routing leak (IMO left set?). Fail loud, never a silent resume.
+const FAIL_SCHED_TIMER_UNARMED: u64 = 0x0000_05CE_0000_000C;
+/// M27b: the smoke round-trip unwound clean but the tick count != K_SMOKE_TICKS
+/// (the facade-side recount of the x1 witness disagreed).
+const FAIL_SCHED_SMOKE_COUNT: u64 = 0x0000_05CE_0000_000D;
 
 /// M27a: the per-slot tick budgets of the fixed two-slot major frame (the
 /// `FramePlan.slot_ticks`). DISTINCT non-zero budgets so the conservation witness
@@ -584,6 +607,7 @@ const M27_VMID1: u16 = 1;
 // error). The HVC immediates are distinct from every existing rung's (0..11) and
 // from each other; the FAIL codes are distinct nonzero.
 const _: () = assert!(HVC_SCHED_ARM == 12 && HVC_SCHED_DONE == 13 && HVC_SCHED_YIELD == 14);
+const _: () = assert!(HVC_SCHED_TIMER_SMOKE == 15); // the next free imm after #14
 const _: () = assert!(M27_SLOT0_TICKS != 0 && M27_SLOT1_TICKS != 0);
 const _: () = assert!(M27_SLOT0_TICKS != M27_SLOT1_TICKS); // a non-trivial conserved sum
 const _: () = assert!(M27_VMID0 != M27_VMID1); // two DISTINCT VMIDs
@@ -591,6 +615,12 @@ const _: () = assert!(FAIL_SCHED_BUILD != 0 && FAIL_SCHED_VMID0_STARVED != 0);
 const _: () = assert!(FAIL_SCHED_VMID1_STARVED != 0 && FAIL_SCHED_ORDER != 0);
 const _: () = assert!(FAIL_SCHED_FOLD != 0 && FAIL_SCHED_TAMPER != 0);
 const _: () = assert!(FAIL_SCHED_FRAME != 0 && FAIL_SCHED_SHORT != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_BAD_INTID != 0 && FAIL_SCHED_TIMER_ISTATUS != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_STORM != 0 && FAIL_SCHED_TIMER_UNARMED != 0);
+const _: () = assert!(FAIL_SCHED_SMOKE_COUNT != 0);
+const _: () = assert!(FAIL_SCHED_TIMER_BAD_INTID != FAIL_SCHED_SHORT); // fresh codes
+const _: () = assert!(FAIL_SCHED_TIMER_ISTATUS != FAIL_SCHED_TIMER_STORM);
+const _: () = assert!(FAIL_SCHED_TIMER_UNARMED != FAIL_SCHED_SMOKE_COUNT);
 
 // ===========================================================================
 // The entry-EL flag (written ONCE by `_start`, caches off; read here).
@@ -1274,6 +1304,44 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             // suspenders end path). Teardown-FIRST, then the verdict.
             m27_done_verdict(esr);
         }
+        HVC_SCHED_TIMER_SMOKE => {
+            // imm == 15: the M27b CNTHP SMOKE bootstrap -- "the IRQ fires" with
+            // NO scheduler coupling (plan Step 4's mandated smoke-first). The
+            // stub entry rides the frame: x3 = the EL1 spin-stub PC (the
+            // HVC_VGIC_ARM gpr[3] convention). Reset the eoi count, mark the
+            // SMOKE mode, arm the CNTHP window with HCR = RW|IMO ONLY (no VM,
+            // no VTTBR -- the kernel's live stage-1 keeps running untranslated
+            // by stage-2), and eret into the spin stub. The 0x480 handler then
+            // counts K_SMOKE_TICKS asynchronous preemptions of the spinning EL1
+            // (re-arm-BEFORE-EOI each tick), disarms teardown-first, and
+            // unwinds back here through the resident B0 with x0 = 0, x1 = the
+            // tick count. NOTE the guest erets with PSTATE.I masked (SPSR
+            // 0x3C5) -- irrelevant: an IRQ targeted at a HIGHER EL is not
+            // masked by the lower EL's PSTATE.I (DDI 0487 D1.13.4).
+            // SAFETY: `frame` == &B0 on the single-accessor monitor stack;
+            // gpr[3] was framed by SAVE_CONTEXT_EL2 and carries the HVC #15 arg.
+            let stub = unsafe { (*frame).gpr[3] };
+            super::tpsched_hal::reset_eoi();
+            super::tpsched_hal::set_timer_mode(super::tpsched_hal::TMODE_SMOKE);
+            super::tpsched_hal::arm_cnthp_window_el2(super::timer::tick_period(), false);
+            // SAFETY: reset SP_EL2 = &B0, program ELR_EL2/SPSR_EL2 for an EL1h
+            // entry at the identity-mapped spin stub, `eret`. `noreturn`:
+            // control leaves EL2 for the spinning EL1 and re-enters ONLY via
+            // the CNTHP IRQ at 0x480 (the first async EL2 entry ever).
+            unsafe {
+                asm!(
+                    "mov sp, {b0}",
+                    "msr elr_el2,  {guest}",
+                    "msr spsr_el2, {spsr}",
+                    "isb",
+                    "eret",
+                    b0    = in(reg) frame,
+                    guest = in(reg) stub,
+                    spsr  = in(reg) SPSR_EL1H_DAIF,
+                    options(noreturn),
+                );
+            }
+        }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.
             el2_return_to_kernel(FAIL_BAD_IMM, other);
@@ -1798,6 +1866,78 @@ fn el2_abort_retry(frame: *mut Frame) -> ! {
 }
 
 // ===========================================================================
+// M27b: the EL2 CNTHP timer-IRQ handler -- the FIRST asynchronous IRQ ever taken
+// at EL2 in this codebase (the 0x480 Lower-EL-AArch64 IRQ slot; reachable ONLY
+// while the armed window holds HCR_EL2.IMO=1). SHALLOW by mandate: no alloc, no
+// deep calls -- volatile GIC MMIO + CNTHP sysregs + the SchedCtx cells only (the
+// EL2 stack is 32 KiB; the frame sits one below the resident B0). The
+// storm-killer order is LAW (plan risk #1): verify IAR==26 -> re-arm
+// CNTHP_TVAL BEFORE GICC_EOIR -> read back ISTATUS clear -> EOI -> hard
+// eoi-count cap. Every fail path disarms teardown-first THEN unwinds loud.
+// ===========================================================================
+// (a) PRE : entered at EL2h from the 0x480 vector after SAVE_CONTEXT_EL2 while
+//           a CNTHP window is armed (SMOKE mode in step A); `frame` = SP_EL2 =
+//           the interrupted lower-EL context (one frame below the resident B0).
+//           POST: never returns -- `el2_abort_retry(frame)` resumes the
+//           interrupted EL1 UNCHANGED (an async IRQ resumes AT the interrupted
+//           instruction; ELR untouched), or the done/fail paths disarm
+//           teardown-first and unwind to the kernel through B0.
+// (b) ABI : `extern "C"`, `#[no_mangle]` so `el2_vectors.rs` can `bl` it. `-> !`.
+// (c) TEST: scripts/run-aarch64.sh -- the smoke (K ticks counted, clean disarm)
+//           runs INSIDE sched_selftest before the cooperative round-trip; the
+//           unchanged "M27: sched OK" + witness line prove zero regression.
+/// Dispatch one CNTHP timer IRQ taken at EL2 (0x480): ack, verify, re-arm
+/// BEFORE EOI, count against the hard cap, then resume / finish / fail-loud.
+#[no_mangle]
+pub(super) extern "C" fn aarch64_el2_timer_handler(frame: *mut Frame) -> ! {
+    // (1) ACK: the GICC_IAR read IS the acknowledge (GICv2 IHI 0048B section
+    // 4.4.4). Hard-verify the INTID is the CNTHP PPI -- anything else (incl. a
+    // 1020..1023 spurious) is a wiring/routing bug surfaced LOUD, never a
+    // silent EOI-and-resume.
+    let iar = super::timer::gicc_read(super::timer::GICC_IAR);
+    let intid = iar & super::timer::GIC_INTID_MASK;
+    if intid != super::tpsched_hal::CNTHP_PPI {
+        super::tpsched_hal::disarm_cnthp_window_el2();
+        super::tpsched_hal::disarm_sched_el2();
+        el2_return_to_kernel(FAIL_SCHED_TIMER_BAD_INTID, u64::from(iar));
+    }
+    let mode = super::tpsched_hal::timer_mode();
+    if mode == super::tpsched_hal::TMODE_SMOKE {
+        // (2) RE-ARM BEFORE EOI (the #1 storm killer): push the compare into
+        // the future -- which drops the level-sensitive ISTATUS -- and read it
+        // back CLEAR before the EOI may lower the running priority.
+        if !super::tpsched_hal::cnthp_rearm_checked(super::timer::tick_period()) {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_ISTATUS, u64::from(iar));
+        }
+        // (3) EOI: end the interrupt at the GIC (running priority drops; the
+        // line is already de-asserted by the re-arm, so no immediate re-entry).
+        super::timer::gicc_write(super::timer::GICC_EOIR, iar);
+        // (4) COUNT + the hard cap: a storm becomes a fast red, never a wedge.
+        let n = super::tpsched_hal::note_eoi();
+        if n > super::tpsched_hal::EOI_HARD_CAP {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(FAIL_SCHED_TIMER_STORM, n);
+        }
+        // (5) K smoke ticks observed -> disarm TEARDOWN-FIRST and unwind clean
+        // (x0 = 0, x1 = the tick count) through the resident B0, exactly the
+        // HVC_SCHED_DONE unwind semantics.
+        if n >= super::tpsched_hal::K_SMOKE_TICKS {
+            super::tpsched_hal::disarm_cnthp_window_el2();
+            el2_return_to_kernel(0, n);
+        }
+        // (6) Window still open: resume the interrupted EL1 spin UNCHANGED
+        // (ELR untouched -- an async IRQ resumes AT the interrupted insn).
+        el2_abort_retry(frame);
+    }
+    // Mode OFF (or unknown): 0x480 fired with no armed window -- a routing leak
+    // (IMO set outside a window?). Disarm everything + fail LOUD.
+    super::tpsched_hal::disarm_cnthp_window_el2();
+    super::tpsched_hal::disarm_sched_el2();
+    el2_return_to_kernel(FAIL_SCHED_TIMER_UNARMED, mode);
+}
+
+// ===========================================================================
 // The EL2 fatal-vector handler: any non-(Lower-EL-sync) slot. Surfaces a FAIL by
 // unwinding to the kernel (never a silent loop / hang).
 // ===========================================================================
@@ -2009,12 +2149,41 @@ extern "C" fn m27_guest1_stub() -> ! {
 }
 
 // ===========================================================================
+// M27b: the SMOKE-window EL1 spin stub -- the minimal asynchronous-preemption
+// target. Unlike every other stub it performs NO store, NO hvc: it only spins,
+// and ONLY the CNTHP IRQ (taken at EL2's 0x480) ever wrests control from it.
+// ===========================================================================
+// (a) PRE : reached only by the `HVC #15` smoke arm's eret, at EL1h (SPSR_EL2 =
+//           0x3C5, PSTATE.I masked -- irrelevant: the PPI targets EL2 via IMO
+//           and a higher-EL-targeted IRQ is not masked by EL1's PSTATE.I, DDI
+//           0487 D1.13.4) under the kernel's live stage-1 MMU (HCR_EL2.VM=0 --
+//           NO stage-2; the smoke has no scheduler coupling). VA == PA:
+//           identity-mapped EL1-executable kernel `.text`. POST: preempted
+//           K_SMOKE_TICKS times by the 0x480 handler (each resume re-enters the
+//           loop UNCHANGED); after the K-th tick the monitor disarms + unwinds
+//           to the kernel and this stub never runs again.
+// (b) ABI : `#[unsafe(naked)]` -- one PC-relative branch, NO stack, NO GPR use.
+// (c) TEST: scripts/run-aarch64.sh -- the smoke phase inside sched_selftest
+//           must return x0 == 0, x1 == K_SMOKE_TICKS before the cooperative
+//           round-trip runs; "M27: sched OK" stays byte-identical.
+/// M27b smoke target: spin at EL1 until the CNTHP PPI preempts into EL2.
+#[unsafe(naked)]
+extern "C" fn m27_smoke_spin_stub() -> ! {
+    naked_asm!(
+        "1: b 1b", // the CNTHP IRQ (-> EL2 0x480) is the ONLY exit from this loop
+    )
+}
+
+// ===========================================================================
 // M27a: the safe facade: sched_selftest() -> SchedProof.
 // ===========================================================================
 // (a) PRE : called once from the kernel at the M27 slot (right after L2.6, before
 //           M19), at EL1h, with the resident monitor armed (BOOTED_AT_EL2 == 1).
-//           POST: built TWO distinct stage-2 roots (VMID 0 + 1) + spliced the two
-//           stage-1 device blocks AT EL1, issued ONE `HVC #12`, drove the
+//           POST: FIRST drove the M27b CNTHP SMOKE round-trip (`HVC #15` ->
+//           K_SMOKE_TICKS async EL2 IRQs -> clean disarm; zero scheduler
+//           coupling), THEN built TWO distinct stage-2 roots (VMID 0 + 1) +
+//           spliced the two stage-1 device blocks AT EL1, issued ONE `HVC #12`,
+//           drove the
 //           arm -> [slot0 store+yield -> world-switch -> slot1 store+yield ->
 //           world-switch] x K -> teardown-FIRST -> verdict -> unwind round-trip,
 //           and returns the outcome enum. The kernel resumes here at EL1 with the
@@ -2035,6 +2204,41 @@ pub fn sched_selftest() -> crate::SchedProof {
     // Graceful skip: no resident monitor -> issuing HVC would fault, so don't.
     if BOOTED_AT_EL2.load(Ordering::Acquire) != 1 {
         return SchedProof::Unavailable;
+    }
+
+    // --- M27b SMOKE PHASE (banked separately; plan Step 4's "smoke `IRQ
+    // works` BEFORE wiring the VMID switch"): prove the FIRST async IRQ at EL2
+    // fires, counts K_SMOKE_TICKS with re-arm-before-EOI, never storms, and
+    // disarms teardown-first -- with ZERO scheduler coupling (no stage-2, no
+    // VTTBR, no SchedCtx decision state). EL1 IRQs are masked across the
+    // window (the proven aL2.5 IMO-window discipline); the CNTHP PPI targets
+    // EL2 and is not maskable by EL1's PSTATE.I. A smoke fail aborts the M27
+    // rung loud BEFORE the cooperative run, cleanly separating "IRQ plumbing
+    // broke" from "scheduler broke".
+    let smoke_stub = m27_smoke_spin_stub as *const () as u64;
+    let daif_smoke = super::timer::local_irq_save();
+    let smoke_out: u64;
+    let smoke_ticks: u64;
+    // SAFETY: the resident EL2 monitor catches `hvc #15`, arms the CNTHP
+    // window (HCR = RW|IMO only), and erets into the spin stub; the 0x480
+    // handler counts K async ticks then disarms + unwinds here with x0 =
+    // outcome, x1 = the tick count, every other kernel register restored from
+    // B0. x3 carries the stub entry in; clobber_abi("C") covers the rest.
+    unsafe {
+        asm!(
+            "hvc #15",
+            inout("x0") 0u64 => smoke_out,
+            inout("x1") 0u64 => smoke_ticks,
+            in("x3") smoke_stub,
+            clobber_abi("C"),
+        );
+    }
+    super::timer::local_irq_restore(daif_smoke);
+    if smoke_out != 0 {
+        return SchedProof::Faulted { code: smoke_out };
+    }
+    if smoke_ticks != super::tpsched_hal::K_SMOKE_TICKS {
+        return SchedProof::Faulted { code: FAIL_SCHED_SMOKE_COUNT };
     }
 
     // Build TWO distinct stage-2 roots (VMID 0 + 1). Each is the GiB0+GiB1
