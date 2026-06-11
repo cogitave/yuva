@@ -124,17 +124,19 @@
 //!  * [`prov`] -- the M22 memory-PROVENANCE LEDGER math: the canonical, injective,
 //!    LENGTH-PREFIXED [`prov::ProvEntry`] encoder (`prov::canon` -- fixed field
 //!    order + an explicit parent-count prefix so distinct entries -> distinct
-//!    bytes), the 256-bit STRUCTURAL digest (`prov::prov_hash` -- four domain-
-//!    separated, already-Kani-proven `blkfmt::fnv1a64` lanes + a length domain-
-//!    separator, NOT cryptographic), the running per-agent fold step
+//!    bytes), the 256-bit digest (`prov::prov_hash` -- BLAKE2s-256 unkeyed via
+//!    the verified M29 [`khash`] leaf since M29 stage C; the retired FNV-era
+//!    structural digest's "NOT cryptographic" concession closed -- primitive
+//!    security `sec=ASSUMED-FROM-LITERATURE`), the running per-agent fold step
 //!    (`prov::chain_mix` -- `head' = mix(head, entry_id)`, tamper-sensitive in
 //!    every input byte) and the inclusion verifier (`prov::verify_inclusion` --
 //!    accept IFF `recompute(leaf, siblings) == head`) behind a per-agent append-
 //!    only hash-chain ledger over the M13 substrate. `tb-hal` CALLS these next to
 //!    the write/forget/skill-admit mutation sites; the boot self-test proves any
 //!    single-byte tamper of a committed entry invalidates the head AND its
-//!    inclusion proof. Structural tamper-evidence only -- a crypto hash + signed
-//!    root is a tracked successor.
+//!    inclusion proof. Cryptographic (khash/BLAKE2s) tamper-evidence since
+//!    M29-C, assumption-conditional (`sec=ASSUMED-FROM-LITERATURE`) -- a SIGNED
+//!    root (authenticity) remains the tracked successor.
 //!  * [`exp`] -- the M23 verified EXPERIENCE CODEC: the fixed-field, FIXED-WIDTH
 //!    injective [`exp::ExperienceRecord`] encoder (`exp::canon` / `exp::decode` /
 //!    `exp::canon_len` -- every field at a fixed offset, so distinct records ->
@@ -153,7 +155,8 @@
 //!    `exp::xp_chain_mix` / `exp::xp_verify_inclusion` / `exp::xp_head_witness` --
 //!    NO new fold math). `tb-hal` CALLS these next to the M17 forget/recall sites;
 //!    `KAN_ACTIVE` stays `false` (the shadow changes zero demotes). Claims ONLY
-//!    replay-determinism + structural tamper-evidence -- NOT policy validity
+//!    replay-determinism + tamper-evidence (cryptographic since M29-C,
+//!    `sec=ASSUMED-FROM-LITERATURE`) -- NOT policy validity
 //!    (deterministic logging -> degenerate propensity; validity is M24's burden).
 //!  * [`exittel`] -- the M26 verified EL2 EXIT-TELEMETRY codec: turns the already-
 //!    Kani-proven [`el2_trap::classify_exit`] guest-exit demux into a BOUNDED, no-float,
@@ -169,9 +172,9 @@
 //!    whose decisions change the future exit distribution (the confounding loop the M24
 //!    adversary named is structurally avoided); the marker emits
 //!    `signal=OBSERVATIONAL-NONCAUSAL` so it cannot claim a causal state-signal. Claims
-//!    injective bounded encoding + replay-determinism + structural tamper-evidence (the
-//!    M23 claim set); the `tel_head` is SEPARATE from the M23 `xp_head` (zero
-//!    regression).
+//!    injective bounded encoding + replay-determinism + tamper-evidence (the M23 claim
+//!    set; cryptographic since M29-C, `sec=ASSUMED-FROM-LITERATURE`); the `tel_head` is
+//!    SEPARATE from the M23 `xp_head` (zero regression).
 //!  * [`opframe`] -- the M25 verified OPERATOR-TRANSCRIPT codec: the typed, fixed-
 //!    header, LENGTH-PREFIXED, injective [`opframe::OpFrame`] encoder (`opframe::canon`
 //!    / `opframe::decode` / `opframe::canon_len` -- magic/ver/kind/sev/partition +
@@ -194,7 +197,8 @@
 //!    2019 + Dwork reusable holdout -- encoded in the encoder). `tb-hal` CALLS these
 //!    to emit + self-verify a transcript at boot; the simulated operator-verifier
 //!    recomputes the head, asserts seq-monotone + intro-binding + a single-byte tamper
-//!    is caught. Claims ONLY structural tamper-EVIDENCE + truncation/reorder/replay
+//!    is caught. Claims ONLY tamper-EVIDENCE (cryptographic-hash since M29-C but
+//!    KEYLESS) + truncation/reorder/replay
 //!    detection (keyed=0, NO forgery-resistance) + instance binding -- NOT crypto
 //!    authenticity, NOT that a human replied (oracle=HUMAN-DEFERRED-M26).
 //!  * [`opframe_rx`] -- the M28 verified OPERATOR-INBOUND command codec, the RX dual of

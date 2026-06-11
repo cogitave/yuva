@@ -721,7 +721,8 @@ fn op_emit_frame(
 /// longer transcript -- a truncated tail -- is REJECTED), and FLIP ONE BYTE of a
 /// committed frame's canonical bytes to prove the recompute REJECTS (head-mismatch
 /// AND inclusion-fail). The marker is withheld unless EVERY leg holds. HONEST: the
-/// fold is keyless (structural tamper-EVIDENCE, not authenticity -- `keyed=0`) and the
+/// fold is keyless (tamper-EVIDENCE -- a cryptographic hash since M29-C but unkeyed,
+/// not authenticity -- `keyed=0`) and the
 /// verifier is the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
 pub(crate) fn opframe_selftest() -> crate::OpframeProof {
     use tb_encode::opframe::{

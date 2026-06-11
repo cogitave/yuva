@@ -1670,24 +1670,25 @@ fn kani_prov_canon_injective() {
     assert!(nz != na);
 }
 
-/// (2) `prov_hash` is TOTAL (panic / overflow / shift-overflow FREE -- wrapping
-/// FNV arithmetic) over a bounded-length symbolic buffer, returns exactly
+/// (2) `prov_hash` is TOTAL (panic / overflow / shift-overflow FREE -- since
+/// M29-C the body is `khash::uhash`, pure wrapping/rotating 32-bit BLAKE2s ARX)
+/// over a bounded-length symbolic buffer, returns exactly
 /// `PROV_HASH_LEN` bytes, and is DETERMINISTIC. The buffer is a small FIXED-LENGTH
-/// symbolic array (the #49 state-explosion lesson: a fully-symbolic long FNV is
-/// the documented trap; the totality is structural over the loop, so a short
-/// bound covers the no-panic property). Mirrors the existing `fnv1a64` harness.
+/// symbolic array (the #49 state-explosion lesson: fully-symbolic data through
+/// a hash is the documented trap; the totality is structural over the loop, so
+/// a short bound covers the no-panic property).
 ///
-/// NEGATIVE CONTROL: replacing a `wrapping_mul` with a checked `*` in `fnv1a64`
-/// (the lane primitive) would panic on overflow inside this harness, turning it
-/// RED -- the wrapping arithmetic is load-bearing for totality.
+/// NEGATIVE CONTROL: replacing a `wrapping_add` with a checked `+` in the
+/// BLAKE2s `g` mixer (the compression primitive `prov_hash` now drives) would
+/// panic on overflow inside this harness, turning it RED -- the wrapping
+/// arithmetic is load-bearing for totality.
 #[kani::proof]
 fn kani_prov_hash_total() {
-    // TOTALITY (no panic / no overflow -- wrapping FNV) over a SHORT symbolic
-    // buffer: prov_hash runs 4 lanes x a 2-pass fnv1a64 PER byte, so a long
-    // symbolic input is the #49 trap -- N=6 (computed TWICE for determinism) timed
-    // the lane out (>220s locally). N=2, digest computed ONCE, exercises the
-    // symbolic loop body (no-panic is structural over the loop) at a fraction of
-    // the cost. (Measured locally: this harness now verifies in seconds.)
+    // TOTALITY (no panic / no overflow -- wrapping ARX) over a SHORT symbolic
+    // buffer: a long fully-symbolic input through the compression is the #49
+    // trap (in the FNV era N=6 computed TWICE timed the lane out >220s locally).
+    // N=2, digest computed ONCE, exercises the symbolic path (no-panic is
+    // structural over the loop) at a fraction of the cost.
     const N: usize = 2;
     let data: [u8; N] = kani::any();
     let h = prov_hash(&data);
@@ -1701,23 +1702,28 @@ fn kani_prov_hash_total() {
 }
 
 /// (3) `chain_mix` is TAMPER-SENSITIVE (proposal §5.3 fold non-degeneracy): for a
-/// symbolic `head` and `entry_id`, flipping the single bit at a symbolic byte
-/// index changes the fold output -- so the head is a function of EVERY entry-id
-/// byte (no degenerate fold can drop an entry). Also DETERMINISTIC. The byte index
-/// is bounded to `0..PROV_HASH_LEN`; the flip is a fixed `^ 0x01` (the bounded-
-/// nondeterminism regime).
+/// concrete `head` and `entry_id`, flipping the single bit at a SYMBOLIC byte
+/// index changes the fold output -- so the head is a function of EVERY one of the
+/// 64 head/entry byte positions (no degenerate fold can drop an entry or its
+/// anchor). Also DETERMINISTIC. M29-C form (the `kani_khash_tamper` discipline --
+/// a symbolic CHOICE over concrete data): the OLD 66-call 2x32 concrete unroll
+/// was an FNV-era workaround for the #49 symbolic-fold blow-up; per the stage-C
+/// budget plan the precedent INVERTS once `prov_hash` is one-block-per-call --
+/// the symbolic index costs ONE evaluation per leg while the unroll pays full
+/// price PER position (~20 min projected). Coverage is IDENTICAL: all 64
+/// positions, now by symbolic index. base + determinism + one symbolic
+/// entry-id-flip + one symbolic head-flip + the flip-back NEG = 5 fold calls.
 ///
-/// NEGATIVE CONTROL: an identity/constant fold (`chain_mix(h, _) == h`, ignoring
-/// `entry_id`) would make the flipped-vs-original outputs EQUAL -> the `!=` assert
-/// FAILS. (Equivalently, a fold that XORed only entry_id[0] would pass byte 0 but
-/// FAIL for a flip at any other index.)
+/// NEGATIVE CONTROLS: an identity/constant fold (`chain_mix(h, _) == h`,
+/// ignoring `entry_id`) would make the flipped-vs-original outputs EQUAL -> the
+/// `!=` asserts FAIL. The flip-back leg (flip the SAME index back -> the BASE
+/// digest returns) proves the mutation genuinely reaches the hash -- a harness
+/// whose tamper never reached `chain_mix`, or a broken restore, fails the
+/// equality (a strict ADDITION over the FNV-era body).
 #[kani::proof]
 fn kani_prov_chain_mix_tamper() {
-    // TRACTABILITY (the #49 symbolic-64-byte-FNV state-explosion trap): the fold
-    // inputs are CONCRETE so each `chain_mix` is a concrete evaluation, while the
-    // flip INDEX below stays symbolic -- so the "head is a function of EVERY
-    // entry-id byte" claim is still proved for all 32 positions, at a fraction of
-    // the cost of folding two fully-symbolic 32-byte arrays.
+    // TRACTABILITY (#49): the fold DATA stays CONCRETE; ONLY the flip index is
+    // symbolic (the kani_khash_tamper shape, already baselined in this lane).
     let head: [u8; PROV_HASH_LEN] = [0x5a; PROV_HASH_LEN];
     let mut entry_id: [u8; PROV_HASH_LEN] = [0u8; PROV_HASH_LEN];
     {
@@ -1731,46 +1737,50 @@ fn kani_prov_chain_mix_tamper() {
     // DETERMINISTIC.
     assert_eq!(chain_mix(head, entry_id), base);
 
-    // EVERY entry-id byte position, CONCRETELY unrolled: a symbolic `idx` here
-    // makes `tampered[idx]` symbolic and re-introduces a symbolic 65-byte FNV fold
-    // (the #49 blow-up that timed the lane out at 35 min). A concrete-bounded loop
-    // CBMC fully unrolls into PROV_HASH_LEN CONCRETE chain_mix evaluations -- fast,
-    // and it still proves "the head is a function of EVERY byte" (host-validated).
-    let mut idx = 0usize;
-    while idx < PROV_HASH_LEN {
-        let mut tampered = entry_id;
-        tampered[idx] ^= 0x01;
-        assert!(chain_mix(head, tampered) != base);
-        idx += 1;
-    }
-    // Symmetrically, EVERY head byte position (chained tamper) -- concrete loop.
-    let mut hidx = 0usize;
-    while hidx < PROV_HASH_LEN {
-        let mut htamper = head;
-        htamper[hidx] ^= 0x01;
-        assert!(chain_mix(htamper, entry_id) != base);
-        hidx += 1;
-    }
+    // TAMPER (entry side): one bit at a SYMBOLIC byte index over ALL
+    // PROV_HASH_LEN entry positions changes the fold.
+    let idx: usize = kani::any();
+    kani::assume(idx < PROV_HASH_LEN);
+    let mut tampered = entry_id;
+    tampered[idx] ^= 0x01;
+    assert!(chain_mix(head, tampered) != base);
+
+    // NEG (flip-back): restoring the SAME byte restores the BASE digest -- the
+    // mutation provably reached the hash.
+    tampered[idx] ^= 0x01;
+    assert!(chain_mix(head, tampered) == base);
+
+    // TAMPER (head side): one bit at a SYMBOLIC byte index over ALL
+    // PROV_HASH_LEN head positions changes the fold (the chained anchor).
+    let hidx: usize = kani::any();
+    kani::assume(hidx < PROV_HASH_LEN);
+    let mut htamper = head;
+    htamper[hidx] ^= 0x01;
+    assert!(chain_mix(htamper, entry_id) != base);
 }
 
 /// (4) `verify_inclusion` is SOUND (proposal §5.4): for a small fixed chain
-/// (leaf + ONE sibling), `verify_inclusion(leaf, sibs, head) == (recompute(leaf,
-/// sibs) == head)` for ALL symbolic inputs, and on the GENUINE head it accepts,
-/// while a single-byte tamper of the leaf, the sibling, OR the head drives it to
-/// `false`. The sibling count is fixed at 1 (the bounded-fold regime); the tamper
-/// index is a fixed byte. This exercises the REAL verifier fold, not a constant.
+/// (leaf + ONE sibling), `verify_inclusion(leaf, sibs, any_head) == (head ==
+/// any_head)` over a fully SYMBOLIC candidate `any_head`, where `head =
+/// recompute(leaf, sibs)` is computed ONCE -- the iff IS the property. M29-C
+/// form (the stage-C budget plan): the FNV-era body re-evaluated `recompute`
+/// on BOTH sides of the iff and then asserted separate genuine-accept and
+/// tampered-head-reject legs; the symbolic `any_head` SUBSUMES both (any_head
+/// == head is the reachable accept case, any_head != head covers EVERY forged/
+/// tampered head), and the single-recompute form is sound because `recompute`
+/// determinism is separately proven (`kani_prov_head_deterministic`). The
+/// `bad_leaf` + `bad_sib` rejections are kept VERBATIM. Nothing is conceded.
 ///
-/// NEGATIVE CONTROL: a verifier that ignored `siblings` (e.g. `recompute(leaf)`
-/// only) would ACCEPT a forged proof whose sibling was replaced -> the
-/// "tampered sibling rejects" assert FAILS. The genuine `head` is computed by the
-/// SAME `recompute`, so the accept half is non-vacuous.
+/// NEGATIVE CONTROL: a verifier that ignored `siblings` (e.g. a `recompute`
+/// that skipped the sibling fold) would ACCEPT a forged proof whose sibling was
+/// replaced -> the "tampered sibling rejects" assert FAILS. The genuine `head`
+/// is computed by the SAME `recompute`, so the iff's accept half is non-vacuous.
 #[kani::proof]
 fn kani_prov_inclusion_sound() {
-    // TRACTABILITY (the #49 symbolic-FNV trap): CONCRETE leaf + sibling keep
+    // TRACTABILITY (the #49 symbolic-fold trap): CONCRETE leaf + sibling keep
     // `recompute` concrete, so the soundness iff is checked over a SYMBOLIC
     // candidate head (the load-bearing generality) and the tamper rejections use
-    // concrete single-byte flips -- avoiding the blow-up of folding fully-symbolic
-    // 64-byte inputs eight times while keeping every negative control live.
+    // concrete single-byte flips.
     let mut leaf: [u8; PROV_HASH_LEN] = [0u8; PROV_HASH_LEN];
     let mut sib: [u8; PROV_HASH_LEN] = [0u8; PROV_HASH_LEN];
     {
@@ -1783,18 +1793,14 @@ fn kani_prov_inclusion_sound() {
     }
     let sibs = [sib];
 
-    // The GENUINE committed head for (leaf, [sib]).
+    // The GENUINE committed head for (leaf, [sib]) -- computed ONCE (M29-C).
     let head = recompute(leaf, &sibs);
 
-    // SOUNDNESS (the iff): verify == (recompute == head), over an ARBITRARY head.
+    // SOUNDNESS (the iff): verify == (head == any_head), over an ARBITRARY head.
+    // Subsumes the genuine-accept (any_head == head, reachable -> non-vacuous)
+    // and the tampered-head-reject (any_head != head) legs of the FNV-era body.
     let any_head: [u8; PROV_HASH_LEN] = kani::any();
-    assert_eq!(
-        verify_inclusion(leaf, &sibs, any_head),
-        recompute(leaf, &sibs) == any_head
-    );
-
-    // The genuine proof is ACCEPTED (non-vacuity).
-    assert!(verify_inclusion(leaf, &sibs, head));
+    assert_eq!(verify_inclusion(leaf, &sibs, any_head), head == any_head);
 
     // A single-byte tamper of the LEAF is REJECTED (the fold caught it). We assume
     // the flip lands where it actually changes the recomputed value: chain_mix is
@@ -1807,11 +1813,6 @@ fn kani_prov_inclusion_sound() {
     let mut bad_sib = sib;
     bad_sib[0] ^= 0x01;
     assert!(!verify_inclusion(leaf, &[bad_sib], head));
-
-    // A single-byte tamper of the HEAD is REJECTED.
-    let mut bad_head = head;
-    bad_head[0] ^= 0x01;
-    assert!(!verify_inclusion(leaf, &sibs, bad_head));
 }
 
 /// (5) CANONICAL ROUND-TRIP (proposal §5.5): `canon` lays the scalar fields out at
@@ -2112,6 +2113,13 @@ fn kani_exp_ring_total() {
 /// inclusion proof). The flip INDEX stays symbolic (every byte position proven); the
 /// record + sibling are concrete so each fold is a concrete `prov` evaluation (the
 /// #49 symbolic-FNV trap the M22 suite documents).
+///
+/// M29-C: this harness is KEPT FULL (leaf re-hash -> head mismatch -> inclusion
+/// failure, end-to-end through the REAL fold at full depth) as THE one
+/// representative end-to-end fold-tamper witness -- it is what LICENSES the
+/// leaf-sensitivity thinning of `kani_opframe_fold_truncation` /
+/// `kani_exittel_fold_tamper` / `kani_tpsched_fold_tamper` (each carries the
+/// `fold-claim=` composition marker naming this harness as `e2e=`).
 ///
 /// NEGATIVE CONTROL: a constant/identity hash (`exp::xp_hash(_) == const`) would make
 /// the flipped-vs-original leaf ids EQUAL -> the `!=` assert FAILS; a fold that
@@ -2425,7 +2433,7 @@ fn kani_bakeoff_bound_sound_rounddown() {
 /// integer fold the seam uses (`xp_chain_mix(decision_id, agent_seed) mod eps_den
 /// mod m`, keyed to the IMMUTABLE decision_id, never a mutable step counter) and
 /// prove two replays agree on coin + propensity + label + bound. The fold inputs +
-/// table are CONCRETE (so the FNV fold / kan_score stay concrete -- the #49 trap);
+/// table are CONCRETE (so the hash fold / kan_score stay concrete -- the #49 trap);
 /// the symbolic surface is the small bounded scalars.
 ///
 /// NEGATIVE CONTROL: keying the explore coin to a MUTABLE step counter (instead of
@@ -2436,7 +2444,7 @@ fn kani_bakeoff_bound_sound_rounddown() {
 fn kani_bakeoff_replay_determinism() {
     // The explore coin: a SEEDED integer fold of the immutable decision_id (reusing
     // the proven M22 fold via prov::chain_mix -> a 32-byte head -> a u64 witness),
-    // then mod eps_den mod m. CONCRETE seed/id so the FNV fold is concrete.
+    // then mod eps_den mod m. CONCRETE seed/id so the hash fold is concrete.
     let did: [u8; PROV_HASH_LEN] = [0x24u8; PROV_HASH_LEN];
     let seed: [u8; PROV_HASH_LEN] = [0xA5u8; PROV_HASH_LEN];
     let eps_den: u32 = 16;
@@ -2811,19 +2819,32 @@ fn kani_opframe_intro_binding() {
     assert!(!intro_binds(&notintro, head));
 }
 
-/// (5) FOLD TAMPER + TAIL-TRUNCATION sensitivity (proposal §4.3): a single-byte flip
-/// of a committed frame's CANONICAL bytes changes the recomputed `op_head` (REUSING
-/// the proven M22 fold over the opframe bytes -- M25 writes NO fold math), AND the
-/// closing `gate_commits_final_seq` detects a truncated tail (a reader expecting a
-/// longer transcript than the GATE_VERDICT commits is rejected). The frame + sibling
-/// are CONCRETE so each `prov` fold is concrete; the flip INDEX stays symbolic.
+/// (5) LEAF-SENSITIVITY + TAIL-TRUNCATION (proposal §4.3, M29-C-thinned): a
+/// single-byte flip at a SYMBOLIC index of a committed frame's CANONICAL bytes
+/// changes its `prov_hash` LEAF id (the 61-byte buffer is one hash invocation
+/// per call), AND the closing `gate_commits_final_seq` detects a truncated tail
+/// (a reader expecting a longer transcript than the GATE_VERDICT commits is
+/// rejected) -- the hash-free half, kept VERBATIM. The frame is CONCRETE; the
+/// flip INDEX stays symbolic over ALL canonical byte positions.
 ///
-/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original leaf
-/// ids EQUAL -> the `!=` assert FAILS; a `gate_commits_final_seq` that ignored the
-/// expected length would ACCEPT a truncated tail -> the truncation assert FAILS.
+/// M29-C COMPOSITION (the ONE documented stage-C concession): this harness
+/// machine-proves the LEAF claim only; the chain-level rejection (head mismatch
+/// + inclusion failure, the FNV-era corroboration legs) is the COMPOSITION of
+/// three separately machine-proven conjuncts -- (leaf != leaf' [THIS harness])
+/// AND (`chain_mix` tamper-sensitive at every byte
+/// [`kani_prov_chain_mix_tamper`]) AND (inclusion iff
+/// [`kani_prov_inclusion_sound`]) -- demonstrated end-to-end at full depth by
+/// the kept-FULL `kani_exp_fold_tamper`.
+/// fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper)
+///
+/// NEGATIVE CONTROLS: a constant/identity hash would make the flipped-vs-
+/// original leaf ids EQUAL -> the `!=` assert FAILS; the flip-back leg (re-flip
+/// the SAME index -> the genuine leaf id returns) proves the mutation reaches
+/// the hash; a `gate_commits_final_seq` that ignored the expected length would
+/// ACCEPT a truncated tail -> the truncation assert FAILS.
 #[kani::proof]
 fn kani_opframe_fold_truncation() {
-    // A concrete emittable frame -> concrete canonical bytes -> concrete fold.
+    // A concrete emittable frame -> concrete canonical bytes.
     let pay: [u8; 2] = [0xDE, 0xAD];
     let frame = OpFrame {
         kind: crate::opframe::kind::EXPERIENCE_DIGEST,
@@ -2838,22 +2859,23 @@ fn kani_opframe_fold_truncation() {
     let n = op_canon(&frame, &mut bytes);
     assert_eq!(n, OPFRAME_HEADER_LEN + 2);
 
-    // The genuine committed leaf id + a concrete sibling -> the committed head.
+    // The genuine committed LEAF id.
     let leaf = prov_hash(&bytes[..n]);
-    let sib: [u8; PROV_HASH_LEN] = [0x33u8; PROV_HASH_LEN];
-    let head = recompute(leaf, &[sib]);
-    assert!(verify_inclusion(leaf, &[sib], head));
 
-    // TAMPER: flip the bit at a SYMBOLIC byte index -> a different leaf -> head mismatch
-    // AND a failing inclusion proof.
+    // TAMPER: flip the bit at a SYMBOLIC byte index -> a different leaf id
+    // (-> a different head + a failing inclusion proof, BY COMPOSITION -- see
+    // the fold-claim marker above).
     let idx: usize = kani::any();
     kani::assume(idx < n);
     let mut tampered = bytes;
     tampered[idx] ^= 0x01;
     let bad_leaf = prov_hash(&tampered[..n]);
     assert!(bad_leaf != leaf);
-    assert!(recompute(bad_leaf, &[sib]) != head);
-    assert!(!verify_inclusion(bad_leaf, &[sib], head));
+
+    // NEG (flip-back): restoring the SAME byte restores the genuine leaf id --
+    // the mutation provably reached the hash.
+    tampered[idx] ^= 0x01;
+    assert!(prov_hash(&tampered[..n]) == leaf);
 
     // TAIL-TRUNCATION: a closing GATE_VERDICT at seq=4 committing final_seq=4 is
     // accepted only when the reader expects exactly 4; a reader expecting 5 (a frame
@@ -3048,14 +3070,26 @@ fn kani_exittel_histogram_saturates() {
     assert!(after == before.saturating_add(1));
 }
 
-/// (5) FOLD TAMPER-SENSITIVITY: a single-byte flip of a committed record's CANONICAL
-/// bytes changes the recomputed `tel_head` -- REUSING the proven M22 `prov::chain_mix`
-/// fold over the exittel record (M26 writes NO fold math). The record + sibling are
-/// CONCRETE so each `prov` fold is concrete; the flip INDEX stays symbolic (the #49
-/// symbolic-FNV trap).
+/// (5) LEAF-SENSITIVITY (M29-C-thinned): a single-byte flip at a SYMBOLIC index
+/// of a committed record's CANONICAL bytes changes its `prov_hash` LEAF id (the
+/// 21-byte buffer is one hash invocation per call). The record is CONCRETE; the
+/// flip INDEX stays symbolic over ALL canonical byte positions.
 ///
-/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original leaf
-/// ids EQUAL -> the `!=` assert FAILS.
+/// M29-C COMPOSITION (the ONE documented stage-C concession): this harness
+/// machine-proves the LEAF claim only; the chain-level rejection of a tampered
+/// record (recomputed `tel_head` mismatch + inclusion failure, the FNV-era
+/// corroboration legs) is the COMPOSITION of three separately machine-proven
+/// conjuncts -- (leaf != leaf' [THIS harness]) AND (`chain_mix` tamper-sensitive
+/// at every byte [`kani_prov_chain_mix_tamper`]) AND (inclusion iff
+/// [`kani_prov_inclusion_sound`]) -- demonstrated end-to-end at full depth by
+/// the kept-FULL `kani_exp_fold_tamper` (M26 writes NO fold math; the fold IS
+/// the M22 `prov` fold those harnesses drive).
+/// fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper)
+///
+/// NEGATIVE CONTROLS: a constant/identity hash would make the flipped-vs-
+/// original leaf ids EQUAL -> the `!=` assert FAILS; the flip-back leg (re-flip
+/// the SAME index -> the genuine leaf id returns) proves the mutation reaches
+/// the hash.
 #[kani::proof]
 fn kani_exittel_fold_tamper() {
     let rec = ExitTelemetryRecord {
@@ -3069,19 +3103,22 @@ fn kani_exittel_fold_tamper() {
     let mut bytes = [0u8; EXITTEL_CANON_LEN];
     let n = et_canon(&rec, &mut bytes);
     assert_eq!(n, EXITTEL_CANON_LEN);
-    let leaf = prov_hash(&bytes);
-    let sib: [u8; PROV_HASH_LEN] = [0x5au8; PROV_HASH_LEN];
-    let head = recompute(leaf, &[sib]);
-    assert!(verify_inclusion(leaf, &[sib], head));
 
+    // The genuine committed LEAF id.
+    let leaf = prov_hash(&bytes);
+
+    // TAMPER: a symbolic-index flip -> a different leaf id (-> a different
+    // head + a failing inclusion proof, BY COMPOSITION -- the fold-claim marker).
     let idx: usize = kani::any();
     kani::assume(idx < EXITTEL_CANON_LEN);
     let mut tampered = bytes;
     tampered[idx] ^= 0x01;
     let bad = prov_hash(&tampered);
     assert!(bad != leaf);
-    assert!(recompute(bad, &[sib]) != head);
-    assert!(!verify_inclusion(bad, &[sib], head));
+
+    // NEG (flip-back): restoring the SAME byte restores the genuine leaf id.
+    tampered[idx] ^= 0x01;
+    assert!(prov_hash(&tampered) == leaf);
 }
 
 // ===========================================================================
@@ -3218,13 +3255,26 @@ fn kani_tpsched_canon_roundtrip() {
     assert!(tp_decode(&buf) == Some(rec));
 }
 
-/// (5) FOLD TAMPER-SENSITIVITY: a single-byte flip of a committed decision's CANONICAL
-/// bytes changes the recomputed `sched_head` -- REUSING the proven M22 fold over the
-/// tpsched record (M27 writes NO fold math). Concrete record/sibling, symbolic flip
-/// index (the #49 symbolic-FNV trap).
+/// (5) LEAF-SENSITIVITY (M29-C-thinned): a single-byte flip at a SYMBOLIC index
+/// of a committed decision's CANONICAL bytes changes its `prov_hash` LEAF id
+/// (the 21-byte buffer is one hash invocation per call). The record is
+/// CONCRETE; the flip INDEX stays symbolic over ALL canonical byte positions.
 ///
-/// NEGATIVE CONTROL: a constant/identity hash would make the flipped-vs-original ids
-/// EQUAL -> the `!=` assert FAILS.
+/// M29-C COMPOSITION (the ONE documented stage-C concession): this harness
+/// machine-proves the LEAF claim only; the chain-level rejection of a tampered
+/// decision (recomputed `sched_head` mismatch + inclusion failure, the FNV-era
+/// corroboration legs) is the COMPOSITION of three separately machine-proven
+/// conjuncts -- (leaf != leaf' [THIS harness]) AND (`chain_mix` tamper-sensitive
+/// at every byte [`kani_prov_chain_mix_tamper`]) AND (inclusion iff
+/// [`kani_prov_inclusion_sound`]) -- demonstrated end-to-end at full depth by
+/// the kept-FULL `kani_exp_fold_tamper` (M27 writes NO fold math; the fold IS
+/// the M22 `prov` fold those harnesses drive).
+/// fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper)
+///
+/// NEGATIVE CONTROLS: a constant/identity hash would make the flipped-vs-
+/// original ids EQUAL -> the `!=` assert FAILS; the flip-back leg (re-flip the
+/// SAME index -> the genuine leaf id returns) proves the mutation reaches the
+/// hash.
 #[kani::proof]
 fn kani_tpsched_fold_tamper() {
     let rec = SchedDecision {
@@ -3237,18 +3287,22 @@ fn kani_tpsched_fold_tamper() {
     let mut bytes = [0u8; SCHED_CANON_LEN];
     let n = tp_canon(&rec, &mut bytes);
     assert_eq!(n, SCHED_CANON_LEN);
+
+    // The genuine committed LEAF id.
     let leaf = prov_hash(&bytes);
-    let sib: [u8; PROV_HASH_LEN] = [0x33u8; PROV_HASH_LEN];
-    let head = recompute(leaf, &[sib]);
-    assert!(verify_inclusion(leaf, &[sib], head));
+
+    // TAMPER: a symbolic-index flip -> a different leaf id (-> a different
+    // head + a failing inclusion proof, BY COMPOSITION -- the fold-claim marker).
     let idx: usize = kani::any();
     kani::assume(idx < SCHED_CANON_LEN);
     let mut tampered = bytes;
     tampered[idx] ^= 0x01;
     let bad = prov_hash(&tampered);
     assert!(bad != leaf);
-    assert!(recompute(bad, &[sib]) != head);
-    assert!(!verify_inclusion(bad, &[sib], head));
+
+    // NEG (flip-back): restoring the SAME byte restores the genuine leaf id.
+    tampered[idx] ^= 0x01;
+    assert!(prov_hash(&tampered) == leaf);
 }
 
 // ===========================================================================

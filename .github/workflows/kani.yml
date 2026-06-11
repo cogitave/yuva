@@ -120,23 +120,27 @@ jobs:
   # on the sealed SAFETY_HELD_OUT partition, the Seldonian no-snoop invariant) /
   # kani_opframe_seq_monotone (seq_index_exact catches gap/dup/reorder/non-zero-start)
   # / kani_opframe_intro_binding (the genesis INTRO binds the transcript to the live M22
-  # head; a forged anchor is rejected) / kani_opframe_fold_truncation (a single-byte
-  # tamper changes op_head, REUSING the M22 fold, + the closing GATE_VERDICT catches
-  # tail-truncation) / kani_opframe_canon_roundtrip (decode(canon(frame))==frame) + the 5
+  # head; a forged anchor is rejected) / kani_opframe_fold_truncation (M29-C-thinned to
+  # LEAF-sensitivity + flip-back -- chain-level rejection by the documented composition
+  # fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound;
+  # e2e=exp_fold_tamper) -- + the closing GATE_VERDICT catches tail-truncation
+  # VERBATIM) / kani_opframe_canon_roundtrip (decode(canon(frame))==frame) + the 5
   # M26 exittel verified EL2 EXIT-TELEMETRY harnesses: kani_exittel_canon_injective (the
   # load-bearing fixed-width canon totality+injectivity proof) / kani_exittel_canon_roundtrip
   # (decode(canon(rec))==rec) / kani_exittel_class_total (the reused L2.2 classify_exit is
   # total over every ESR; class_tag/class_from_tag is a bijection on the 6 classes -> an
   # exit's class always encodes to a valid round-trippable byte) / kani_exittel_histogram_saturates
   # (bucket_index in 0..N_BUCKETS for ALL u64 + ExitHistogram::record saturating, count
-  # monotone) / kani_exittel_fold_tamper (a single-byte tamper changes tel_head, REUSING the
-  # M22 fold) + the 5 M27 tpsched verified TWO-VMID TIME-PARTITION-SCHEDULER harnesses:
+  # monotone) / kani_exittel_fold_tamper (M29-C-thinned to LEAF-sensitivity + flip-back;
+  # fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound;
+  # e2e=exp_fold_tamper)) + the 5 M27 tpsched verified TWO-VMID TIME-PARTITION-SCHEDULER harnesses:
   # kani_tpsched_next_slot_roundrobin (next_slot total + strict 0->1->0 round-robin + neither
   # slot a fixed point -> no VMID starves) / kani_tpsched_frame_conserved (frame_total == sum of
   # slot_deadline_delta over a symbolic plan; every slot clamped up to MIN_SLOT_TICKS -> no
   # starvation, <= frame -> no monopoly, saturating no-overflow) / kani_tpsched_canon_injective /
-  # kani_tpsched_canon_roundtrip / kani_tpsched_fold_tamper (a single-byte tamper changes
-  # sched_head, REUSING the M22 fold) + the 6 M28 opframe_rx verified OPERATOR-INBOUND command
+  # kani_tpsched_canon_roundtrip / kani_tpsched_fold_tamper (M29-C-thinned to LEAF-sensitivity
+  # + flip-back; fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound;
+  # e2e=exp_fold_tamper)) + the 6 M28 opframe_rx verified OPERATOR-INBOUND command
   # harnesses (the RX dual of M25 opframe -- the CAPSTONE): kani_cmd_canon_injective (the load-
   # bearing canon totality+injectivity proof -- the MAC'd bytes = everything EXCEPT the trailing
   # mac; the payload_len u32 prefix disambiguates the variable tail; decode fails closed without
@@ -225,8 +229,13 @@ jobs:
     runs-on: ubuntu-latest
     # Fail fast + clearly if a harness ever regresses into a state explosion.
     # The fixed-size POD encoders + the single bounded ring harness verify in
-    # seconds; the M22/M23/M25/M26 fold harnesses concretize their FNV-fold inputs
-    # (keeping only the flip-index / candidate-head symbolic) to stay tractable. The
+    # seconds; the M22/M23/M25/M26/M27 fold harnesses concretize their fold inputs
+    # (keeping only the flip-index / candidate-head symbolic) to stay tractable --
+    # since M29-C the fold is khash/BLAKE2s (~7-9s per CONCRETE compression,
+    # measured), so the fold family is COMPRESSION-BUDGETED per
+    # docs/plans/m29-stage-c-plan.md (the three per-milestone fold harnesses are
+    # leaf-sensitivity + the tokened composition; kani_exp_fold_tamper is the one
+    # kept-FULL end-to-end witness). The
     # observed runtime grows with the harness count (69 harnesses ~30min on the CI
     # runner -- codegen-dominated, see #77); 45 is a safety margin above that, not a
     # license for symbolic blow-up. MEASURE each new/changed harness locally in WSL

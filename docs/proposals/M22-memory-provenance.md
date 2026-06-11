@@ -117,7 +117,7 @@ The boot self-test `prov_selftest() -> ProvProof` (kernel/src/main.rs, immediate
 
 ## 8. Tracked successors (created as tasks)
 
-- **Cryptographic provenance:** replace the FNV-fold digest with a real keyed/crypto hash (e.g. BLAKE3) + an in-VM deterministic-keypair **signature over the root** (second-preimage resistance + authenticity). Likely needs a vetted no_std crypto dep — a dependency-policy decision for Arda.
+- **Cryptographic provenance:** replace the FNV-fold digest with a real keyed/crypto hash (e.g. BLAKE3) + an in-VM deterministic-keypair **signature over the root** (second-preimage resistance + authenticity). Likely needs a vetted no_std crypto dep — a dependency-policy decision for Arda. **HASH HALF LANDED (M29 stage C, #99):** `prov_hash` is cryptographic (khash/BLAKE2s-256 unkeyed, zero-dep in-tree, `sec=ASSUMED-FROM-LITERATURE`) since M29-C; the **signed root** (authenticity) remains the open successor half.
 - **Balanced Merkle batch inclusion proofs** (logarithmic proofs over a tree, not a linear chain) — a later milestone once the linear ledger is proven.
 - **Provenance-attested shared memory / snapshot-migration** — the shared-memory (alt-A) and snapshot (alt-B) successors attest against this ledger; provenance is the correct *first* cut.
 

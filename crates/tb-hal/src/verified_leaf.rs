@@ -832,14 +832,16 @@ pub fn kan_selftest() -> KanProof {
 // M22: verified memory-PROVENANCE-LEDGER self-test facade. A per-agent, append-
 // only, content-addressed HASH-CHAIN ledger over the M13 substrate: every memory
 // mutation (write / forget-tombstone / skill-admit) appends a typed entry whose
-// 256-bit STRUCTURAL digest folds into a running `chain_head`. The boot self-test
+// 256-bit BLAKE2s-256 digest (khash/uhash since M29 stage C) folds into a running
+// `chain_head`. The boot self-test
 // writes N>=3 real records, demotes one through the REAL M17 forget_sweep (a
 // provable tombstone), builds a genuine inclusion proof, then flips ONE byte of a
 // COMMITTED entry's canonical bytes and proves the head + inclusion proof BOTH
 // catch it. The math is the Kani-proven `tb_encode::prov`; the verdict is a pure-
 // data struct the `#![forbid(unsafe_code)]` kernel matches on (mirroring
-// [`KanProof`]). STRUCTURAL tamper-evidence only -- NOT cryptographic (proposal
-// §2): a crypto hash + signed root is a tracked successor. The head is kept IN-RAM
+// [`KanProof`]). Tamper-evidence is CRYPTOGRAPHIC since M29-C (khash/BLAKE2s-256,
+// `sec=ASSUMED-FROM-LITERATURE`): a SIGNED root (authenticity) remains the tracked
+// successor. The head is kept IN-RAM
 // this milestone (it does NOT ride the M20 superblock), so the M20 two-phase
 // commit + persist_selftest gen-continuity stay byte-identical (zero M20/M21
 // regression).
@@ -893,8 +895,9 @@ pub fn prov_selftest() -> ProvProof {
 // forget/demote decision is BYTE-IDENTICAL to M22's. The boot self-test seeds a
 // memory-pressure scenario that forces >=3 forget-decisions + >=1 recall-touch,
 // then proves replay-determinism (a recorded feats row replays through kan_score to
-// the logged shadow BIT-IDENTICALLY) + structural tamper-evidence + heuristic
-// faithfulness. M23 claims ONLY replay-determinism + structural tamper-evidence --
+// the logged shadow BIT-IDENTICALLY) + tamper-evidence (cryptographic since
+// M29-C) + heuristic
+// faithfulness. M23 claims ONLY replay-determinism + tamper-evidence --
 // NOT policy validity (deterministic logging -> degenerate propensity; validity is
 // M24's burden, the exogenous human-operator oracle is M25's). The math is the
 // Kani-proven `tb_encode::exp`; the verdict is a pure-data struct the
@@ -921,7 +924,8 @@ pub struct ExpProof {
     pub heuristic_faithful: bool,
     /// A single-byte tamper of a COMMITTED record's canonical bytes was caught on
     /// BOTH legs (head-mismatch AND inclusion-fail). The kernel requires this -- the
-    /// load-bearing structural tamper-evidence claim (rendered `tamper-caught=0x1`).
+    /// load-bearing tamper-evidence claim (cryptographic since M29-C; rendered
+    /// `tamper-caught=0x1`).
     pub tamper_caught: bool,
     /// Whether the learned cell is on the decision path. `false` this milestone (the
     /// shadow is logged only, never changing a demote -- the live decision is
@@ -1055,8 +1059,9 @@ pub fn bakeoff_selftest() -> BakeoffProof {
 // fails the no-human CI gate today). The math is the Kani-proven
 // `tb_encode::opframe` (which REUSES the M22 `tb_encode::prov` fold verbatim);
 // the verdict is a pure-data struct the `#![forbid(unsafe_code)]` kernel matches
-// on (mirroring [`ExpProof`]). HONEST: the fold is keyless (structural tamper-
-// EVIDENCE, not authenticity -- `keyed=0`) and the boot self-test's verifier is
+// on (mirroring [`ExpProof`]). HONEST: the fold is keyless (tamper-EVIDENCE --
+// a cryptographic hash since M29-C but unkeyed, not authenticity -- `keyed=0`)
+// and the boot self-test's verifier is
 // the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
 // ===========================================================================
 
@@ -1085,8 +1090,9 @@ pub struct OpframeProof {
     /// truncation guard. The kernel requires this (folded into `tamper-caught=1`).
     pub truncation_caught: bool,
     /// A single-byte tamper of a committed frame's canonical bytes was caught on BOTH
-    /// legs (head-mismatch AND inclusion-fail) -- the load-bearing structural tamper-
-    /// evidence claim. The kernel requires this (rendered `tamper-caught=1`).
+    /// legs (head-mismatch AND inclusion-fail) -- the load-bearing tamper-evidence
+    /// claim (cryptographic since M29-C). The kernel requires this (rendered
+    /// `tamper-caught=1`).
     pub tamper_caught: bool,
     /// A u64 WITNESS folded from the 32-byte committed `op_head` (every head byte
     /// contributes), rendered as `tx_head=<hex16>` in the boot witness line.
@@ -1148,7 +1154,7 @@ pub struct ExitTelemetryProof {
     pub inclusion_ok: bool,
     /// A single-byte tamper of a committed record's canonical bytes was caught on BOTH
     /// legs (head-mismatch AND inclusion-fail). The kernel requires this (rendered
-    /// `tamper-caught=1`) -- the structural tamper-evidence claim.
+    /// `tamper-caught=1`) -- the tamper-evidence claim (cryptographic since M29-C).
     pub tamper_caught: bool,
     /// The number of DISTINCT exit classes observed (6 on the synthetic vector),
     /// rendered as `classes=<m>`.
