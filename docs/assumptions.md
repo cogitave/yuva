@@ -407,6 +407,25 @@ model." The deliberate TABOS divergence from pKVM (documented in the roadmap): T
 RETAINS sovereign scheduling inside the trusted core, so availability/DoS is
 explicitly scoped OUT of the proven set while memory isolation stays in it.
 
+## 3a. M30 external-dependency entries (the inference-transport trust path)
+
+- **QEMU virtio-console device model — status ACCEPTED-PERMANENT** (M30 proposal
+  §9, option A): the M30 chardev-harness lanes route the verified inference
+  transport through stock QEMU's `virtio-serial-device` + `virtconsole` device
+  model on BOTH arches, so that model is part of the `M30: infer-transport OK`
+  trust path alongside QEMU itself (already a trust-path member for every lane).
+  Accepted because console (DeviceID 3) is the ONLY class with a stock-QEMU
+  virtio-mmio peer on both arches — zero QEMU patching, the decisive §3 coupling.
+  The parity successors if this dependency is ever to be retired: a custom QEMU
+  device / vhost-user (revisit at B2) / an aarch64 tb-vmm. The x86/KVM lane's
+  stage-C tb-vmm backend (`transport=TB-VMM-HOST`) replaces it on that lane only.
+- **Symmetric host-echo key — named residual** (M30 proposal §12): the M30 echo
+  key K is symmetric and revealed in cleartext on the channel, so the echo
+  proves host PARTICIPATION (per-run OS-RNG custody + the cross-process guard
+  equality), never host EXCLUSIVITY — an adversarial host is out of scope (the
+  host is trusted ground), and the upgrade to exclusivity is the M33 signature
+  primitive, tracked, not claimed.
+
 ## 4. Status & review discipline
 
 These assumptions are LIVE and shrink as rungs land: A3 closes at L2.8 (SMMUv3),

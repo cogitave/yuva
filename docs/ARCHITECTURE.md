@@ -1,6 +1,6 @@
 # TABOS Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M29 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M30 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,12 +8,14 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M29 cumulative tail is below. The authoritative, executable record is the
+M30 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M29: khash-mac OK` marker, then assert each milestone directly and reject the
-skip/dormant variant while positively requiring its witness line.
+`M30: infer-transport OK` marker, then assert each milestone directly and reject
+the skip/dormant variant while positively requiring its witness line (and, for
+M30, ALSO string-compare the kernel-witnessed challenge/tag against the
+`xport-harness` host peer's own line -- the cross-process anti-hollow leg).
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
 
@@ -201,8 +203,8 @@ skip/dormant variant while positively requiring its witness line.
   M28) · sovereignty (M27) — record (M23) → honestly-refuse (M24) →
   surface-to-human (M25) → record-workload (M26) → schedule (M27) →
   RECEIVE-HUMAN-COMMAND (M28).
-- **The KEYED-CRYPTO MAC (the M28 §5 named successor) — M29, the NEW cumulative
-  tail.** `M29: khash-mac OK` (printed after M28): ONE new verified primitive
+- **The KEYED-CRYPTO MAC (the M28 §5 named successor) — M29.**
+  `M29: khash-mac OK` (printed after M28; the cumulative tail until M30 landed): ONE new verified primitive
   leaf, `tb-encode::khash` — **BLAKE2s-256 (RFC 7693) in its native keyed mode**
   (width-exact: 32-byte key == `KEY_LEN`, 32-byte digest == `PROV_HASH_LEN`,
   spec-sanctioned 16-byte tag truncation == `MAC_LEN`; the keyed mode carries the
@@ -233,6 +235,46 @@ skip/dormant variant while positively requiring its witness line.
   provenance-hash cutover (`prov_hash` → `khash::uhash`) and #75 Merkle
   inclusion proofs; the #74 signed root is a separate signature primitive,
   explicitly out of khash scope.
+- **The verified INFERENCE TRANSPORT (stages A+B) — M30, the NEW cumulative
+  tail.** `M30: infer-transport OK` (printed after M29): the sovereignty
+  A-chain's channel to a host model peer (#87), promoting the M22 runner-up
+  with the anti-hollow amendment that makes its in-kernel mock-loopback
+  structurally impossible. ONE new verified codec leaf, `tb-encode::inferwire`
+  (the 20th — the typed, fixed-header, length-prefixed, injective `InferFrame`,
+  house magic `0x5444`; fail-closed `canon`/`decode`; the `FrameAccum`
+  byte-stream re-framer with proven never-overflow scan-to-next-magic resync;
+  the `resp_binds_req` correlation iff-theorem; and the host-keyed
+  `echo_tag`/`verify_echo` — exactly ONE domain-separated khash call,
+  `khash(K, "TABOS-M30-ECHO-V1" || peer_id || nonce || challenge || body)[..16]`,
+  binding the challenge + host nonce + lane label INSIDE the MAC), carried by
+  the kernel's FIRST TWO-queue virtio driver — a modern (Version==2 readback)
+  virtio-console (DeviceID 3), VERSION_1-only (F_MULTIPORT/F_SIZE/F_EMERG_WRITE
+  rejected, so the device is exactly receiveq(0)+transmitq(1) on port 0), the
+  rx buffer posted BEFORE DRIVER_OK, poll-only (`mode=POLL`, guard-pinned
+  against a silent IRQ migration until a #71 disposition) — to the
+  `xport-harness` HOST peer over a QEMU virtconsole chardev unix socket on both
+  TCG lanes (`transport=QEMU-CHARDEV-HARNESS`, `bus=SERIAL-FRAMED`). THE
+  ANTI-HOLLOW DoD IS A TWO-LEG COMPOSITION: the host custodies a per-run OS-RNG
+  key K + nonce N (never in the guest image/cmdline/config space), applies the
+  khash echo and reveals K on the channel; the kernel recomputes + verifies and
+  fires four in-boot negatives (badtag/wrongkey/partial/desync) — leg 1,
+  `echo=HOST-KEYED-VERIFIED`, an explicitly KERNEL-SCOPE token; the run scripts
+  then string-compare the kernel-witnessed challenge/tag against the harness's
+  OWN printed line — leg 2, the loopback killer (a loopback can mint a
+  self-consistent tag but cannot equal `khash(K, ..)` without guessing 32
+  OS-RNG bytes) — plus skip/loopback-by-name rejects, the lane cross-pin, the
+  `mode=IRQ` tripwire, a key-leak negative, and strip-then-reject overclaim
+  guards. HONEST: `key=HOST-CUSTODIED-PER-RUN` claims custody, NOT
+  confidentiality (K is cleartext on the channel — host *participation*, not
+  exclusivity, until the M33 signature primitive); `backend=ECHO-ONLY` (no
+  model, no inference semantics — the M31 adapter brings meaning); no
+  network/TLS (a LOCAL host process, reject-enforced); desync recovery is
+  decoder-level, not live-ring (named deferral). **Stage C — the tb-vmm
+  virtio-console device backend (`transport=TB-VMM-HOST`, `bus=VIRTIO-MMIO`,
+  tb-vmm's first `mmio_bus` device) — is SPLIT to its own follow-up landing**;
+  the chardev lanes already discharge the REQUIRED both-arches DoD on TCG,
+  accel-independent, and `run-vmm-x86_64.sh` stays at its M19 marker until
+  stage C lands.
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the
@@ -256,7 +298,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 19 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 20 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -289,8 +331,14 @@ M29 call the khash leaf), and `khash` (the **M29** keyed-hash primitive:
 BLAKE2s-256 per RFC 7693 in its native keyed mode + the unkeyed form, the ONE
 cryptographic primitive behind `mac=KEYED-CRYPTO` — official-KAT-pinned,
 concrete-input Kani proofs only, primitive security
-`sec=ASSUMED-FROM-LITERATURE` by design). `scripts/verify-encode.sh`
-pins **`EXPECTED_HARNESSES=84`**
+`sec=ASSUMED-FROM-LITERATURE` by design), and `inferwire` (the **M30**
+inference-transport codec: the injective length-prefixed `InferFrame` +
+fail-closed `canon`/`decode`, the `FrameAccum` byte-stream re-framer with
+proven never-overflow resync, the correlation iff-theorem, and the host-keyed
+`echo_tag`/`verify_echo` -- ONE domain-separated khash call binding
+peer_id‖nonce‖challenge‖body inside the MAC; mutation-tested per the M30
+proposal §6). `scripts/verify-encode.sh`
+pins **`EXPECTED_HARNESSES=90`**
 and fails closed unless that many harnesses verify and zero fail, then emits
 `V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
 the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
@@ -300,7 +348,10 @@ since the `prove-encode` lane has a hard timeout.
 
 *CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
-booting both arches under pure QEMU-TCG to the final `M29: khash-mac OK` marker
+booting both arches under pure QEMU-TCG to the final `M30: infer-transport OK`
+marker (since M30 each lane also spawns the `xport-harness` host echo peer
+against a QEMU virtconsole chardev socket and cross-process-compares the M30
+challenge/tag between guest serial and harness stdout)
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64

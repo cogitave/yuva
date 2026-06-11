@@ -1,6 +1,6 @@
 # TABOS Milestones & Development Pipeline
 
-> Status: the agent-native milestone chain **M0 → M29 is complete and CI-green on
+> Status: the agent-native milestone chain **M0 → M30 is complete and CI-green on
 > both architectures** (x86_64 + aarch64), extended since the M18 capstone by a
 > tail of follow-on markers — **M14.1** (byte-payload IPC), **M14.2**
 > (blocking-recv), **M15.1** (block unmap + frame reclamation), **M18.1**
@@ -49,14 +49,31 @@
 > `kat=RFC7693-PASS` per boot through the real compression, and the prove/assume
 > boundary is machine-emitted — `sec=ASSUMED-FROM-LITERATURE` (implementation
 > PROVEN; primitive security assumed from the cryptanalysis literature, the
-> Appel/HACL*/mlkem-native claim boundary); the NEW cumulative-tail marker
-> `M29: khash-mac OK`) — every milestone verified
-> by booting under QEMU
+> Appel/HACL*/mlkem-native claim boundary); `M29: khash-mac OK`) — and finally
+> **M30** (the verified INFERENCE TRANSPORT, stages A+B — the sovereignty
+> A-chain's channel to a host model peer, promoting the M22 runner-up with the
+> anti-hollow amendment that makes its mock-loopback structurally impossible:
+> the Kani-proven `tb-encode::inferwire` frame codec (house magic `0x5444`,
+> fail-closed `canon`/`decode`, the `FrameAccum` byte-stream re-framer, the
+> ONE-khash-call `echo_tag`/`verify_echo`) rides a modern (Version==2)
+> virtio-console (DeviceID 3, VERSION_1-only, port 0, poll-only `mode=POLL`)
+> to a HOST peer that custodies a per-run OS-RNG key+nonce — the
+> `xport-harness` binary on the QEMU chardev lanes (`transport=
+> QEMU-CHARDEV-HARNESS`, `bus=SERIAL-FRAMED`) — and the DoD is a TWO-LEG
+> composition: the kernel verifies the khash-transformed echo against the
+> channel-revealed key (leg 1, `echo=HOST-KEYED-VERIFIED`, kernel-scope) AND
+> the run script string-compares the kernel-witnessed challenge/tag against the
+> host peer's OWN printed line (leg 2 — CROSS-PROCESS equality with a
+> host-custodied key is the loopback killer); `key=HOST-CUSTODIED-PER-RUN`,
+> `backend=ECHO-ONLY` (transport only — the adapter is M31), stage C (the
+> tb-vmm `TB-VMM-HOST` device backend) split to its own follow-up landing; the
+> NEW cumulative-tail marker `M30: infer-transport OK`) — every milestone
+> verified by booting under QEMU
 > (and, on x86_64, the project's own `tb-vmm`/KVM) on every change. A
 > **formally-verified core** now backs the chain: M11's capability rights-subset
 > invariant is **machine-proven by Kani** (`M11: caps-subset PROVEN`,
 > `crates/tb-caps-core`), the silicon-unsafe encoders/parsers + the memory/learning
-> leaves are **Kani-proven** over the 19-leaf `crates/tb-encode` (84 harnesses,
+> leaves are **Kani-proven** over the 20-leaf `crates/tb-encode` (90 harnesses,
 > `V1: kani-encoders OK`), and a
 > **Miri Tier-0 UB gate** interprets both leaf crates (`T0: miri OK`); CI now runs
 > **9 gates across 8 workflow files**. This
@@ -101,7 +118,7 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M29, + L2.0 … L2.6)
+## 2. The milestone chain (M0 → M30, + L2.0 … L2.6)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
@@ -119,12 +136,17 @@ correctly refusing on synthetic data), `M25: operator OK` (the operator transcri
 the `M26: exit-telemetry OK` exit-telemetry-producer marker, the
 `M28: operator-cmd OK` operator-inbound marker (the RX dual of M25:
 a dual-credential, freshness-challenged human command bound to the live M22 head),
-and finally the NEW cumulative-tail `M29: khash-mac OK` keyed-crypto-MAC marker
+the `M29: khash-mac OK` keyed-crypto-MAC marker
 (the M28 MAC re-pointed at the verified BLAKE2s-256 `khash` leaf; its `khash: …`
-witness line carries the machine-emitted prove/assume boundary)
+witness line carries the machine-emitted prove/assume boundary), and finally the
+NEW cumulative-tail `M30: infer-transport OK` verified-inference-transport marker
+(the host-keyed echo over the modern virtio-console channel; its `xport: …`
+witness carries the two-leg anti-hollow tokens and the run scripts ALSO
+string-compare its challenge/tag against the host peer's own `xport-harness: …`
+line — cross-process equality with a host-custodied key)
 (each preceded by its anti-hollow witness line: `prov: …`, `exp: …`, `bakeoff: …`,
-`opframe: …`, `exittel: …`, `khash: …`, `opcmd: …`) — the ordered sequence
-(detailed through M22) is listed further below.
+`opframe: …`, `exittel: …`, `khash: …`, `opcmd: …`, `xport: …`) — the ordered
+sequence (detailed through M22) is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
@@ -235,7 +257,8 @@ in **[ROADMAP-V2](ROADMAP-V2.md)**; the summary:
 | **M26** | Verified **EL2 exit-telemetry producer** — the learning pillar's SECOND experience producer: the EL2 (nVHE) monitor's guest-exit demux (the already-Kani-proven L2.2 `el2_trap::classify_exit`) becomes a BOUNDED, no-float, injective telemetry record (exit-class + a saturating log2 cost-proxy histogram + logical time) folded into a per-instance `tel_head` via the M22 fold reused verbatim; the OS *records* its own virtualization workload. PRODUCER-ONLY (the telemetry is recorded + folded, NEVER fed to a policy whose decisions change the future exit distribution — the confounding loop the M24 adversary named is structurally avoided); the `tel_head` is SEPARATE from the M23 `xp_head` (zero regression). Claims injective bounded encoding + tamper-evidence, NOT a causal state-signal (`signal=OBSERVATIONAL-NONCAUSAL`); the last cumulative agent-native marker until the M28 tail landed (M28 now prints after it) | `M26: exit-telemetry OK` | none (classifier-reuse / log2-bucket histogram / fixed-width injective codec / fold-reuse in `tb-encode::exittel`, Kani-proven) |
 | **M27** | **Two-VMID sovereign time-partition scheduler** — the sovereignty pillar's "TABOS owns time for two guests" rung: the EL2 (nVHE) monitor arms TWO distinct stage-2 roots (VMID 0 + 1) and alternates two trivial EL1 guest stubs in a fixed two-slot major frame, each bumping a DISTINCT per-VMID MMIO forward-progress cell (a guest can't fake a non-trapping store), folding each `SchedDecision` into a tamper-evident `sched_head` via the M22 fold; the verdict genuinely checks both-progressed + round-robin order + frame-conservation + fold-verified + tamper-caught. **Landed in two banked stages:** M27a, the cooperative HVC-yield green floor, then **M27b — REAL CNTHP timer-preemption, the first asynchronous IRQ ever taken at EL2** (the 0x480 Lower-EL IRQ vector; `HCR_EL2.IMO=1` only inside the armed window; the guest stubs are pure store-spins with NO voluntary yield, so `both-progressed=1` is only reachable via genuine timer preemption; re-arm-before-EOI + IAR==26 verify + ISTATUS read-back + a hard EOI cap turn any storm into a fast red; the retired `hvc #14` yield traps loud). `timing=TCG-NON-CYCLE-ACCURATE realtime=NOT-CLAIMED` — the guard REQUIRES the new token and REJECTS the cooperative one. Prints in the L2-track position (after L2.6, before M19) | `M27: sched OK` | the verified `tb-encode::tpsched` leaf (next_slot/frame-conservation/`SchedDecision` codec + 5 Kani harnesses) + the EL2 HAL (`tpsched_hal`/`el2`/`stage2`/`el2mmio`); kernel zero-unsafe, branches on `SchedProof` |
 | **M28** | **Operator INBOUND command channel** — the COMMUNICATION pillar's inbound half, the RX dual of M25's `opframe`, and the exogenous-oracle CAPSTONE that CLOSES the learning loop (record M23 → honestly-refuse M24 → surface-to-human M25 → record-workload M26 → schedule M27 → **receive-human-command M28**): a human operator holding TWO enrolled credentials answers the OS's freshness challenge and submits a dual-authorized `ACTIVATE_CMD` bound to the live M22 provenance head. THE GATE IS MACHINE-PROVEN: the conjunctive verdict core is the pure, buffer-free/hash-free `opframe_rx::verify_decoded(frame, expected_nonce, live_head, mac_ok)` (`decode_and_verify` delegates its verdict to it verbatim) and Kani drives it fully symbolically — `RejectStale` iff echo ≠ challenge, `RejectWrongHead` iff the bound head ≠ a fully-symbolic live head, `RejectSingleCred` iff the two creds are equal, `RejectBadMac` iff distinct-creds AND `!mac_ok`, **Accept IFF every conjunct holds** (the Accept-iff-all theorem), plus kind-dominance (`NotActivate`); the reject branches are MUTATION-TESTED (deleting each → `VERIFICATION FAILED` ×3), and the `decode_and_verify` wrapper's buffer/MAC plumbing is host-tested (all 7 verdict arms, run under the Miri CI lane) + boot self-tested. Honest scope (machine-emitted tokens the run scripts enforce): at landing the MAC was `mac=KEYED-NONCRYPTO` — a NESTED keyed-FNV envelope, genuinely keyed by two 256-bit creds but NOT cryptographic — **upgraded by M29 to `mac=KEYED-CRYPTO`** (the named successor LANDED: a keyed BLAKE2s-256 derive-then-MAC; the retired `KEYED-NONCRYPTO` token is now guard-REJECTED); `oracle=SIMULATED-ENROLLED-KEY` — a compiled-in test key, NOT a human/enrolment ceremony; `kan_active=0` — an Accept is NECESSARY-NOT-SUFFICIENT (`KAN_ACTIVE` stays `false`, M24's statistical bar still gates, and the accepted command is currently fully inert). Replay scope is honest: the verifier is pure + stateless — per-EPOCH staleness rejection, NOT one-shot per-challenge nonce consumption (an identical valid wire re-verifies within the same epoch; rotate-on-accept in the stateful seam is a named successor). Witness (post-M29): `opcmd: challenge=<hex16> accepted=1 stale-rejected=1 wronghead-rejected=1 single-cred-rejected=1 badmac-rejected=1 oldkey-zeroized=1 kan_active=0 mac=KEYED-CRYPTO kdf=DERIVE-THEN-MAC-DOMSEP keyevolve=PRF-DOMSEP oracle=SIMULATED-ENROLLED-KEY`. Printed after M26 (M27 keeps its L2-track position) | `M28: operator-cmd OK` | none (challenge/echo + the canonical command codec + the keyed MAC + the pure `verify_decoded` verdict core in `tb-encode::opframe_rx`, Kani-proven — the 18th verified leaf, the six `kani_cmd_*` harnesses) |
-| **M29** | **The KEYED-CRYPTO MAC** — the M28 §5 named successor LANDS: ONE new verified primitive leaf, `tb-encode::khash` — **BLAKE2s-256 (RFC 7693) in its native keyed mode** (key zero-padded into data block 0, §2.5/§2.10; width-exact: 32-byte key == `KEY_LEN`, 32-byte digest == `PROV_HASH_LEN`, spec-sanctioned 16-byte tag truncation == `MAC_LEN`) — consumed by the M28 MAC and key-evolution. `compute_mac` sheds the five-pass nested-FNV envelope for **derive-then-MAC** (`K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" \|\| key_b)`; `tag = khash(K_s, canon)[..16]` — keyed-BLAKE2 PRF proof Luykx–Mennink–Neves FSE 2016; libsodium `crypto_kdf` precedent; the adversarially-chosen-component case rests on a dual-PRF-style assumption, Backendal et al. CRYPTO 2023, named not claimed-around) and `key_evolve` becomes `khash(key, "TABOS-KEY-EVOLVE-V1")` (Bellare–Yee forward-security shape, domain-separated from MAC use; the selftest TESTS old-key erasure — `oldkey-zeroized=1`); signatures UNCHANGED, so `seal`/`decode_and_verify`/the four hash-free Kani gate harnesses carry over verbatim. **Honest by construction:** Kani proves totality/determinism/official-KAT correctness/tamper-at-flip-index on CONCRETE inputs (the #49 discipline; 4 new `kani_khash_*` harnesses, each mutation-tested); collision/preimage/PRF/forgery resistance of the primitive is **`sec=ASSUMED-FROM-LITERATURE`** (the Appel TOPLAS 2015 / HACL* / mlkem-native claim boundary, machine-tokened — deliberately NO symbolic security harness); `kat=RFC7693-PASS` is EARNED per boot (the selftest recomputes RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through the real compression, fail-closed); `sidechannel=NOT-CLAIMED` (constant-time-SHAPED only); `prim=BLAKE2S-256` names the informational-RFC trade. `oracle=SIMULATED-ENROLLED-KEY` + `kan_active=0` stay VERBATIM — a real hash makes the key neither a human nor an activation. Witness: `khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED`. The NEW cumulative-tail marker | `M29: khash-mac OK` | none (the pure BLAKE2s-256 leaf in `tb-encode::khash`, Kani-proven — the 19th verified leaf, the four `kani_khash_*` harnesses; the kernel stays zero-unsafe and branches on `OpcmdProof` bools) |
+| **M29** | **The KEYED-CRYPTO MAC** — the M28 §5 named successor LANDS: ONE new verified primitive leaf, `tb-encode::khash` — **BLAKE2s-256 (RFC 7693) in its native keyed mode** (key zero-padded into data block 0, §2.5/§2.10; width-exact: 32-byte key == `KEY_LEN`, 32-byte digest == `PROV_HASH_LEN`, spec-sanctioned 16-byte tag truncation == `MAC_LEN`) — consumed by the M28 MAC and key-evolution. `compute_mac` sheds the five-pass nested-FNV envelope for **derive-then-MAC** (`K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" \|\| key_b)`; `tag = khash(K_s, canon)[..16]` — keyed-BLAKE2 PRF proof Luykx–Mennink–Neves FSE 2016; libsodium `crypto_kdf` precedent; the adversarially-chosen-component case rests on a dual-PRF-style assumption, Backendal et al. CRYPTO 2023, named not claimed-around) and `key_evolve` becomes `khash(key, "TABOS-KEY-EVOLVE-V1")` (Bellare–Yee forward-security shape, domain-separated from MAC use; the selftest TESTS old-key erasure — `oldkey-zeroized=1`); signatures UNCHANGED, so `seal`/`decode_and_verify`/the four hash-free Kani gate harnesses carry over verbatim. **Honest by construction:** Kani proves totality/determinism/official-KAT correctness/tamper-at-flip-index on CONCRETE inputs (the #49 discipline; 4 new `kani_khash_*` harnesses, each mutation-tested); collision/preimage/PRF/forgery resistance of the primitive is **`sec=ASSUMED-FROM-LITERATURE`** (the Appel TOPLAS 2015 / HACL* / mlkem-native claim boundary, machine-tokened — deliberately NO symbolic security harness); `kat=RFC7693-PASS` is EARNED per boot (the selftest recomputes RFC 7693 Appendix B + BLAKE2 reference-KAT vectors through the real compression, fail-closed); `sidechannel=NOT-CLAIMED` (constant-time-SHAPED only); `prim=BLAKE2S-256` names the informational-RFC trade. `oracle=SIMULATED-ENROLLED-KEY` + `kan_active=0` stay VERBATIM — a real hash makes the key neither a human nor an activation. Witness: `khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED`. The cumulative-tail marker until M30 landed | `M29: khash-mac OK` | none (the pure BLAKE2s-256 leaf in `tb-encode::khash`, Kani-proven — the 19th verified leaf, the four `kani_khash_*` harnesses; the kernel stays zero-unsafe and branches on `OpcmdProof` bools) |
+| **M30** | **Verified INFERENCE TRANSPORT (stages A+B)** — the sovereignty A-chain's channel to a host model peer (#87), PROMOTING the M22 runner-up with the anti-hollow amendment that makes its in-kernel mock-loopback structurally impossible. Stage A: ONE new verified codec leaf, `tb-encode::inferwire` — the typed, fixed-header, LENGTH-PREFIXED, injective `InferFrame` (house magic `0x5444`; kind ECHO_REQ/ECHO_RESP/ERR, reserved-zero flags, a u64 correlation id on the wire from day one — 9p2000 tag precedent, challenge[16]/nonce[16]/peer_id/tag[16], payload cap 1024) with TOTAL fail-closed `canon`/`decode`, the `resp_binds_req` correlation iff-theorem, the `FrameAccum` byte-STREAM re-framer (the `BoundedRing` fixed-capacity pattern, length-delimited, scan-to-next-magic resync, proven never-overflow), and the host-keyed echo `echo_tag`/`verify_echo` — EXACTLY ONE domain-separated khash call, `khash(K, "TABOS-M30-ECHO-V1" ‖ peer_id ‖ nonce ‖ challenge ‖ body)[..16]`, binding the challenge + host nonce + lane label INSIDE the MAC (the M28/Terrapin lesson). Stage B: the kernel's FIRST TWO-queue virtio driver — a modern (Version==2 readback) virtio-console (DeviceID 3), VERSION_1-only (F_MULTIPORT/F_SIZE/F_EMERG_WRITE rejected → exactly receiveq(0)+transmitq(1) on port 0), rx buffer posted BEFORE DRIVER_OK, poll-only (`mode=POLL`, the #71 guard pin) — plus the `xport-harness` HOST peer on the QEMU chardev lanes (`-device virtio-serial-device -device virtconsole,chardev=<unix socket>`, the spike-verified config on qemu-6.2 + 8.2.2): the harness CUSTODIES a per-run OS-RNG key K + nonce N (NEVER in the guest image/cmdline/config space), applies the khash echo, reveals K on the CHANNEL for the kernel recompute, and prints its OWN `xport-harness:` witness. **THE ANTI-HOLLOW DoD IS A TWO-LEG COMPOSITION** (proposal §4): leg 1 — the kernel verifies the tag + challenge-echo + body-bitexact against the channel-revealed key (`echo=HOST-KEYED-VERIFIED`, an explicitly KERNEL-SCOPE token — it can never mean "not a loopback") and fires four in-boot negatives (badtag/wrongkey/partial/desync); leg 2 — the run script string-compares the kernel-witnessed challenge/tag against the harness's independently-printed line (CROSS-PROCESS equality with a host-custodied key — a loopback can mint a self-consistent tag but cannot equal `khash(K,…)` without guessing 32 OS-RNG bytes), plus skip/loopback-by-name rejects, the lane cross-pin, the `mode=IRQ` tripwire, a key-LEAK negative, and strip-then-reject overclaim guards. HONEST SCOPE (machine-emitted): `key=HOST-CUSTODIED-PER-RUN` claims custody, NOT confidentiality (K is cleartext on the channel — host *participation*, not exclusivity, until the M33 signature primitive); `backend=ECHO-ONLY` (no model, no inference semantics — the adapter is M31); no network/TLS (a LOCAL host process, §5.8-enforced); `sec=ASSUMED-FROM-LITERATURE` inherited from M29; desync recovery is decoder-level, not live-ring (named deferral). Witness: `xport: bus=SERIAL-FRAMED qsz=0x4 tx=0x1 rx=0x1 challenge=<hex32> nonce=<hex32> tag=<hex32> req-id=<hex16> echo-verified=0x1 body-bitexact=0x1 badtag-rejected=0x1 wrongkey-rejected=0x1 partial-rejected=0x1 desync-rejected=0x1 mode=POLL transport=QEMU-CHARDEV-HARNESS echo=HOST-KEYED-VERIFIED key=HOST-CUSTODIED-PER-RUN backend=ECHO-ONLY sec=ASSUMED-FROM-LITERATURE` + the host's `xport-harness: peer=QEMU-CHARDEV-HARNESS challenge=… tag=… key-custody=HOST`. **Stage C (the tb-vmm `TB-VMM-HOST` virtio-console device backend — `bus=VIRTIO-MMIO`) is SPLIT to its own follow-up landing** (the vmm-boot lane stays at its M19 marker); the chardev lanes already discharge the REQUIRED both-arches DoD on TCG, accel-independent. The NEW cumulative-tail marker | `M30: infer-transport OK` | the two-queue virtio-console MMIO/DMA session in `arch::*::virtio::chan_*` (reusing every M19/M20 accessor/barrier primitive verbatim; the codec + MAC are the pure `tb-encode::inferwire` — the 20th verified leaf, the six `kani_inferwire_*` harnesses; the kernel stays zero-unsafe and matches on `InferChanProof`) |
 
 Capability-passing IPC (M14) is the multi-agent north star and landed in three
 serial steps: **M14** is the channel core — a `Handle` MOVES across address
@@ -370,7 +393,7 @@ A skip is **never** legitimate here (there is no device to be absent), so the ru
 scripts **reject** any `(no ledger, skipped)` variant and **positively require**
 the `prov:` witness — and `M22: provenance OK` became **the cumulative-tail marker
 both run scripts grep for** at its landing (replacing M20 as the final chain
-marker; the tail has since moved along the chain and is `M29: khash-mac OK`
+marker; the tail has since moved along the chain and is `M30: infer-transport OK`
 today). The six
 `kani_prov_*` harnesses (each with a negative control; `canon`-injectivity is the
 load-bearing proof, written before the kernel seam) land in `tb-encode`, bumping
@@ -416,9 +439,9 @@ green `n/a`:
 
 A green boot prints the M0–M4 foundation trace shown above, then the following
 markers in order — every milestone runs cumulatively, so each boot is a full
-regression of M0 through the cumulative tail `M29: khash-mac OK` (the listing
+regression of M0 through the cumulative tail `M30: infer-transport OK` (the listing
 below is detailed through M22; after it the M23→M26 learning-loop arc, the M28
-operator-inbound marker and the `M29: khash-mac OK` tail print in the §2 order
+operator-inbound marker, the `M29: khash-mac OK` keyed-MAC marker and the NEW `M30: infer-transport OK` tail print in the §2 order
 above, with `M27: sched OK` in its L2-track position between `L2.6` and M19):
 
 ```
@@ -494,8 +517,8 @@ Two machine-checked guarantees back the chain:
   wrong constant turns into a silent VM-entry failure — was extracted into a NEW
   pure `crates/tb-encode` (`no_std`, `#![forbid(unsafe_code)]`, host-buildable;
   `tb-hal` now CALLS it, the `vmwrite`/`read_volatile`/asm staying behind) and is
-  machine-proven by **Kani**. The suite now totals **84 `#[kani::proof]`
-  harnesses** across 19 leaves: the control-MSR adjust-legality gate (force all allowed-0 bits,
+  machine-proven by **Kani**. The suite now totals **90 `#[kani::proof]`
+  harnesses** across 20 leaves: the control-MSR adjust-legality gate (force all allowed-0 bits,
   clear all non-allowed-1 bits, under the Intel allowed0⊆allowed1 precondition),
   the CR0/CR4 fixed-bit clamp, the page-table / EPT entry encoders (address +
   flags preserved, level index < 512, EPTP well-formed), the 16-byte IPC frame
@@ -511,9 +534,9 @@ Two machine-checked guarantees back the chain:
   `0x16` HVC64) and the faulting IPA (`kani_esr_decode_total`,
   `kani_hpfar_fault_ipa`). The `.github/workflows/kani.yml` `prove-encode` job
   runs `cargo kani -p tb-encode` and **fails closed** unless every harness
-  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 84`
+  verifies *and* the success count equals the pinned `EXPECTED_HARNESSES = 90`
   (`scripts/verify-encode.sh`, bumped from 15 in lockstep across the L2.1–L2.6
-  rungs and the M20–M29 leaves: +5 stage-2/ESR, +1 exit-classifier, +2
+  rungs and the M20–M30 leaves: +5 stage-2/ESR, +1 exit-classifier, +2
   sysreg/DABT ISS, +1 SCTLR_EL1, +1 GICH_LR0 vIRQ, +3 SMMUv3 stage-2, +6 `blkfmt`
   durable-persistence codecs (M20), +6 `kancell` additive-policy (M21), +6 `prov`
   ledger (M22), +23 across the M23–M26 learning-loop / operator-transcript /
@@ -522,11 +545,15 @@ Two machine-checked guarantees back the chain:
   command-gate harnesses (M28, the `kani_cmd_*` suite), and +4 `khash`
   keyed-hash primitive harnesses (M29, the `kani_khash_*` suite — concrete
   official-vector/flip-index proofs ONLY; primitive security deliberately
-  unproven, `sec=ASSUMED-FROM-LITERATURE`)), then emits
-  `V1: kani-encoders OK`. The nineteen `tb-encode` leaves are now `vmx`,
+  unproven, `sec=ASSUMED-FROM-LITERATURE`), and +6 `inferwire`
+  inference-transport codec harnesses (M30, the `kani_inferwire_*` suite —
+  concrete-frame / short-symbolic codec/accumulator proofs + the host-keyed
+  echo at 2 compressions per khash call, each mutation-tested per the M30
+  proposal §6)), then emits
+  `V1: kani-encoders OK`. The twenty `tb-encode` leaves are now `vmx`,
   `paging`, `ipc_frame`, `route`, `memscore`, `stage2`, `smmuv3`, `el2_trap`,
   `blkfmt`, `kancell`, `prov`, `exp`, `explore`, `bakeoff`, `opframe`,
-  `exittel`, `tpsched`, `opframe_rx`, and `khash`. Each harness must be **tractable**
+  `exittel`, `tpsched`, `opframe_rx`, `khash`, and `inferwire`. Each harness must be **tractable**
   (bounded symbolic / concretized-hash inputs — the `#49` symbolic-array
   state-explosion is the documented trap) and carries a **negative control**. (The `tb-caps-core` M11 proof is the independent
   `prove-caps` job in the same workflow; neither can break the other.)
@@ -552,11 +579,11 @@ Nine CI gates across eight workflow files guard the tree:
 
 | Gate | Workflow | What it proves |
 |---|---|---|
-| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M29; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached) |
+| **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M30; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached + since M30 both lanes spawn the xport-harness host echo peer against a QEMU virtconsole chardev socket and CROSS-PROCESS-compare the M30 challenge/tag) |
 | **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm`, asserting M4 + the boot-time bench (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | informational/continue-on-error — the **real** L2.0 VMX-root verdict under nested KVM (`-cpu host`), checking the chain reached `M18: evolve OK` |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain reaches `M18: evolve OK` (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the non-blocking `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
-| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 84 harnesses); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode lane has a hard timeout |
+| **kani** | `kani.yml` | two jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and `prove-encode` (the `tb-encode` encoder/parser proofs → `V1: kani-encoders OK`, 90 harnesses); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode lane has a hard timeout |
 | **miri** | `miri.yml` | the Tier-0 UB gate → `T0: miri OK` (`cargo miri test -p tb-caps-core -p tb-encode`) |
 | **clippy** | `clippy.yml` | static-lint `-D warnings` over the forbid-unsafe leaf crates (`tb-caps-core`/`tb-encode`/`tb-boot`) → `S0: clippy OK` |
 | **bench** | `bench.yml` | non-blocking `tb-vmm` vs Firecracker boot benchmark (BENCHMARKS Axis-A) |

@@ -20,7 +20,7 @@ This is the output of the M22 research pass (recon + 3 survey arms + synthesis).
 
 4. **It upgrades M17's silent demote into a verifiable redaction/tombstone** in the ledger — advancing the self-improvement pillar's auditability.
 
-**Runner-up:** a verified *inference-transport* framing leaf + virtio-mmio seam against the deterministic M16 `MockBackend` (`M22: infer-transport OK`). It lost because it advances device-I/O breadth more than the four core pillars, its "real" round-trip terminates at an in-kernel mock loopback (higher hollow-pass exposure), and it doesn't close a convergent #1 literature gap. It is the correct buildable slice of the (network-blocked) real-inference thesis and a strong **M23/M24** candidate.
+**Runner-up:** a verified *inference-transport* framing leaf + virtio-mmio seam against the deterministic M16 `MockBackend` (`M22: infer-transport OK`). It lost because it advances device-I/O breadth more than the four core pillars, its "real" round-trip terminates at an in-kernel mock loopback (higher hollow-pass exposure), and it doesn't close a convergent #1 literature gap. It is the correct buildable slice of the (network-blocked) real-inference thesis and a strong **M23/M24** candidate. **(Promoted as M30, anti-hollow amended:** the loopback weakness named here became the design constraint — M30's DoD is a HOST-keyed echo verified two ways, kernel-side `verify_echo` AND a cross-process challenge/tag equality against the host peer's own printed line, so the mock-loopback pass this paragraph rejected is structurally impossible; see `M30-infer-transport.md`.)**
 
 ---
 

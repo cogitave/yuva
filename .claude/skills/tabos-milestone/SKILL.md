@@ -60,8 +60,9 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
   kernel path) + Kani harnesses + the Miri gate. tb-hal CALLS the leaf byte-identically.
 - **No float** on any kernel path (fixed-point only).
 - **Cumulative DoD**: each milestone prints an EXACT serial marker; the kernel runs
-  M0..latest every boot. The current tail is **`M29: khash-mac OK`** — the marker
-  both run scripts grep for, printed after M28. (Chain: M0…M18, M18.1/.2, then on
+  M0..latest every boot. The current tail is **`M30: infer-transport OK`** — the marker
+  both run scripts grep for, printed after M29 (its `xport:` witness is ALSO
+  cross-process-compared against the `xport-harness` host peer's own line). (Chain: M0…M18, M18.1/.2, then on
   aarch64 L2.0…L2.6 and M27 sovereign-scheduler [two-VMID, M27a cooperative —
   mid-chain, before M19], then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT],
   M22 provenance, then the learning-loop arc M23 experience, M24 bakeoff [honest gate,
@@ -69,7 +70,12 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
   M28 operator-cmd [the INBOUND dual of M25 — closes the loop; an Accept is
   necessary-NOT-sufficient: kan_active=0, M24's statistical bar still gates], then
   M29 khash-mac [the M28 MAC re-pointed at the verified BLAKE2s-256 khash leaf —
-  mac=KEYED-CRYPTO, sec=ASSUMED-FROM-LITERATURE, kat=RFC7693-PASS earned per boot].)
+  mac=KEYED-CRYPTO, sec=ASSUMED-FROM-LITERATURE, kat=RFC7693-PASS earned per boot],
+  then M30 infer-transport [stages A+B: the inferwire codec leaf + the two-queue
+  virtio-console seam + the host-keyed echo, two-leg anti-hollow (kernel verify
+  x cross-process challenge/tag equality vs the xport-harness host peer);
+  backend=ECHO-ONLY, key=HOST-CUSTODIED-PER-RUN, mode=POLL #71-pinned; stage C
+  (the tb-vmm TB-VMM-HOST backend) split to its own follow-up].)
 - **Two arches** (x86_64 + aarch64) and **multiple boot paths** (PVH/microvm, tb-boot/
   tb-vmm, KVM/TCG) must stay green.
 - **The build + boot are the arbiter.** A reviewer that says "sound" is not enough;
@@ -106,9 +112,9 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      current state (read the files).
 
 4. **Add the tb-encode verified leaf (when it ships value-computation).** Add a pure
-   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves — 18: vmx, paging,
+   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves — 20: vmx, paging,
    ipc_frame, route, memscore, stage2, smmuv3, el2_trap, blkfmt, kancell, prov, exp,
-   explore, bakeoff, opframe, exittel, tpsched, opframe_rx). Add `#[kani::proof]`
+   explore, bakeoff, opframe, exittel, tpsched, opframe_rx, khash, inferwire). Add `#[kani::proof]`
    harnesses in `proofs.rs`, each:
    - **TRACTABLE — and MEASURED locally before pushing.** Run `cargo kani -p tb-encode
      --harness <name>` (WSL) on EVERY new/changed harness; the full gate is
@@ -121,7 +127,14 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      determinism over a CONCRETE input, and concretely-unroll any "for every byte" loop
      instead of using a symbolic index. (Real example: M22 `hash_total` ran prov_hash
      over 6 symbolic bytes TWICE → >220s, timing the 35-min lane out; N=6→2 + single
-     digest → 3s, and the whole gate then verifies in ~6 min locally.)
+     digest → 3s, and the whole gate then verifies in ~6 min locally.) SECOND
+     structural offender (M30 lesson): a SEQUENTIAL BYTE-PUSH TRACE through a
+     stateful accumulator — ~68 push-call inlines × the per-harness unwind bound
+     on the inner scan/shift loops is a formula floor (>>120s) that survives
+     concrete data, kissat, chunked loops, and hot-path slimming; prove the
+     index/capacity/rejection-class discipline at a tiny const-generic cap and
+     DELEGATE the full trace to host tests + Miri + the live boot lanes, NAMED
+     in the gate docs (the M30 accum_resync precedent).
    - carrying a **NEGATIVE CONTROL** (an identity/constant/commutative variant the
      harness must REJECT).
    - **MUTATION-TESTED when it gates.** Every gate-level harness (one whose green
@@ -141,10 +154,10 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      proven core — each reject arm iff its condition, plus the Accept-iff-all-conjuncts
      theorem over a fully-symbolic live head — and `decode_and_verify` delegates its
      verdict to it verbatim; all 7 verdict arms of the wrapper are host-tested.)
-   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **84**) AND the
-     `kani.yml` "currently 84" comment **in LOCKSTEP** — a vacuous/deleted harness must
+   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **90**) AND the
+     `kani.yml` "currently 90" comment **in LOCKSTEP** — a vacuous/deleted harness must
      fail the gate. The kani lane has 2 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
-     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 84
+     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 90
      harnesses, marker `V1: kani-encoders OK`, 45-min hard timeout). Never `--workspace`
      (drags tb-hal asm into CBMC).
 
