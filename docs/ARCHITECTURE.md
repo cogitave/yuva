@@ -339,16 +339,25 @@ fail-closed `canon`/`decode`, the `FrameAccum` byte-stream re-framer with
 proven never-overflow resync, the correlation iff-theorem, and the host-keyed
 `echo_tag`/`verify_echo` -- ONE domain-separated khash call binding
 peer_id‖nonce‖challenge‖body inside the MAC; mutation-tested per the M30
-proposal §6). `scripts/verify-encode.sh`
-pins **`EXPECTED_HARNESSES=90`**
-and fails closed unless that many harnesses verify and zero fail, then emits
-`V1: kani-encoders OK`. Adding a harness requires bumping that constant **and**
-the `kani.yml` count in **lockstep**, so a vacuous or deleted harness fails the
+proposal §6). Since **#101** the CI lane is **sharded into two cost-balanced
+parallel jobs** (`prove-encode-a`/`prove-encode-b` — the first post-M29-stage-C
+pass measured 41m22s of the 45-min cap, past the pre-agreed ~38-min option-4
+trigger); the shard lists, the per-shard pinned counts (the list lengths) and
+the pinned total **`EXPECTED_HARNESSES_TOTAL=90`** live in ONE place,
+`scripts/kani-shards.sh`, consumed by `scripts/verify-encode.sh`
+(`SHARD=a|b|all`; `all` = the unchanged local single full pass). Every mode
+first runs the fail-closed **completeness guard** (lists disjoint + exhaustive,
+in lockstep with the `#[kani::proof]` count in `proofs.rs`), then fails closed
+unless the shard's pinned count of harnesses verify and zero fail, then emits
+`V1-shard-a: kani-encoders OK` / `V1-shard-b: kani-encoders OK` (the full pass
+keeps `V1: kani-encoders OK`). Adding a harness is **one-touch**: the new name
+goes into exactly ONE shard list plus the total in `kani-shards.sh`, so a
+vacuous, deleted, renamed, or shard-unassigned harness fails the
 gate. Kani is installed locally in WSL (`cargo-kani`), so a new/changed harness
 should be measured with `cargo kani -p tb-encode --harness <name>` BEFORE pushing,
-since the `prove-encode` lane has a hard timeout.
+since the `prove-encode-*` lanes have hard timeouts.
 
-*CI lanes.* Nine distinct CI jobs across eight workflow files guard the tree:
+*CI lanes.* Ten distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
 booting both arches under pure QEMU-TCG to the final `M30: infer-transport OK`
 marker (since M30 each lane also spawns the `xport-harness` host echo peer
@@ -362,8 +371,9 @@ lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
 KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
 QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
-**kani** (two jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and
-`prove-encode` over `tb-encode` = 80 harnesses); **miri** (the Tier-0 dynamic UB
+**kani** (three jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and the
+#101 cost-balanced shard pair `prove-encode-a`/`prove-encode-b` over `tb-encode`
+= 46 + 44 of the 90 harnesses, completeness-guarded); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI

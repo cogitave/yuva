@@ -16,9 +16,10 @@ edits via Windows paths). Build: `cargo kbuild --target targets/<arch>-tabos-non
 (the `.cargo/config.toml` alias = `build -p tabos-kernel -Zbuild-std=… -Zjson-target-spec`;
 never hand-write the `-Z` flags). Kani IS installed locally in WSL (`cargo-kani`,
 run via `wsl.exe -d Ubuntu-22.04`) — ALWAYS measure a new/changed harness with
-`cargo kani -p tb-encode --harness <name>` BEFORE pushing (Step 4); the `prove-encode`
-CI lane has a hard `timeout-minutes` and ONE slow harness silently times the whole
-lane out (this cost three blind ~30-min CI round-trips once — never again).
+`cargo kani -p tb-encode --harness <name>` BEFORE pushing (Step 4); the
+`prove-encode-a`/`prove-encode-b` CI lanes (#101 shard pair) have hard
+`timeout-minutes` and ONE slow harness silently times a whole lane out (this
+cost three blind ~30-min CI round-trips once — never again).
 
 ## Operating mode (standing directives — do not ask)
 - **Always ultracode.** Every substantive step (research, design, generate, review,
@@ -154,11 +155,18 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
      proven core — each reject arm iff its condition, plus the Accept-iff-all-conjuncts
      theorem over a fully-symbolic live head — and `decode_and_verify` delegates its
      verdict to it verbatim; all 7 verdict arms of the wrapper are host-tested.)
-   - Bump `scripts/verify-encode.sh` `EXPECTED_HARNESSES` (currently **90**) AND the
-     `kani.yml` "currently 90" comment **in LOCKSTEP** — a vacuous/deleted harness must
-     fail the gate. The kani lane has 2 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
-     12 harnesses, marker `M11: caps-subset PROVEN`) and `prove-encode` (tb-encode, 90
-     harnesses, marker `V1: kani-encoders OK`, 45-min hard timeout). Never `--workspace`
+   - Bump `scripts/kani-shards.sh` **in LOCKSTEP** — the #101 ONE-TOUCH procedure:
+     add the new harness name to exactly ONE shard list (pick the lighter shard;
+     annotate the measured local time if >~20s) AND bump `EXPECTED_HARNESSES_TOTAL`
+     (currently **90**), plus the `kani.yml` "currently 90" comment. The fail-closed
+     completeness guard (`shards_assert_complete`, run in every verify-encode.sh
+     mode) makes a vacuous/deleted/renamed/shard-unassigned harness fail the gate.
+     The kani lane has 3 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
+     12 harnesses, marker `M11: caps-subset PROVEN`) and the #101 cost-balanced
+     shard pair `prove-encode-a`/`prove-encode-b` (tb-encode, 46+44 of the 90
+     harnesses, markers `V1-shard-a: kani-encoders OK`/`V1-shard-b: kani-encoders OK`,
+     30-min hard timeouts; local `SHARD=all` keeps the single 90-harness pass and
+     `V1: kani-encoders OK`). Never `--workspace`
      (drags tb-hal asm into CBMC).
 
 5. **Build — the real arbiter (CARGO_INCREMENTAL=0).** `export CARGO_INCREMENTAL=0`
@@ -230,12 +238,12 @@ lane out (this cost three blind ~30-min CI round-trips once — never again).
    - Zero Turkish (proper nouns like Gödel/TÜV are fine).
 
 10. **Land via the PR LOOP — never push to main.** Branch + open a PR (Conventional
-    Commits, `feat(<area>): Mn — <title>`). Watch the **real** CI: the ~9 lanes —
+    Commits, `feat(<area>): Mn — <title>`). Watch the **real** CI: the ~10 lanes —
     `ci` (both-arch QEMU-TCG cumulative boot; the aarch64 boot runs INSIDE a
     `debian:trixie-slim` qemu-10 container because SMMUv3 stage-2/L2.6 needs qemu≥9),
     `vmm-boot` (tb-vmm/KVM, M4), `l2-nested-vmx` (x86 VMX probe, informational),
     `microvm-kvm` (QEMU-microvm+KVM hard gate on `M18: evolve OK` + the --release
-    boot-ready bench), `kani` (prove-caps + prove-encode), `miri` (Tier-0 UB gate,
+    boot-ready bench), `kani` (prove-caps + prove-encode-a/-b), `miri` (Tier-0 UB gate,
     `T0: miri OK`), `clippy` (forbid-unsafe leaf lint, `S0: clippy OK`), `bench`
     (non-blocking). Merge ONLY after **2 CONSECUTIVE green real-CI runs on BOTH arches**,
     then `gh pr merge --merge --delete-branch`. (Commit messages: avoid backticks inside
