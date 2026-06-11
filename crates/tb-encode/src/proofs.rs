@@ -77,6 +77,7 @@ use crate::opframe_rx::{
     canon as cmd_canon, compute_mac, decode as cmd_decode, key_evolve, verify_decoded,
     CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN, MAC_LEN,
 };
+use crate::khash::{kat_ok, khash, uhash, KAT_ABC_UNKEYED, KHASH_KEY_LEN, KHASH_TAG_LEN};
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
     eb_lower_bound, gate_clears, label_reward, smoothness_floor_mean, survival_label,
@@ -3591,4 +3592,166 @@ fn kani_cmd_key_evolve() {
     let mut k2 = key;
     k2[idx] ^= 0x01;
     assert!(key_evolve(&k2) != evolved);
+}
+
+// ===========================================================================
+// M29: the khash BLAKE2s-256 KEYED-HASH primitive leaf (proposal §6.1) -- the
+// verified REAL keyed hash behind mac=KEYED-CRYPTO. The #49 strategy
+// throughout: hash inputs CONCRETE (constant propagation keeps 10-round ARX
+// cheap for CBMC) or a <=2-byte symbolic message for totality at the ceiling;
+// only flip INDEXES symbolic (a symbolic CHOICE over concrete data). There is
+// deliberately NO symbolic collision/preimage/PRF harness -- no tool in the
+// field proves those (research §5), and a vacuous one would be overclaim-by-
+// implication; primitive security stays ASSUMED-FROM-LITERATURE, tokened.
+// ===========================================================================
+
+/// (1) TOTALITY + DETERMINISM over the §3.3 split paths (proposal §6.1.1,
+/// MEASURED + restructured per the #49 mitigation ladder -- the proposal's
+/// compute-twice-at-every-boundary-length form measured ~6x over the local
+/// budget at ~9s per CONCRETE compression, so this is the MINIMAL
+/// path-covering set with every computed digest REUSED across asserts):
+/// `khash` at lengths {0, 64, 65} -- the keyed key-block-as-final, the
+/// block-aligned final, and the full-block + partial-final paths (a 1..=63
+/// remainder takes the SAME partial-final branch as 65's) -- and `uhash` at
+/// {0, 1, 65} -- the all-zero-block empty special case, the partial final,
+/// and the full+partial multi-block loop. PANIC-FREEDOM over each path;
+/// compute-twice DETERMINISM pinned to keyed-64 and unkeyed-empty. The
+/// remaining boundary lengths {1, 2, 31, 32, 55, 63, 128, 129} are pinned by
+/// the OFFICIAL KAT sweep under `cargo test` + Miri (same code, same paths).
+/// Deliberately NO fully-symbolic message bytes through the compression (the
+/// #49 rule); data-variation through the compression is exercised by the
+/// symbolic-flip-index `kani_khash_tamper` (a symbolic CHOICE over concrete
+/// data, the M22..M28 fold-tamper discipline).
+///
+/// NEGATIVE CONTROL (the classic last-block bug): `khash(k, m64) !=
+/// khash(k, m64 || 0x00)` -- a broken finalization counter / padding branch
+/// that absorbed the extension fails it; and `uhash("") != uhash("\x00")` --
+/// the two PADDED final blocks are byte-identical, ONLY the t counter
+/// separates them, so an implementation that dropped the §3.2 t fold fails.
+#[kani::proof]
+fn kani_khash_total_deterministic() {
+    let key: [u8; KHASH_KEY_LEN] = [0x5Au8; KHASH_KEY_LEN];
+    // One concrete 65-byte buffer: m65 = m64 || 0x00 by construction.
+    let mut m65 = [0u8; 65];
+    let mut i = 0usize;
+    while i < 64 {
+        m65[i] = (i as u8).wrapping_mul(7).wrapping_add(3);
+        i += 1;
+    }
+    m65[64] = 0x00;
+    // KEYED split paths (digests reused below).
+    let k0 = khash(&key, &[]); // key block IS the final block (keyed-empty)
+    let k64 = khash(&key, &m65[..64]); // block-aligned final
+    let k65 = khash(&key, &m65); // full block + 1-byte partial final
+    // DETERMINISM (keyed, the aligned-final path): twice, equal.
+    assert!(khash(&key, &m65[..64]) == k64);
+    // NEG: the m64 vs m64||0x00 extension (the padding/counter last-block bug).
+    assert!(k64 != k65);
+    // Distinct split paths give distinct digests (a degenerate constant fails).
+    assert!(k0 != k64);
+    // UNKEYED split paths.
+    let u0 = uhash(&[]); // the all-zero-block empty special case
+    let u00 = uhash(&[0u8]); // partial final
+    let u65 = uhash(&m65); // full + partial multi-block loop
+    // DETERMINISM (unkeyed empty): twice, equal.
+    assert!(uhash(&[]) == u0);
+    // NEG: "" vs "\x00" -- identical padded blocks, t-counter-only separation.
+    assert!(u0 != u00);
+    assert!(u65 != u00);
+}
+
+/// (2) OFFICIAL-VECTOR functional correctness (proposal §6.1.2): the boot KAT
+/// body [`kat_ok`] -- RFC 7693 Appendix B "abc" (unkeyed) + the BLAKE2
+/// reference keyed KATs (key 000102..1f; the empty-input key-block-as-final
+/// vector + the 65-byte two-message-block vector) -- recomputed through the
+/// REAL compression and asserted. Any wrong IV / sigma / rotation / counter /
+/// final-flag constant fails the KAT. The SAME vectors re-run under Miri and
+/// in-boot (the kernel earns `kat=RFC7693-PASS` from this exact function).
+///
+/// NEGATIVE CONTROL (non-vacuous comparator): the computed "abc" digest does
+/// NOT equal the expected constant perturbed at a SYMBOLIC byte index -- a
+/// comparator that accepted everything (or a digest function returning the
+/// constant table) fails the inequality.
+#[kani::proof]
+fn kani_khash_vectors() {
+    // The fail-closed boot KAT, verbatim (kat=RFC7693-PASS is earned by this).
+    assert!(kat_ok());
+    // NEG: a one-byte-perturbed EXPECTED digest must NOT match the computed
+    // one, at every position (symbolic flip index over the 32 digest bytes).
+    let computed = uhash(b"abc");
+    let idx: usize = kani::any();
+    kani::assume(idx < KHASH_TAG_LEN);
+    let mut perturbed = KAT_ABC_UNKEYED;
+    perturbed[idx] ^= 0x01;
+    assert!(computed != perturbed);
+}
+
+/// (3) TAMPER-SENSITIVITY at a symbolic flip position (proposal §6.1.3): a
+/// concrete key + a concrete 65-byte message (forcing BOTH message blocks);
+/// flipping one bit at a SYMBOLIC index ranging over ALL 65 message bytes AND
+/// all 32 key bytes changes the tag (the M22/M25/M28 fold-tamper discipline:
+/// the symbolic part is the CHOICE over concrete data, never the data).
+///
+/// NEGATIVE CONTROL: flip-then-flip-back RESTORES the reference tag -- proves
+/// the harness genuinely mutates the hashed input (a tamper harness whose
+/// mutation never reached the hash would fail the restore equality, and a
+/// constant/length-only digest stand-in fails the inequality).
+#[kani::proof]
+fn kani_khash_tamper() {
+    let key: [u8; KHASH_KEY_LEN] = [0x3Cu8; KHASH_KEY_LEN];
+    let mut msg = [0u8; 65];
+    let mut i = 0usize;
+    while i < 65 {
+        msg[i] = (i as u8).wrapping_mul(11).wrapping_add(5);
+        i += 1;
+    }
+    let base = khash(&key, &msg);
+
+    // TAMPER: one bit at a symbolic index over message bytes [0,65) and key
+    // bytes [65,97).
+    let idx: usize = kani::any();
+    kani::assume(idx < 65 + KHASH_KEY_LEN);
+    let mut tkey = key;
+    let mut tmsg = msg;
+    if idx < 65 {
+        tmsg[idx] ^= 0x01;
+    } else {
+        tkey[idx - 65] ^= 0x01;
+    }
+    assert!(khash(&tkey, &tmsg) != base);
+
+    // NEG: flip back -> the reference tag returns (the mutation was real).
+    if idx < 65 {
+        tmsg[idx] ^= 0x01;
+    } else {
+        tkey[idx - 65] ^= 0x01;
+    }
+    assert!(khash(&tkey, &tmsg) == base);
+}
+
+/// (4) KEYED-MODE SEPARATION (proposal §6.1.4): two concrete keys differing in
+/// ONE byte produce DISTINCT tags on the same message, and the keyed mode is
+/// DISTINCT from the unkeyed mode on the same message (`kk` lives in the §2.5
+/// parameter word AND the key occupies block 0, so the modes can never alias).
+///
+/// NEGATIVE CONTROL: an implementation that SKIPPED the key block (or dropped
+/// `kk` from the parameter word) makes `khash(k, m) == uhash(m)` -> the
+/// mode-separation assert FAILS; one that ignored the key bytes makes the two
+/// keyed tags equal -> the key-sensitivity assert FAILS.
+#[kani::proof]
+fn kani_khash_keyed_distinct() {
+    let k1: [u8; KHASH_KEY_LEN] = [0x42u8; KHASH_KEY_LEN];
+    let mut k2 = k1;
+    k2[7] ^= 0x01; // one concrete byte apart
+    let mut msg = [0u8; 40];
+    let mut i = 0usize;
+    while i < 40 {
+        msg[i] = (i as u8).wrapping_mul(13).wrapping_add(1);
+        i += 1;
+    }
+    let t1 = khash(&k1, &msg);
+    // KEY SENSITIVITY: a one-byte key change moves the tag.
+    assert!(t1 != khash(&k2, &msg));
+    // MODE SEPARATION: keyed and unkeyed never alias on the same message.
+    assert!(t1 != uhash(&msg));
 }

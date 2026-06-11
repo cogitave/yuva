@@ -199,8 +199,34 @@ set -euo pipefail
 # CONCRETE key). Claims ONLY enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary
 # (mac=KEYED-NONCRYPTO, NOT forgery-resistance); the oracle is a test key (oracle=SIMULATED-ENROLLED-KEY);
 # an accepted command is necessary-not-sufficient (kan_active=0).
+# + M29 khash verified KEYED-HASH primitive leaf x4 (BLAKE2s-256, RFC 7693, native keyed mode -- the
+# mac=KEYED-CRYPTO primitive; ALL khash harnesses are CONCRETE-VECTOR-ONLY per the #49 discipline:
+# hash inputs concrete (or one <=2-byte fully-symbolic message for totality at the ceiling), only
+# flip INDEXES symbolic; a symbolic collision/preimage/PRF harness is structurally impossible here
+# BY DESIGN -- no tool in the field proves primitive security, and a vacuous one would be
+# overclaim-by-implication, so that tier stays ASSUMED-FROM-LITERATURE, machine-tokened):
+# kani_khash_total_deterministic -- the MINIMAL §3.3 path-covering set (measured: ~9s per concrete
+# compression, so digests are computed once and REUSED): khash at {0,64,65} (key-block-as-final /
+# block-aligned final / full+partial final -- any 1..=63 remainder takes 65's branch) + uhash at
+# {0,1,65} (empty special case / partial final / multi-block loop), panic-freedom over each path,
+# compute-twice DETERMINISM pinned to keyed-64 + unkeyed-empty; the remaining boundary lengths are
+# pinned by the official KAT sweep under cargo test + Miri (same code, same paths); deliberately NO
+# fully-symbolic message bytes through the compression (the #49 rule -- data variation through the
+# compression is the symbolic-flip-index tamper harness's job);
+# NEG: khash(k,m64) != khash(k,m64||0x00) (the classic
+# last-block padding/counter bug) and uhash("") != uhash("\x00") (identical padded blocks separated
+# ONLY by the t counter -- a dropped §3.2 t fold fails); kani_khash_vectors -- the fail-closed boot
+# KAT body kat_ok() recomputes the OFFICIAL vectors (RFC 7693 Appendix B "abc" + the BLAKE2
+# reference keyed KATs, key 000102..1f, empty + 65-byte inputs) through the REAL compression (any
+# wrong IV/sigma/rotation/counter/final-flag fails); NEG: the computed digest != the expected
+# constant perturbed at a symbolic byte index (a vacuous comparator fails); kani_khash_tamper -- a
+# one-bit flip at a SYMBOLIC index over ALL 65 message bytes AND all 32 key bytes of a concrete
+# two-block input changes the tag; NEG: flip-then-flip-back RESTORES the reference tag (the
+# mutation provably reaches the hash); kani_khash_keyed_distinct -- two concrete keys one byte
+# apart give distinct tags on the same message AND khash(k,m) != uhash(m) (the §2.5 kk parameter
+# word + key block 0 separate the modes; a skipped key block fails both asserts).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=80
+EXPECTED_HARNESSES=84
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

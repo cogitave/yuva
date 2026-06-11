@@ -55,6 +55,24 @@
 //!    in-kernel at load -- totality / overflow-freedom / structural monotonicity /
 //!    determinism / envelope-no-widening proven over the INTEGER artifact. SHIPS
 //!    DORMANT (the heuristic floor decides until an offline trace bake-off gate).
+//!  * [`khash`] -- the M29 verified KEYED-HASH primitive leaf: BLAKE2s-256
+//!    (RFC 7693) in its NATIVE KEYED MODE (`khash::khash(key32, msg) -> tag32`,
+//!    key zero-padded into data block 0 per §2.5/§2.10) plus the unkeyed form
+//!    (`khash::uhash` -- the #74 `prov_hash` successor body and the #75
+//!    Merkle-node hash), a one-shot API over a single contiguous slice
+//!    (deliberately NOT init/update/final). Pure wrapping 32-bit ARX, zero
+//!    deps, no float; .rodata = the 32-byte IV + 160-byte sigma schedule.
+//!    `khash::kat_ok` recomputes the OFFICIAL vectors (RFC 7693 Appendix B +
+//!    the BLAKE2 reference KAT) through the real compression -- the boot
+//!    self-test earns `kat=RFC7693-PASS` from it, fail-closed. HONEST
+//!    (machine-tokened): implementation totality/determinism/KAT-correctness/
+//!    tamper-sensitivity are PROVEN (Kani, concrete inputs -- the #49
+//!    discipline); collision/preimage/PRF/forgery resistance of the primitive
+//!    is ASSUMED-FROM-LITERATURE (Luykx-Mennink-Neves FSE 2016 keyed-mode
+//!    PRF proof; attack record ~7/10 rounds, pseudo settings only); NO
+//!    symbolic security harness exists, deliberately. `sidechannel=NOT-CLAIMED`
+//!    (constant-time-SHAPED only); RFC 7693 is informational, not a NIST
+//!    standard (`prim=BLAKE2S-256` names the trade).
 //!  * [`stage2`] -- the L2.1 aarch64 second-stage (stage-2) descriptor + control
 //!    algebra: the `s2_leaf_2mib`/`s2_leaf_4k`/`s2_table` VMSAv8-64 stage-2 entry
 //!    encoders (S2AP=RW, MemAttr Normal-WB, mandatory AF, block/page/table low
@@ -256,6 +274,7 @@ pub mod exp;
 pub mod explore;
 pub mod ipc_frame;
 pub mod kancell;
+pub mod khash;
 pub mod memscore;
 pub mod opframe;
 pub mod opframe_rx;
