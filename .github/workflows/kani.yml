@@ -81,7 +81,7 @@ jobs:
   # nor can break the M11 `prove-caps` lane above. Runs `cargo kani -p tb-encode`
   # (NEVER --workspace -- that would drag tb-hal's inline asm into CBMC), then
   # scripts/verify-encode.sh asserts ZERO failures AND that SUCCESSFUL == the
-  # pinned EXPECTED_HARNESSES (currently 84: the 15 original + the 5 L2.1 stage-2/
+  # pinned EXPECTED_HARNESSES (currently 90: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -178,7 +178,46 @@ jobs:
   # expected digest must NOT match) / kani_khash_tamper (a one-bit flip at a SYMBOLIC index over all
   # 65 message + 32 key bytes of a concrete two-block input changes the tag; NEG: flip-then-flip-back
   # restores the reference tag) / kani_khash_keyed_distinct (two concrete keys one byte apart give
-  # distinct tags + khash(k,m) != uhash(m) -- a skipped key block fails both);
+  # distinct tags + khash(k,m) != uhash(m) -- a skipped key block fails both) + the 6 M30
+  # inferwire verified INFERENCE-TRANSPORT codec harnesses (the frame codec + stream accumulator
+  # + host-keyed echo behind the guest<->host channel; CONCRETE-FRAME / SHORT-SYMBOLIC per the
+  # #49 discipline -- every khash-consuming harness uses a 58-byte MAC message = key block + ONE
+  # message block = 2 compressions per call, <=4 calls per harness, the M29 measured budget; the
+  # codec harnesses are khash-FREE; mutation-tested per the M30 proposal §6 -- a flipped decode
+  # bounds op / a dropped peer_id/challenge/nonce in echo_tag's MAC input / an off-by-one
+  # FrameAccum cap each turn at least one harness RED): kani_inferwire_canon_roundtrip
+  # (decode(canon(f)) recovers every field bit-exactly at boundary payload lengths {0,1,31} +
+  # the 1024 cap pinned by length math, + a one-byte perturbation at a symbolic index across
+  # req_id/challenge/nonce/peer/tag canons to DISTINCT bytes -- injectivity; NEG: a kind-only
+  # difference canons to distinct bytes, a kind-blind encoder fails) /
+  # kani_inferwire_decode_total (a fully-symbolic short buffer + every concrete truncation + a
+  # reserved-nonzero flags byte + an oversize declared payload_len ALL reject; a fully-symbolic
+  # exact-header buffer is panic-free with accept-soundness; NEG: the exactly-valid frame
+  # decodes Some -- the rejector is non-vacuous) / kani_inferwire_req_binding
+  # (resp_binds_req(resp,id) IFF resp.req_id==id AND kind==ECHO_RESP, fully symbolic; NEG:
+  # flip-then-flip-back of a symbolic req_id byte breaks then restores the binding) /
+  # kani_inferwire_echo_sound (verify_echo ACCEPTS the genuine host-keyed echo; a one-bit flip
+  # at a symbolic index over ALL tag+body bytes REJECTS -- the key-flip range EXCLUDED per the
+  # measured #49 budget: key-bit sensitivity is kani_khash_tamper's primitive-level theorem,
+  # verify_echo's key path is a direct khash call, and the wrongkey reject fires in-boot on
+  # every attached lane; NEG: flip-then-flip-back restores acceptance -- a constant/length-only
+  # tag stand-in fails) / kani_inferwire_accum_resync (the
+  # capacity + resync DISCIPLINE proof, reshaped down the FULL measured #49 ladder to its named
+  # last rung: a TINY-cap FrameAccum<6> driven to capacity and THROUGH the at-capacity
+  # consume-then-resync branch by a CONCRETE plausible-header stream NEVER overflows --
+  # len()<=CAP after every push, every index Kani-checked, the off-by-one-capacity killer --
+  # plus EVERY byte-wise resync class (non-magic / magic-then-bad-second / bad version /
+  # unknown kind / reserved-nonzero flags) each fed concretely, every push None, the
+  # accumulator drains + stays reusable; the FULL emit trace is a NAMED delegation -- every
+  # symbolic/trace form measured >>120s, a structural CBMC floor for a 66-byte-header protocol
+  # -- covered by 5 dedicated host tests + Miri over this exact code AND both live CI boot
+  # lanes pushing the real host response through FrameAccum every boot with the proven
+  # fail-closed decode as the emitted-window arbiter; NEG: every leg asserts None on every
+  # push) /
+  # kani_inferwire_peer_label_bound (on the same (K,N,C,body) a distinct peer_id / challenge /
+  # nonce each yields a DISTINCT tag -- peer+challenge+nonce provably INSIDE the MAC'd bytes,
+  # so the run-script lane-token cross-pin is real; NEG: an echo_tag that dropped any of them
+  # from its MAC input fails the corresponding inequality);
   # bump in LOCKSTEP with scripts/verify-encode.sh) before
   # emitting the DoD marker `V1: kani-encoders OK` (fail-closed).
   prove-encode:

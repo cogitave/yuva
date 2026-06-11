@@ -228,8 +228,64 @@ set -euo pipefail
 # mutation provably reaches the hash); kani_khash_keyed_distinct -- two concrete keys one byte
 # apart give distinct tags on the same message AND khash(k,m) != uhash(m) (the §2.5 kk parameter
 # word + key block 0 separate the modes; a skipped key block fails both asserts).
+# + M30 inferwire verified INFERENCE-TRANSPORT codec leaf x6 (the frame codec + stream
+# accumulator + host-keyed echo behind the guest<->host channel; CONCRETE-FRAME /
+# SHORT-SYMBOLIC per the #49 discipline -- frame inputs concrete or <=8 symbolic bytes,
+# only flip-indexes/predicates/lengths symbolic; every khash-consuming harness uses a
+# 58-byte MAC message = key block + ONE message block = 2 compressions per call, <=4
+# calls per harness -- the M29 measured budget; the codec harnesses are khash-FREE;
+# MUTATION-TESTED per proposal §6: a flipped decode bounds op / a dropped
+# peer_id/challenge/nonce in echo_tag's MAC input / an off-by-one FrameAccum cap each
+# turn at least one harness RED -- recorded in the M30 proposal so the obligation is
+# auditable): kani_inferwire_canon_roundtrip -- decode(canon(f)) recovers every field
+# bit-exactly at boundary payload lengths {0,1,31} (+ the 1024 cap pinned by length
+# math; the full-cap byte round-trip is host-test+Miri territory, the #49 cost rule),
+# AND a one-byte perturbation at a symbolic index across req_id/challenge/nonce/peer/
+# tag canons to DISTINCT bytes (injectivity); NEG: a kind-only difference canons to
+# distinct bytes (a kind-blind encoder fails); kani_inferwire_decode_total -- a
+# fully-symbolic short buffer + every concrete truncation + a reserved-nonzero flags
+# byte (symbolic over all 255) + an oversize declared payload_len (symbolic past the
+# cap) ALL reject, a fully-symbolic exact-header buffer is panic-free with
+# accept-soundness (Some implies the magic/ver/flags bytes provably hold); NEG: the
+# exactly-valid frame decodes Some (the rejector is non-vacuous);
+# kani_inferwire_req_binding -- resp_binds_req(resp,id) IFF resp.req_id==id AND
+# kind==ECHO_RESP, fully symbolic; NEG: flip-then-flip-back of a symbolic req_id byte
+# breaks then RESTORES the binding (the mutation provably reaches the field);
+# kani_inferwire_echo_sound -- verify_echo ACCEPTS the genuine host-keyed echo and a
+# one-bit flip at a symbolic index over ALL tag+body bytes REJECTS (concrete 8-byte
+# body -> 2 compressions/call, 4 calls; the key-flip range is EXCLUDED per the
+# measured #49 budget -- 129s with it, key-bit sensitivity is kani_khash_tamper's
+# theorem at the primitive level, verify_echo's key path is a direct khash call, and
+# the wrongkey reject fires in-boot on every attached lane + in the host tests);
+# NEG: flip-then-flip-back restores acceptance (a constant/length-only tag stand-in
+# fails); kani_inferwire_accum_resync
+# -- the capacity + resync DISCIPLINE proof, RESHAPED down the FULL measured #49
+# mitigation ladder to its named last rung (split the FrameAccum trace out): (leg A,
+# the off-by-one-capacity killer) a TINY-cap FrameAccum<6> driven to capacity and
+# THROUGH the at-capacity consume-then-resync branch by a CONCRETE plausible-header
+# stream that can never complete a frame NEVER overflows (len()<=CAP after every push,
+# every index Kani-checked on that path; const-generic, so the discipline proven at
+# CAP=6 is the same code path the INFER_ACCUM_CAP alias runs -- its value pinned by
+# harness 1 length math); (leg B) EVERY byte-wise resync class -- non-magic /
+# magic-then-bad-second / bad version / unknown kind / reserved-nonzero flags -- each
+# fed concretely, every push None, the accumulator drains and stays reusable. The
+# FULL emit trace (garbage -> 68-byte frame -> emitted EXACTLY ONCE at wire length ->
+# emitted window decodes) is a NAMED delegation: every symbolic/trace form (symbolic
+# bytes, symbolic length, kissat, chunked unwind, decode-free scan) measured >>120s --
+# a structural CBMC floor for a 66-byte-header protocol (~68 sequential push inlines x
+# the unwind bound on the scan/consume/resync loops); it runs as 5 dedicated host
+# tests + the Miri gate over this exact code, and BOTH live CI boot lanes push the
+# real host response through FrameAccum byte-at-a-time every boot with the proven
+# fail-closed decode as the arbiter of the emitted window (kernel stage-0x4 reject);
+# symbolic-input rejection coverage lives in kani_inferwire_decode_total, whose
+# decoder IS the rule set scan enforces byte-wise; NEG: every leg asserts None on
+# every push (a fabricated frame boundary fails);
+# kani_inferwire_peer_label_bound -- on the same (K,N,C,body), a distinct peer_id /
+# challenge / nonce each yields a DISTINCT tag (peer+challenge+nonce provably INSIDE
+# the MAC'd bytes -> the run-script lane cross-pin is real); NEG: an echo_tag that
+# dropped any of them from its MAC input fails the corresponding inequality.
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=84
+EXPECTED_HARNESSES=90
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per

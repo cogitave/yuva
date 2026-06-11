@@ -78,6 +78,13 @@ use crate::opframe_rx::{
     CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN, MAC_LEN,
 };
 use crate::khash::{kat_ok, khash, uhash, KAT_ABC_UNKEYED, KHASH_KEY_LEN, KHASH_TAG_LEN};
+use crate::inferwire::{
+    canon as iw_canon, decode as iw_decode, echo_tag, kind as iw_kind, peer as iw_peer,
+    resp_binds_req, verify_echo, FrameAccum, InferFrame, INFER_ACCUM_CAP, INFER_CHALLENGE_LEN,
+    INFER_HEADER_LEN, INFER_KEY_LEN, INFER_MAGIC, INFER_NONCE_LEN, INFER_PAYLOAD_CAP,
+    INFER_TAG_LEN, INFER_VER, OFF_FLAGS as IW_OFF_FLAGS, OFF_KIND as IW_OFF_KIND,
+    OFF_MAGIC as IW_OFF_MAGIC, OFF_PAYLOAD_LEN as IW_OFF_PAYLOAD_LEN, OFF_VER as IW_OFF_VER,
+};
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
     eb_lower_bound, gate_clears, label_reward, smoothness_floor_mean, survival_label,
@@ -3759,4 +3766,443 @@ fn kani_khash_keyed_distinct() {
     assert!(t1 != khash(&k2, &msg));
     // MODE SEPARATION: keyed and unkeyed never alias on the same message.
     assert!(t1 != uhash(&msg));
+}
+
+// ===========================================================================
+// M30: the inferwire verified INFERENCE-TRANSPORT codec leaf (proposal §6) --
+// the frame codec + stream accumulator + host-keyed echo behind the
+// guest<->host channel. The #49 strategy throughout: frame INPUTS concrete (or
+// <=8 symbolic bytes for totality), only flip-indexes/predicates/lengths
+// symbolic; the khash body inside `echo_tag` runs on CONCRETE inputs with a
+// SHORT message (label 17 + peer 1 + nonce 16 + challenge 16 + body 8 = 58
+// bytes -> key block + ONE message block = 2 compressions per call, the M29
+// measured-budget discipline); deliberately NO symbolic collision/preimage/PRF
+// harness (overclaim-by-implication, banned -- the M29 convention).
+// ===========================================================================
+
+/// A concrete, fully-populated inferwire ECHO_RESP over a borrowed payload
+/// (helper -- concrete tag bytes; the codec never verifies tags, `verify_echo`
+/// does, so the codec harnesses stay khash-FREE).
+#[cfg(kani)]
+fn kani_iw_frame<'a>(payload: &'a [u8]) -> InferFrame<'a> {
+    let mut challenge = [0u8; INFER_CHALLENGE_LEN];
+    let mut nonce = [0u8; INFER_NONCE_LEN];
+    let mut tag = [0u8; INFER_TAG_LEN];
+    let mut i = 0usize;
+    while i < 16 {
+        challenge[i] = (i as u8).wrapping_mul(7).wrapping_add(1);
+        nonce[i] = (i as u8).wrapping_mul(11).wrapping_add(3);
+        tag[i] = (i as u8).wrapping_mul(13).wrapping_add(5);
+        i += 1;
+    }
+    InferFrame {
+        kind: iw_kind::ECHO_RESP,
+        req_id: 0xA5A5_5A5A_0123_4567,
+        challenge,
+        nonce,
+        peer_id: iw_peer::QEMU_CHARDEV_HARNESS,
+        tag,
+        payload,
+    }
+}
+
+/// (1) M30 CANON ROUND-TRIP + INJECTIVITY (proposal §6.1): at the boundary
+/// payload lengths {0, 1, 31} (+ the cap pinned by length math -- the FULL
+/// 1024-byte round-trip is pinned by `cargo test` + Miri over the same code;
+/// a concrete 1024-iteration copy x4 in CBMC buys no extra proof over 31,
+/// the #49 cost discipline), `decode(canon(f))` recovers EVERY field
+/// bit-exactly; and flipping ONE byte at a SYMBOLIC index across the
+/// fixed-width header value fields (req_id | challenge | nonce | peer_id |
+/// tag) canons to DISTINCT bytes -- the injectivity that makes the frame a
+/// sound MAC/witness carrier.
+///
+/// NEGATIVE CONTROL (the kind-blind-encoder break): two frames identical
+/// except `kind` (ECHO_REQ vs ECHO_RESP) MUST canon to distinct bytes -- an
+/// encoder that dropped `kind` from the layout passes every round-trip leg
+/// and fails exactly this inequality.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_canon_roundtrip() {
+    // Round-trip at the boundary payload lengths (concrete).
+    let payload = [0xC3u8; 31];
+    let mut l = 0usize;
+    while l < 3 {
+        let plen = [0usize, 1, 31][l];
+        let f = kani_iw_frame(&payload[..plen]);
+        let mut buf = [0u8; INFER_HEADER_LEN + 31];
+        let n = iw_canon(&f, &mut buf);
+        assert!(n == INFER_HEADER_LEN + plen);
+        let d = match iw_decode(&buf[..n]) {
+            Some(d) => d,
+            None => panic!("valid frame must decode"),
+        };
+        assert!(d.kind == f.kind);
+        assert!(d.req_id == f.req_id);
+        assert!(d.challenge == f.challenge);
+        assert!(d.nonce == f.nonce);
+        assert!(d.peer_id == f.peer_id);
+        assert!(d.tag == f.tag);
+        assert!(d.payload.len() == plen);
+        let mut p = 0usize;
+        while p < plen {
+            assert!(d.payload[p] == f.payload[p]);
+            p += 1;
+        }
+        l += 1;
+    }
+    // The cap is pinned by the length math (the 1024-byte copy itself adds no
+    // proof value -- covered by host tests + Miri on the same code).
+    assert!(crate::inferwire::canon_len(INFER_PAYLOAD_CAP) == INFER_ACCUM_CAP);
+    assert!(crate::inferwire::frame_is_encodable(INFER_PAYLOAD_CAP));
+    assert!(!crate::inferwire::frame_is_encodable(INFER_PAYLOAD_CAP + 1));
+
+    // INJECTIVITY: a one-byte perturbation at a SYMBOLIC index across the
+    // fixed-width value fields canons to distinct bytes.
+    let base = kani_iw_frame(&payload[..2]);
+    let mut cb = [0u8; INFER_HEADER_LEN + 2];
+    let nb = iw_canon(&base, &mut cb);
+    assert!(nb == INFER_HEADER_LEN + 2);
+    let idx: usize = kani::any();
+    kani::assume(idx < 8 + 16 + 16 + 1 + 16); // req_id|challenge|nonce|peer|tag
+    let mut m = base;
+    if idx < 8 {
+        m.req_id ^= 1u64 << (8 * idx as u32); // flip one req_id byte
+    } else if idx < 24 {
+        m.challenge[idx - 8] ^= 0x01;
+    } else if idx < 40 {
+        m.nonce[idx - 24] ^= 0x01;
+    } else if idx < 41 {
+        m.peer_id ^= 0x01;
+    } else {
+        m.tag[idx - 41] ^= 0x01;
+    }
+    let mut cm = [0u8; INFER_HEADER_LEN + 2];
+    let nm = iw_canon(&m, &mut cm);
+    assert!(nm == nb);
+    let mut differs = false;
+    let mut k = 0usize;
+    while k < nb {
+        if cm[k] != cb[k] {
+            differs = true;
+        }
+        k += 1;
+    }
+    assert!(differs);
+
+    // NEG: a kind-only difference canons to distinct bytes (kind-blind fails).
+    let mut req = base;
+    req.kind = iw_kind::ECHO_REQ;
+    let mut cr = [0u8; INFER_HEADER_LEN + 2];
+    let nr = iw_canon(&req, &mut cr);
+    assert!(nr == nb);
+    assert!(cr[IW_OFF_KIND] != cb[IW_OFF_KIND]);
+}
+
+/// (2) M30 DECODE TOTALITY -- fail-closed over malformed input (proposal
+/// §6.2): a fully-SYMBOLIC short buffer never panics and never decodes (the
+/// header is 66 bytes); EVERY concrete truncation of a valid frame rejects;
+/// a reserved-NONZERO `flags` byte rejects (symbolic over all 255 values); an
+/// OVERSIZE declared `payload_len` rejects (symbolic over all values past the
+/// cap); a fully-symbolic exact-header buffer never panics, and IF it decodes
+/// then its magic/ver/flags bytes provably hold the required values (accept-
+/// soundness).
+///
+/// NEGATIVE CONTROL (the rejector is non-vacuous): the exactly-valid frame
+/// MUST decode `Some` -- a decoder that rejects everything passes every
+/// fail-closed leg and fails exactly this.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_decode_total() {
+    // A fully-symbolic SHORT buffer: total + always None.
+    let short: [u8; 8] = kani::any();
+    let sl: usize = kani::any();
+    kani::assume(sl <= 8);
+    assert!(iw_decode(&short[..sl]).is_none());
+
+    // A fully-symbolic exact-header buffer: total; accept-soundness on Some.
+    let hdr: [u8; INFER_HEADER_LEN] = kani::any();
+    if iw_decode(&hdr).is_some() {
+        assert!(hdr[IW_OFF_MAGIC] == (INFER_MAGIC & 0xFF) as u8);
+        assert!(hdr[IW_OFF_MAGIC + 1] == (INFER_MAGIC >> 8) as u8);
+        assert!(hdr[IW_OFF_VER] == INFER_VER);
+        assert!(hdr[IW_OFF_FLAGS] == 0);
+    }
+
+    // A concrete valid frame (payload 2): every truncation rejects.
+    let payload = [0xEEu8, 0x11];
+    let f = kani_iw_frame(&payload);
+    let mut wire = [0u8; INFER_HEADER_LEN + 2];
+    let n = iw_canon(&f, &mut wire);
+    assert!(n == INFER_HEADER_LEN + 2);
+    let cut: usize = kani::any();
+    kani::assume(cut < n);
+    assert!(iw_decode(&wire[..cut]).is_none());
+
+    // Reserved-NONZERO flags reject (all 255 nonzero values, symbolic).
+    let flags: u8 = kani::any();
+    kani::assume(flags != 0);
+    let mut bf = wire;
+    bf[IW_OFF_FLAGS] = flags;
+    assert!(iw_decode(&bf[..n]).is_none());
+
+    // An OVERSIZE declared payload_len rejects (symbolic past the cap).
+    let plen: u32 = kani::any();
+    kani::assume(plen as usize > INFER_PAYLOAD_CAP);
+    let mut bl = wire;
+    let lb = plen.to_le_bytes();
+    bl[IW_OFF_PAYLOAD_LEN] = lb[0];
+    bl[IW_OFF_PAYLOAD_LEN + 1] = lb[1];
+    bl[IW_OFF_PAYLOAD_LEN + 2] = lb[2];
+    bl[IW_OFF_PAYLOAD_LEN + 3] = lb[3];
+    assert!(iw_decode(&bl[..n]).is_none());
+
+    // NEG: the exactly-valid frame decodes Some (non-vacuous rejector).
+    assert!(iw_decode(&wire[..n]).is_some());
+}
+
+/// (3) M30 CORRELATION BINDING -- the iff-theorem (proposal §6.3):
+/// `resp_binds_req(resp, id)` holds IFF `resp.req_id == id` AND `resp.kind ==
+/// ECHO_RESP`, proven fully symbolically over the id space and the kind byte.
+///
+/// NEGATIVE CONTROL (the harness genuinely mutates): flipping one SYMBOLIC
+/// byte of a bound resp's `req_id` BREAKS the binding, and flipping it back
+/// RESTORES it -- a binding check that ignored `req_id` (or a harness whose
+/// mutation never reached the field) fails one of the two.
+#[kani::proof]
+fn kani_inferwire_req_binding() {
+    // The iff, fully symbolic.
+    let id: u64 = kani::any();
+    let rid: u64 = kani::any();
+    let k: u8 = kani::any();
+    kani::assume(k == iw_kind::ECHO_REQ || k == iw_kind::ECHO_RESP || k == iw_kind::ERR);
+    let mut f = kani_iw_frame(&[]);
+    f.req_id = rid;
+    f.kind = k;
+    let binds = resp_binds_req(&f, id);
+    assert!(binds == (rid == id && k == iw_kind::ECHO_RESP));
+
+    // Flip-then-flip-back at a symbolic req_id byte.
+    let mut bound = kani_iw_frame(&[]);
+    bound.req_id = id;
+    assert!(resp_binds_req(&bound, id));
+    let bidx: usize = kani::any();
+    kani::assume(bidx < 8);
+    bound.req_id ^= 1u64 << (8 * bidx as u32);
+    assert!(!resp_binds_req(&bound, id)); // broken
+    bound.req_id ^= 1u64 << (8 * bidx as u32);
+    assert!(resp_binds_req(&bound, id)); // restored (the mutation was real)
+}
+
+/// (4) M30 ECHO SOUNDNESS + single-byte tamper rejection (proposal §6.4):
+/// with a CONCRETE key/nonce/challenge/peer and a CONCRETE 8-byte body (the
+/// khash message is 58 bytes -> key block + ONE message block = 2 compressions
+/// per call, the M29 measured budget; 4 khash calls total = 8 compressions),
+/// `verify_echo` ACCEPTS the genuine `(echo_tag, body)` response; flipping one
+/// bit at a SYMBOLIC index over ALL tag bytes AND all body bytes makes it
+/// REJECT. MEASURED TRIM vs the proposal's sketch (#49 budget): the key-byte
+/// flip range is EXCLUDED -- a symbolic key flip makes khash's key block
+/// symbolic-choice in every call and pushed the harness past the 120s budget
+/// (129s measured); key-BIT sensitivity is already `kani_khash_tamper`'s
+/// theorem at the primitive level (a symbolic flip over all 32 key bytes
+/// changes the tag), `verify_echo`'s key path is a direct `khash(key, ..)`
+/// call with no intervening transform, and the WRONGKEY reject additionally
+/// fires IN-BOOT on every attached lane (`wrongkey-rejected=1`, the runtime
+/// mirror) plus in the host tests.
+///
+/// NEGATIVE CONTROL: flip-then-flip-back RESTORES acceptance -- proves the
+/// harness genuinely mutates what the verifier reads (a constant/length-only
+/// tag stand-in fails the tamper inequality; a mutation that never reached
+/// the verifier fails the restore -- the M29 §6.3 tamper idiom). The
+/// challenge/nonce/peer MAC-coverage mutants are killed by harness (6).
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_echo_sound() {
+    let key: [u8; INFER_KEY_LEN] = [0x6Du8; INFER_KEY_LEN];
+    let body = [0x42u8, 0x99, 0x17, 0xE0, 0x3B, 0x70, 0x55, 0x08];
+    let req = {
+        let mut r = kani_iw_frame(&body);
+        r.kind = iw_kind::ECHO_REQ;
+        r
+    };
+    let mut resp = kani_iw_frame(&body);
+    resp.tag = echo_tag(&key, resp.peer_id, &resp.nonce, &req.challenge, &body);
+    resp.challenge = req.challenge;
+
+    // ACCEPT the genuine host-keyed echo.
+    assert!(verify_echo(&key, &resp, &req));
+
+    // TAMPER: one bit at a SYMBOLIC index over tag[0..16) | body[16..24)
+    // -> reject (the key range is excluded -- see the harness doc).
+    let idx: usize = kani::any();
+    kani::assume(idx < INFER_TAG_LEN + 8);
+    let mut tbody = body;
+    let mut tresp = resp;
+    if idx < INFER_TAG_LEN {
+        tresp.tag[idx] ^= 0x01;
+    } else {
+        tbody[idx - INFER_TAG_LEN] ^= 0x01;
+        tresp.payload = &tbody;
+    }
+    assert!(!verify_echo(&key, &tresp, &req));
+
+    // NEG: flip back (fresh copies -- the borrow above stays untouched) ->
+    // acceptance returns (the mutation was real).
+    let mut rbody = tbody;
+    let mut rresp = tresp;
+    if idx < INFER_TAG_LEN {
+        rresp.tag[idx] ^= 0x01;
+    } else {
+        rbody[idx - INFER_TAG_LEN] ^= 0x01;
+        rresp.payload = &rbody;
+    }
+    assert!(verify_echo(&key, &rresp, &req));
+}
+
+/// (5) M30 STREAM-ACCUMULATOR capacity + resync discipline (proposal §6.5, the
+/// `BoundedRing` never-overflow proof shape -- RESHAPED down the FULL, measured
+/// #49 mitigation ladder, ending at the ladder's named last rung, "split the
+/// FrameAccum harness out": the proposal's symbolic-garbage-then-full-frame
+/// trace form was walked through fully-symbolic bytes, symbolic-length,
+/// symbolic-values-only, `kani::solver(kissat)`, a chunked-unwind restructure,
+/// AND a decode-free scan hot path -- every form exceeded the measured local
+/// budget (>>120s; >6 min at the cheapest), because ~68 sequential `push_byte`
+/// inlines x the per-harness unwind bound on the scan/consume/resync loops is
+/// a STRUCTURAL formula floor for a 66-byte-header protocol, independent of
+/// data concreteness. What Kani PROVES here is the part model-checking
+/// uniquely adds -- index/capacity/totality discipline + every byte-wise
+/// resync class, each leg concrete + tiny:
+///
+/// * (leg A, the off-by-one-capacity killer) a TINY-cap `FrameAccum<6>` is fed
+///   a CONCRETE plausible-header stream that can never complete a frame
+///   (CAP < header), driving `len` to CAP and THROUGH the at-capacity
+///   consume-then-resync branch -- Kani checks EVERY buffer index on that
+///   path, so a capacity off-by-one is an out-of-bounds proof failure, and
+///   `len() <= CAP` is asserted after every push (the §6 mutation set's
+///   designated cap-mutant killer; `FrameAccum` is const-generic, so the
+///   discipline proven at CAP=6 is the SAME code path the `INFER_ACCUM_CAP`
+///   alias runs -- whose value is pinned by the length math in harness (1)).
+/// * (leg B, the resync classes) every byte-wise rejection class the scan
+///   enforces -- non-magic first byte, magic-then-bad-second-byte, bad
+///   version, unknown kind, reserved-nonzero flags -- each fed concretely
+///   after a fresh plausible prefix: every push returns `None` (no fabricated
+///   frame boundary) and the accumulator drains/resyncs without overflow.
+///
+/// The FULL emit trace (garbage prefix -> 68-byte frame -> emitted EXACTLY
+/// ONCE at exactly the wire length -> the emitted window decodes) is the
+/// NAMED delegation: it runs as 5 dedicated host tests (byte-by-byte split
+/// delivery, garbage resync, plausible-garbage-header resync, the max-size
+/// frame completing AT capacity, tiny-cap saturation) under `cargo test` AND
+/// the Miri UB gate over this exact code, and BOTH live CI boot lanes push
+/// the real host response through `FrameAccum` byte-at-a-time every boot with
+/// the proven fail-closed [`decode`] as the arbiter of the emitted window
+/// (the kernel rejects at stage 0x4 if the emitted bytes do not decode).
+/// Recorded in the gate docs + the proposal status note -- auditable, not
+/// implied.
+///
+/// NEGATIVE CONTROL (resync does not false-positive): every leg asserts
+/// `push_byte(..).is_none()` -- an accumulator that fabricated a frame
+/// boundary on garbage (or emitted below a complete header) fails the asserts.
+#[kani::proof]
+#[kani::unwind(14)]
+fn kani_inferwire_accum_resync() {
+    let magic0 = (INFER_MAGIC & 0xFF) as u8;
+    let magic1 = (INFER_MAGIC >> 8) as u8;
+
+    // Leg A: tiny-cap capacity discipline on a CONCRETE plausible stream.
+    // bytes 0..5 pass every byte-wise plausibility check (magic|ver|kind|
+    // flags), so len climbs to CAP=6; push 7 takes the at-capacity
+    // consume(1) branch; the resync then drains on the implausible shifted
+    // prefix. A frame can NEVER complete below INFER_HEADER_LEN, so every
+    // push must return None.
+    let mut tiny: FrameAccum<6> = FrameAccum::new();
+    let stream: [u8; 10] = [
+        magic0,
+        magic1,
+        INFER_VER,
+        iw_kind::ECHO_REQ,
+        0x00, // flags (plausible)
+        0x11,
+        0x22,
+        0x33,
+        magic0, // a fresh magic start late in the stream
+        0x55,
+    ];
+    let mut i = 0usize;
+    while i < 10 {
+        assert!(tiny.push_byte(stream[i]).is_none());
+        assert!(tiny.len() <= 6);
+        i += 1;
+    }
+
+    // Leg B: every byte-wise resync class, each after a fresh plausible
+    // prefix, on a 12-cap accumulator (capacity is leg A's concern; 12 leaves
+    // headroom so no class is masked by the at-capacity branch).
+    let mut acc: FrameAccum<12> = FrameAccum::new();
+    // (B1) non-magic first byte: resync-to-empty.
+    assert!(acc.push_byte(0x99).is_none());
+    assert!(acc.is_empty());
+    // (B2) magic then a bad SECOND magic byte: partial-candidate front drop.
+    assert!(acc.push_byte(magic0).is_none());
+    assert!(acc.push_byte(0x07).is_none());
+    assert!(acc.is_empty());
+    // (B3) magic+magic then a bad VERSION byte.
+    assert!(acc.push_byte(magic0).is_none());
+    assert!(acc.push_byte(magic1).is_none());
+    assert!(acc.push_byte(0xEE).is_none()); // != INFER_VER
+    assert!(acc.is_empty());
+    // (B4) magic+magic+ver then an UNKNOWN kind.
+    assert!(acc.push_byte(magic0).is_none());
+    assert!(acc.push_byte(magic1).is_none());
+    assert!(acc.push_byte(INFER_VER).is_none());
+    assert!(acc.push_byte(0x7F).is_none()); // not a known kind
+    assert!(acc.is_empty());
+    // (B5) magic+magic+ver+kind then RESERVED-NONZERO flags.
+    assert!(acc.push_byte(magic0).is_none());
+    assert!(acc.push_byte(magic1).is_none());
+    assert!(acc.push_byte(INFER_VER).is_none());
+    assert!(acc.push_byte(iw_kind::ECHO_RESP).is_none());
+    assert!(acc.push_byte(0x80).is_none()); // reserved flags bit set
+    assert!(acc.is_empty());
+    // After every rejection class the accumulator is reusable: a plausible
+    // prefix accumulates again (and still cannot emit below a full header).
+    assert!(acc.push_byte(magic0).is_none());
+    assert!(acc.push_byte(magic1).is_none());
+    assert!(acc.len() == 2);
+}
+
+/// (6) M30 MAC-COVERAGE of the labels (proposal §6.6 -- proves the run-script
+/// lane-token cross-pin §5.4 is REAL, not decorative): on the SAME concrete
+/// `(K, N, C, body)`, two distinct `peer_id`s yield DISTINCT tags, a distinct
+/// challenge yields a distinct tag, and a distinct nonce yields a distinct tag
+/// -- so peer/challenge/nonce are all provably INSIDE the MAC'd bytes (4 khash
+/// calls x 2 compressions = 8, the measured budget).
+///
+/// NEGATIVE CONTROL: an `echo_tag` that DROPPED `peer_id` (or the challenge,
+/// or the nonce) from its MAC input makes the corresponding pair EQUAL and
+/// fails that inequality -- the §6 mutation set's designated killers.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_peer_label_bound() {
+    let key: [u8; INFER_KEY_LEN] = [0x2Bu8; INFER_KEY_LEN];
+    let mut nonce = [0u8; INFER_NONCE_LEN];
+    let mut chal = [0u8; INFER_CHALLENGE_LEN];
+    let mut i = 0usize;
+    while i < 16 {
+        nonce[i] = (i as u8).wrapping_mul(17).wrapping_add(9);
+        chal[i] = (i as u8).wrapping_mul(23).wrapping_add(2);
+        i += 1;
+    }
+    let body = [0x5Au8; 8];
+
+    let base = echo_tag(&key, iw_peer::TB_VMM_HOST, &nonce, &chal, &body);
+    // peer_id is MAC-covered (the lane cross-pin is bound inside the tag).
+    assert!(base != echo_tag(&key, iw_peer::QEMU_CHARDEV_HARNESS, &nonce, &chal, &body));
+    // The challenge is MAC-covered (a canned cross-boot response moves the tag).
+    let mut c2 = chal;
+    c2[0] ^= 0x01;
+    assert!(base != echo_tag(&key, iw_peer::TB_VMM_HOST, &nonce, &c2, &body));
+    // The host nonce is MAC-covered (host participation is bound per run).
+    let mut n2 = nonce;
+    n2[15] ^= 0x80;
+    assert!(base != echo_tag(&key, iw_peer::TB_VMM_HOST, &n2, &chal, &body));
 }
