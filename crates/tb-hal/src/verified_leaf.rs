@@ -580,20 +580,24 @@ pub fn smmu_selftest() -> SmmuProof {
 }
 
 // ===========================================================================
-// M27a: the COOPERATIVE two-VMID sovereign time-partition scheduler self-test
-// facade — the sovereignty pillar's "TABOS owns time for two guests" rung, built
-// ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam + M22's fold. Unlike
-// M27b (the real CNTHP-preemption path, DEFERRED), M27a is COOPERATIVE: two
-// trivial EL1 guest stubs run under TWO distinct VMIDs (two stage-2 roots); each,
-// when scheduled, bumps a DISTINCT per-VMID MMIO cell then voluntarily YIELDS
-// (`hvc #14`). The EL2 monitor, on each yield, consults the Kani-proven
-// `tb_encode::tpsched::next_slot`, switches `VTTBR_EL2` to the next VMID's root,
+// M27 (M27b): the CNTHP TIMER-PREEMPTED two-VMID sovereign time-partition
+// scheduler self-test facade — the sovereignty pillar's "TABOS owns time for two
+// guests" rung, built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam +
+// M22's fold. M27b upgraded the M27a cooperative green floor to REAL preemption:
+// two trivial EL1 guest stubs run under TWO distinct VMIDs (two stage-2 roots);
+// each is a PURE store-spin bumping a DISTINCT per-VMID MMIO cell — NO voluntary
+// yield (the retired `hvc #14` now traps loud), so the ONLY control transfer is
+// the CNTHP physical-timer PPI taken at EL2's 0x480 Lower-EL IRQ vector (the
+// first async IRQ at EL2; HCR_EL2.IMO=1 only inside the armed window). On each
+// preemption the monitor consults the Kani-proven `tb_encode::tpsched::next_slot`,
+// re-arms CNTHP BEFORE EOI (IAR==26 verified, ISTATUS read back, a hard EOI cap
+// turns a storm into a fast red), switches `VTTBR_EL2` to the next VMID's root,
 // folds a `tb_encode::tpsched::SchedDecision` into a running `sched_head` (the M22
 // `prov` fold reused VERBATIM), and resumes the next guest. After K bounded major
 // frames the monitor tears the window down (teardown-FIRST) and verifies the five
-// DoD properties. This exercises EVERYTHING EXCEPT the timer IRQ and CANNOT
-// IRQ-storm; the marker emits `timing=COOPERATIVE-HVC-YIELD` so it can never
-// impersonate M27b's `timing=TCG-NON-CYCLE-ACCURATE` real-timer claim.
+// DoD properties. The marker emits `timing=TCG-NON-CYCLE-ACCURATE` (TCG timing is
+// not cycle-accurate) + `realtime=NOT-CLAIMED`; the run-script guard REJECTS the
+// retired `timing=COOPERATIVE-HVC-YIELD` token so M27a cannot impersonate M27b.
 //
 // ALL the asm/unsafe is confined to tb-hal's arch/aarch64/{el2,tpsched_hal,stage2,
 // el2mmio}.rs (the tpsched leaf + the prov fold in tb-encode are forbid(unsafe) +
@@ -628,7 +632,7 @@ pub enum SchedProof {
         /// The nonzero failure code the EL2 monitor returned in x0.
         code: u64,
     },
-    /// THE PROOF: the cooperative two-VMID round-trip closed — both VMIDs advanced
+    /// THE PROOF: the timer-preempted two-VMID round-trip closed — both VMIDs advanced
     /// their DISTINCT MMIO cell (both-progressed, neither starved), the observed
     /// VMID run-order was the tpsched round-robin (order-honored), the recomputed
     /// `sched_head` matched the committed fold (fold-verified) AND a single-byte
@@ -643,8 +647,9 @@ pub enum SchedProof {
     },
 }
 
-/// M27a: run the cooperative two-VMID time-partition scheduler self-test
-/// (aarch64), or report [`SchedProof::NotApplicable`] on x86_64. See [`SchedProof`].
+/// M27 (M27b): run the CNTHP timer-preempted two-VMID time-partition scheduler
+/// self-test (aarch64), or report [`SchedProof::NotApplicable`] on x86_64. See
+/// [`SchedProof`].
 #[cfg(target_arch = "aarch64")]
 pub fn sched_selftest() -> SchedProof {
     arch::sched_selftest()
