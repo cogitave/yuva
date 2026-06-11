@@ -3,24 +3,30 @@
 //! ledger over the M13 memory substrate, lifted into `tb-encode` exactly as the
 //! M20 on-disk codecs ([`crate::blkfmt`]) and the M21 forget policy
 //! ([`crate::kancell`]) were. Every memory mutation (write / demote-tombstone /
-//! skill-admit) appends a typed [`ProvEntry`]; its 256-bit STRUCTURAL digest folds
+//! skill-admit) appends a typed [`ProvEntry`]; its 256-bit BLAKE2s-256 digest
+//! ([`crate::khash::uhash`] since M29 stage C) folds
 //! into a running per-agent `chain_head`, and an inclusion verifier recomputes the
 //! fold to prove a known entry is committed. The kernel/`tb-hal` seam CALLS these
 //! exact functions next to the existing mutation sites; the Kani lane PROVES
 //! canon-injectivity / totality / fold tamper-sensitivity / inclusion-soundness /
 //! determinism over the SAME bytes, with NO model drift.
 //!
-//! ## Honest scope (proposal §2 -- the marker claims ONLY what is proved)
+//! ## Honest scope (M29 stage C -- the claim boundary the witness uses)
 //!
-//! * **CLAIMS structural tamper-evidence.** Any single-byte mutation to a
-//!   committed entry's canonical bytes provably invalidates the recomputed head
-//!   AND its inclusion proof. Deletion is provable: an M17 demote emits a
-//!   TOMBSTONE entry, not a silent drop.
-//! * **Does NOT claim cryptographic collision / second-preimage resistance.** The
-//!   256-bit digest is built from FOUR domain-separated FNV-1a-64 lanes (reusing
-//!   the already-Kani-proven [`crate::blkfmt::fnv1a64`]) -- fast, total, no-float,
-//!   zero-dep, but NOT a cryptographic hash. An adversary who can CHOOSE inputs is
-//!   out of scope. A real keyed/crypto hash + a signed root is a tracked successor.
+//! * **CLAIMS cryptographic tamper-evidence (assumption-conditional, since
+//!   M29-C).** Any single-byte mutation to a committed entry's canonical bytes
+//!   provably invalidates the recomputed head AND its inclusion proof. Deletion
+//!   is provable: an M17 demote emits a TOMBSTONE entry, not a silent drop.
+//! * **The digest is BLAKE2s-256 (`prim=BLAKE2S-256`) since M29 stage C** --
+//!   the [`crate::khash::uhash`] unkeyed mode (RFC 7693) replaced the retired
+//!   4-lane FNV-1a-64 STRUCTURAL digest (the #74 hash half; the M22 "NOT
+//!   cryptographic" concession closes). Implementation totality / determinism /
+//!   official-vector correctness / tamper-sensitivity are PROVEN (Kani + Miri +
+//!   host tests + the fail-closed in-boot KAT); the primitive's collision /
+//!   preimage resistance is `sec=ASSUMED-FROM-LITERATURE` -- NEVER proven,
+//!   deliberately (no tool in the field proves primitive security; see the
+//!   [`crate::khash`] honesty note, the single source of truth). A SIGNED root
+//!   (authenticity over the head) remains the tracked #74 successor.
 //! * **A linear hash-CHAIN head, not a balanced Merkle tree.** The `parent_ids`
 //!   DAG edges are DATA inside an entry; the per-agent *head* is a fold. Balanced
 //!   batch-Merkle proofs are deferred to a successor (the Kani state-space reason).
@@ -30,15 +36,16 @@
 //! Pure integer/byte arithmetic, zero alloc, zero deps. `canon` is a fixed-field-
 //! order, LENGTH-PREFIXED-parents LE byte layout into a caller buffer (total +
 //! fail-closed: returns `0` if the buffer is too small, never panics). `prov_hash`
-//! is wrapping FNV-1a-64 over four domain-separated lanes. `chain_mix` folds the
+//! is BLAKE2s-256 unkeyed (pure wrapping/rotating 32-bit ARX -- the verified
+//! [`crate::khash`] leaf). `chain_mix` folds the
 //! 32-byte entry id into the 32-byte head by hashing their concatenation under a
 //! fold domain tag. `verify_inclusion` re-runs the fold over `(leaf, siblings)`
 //! and accepts iff it lands on the committed head -- a TOTAL, no-`unsafe`,
 //! `#![no_std]` leaf (the crate root forbids `unsafe_code`).
 
-use crate::blkfmt::fnv1a64;
+use crate::khash::{uhash, KHASH_TAG_LEN};
 
-/// The fixed canonical-entry digest width: a 256-bit (32-byte) structural id.
+/// The fixed canonical-entry digest width: a 256-bit (32-byte) content id.
 pub const PROV_HASH_LEN: usize = 32;
 
 /// The fixed prefix every [`canon`] encoding stamps BEFORE the variable parent
@@ -54,13 +61,10 @@ pub const CANON_PREFIX_LEN: usize = 1 + 1 + 8 + 8 + 8 + 8;
 /// `CANON_PREFIX_LEN + n * PROV_HASH_LEN`.
 pub const CANON_PARENT_LEN: usize = PROV_HASH_LEN;
 
-/// The domain-separator byte that leads each of the four `prov_hash` lanes (so a
-/// lane never aliases another lane on the same bytes) -- combined with the input
-/// LENGTH (also folded in) this gives the "two domain-separated lanes + a length
-/// domain-separator" structure (proposal §3), widened to four lanes to fill the
-/// full 256-bit digest. Distinct from [`MIX_DOMAIN`] so a hash and a fold can
-/// never collide on identical bytes.
-pub const HASH_LANE_DOMAIN: u8 = 0xA2;
+/// The fixed digest width of the [`crate::khash`] leaf is EXACTLY the prov
+/// digest width (BLAKE2s-256 == 32 bytes) -- the M29-C cutover is
+/// width-transparent, compile-pinned here so a drift can never build.
+const _: () = assert!(KHASH_TAG_LEN == PROV_HASH_LEN);
 
 /// The domain-separator byte that leads the [`chain_mix`] fold input, so folding
 /// `(head, id)` is domain-separated from a bare [`prov_hash`] over the same 64
@@ -167,58 +171,21 @@ pub fn canon(entry: &ProvEntry, out: &mut [u8]) -> usize {
     total
 }
 
-/// One domain-separated FNV-1a-64 lane over `bytes`: fold the lane domain byte,
-/// the lane index, and the input LENGTH (low 8 bytes, LE) as a length domain-
-/// separator BEFORE the payload, so a lane is a function of `(lane, len, bytes)`
-/// and two different lanes never alias on the same payload. Reuses the already-
-/// Kani-proven [`fnv1a64`] (wrapping, total, no float).
-#[inline]
-fn lane(bytes: &[u8], lane_idx: u8) -> u64 {
-    // Seed material: [HASH_LANE_DOMAIN, lane_idx, len_le(8)] then the payload. We
-    // run two passes of fnv1a64 (seed-material id XOR-mixed with the payload id)
-    // so the lane index genuinely perturbs the whole 64-bit lane.
-    let mut seed = [0u8; 10];
-    seed[0] = HASH_LANE_DOMAIN;
-    seed[1] = lane_idx;
-    let len_le = (bytes.len() as u64).to_le_bytes();
-    let mut i = 0usize;
-    while i < 8 {
-        seed[2 + i] = len_le[i];
-        i += 1;
-    }
-    let seed_id = fnv1a64(&seed);
-    let body_id = fnv1a64(bytes);
-    // Mix the two with the lane index folded into the rotate so the four lanes
-    // are genuinely distinct functions of the same payload (no lane aliasing).
-    let r = lane_idx as u32 & 63;
-    seed_id
-        .wrapping_mul(0x0000_0100_0000_01b3) // FNV64 prime (the blkfmt domain prime)
-        .rotate_left(r)
-        ^ body_id.rotate_left((r.wrapping_add(17)) & 63)
-}
-
-/// 256-bit STRUCTURAL digest of `bytes`: FOUR domain-separated, already-Kani-
-/// proven FNV-1a-64 lanes (each folding the [`HASH_LANE_DOMAIN`] tag, the lane
-/// index, and a LENGTH domain-separator) packed LE into 32 bytes. TOTAL, wrapping,
-/// NO float. NOT cryptographic (see the module honesty note) -- it is STRUCTURAL
-/// tamper-evidence: any single-byte change to `bytes` changes the digest with
-/// overwhelming-for-non-adversarial-inputs probability (the FNV avalanche), which
-/// the boot self-test demonstrates concretely.
+/// 256-bit digest of `bytes`: BLAKE2s-256 UNKEYED ([`crate::khash::uhash`],
+/// RFC 7693) -- the M29 stage C cutover body (the #74 hash half). TOTAL,
+/// deterministic, NO float, no alloc, no panic (the khash leaf's Kani/Miri/
+/// KAT-proven properties). The retired FNV-era body (four domain-separated
+/// `fnv1a64` lanes + a length separator) was STRUCTURAL tamper-evidence only;
+/// this body is a real cryptographic hash whose collision / preimage
+/// resistance is `sec=ASSUMED-FROM-LITERATURE` (see the module honesty note +
+/// [`crate::khash`] -- the implementation is verified, the primitive's
+/// security is never prose-claimed). Width-exact by construction:
+/// `KHASH_TAG_LEN == PROV_HASH_LEN == 32` (compile-pinned above). Domain
+/// separation stays the CALLER's, exactly as before (e.g. the [`MIX_DOMAIN`]
+/// fold tag leads the [`chain_mix`] buffer).
 #[must_use]
 pub fn prov_hash(bytes: &[u8]) -> [u8; PROV_HASH_LEN] {
-    let mut out = [0u8; PROV_HASH_LEN];
-    let mut l = 0u8;
-    while (l as usize) < 4 {
-        let v = lane(bytes, l).to_le_bytes();
-        let base = (l as usize) * 8;
-        let mut b = 0usize;
-        while b < 8 {
-            out[base + b] = v[b];
-            b += 1;
-        }
-        l += 1;
-    }
-    out
+    uhash(bytes)
 }
 
 /// The running per-agent FOLD step: `head' = chain_mix(head, entry_id)`. Hashes
@@ -470,8 +437,8 @@ mod tests {
             let h2 = prov_hash(&data);
             assert_eq!(h1, h2, "prov_hash must be deterministic");
         }
-        // The four lanes are not all the same 8 bytes (the digest is not a single
-        // FNV smeared four times -- the domain separation actually bites).
+        // The four 8-byte digest windows are not all identical (a degenerate
+        // digest that smeared one 64-bit word four times would fail here).
         let h = prov_hash(b"the quick brown fox");
         assert_ne!(&h[0..8], &h[8..16]);
         assert_ne!(&h[8..16], &h[16..24]);

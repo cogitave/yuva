@@ -50,8 +50,9 @@ use tb_encode::kancell::{
 // existing write/forget/skill-admit mutation sites, exactly as it calls
 // `bla_raw`/`kan_score`; the math (canon-injectivity / fold tamper-sensitivity /
 // inclusion-soundness) is Kani-proven in `tb-encode::prov`, so the ledger head is
-// byte-identical to a host-verified model. Structural tamper-evidence only (NOT
-// cryptographic -- proposal §2).
+// byte-identical to a host-verified model. Tamper-evidence is CRYPTOGRAPHIC since
+// M29-C (khash/BLAKE2s-256, sec=ASSUMED-FROM-LITERATURE; a SIGNED root remains the
+// tracked successor).
 use tb_encode::prov::{self, ProvEntry, PROV_HASH_LEN};
 // M23: the verified EXPERIENCE CODEC leaf -- the fixed-width injective
 // `ExperienceRecord` encoder (`exp::canon`), the fixed-capacity drop-oldest in-RAM

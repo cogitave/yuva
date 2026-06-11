@@ -18,10 +18,11 @@
 //!   bias is non-identifiable (the M24 adversary's exogeneity problem, restated for an
 //!   exit stream); M26 does not close any exit->policy->exit loop. The honesty token is
 //!   machine-emitted so the marker mechanically cannot claim a causal state-signal.
-//! * **CLAIMS injective bounded encoding + replay-determinism + structural tamper-
-//!   evidence** (the M23 claim set): a single-byte mutation of a committed record
-//!   provably invalidates the recomputed `tel_head` AND its inclusion proof -- the M22
-//!   fold reused verbatim (NOT cryptographic). Per-class counts are EXACT (a direct-
+//! * **CLAIMS injective bounded encoding + replay-determinism + tamper-evidence
+//!   (cryptographic since M29-C)** (the M23 claim set): a single-byte mutation of a
+//!   committed record provably invalidates the recomputed `tel_head` AND its
+//!   inclusion proof -- the M22 fold reused verbatim (khash/BLAKE2s-256 since M29
+//!   stage C; `sec=ASSUMED-FROM-LITERATURE`). Per-class counts are EXACT (a direct-
 //!   mapped per-class histogram over the small CLOSED `ExitClass` set -- no sketch
 //!   collisions to bound); the cost-proxy bucket is a RELATIVE shape, not a validated
 //!   cost model, and under QEMU TCG is not cycle-accurate.

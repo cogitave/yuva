@@ -1670,24 +1670,25 @@ fn kani_prov_canon_injective() {
     assert!(nz != na);
 }
 
-/// (2) `prov_hash` is TOTAL (panic / overflow / shift-overflow FREE -- wrapping
-/// FNV arithmetic) over a bounded-length symbolic buffer, returns exactly
+/// (2) `prov_hash` is TOTAL (panic / overflow / shift-overflow FREE -- since
+/// M29-C the body is `khash::uhash`, pure wrapping/rotating 32-bit BLAKE2s ARX)
+/// over a bounded-length symbolic buffer, returns exactly
 /// `PROV_HASH_LEN` bytes, and is DETERMINISTIC. The buffer is a small FIXED-LENGTH
-/// symbolic array (the #49 state-explosion lesson: a fully-symbolic long FNV is
-/// the documented trap; the totality is structural over the loop, so a short
-/// bound covers the no-panic property). Mirrors the existing `fnv1a64` harness.
+/// symbolic array (the #49 state-explosion lesson: fully-symbolic data through
+/// a hash is the documented trap; the totality is structural over the loop, so
+/// a short bound covers the no-panic property).
 ///
-/// NEGATIVE CONTROL: replacing a `wrapping_mul` with a checked `*` in `fnv1a64`
-/// (the lane primitive) would panic on overflow inside this harness, turning it
-/// RED -- the wrapping arithmetic is load-bearing for totality.
+/// NEGATIVE CONTROL: replacing a `wrapping_add` with a checked `+` in the
+/// BLAKE2s `g` mixer (the compression primitive `prov_hash` now drives) would
+/// panic on overflow inside this harness, turning it RED -- the wrapping
+/// arithmetic is load-bearing for totality.
 #[kani::proof]
 fn kani_prov_hash_total() {
-    // TOTALITY (no panic / no overflow -- wrapping FNV) over a SHORT symbolic
-    // buffer: prov_hash runs 4 lanes x a 2-pass fnv1a64 PER byte, so a long
-    // symbolic input is the #49 trap -- N=6 (computed TWICE for determinism) timed
-    // the lane out (>220s locally). N=2, digest computed ONCE, exercises the
-    // symbolic loop body (no-panic is structural over the loop) at a fraction of
-    // the cost. (Measured locally: this harness now verifies in seconds.)
+    // TOTALITY (no panic / no overflow -- wrapping ARX) over a SHORT symbolic
+    // buffer: a long fully-symbolic input through the compression is the #49
+    // trap (in the FNV era N=6 computed TWICE timed the lane out >220s locally).
+    // N=2, digest computed ONCE, exercises the symbolic path (no-panic is
+    // structural over the loop) at a fraction of the cost.
     const N: usize = 2;
     let data: [u8; N] = kani::any();
     let h = prov_hash(&data);
@@ -2432,7 +2433,7 @@ fn kani_bakeoff_bound_sound_rounddown() {
 /// integer fold the seam uses (`xp_chain_mix(decision_id, agent_seed) mod eps_den
 /// mod m`, keyed to the IMMUTABLE decision_id, never a mutable step counter) and
 /// prove two replays agree on coin + propensity + label + bound. The fold inputs +
-/// table are CONCRETE (so the FNV fold / kan_score stay concrete -- the #49 trap);
+/// table are CONCRETE (so the hash fold / kan_score stay concrete -- the #49 trap);
 /// the symbolic surface is the small bounded scalars.
 ///
 /// NEGATIVE CONTROL: keying the explore coin to a MUTABLE step counter (instead of
@@ -2443,7 +2444,7 @@ fn kani_bakeoff_bound_sound_rounddown() {
 fn kani_bakeoff_replay_determinism() {
     // The explore coin: a SEEDED integer fold of the immutable decision_id (reusing
     // the proven M22 fold via prov::chain_mix -> a 32-byte head -> a u64 witness),
-    // then mod eps_den mod m. CONCRETE seed/id so the FNV fold is concrete.
+    // then mod eps_den mod m. CONCRETE seed/id so the hash fold is concrete.
     let did: [u8; PROV_HASH_LEN] = [0x24u8; PROV_HASH_LEN];
     let seed: [u8; PROV_HASH_LEN] = [0xA5u8; PROV_HASH_LEN];
     let eps_den: u32 = 16;

@@ -229,8 +229,13 @@ jobs:
     runs-on: ubuntu-latest
     # Fail fast + clearly if a harness ever regresses into a state explosion.
     # The fixed-size POD encoders + the single bounded ring harness verify in
-    # seconds; the M22/M23/M25/M26 fold harnesses concretize their FNV-fold inputs
-    # (keeping only the flip-index / candidate-head symbolic) to stay tractable. The
+    # seconds; the M22/M23/M25/M26/M27 fold harnesses concretize their fold inputs
+    # (keeping only the flip-index / candidate-head symbolic) to stay tractable --
+    # since M29-C the fold is khash/BLAKE2s (~7-9s per CONCRETE compression,
+    # measured), so the fold family is COMPRESSION-BUDGETED per
+    # docs/plans/m29-stage-c-plan.md (the three per-milestone fold harnesses are
+    # leaf-sensitivity + the tokened composition; kani_exp_fold_tamper is the one
+    # kept-FULL end-to-end witness). The
     # observed runtime grows with the harness count (69 harnesses ~30min on the CI
     # runner -- codegen-dominated, see #77); 45 is a safety margin above that, not a
     # license for symbolic blow-up. MEASURE each new/changed harness locally in WSL

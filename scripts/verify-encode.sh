@@ -63,8 +63,10 @@ set -euo pipefail
 # proof: canon is TOTAL (fails closed to 0 on a too-small buffer, no partial write)
 # AND INJECTIVE (a distinct kind/tier/payload_tok/writer_cap_id/t_created/parent-
 # count encodes to distinct bytes -- the length-prefixed parent list is the
-# disambiguator); kani_prov_hash_total -- prov_hash is TOTAL/no-overflow (wrapping
-# FNV) + deterministic + full 32-byte width over a bounded symbolic buffer;
+# disambiguator); kani_prov_hash_total -- prov_hash is TOTAL/no-overflow (since
+# M29-C the body is khash::uhash -- BLAKE2s-256 unkeyed, wrapping 32-bit ARX;
+# prim=BLAKE2S-256, sec=ASSUMED-FROM-LITERATURE -- the FNV-era structural digest
+# retired) + deterministic + full 32-byte width over a bounded symbolic buffer;
 # kani_prov_chain_mix_tamper -- the fold is TAMPER-SENSITIVE: flipping the bit at a
 # SYMBOLIC index of entry_id (or head) changes chain_mix (the head folds every one
 # of the 64 head/entry byte positions; an identity/constant fold fails it; M29-C

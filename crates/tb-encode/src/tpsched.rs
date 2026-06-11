@@ -19,9 +19,11 @@
 //!   the schedule is a FIXED round-robin, never adapted from telemetry (the M26
 //!   confounding firewall holds -- a learned scheduler driven by exit/sched telemetry
 //!   would close the confounded loop M24 refuses).
-//! * **CLAIMS injective bounded encoding + structural tamper-evidence** (the M23/M26
-//!   claim set): a single-byte mutation of a committed decision invalidates the
-//!   recomputed `sched_head` -- the M22 fold reused verbatim (NOT cryptographic).
+//! * **CLAIMS injective bounded encoding + tamper-evidence (cryptographic since
+//!   M29-C)** (the M23/M26 claim set): a single-byte mutation of a committed
+//!   decision invalidates the recomputed `sched_head` -- the M22 fold reused
+//!   verbatim (khash/BLAKE2s-256 since M29 stage C;
+//!   `sec=ASSUMED-FROM-LITERATURE`).
 //!
 //! ## Numeric format (no float, ever -- mirrors `exittel`/`exp`/`prov`)
 //!

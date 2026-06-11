@@ -3992,9 +3992,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // BYTE of a COMMITTED entry's canonical bytes and asserts BOTH head-mismatch AND
     // inclusion-failure -- exercising the real verifier path, not a constant compare.
     // ALL value computation is the host-verifiable, Kani-proven `tb_encode::prov`
-    // (no_std, forbid(unsafe), NO float); the digest is two+ domain-separated
-    // `blkfmt::fnv1a64` lanes -- STRUCTURAL tamper-evidence, NOT cryptographic
-    // (proposal §2 -- a crypto hash + signed root is a tracked successor). This
+    // (no_std, forbid(unsafe), NO float); the digest is BLAKE2s-256 unkeyed (the
+    // verified khash leaf) since M29 stage C -- CRYPTOGRAPHIC tamper-evidence,
+    // assumption-conditional (`sec=ASSUMED-FROM-LITERATURE`; a SIGNED root remains
+    // the tracked successor). This
     // kernel stays zero-unsafe and only branches on the returned `ProvProof` bools.
     // The head is kept IN-RAM this milestone (it does NOT ride the M20 superblock),
     // so the M20 two-phase commit + persist_selftest gen-continuity stay byte-
@@ -4054,7 +4055,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ALL value computation is the host-verifiable, Kani-proven `tb_encode::exp`
     // (no_std, forbid(unsafe), NO float); this kernel stays zero-unsafe and only
     // branches on the returned `ExpProof` bools. M23 claims ONLY replay-determinism +
-    // structural tamper-evidence -- NOT policy validity (the deterministic logging
+    // tamper-evidence (cryptographic since M29-C) -- NOT policy validity (the deterministic logging
     // policy gives degenerate propensity; validity is M24's burden, the exogenous
     // human-operator oracle is M25's). The honesty token
     // `oracle=DECLARED-PROXY-DEFERRED-M24` is machine-emitted so the marker
@@ -4218,7 +4219,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ALL value computation is the host-verifiable, Kani-proven `tb_encode::opframe`
     // (no_std, forbid(unsafe), NO float; it REUSES the M22 prov fold verbatim); this
     // kernel stays zero-unsafe and only branches on the returned `OpframeProof` bools.
-    // HONEST: the fold is KEYLESS (structural tamper-EVIDENCE, NOT cryptographic
+    // HONEST: the fold is KEYLESS (tamper-EVIDENCE -- a cryptographic hash since
+    // M29-C but unkeyed, NOT cryptographic
     // authenticity -- `keyed=0`) and the verifier is the OS's own plumbing, NOT a human
     // (`oracle=HUMAN-DEFERRED-M26` -- the inbound RX + an enrolled operator credential
     // by which a human could COMMAND the M24 gate is M26). The transcript is TX-only +

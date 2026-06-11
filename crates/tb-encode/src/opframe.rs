@@ -19,10 +19,12 @@
 //!
 //! ## Honest scope (proposal §5 -- the marker claims ONLY what is proved)
 //!
-//! * **CLAIMS structural tamper-EVIDENCE** under NON-ADVERSARIAL corruption (line
+//! * **CLAIMS tamper-EVIDENCE (cryptographic-hash since M29-C)** under
+//!   NON-ADVERSARIAL corruption (line
 //!   drops, serial glitches, accidental reorder, benign byte flips): any single-byte
 //!   mutation of a committed frame changes the recomputed `op_head` AND its inclusion
-//!   proof -- the M22 fold reused verbatim. The strictly-monotone `seq` (folded INTO
+//!   proof -- the M22 fold reused verbatim (khash/BLAKE2s-256 since M29 stage C;
+//!   `sec=ASSUMED-FROM-LITERATURE`). The strictly-monotone `seq` (folded INTO
 //!   `canon`) + the closing `GATE_VERDICT` (committing the final seq) catch reorder,
 //!   gap, duplication, and TAIL-TRUNCATION (the Schneier-Kelsey / Ma-Tsudik FssAgg
 //!   construction). The honesty token `keyed=0` is machine-emitted.
@@ -31,7 +33,8 @@
 //!   RATS RFC 9334 layered attestation; a structural UEID per EAT RFC 9711). The
 //!   token `intro_bound=1` is machine-emitted.
 //! * **Does NOT claim cryptographic authenticity / non-repudiation / forgery-
-//!   resistance.** The fold is the same KEYLESS structural FNV as M22 -- publicly
+//!   resistance.** The fold is the same KEYLESS hash as M22 (BLAKE2s-256 since
+//!   M29-C, but unkeyed) -- publicly
 //!   recomputable, so a stream-rewriting adversary can forge a self-consistent
 //!   transcript. A secret-keyed forward-secure aggregate MAC + a signed history-tree
 //!   (RFC 6962/9162) is a tracked successor (M26+, it needs the inbound credential).

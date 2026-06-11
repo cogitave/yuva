@@ -17,9 +17,11 @@
 //! * **CLAIMS replay-determinism.** A recorded `feats` row replayed through the
 //!   dormant `kan_score` reproduces the logged [`ExperienceRecord::kan_score_shadow`]
 //!   BIT-IDENTICALLY (achievable precisely because the kancell is integer / no-float).
-//! * **CLAIMS structural tamper-evidence.** Any single-byte mutation to a committed
-//!   record's canonical bytes provably invalidates the recomputed `xp_head` AND its
-//!   inclusion proof -- the M22 fold, reused verbatim (NOT cryptographic).
+//! * **CLAIMS tamper-evidence (cryptographic since M29-C).** Any single-byte
+//!   mutation to a committed record's canonical bytes provably invalidates the
+//!   recomputed `xp_head` AND its inclusion proof -- the M22 fold, reused verbatim
+//!   (khash/BLAKE2s-256 since M29 stage C; primitive security
+//!   `sec=ASSUMED-FROM-LITERATURE`, never prose-claimed).
 //! * **Does NOT validate any policy.** The `outcome` is `Unset`; the logging policy
 //!   is `DETERMINISTIC` so the propensity is degenerate (1/0) -- naive IPS/DR is
 //!   structurally non-identifiable on this stream. Validity is M24's burden; the
