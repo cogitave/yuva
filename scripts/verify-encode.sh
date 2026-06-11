@@ -66,11 +66,16 @@ set -euo pipefail
 # disambiguator); kani_prov_hash_total -- prov_hash is TOTAL/no-overflow (wrapping
 # FNV) + deterministic + full 32-byte width over a bounded symbolic buffer;
 # kani_prov_chain_mix_tamper -- the fold is TAMPER-SENSITIVE: flipping the bit at a
-# symbolic index of entry_id (or head) changes chain_mix (the head folds every
-# byte; an identity/constant fold fails it); kani_prov_inclusion_sound -- verify_
-# inclusion is SOUND (accept IFF recompute(leaf,siblings)==head) and a single-byte
-# tamper of the leaf/sibling/head is REJECTED (siblings are load-bearing -- a
-# verifier that ignored them accepts a forgery and fails the harness); kani_prov_
+# SYMBOLIC index of entry_id (or head) changes chain_mix (the head folds every one
+# of the 64 head/entry byte positions; an identity/constant fold fails it; M29-C
+# form: base + determinism + one symbolic entry-flip + one symbolic head-flip +
+# the flip-back NEG -- flip-then-flip-back restores the base digest, proving the
+# mutation reaches the hash); kani_prov_inclusion_sound -- verify_inclusion is
+# SOUND (the M29-C iff over a fully-SYMBOLIC candidate head: verify(leaf,sibs,
+# any_head) == (genuine head == any_head), the genuine head recomputed ONCE --
+# the symbolic any_head subsumes the genuine-accept and tampered-head legs) and a
+# single-byte tamper of the leaf/sibling is REJECTED (siblings are load-bearing --
+# a verifier that ignored them accepts a forgery and fails the harness); kani_prov_
 # canon_roundtrip -- the canonical scalar fields read back from their FIXED offsets
 # via independent LE shifts (the blkfmt round-trip pattern); kani_prov_head_
 # deterministic -- the same entry sequence folds to the same head bit-for-bit AND
@@ -105,8 +110,10 @@ set -euo pipefail
 # no-panic and the drop-oldest FIFO never exceeds CAP (bounded #[kani::unwind]);
 # kani_exp_fold_tamper -- a single-byte flip of a committed record's canonical bytes
 # changes the recomputed xp_head, REUSING the proven M22 prov::chain_mix fold (a
-# SYMBOLIC flip index over all EXP_CANON_LEN bytes, concrete record/sibling so the
-# FNV fold stays concrete); kani_exp_canon_roundtrip -- exp::decode(exp::canon(rec))
+# SYMBOLIC flip index over all EXP_CANON_LEN bytes, concrete record/sibling; M29-C:
+# KEPT FULL -- leaf re-hash -> head mismatch -> inclusion failure end-to-end through
+# the REAL fold, THE one representative deep witness the thinned opframe/exittel/
+# tpsched fold-claim= markers name as e2e=); kani_exp_canon_roundtrip -- exp::decode(exp::canon(rec))
 # == rec (the fixed-width bijection, an Unset record + a populated-outcome sub-check);
 # kani_exp_schema_stability -- canon of an outcome=Unset + reserved-propensity-sentinel
 # record has IDENTICAL length + field offsets to a populated record, so M24 populating
@@ -145,10 +152,14 @@ set -euo pipefail
 # genesis INTRO binds the transcript to the LIVE M22 provenance head ("which instance am I" -- RATS
 # RFC 9334); intro_binds accepts IFF kind==INTRO && seq==0 && prev_head==the true head, and REJECTS
 # a symbolic single-byte forged anchor / non-zero seq / non-INTRO kind; kani_opframe_fold_truncation
-# -- a single-byte flip of a committed frame's canonical bytes changes the recomputed op_head
-# (REUSING the proven M22 prov::chain_mix fold over the opframe bytes -- a SYMBOLIC flip index,
-# concrete frame/sibling so the FNV fold stays concrete) AND the closing GATE_VERDICT's
-# gate_commits_final_seq catches a truncated tail (a reader expecting a longer transcript than the
+# -- M29-C-thinned to LEAF-SENSITIVITY + flip-back: a SYMBOLIC-index single-byte flip of a committed
+# frame's canonical bytes changes its prov_hash LEAF id, and flip-back restores it (the chain-level
+# head-mismatch + inclusion-failure rejection is the documented COMPOSITION of three machine-proven
+# conjuncts -- this leaf claim AND kani_prov_chain_mix_tamper AND kani_prov_inclusion_sound --
+# demonstrated end-to-end by the kept-FULL kani_exp_fold_tamper;
+# fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper))
+# AND the closing GATE_VERDICT's gate_commits_final_seq catches a truncated tail VERBATIM (a reader
+# expecting a longer transcript than the
 # committed final seq is rejected -- the Ma-Tsudik FssAgg fix); kani_opframe_canon_roundtrip --
 # opframe::decode(opframe::canon(frame)) == frame (every header field read back from its fixed
 # offset, the payload slice recovered via the length prefix).
@@ -162,10 +173,14 @@ set -euo pipefail
 # encodes to a valid round-trippable byte), an out-of-range tag fails closed;
 # kani_exittel_histogram_saturates -- bucket_index(delta) is in 0..N_BUCKETS for ALL u64 (no panic,
 # the OTel log2 idea no-float) AND ExitHistogram::record SATURATING-increments (bucket in range +
-# count monotone non-decreasing, never wraps); kani_exittel_fold_tamper -- a single-byte flip of a
-# committed record's canonical bytes changes the recomputed tel_head, REUSING the proven M22
-# prov::chain_mix fold (a SYMBOLIC flip index, concrete record/sibling so the FNV fold stays
-# concrete). PRODUCER-ONLY: the telemetry is recorded + folded, never fed to a policy (the
+# count monotone non-decreasing, never wraps); kani_exittel_fold_tamper -- M29-C-thinned to
+# LEAF-SENSITIVITY + flip-back: a SYMBOLIC-index single-byte flip of a committed record's canonical
+# bytes changes its prov_hash LEAF id, and flip-back restores it (the chain-level tel_head-mismatch
+# + inclusion-failure rejection is the documented COMPOSITION of three machine-proven conjuncts --
+# this leaf claim AND kani_prov_chain_mix_tamper AND kani_prov_inclusion_sound -- demonstrated
+# end-to-end by the kept-FULL kani_exp_fold_tamper;
+# fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper)).
+# PRODUCER-ONLY: the telemetry is recorded + folded, never fed to a policy (the
 # confounding loop is structurally avoided; signal=OBSERVATIONAL-NONCAUSAL).
 # + M27 tpsched verified TWO-VMID TIME-PARTITION-SCHEDULER leaf x5: kani_tpsched_next_slot_roundrobin
 # -- next_slot is TOTAL over ALL usize (fail-closed to 0 for an out-of-range slot), strictly cycles
@@ -175,9 +190,14 @@ set -euo pipefail
 # the saturating sum never overflows; kani_tpsched_canon_injective -- the fixed-WIDTH tpsched::canon is
 # TOTAL (fail-closed to 0) AND INJECTIVE (a distinct frame_seq/slot/vmid_from/vmid_to/t_logical encodes
 # to distinct bytes); kani_tpsched_canon_roundtrip -- tpsched::decode(tpsched::canon(rec)) == rec;
-# kani_tpsched_fold_tamper -- a single-byte flip of a committed decision's canonical bytes changes the
-# recomputed sched_head, REUSING the proven M22 prov::chain_mix fold (SYMBOLIC flip index, concrete
-# record/sibling). OBSERVATIONAL not learned (fixed round-robin); NOT real-time / NOT schedulability-
+# kani_tpsched_fold_tamper -- M29-C-thinned to LEAF-SENSITIVITY + flip-back: a SYMBOLIC-index
+# single-byte flip of a committed decision's canonical bytes changes its prov_hash LEAF id, and
+# flip-back restores it (the chain-level sched_head-mismatch + inclusion-failure rejection is the
+# documented COMPOSITION of three machine-proven conjuncts -- this leaf claim AND
+# kani_prov_chain_mix_tamper AND kani_prov_inclusion_sound -- demonstrated end-to-end by the
+# kept-FULL kani_exp_fold_tamper;
+# fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound; e2e=exp_fold_tamper)).
+# OBSERVATIONAL not learned (fixed round-robin); NOT real-time / NOT schedulability-
 # proven (realtime=NOT-CLAIMED).
 # + M28 opframe_rx verified OPERATOR-INBOUND command leaf x6 (the RX dual of M25 opframe -- the CAPSTONE
 # that closes the learning loop): kani_cmd_canon_injective -- the load-bearing canon totality+injectivity
