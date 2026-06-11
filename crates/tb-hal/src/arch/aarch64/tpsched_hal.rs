@@ -1,48 +1,52 @@
-//! aarch64 **M27a "sched"**: the COOPERATIVE (HVC-yield) two-VMID sovereign
+//! aarch64 **M27b "sched"**: the CNTHP TIMER-PREEMPTED two-VMID sovereign
 //! time-partition scheduler -- the EL2-only armed/decision context cell + the
 //! TWO-stage-2-root arm/disarm window (the teardown-first discipline), mirroring
 //! [`super::el2vgic`]'s `VgicCtx` + `arm_vgic_el2`/`disarm_vgic_el2` -- PLUS the
-//! **M27b CNTHP window** (`arm_cnthp_window_el2`/`disarm_cnthp_window_el2`/
+//! **CNTHP window** (`arm_cnthp_window_el2`/`disarm_cnthp_window_el2`/
 //! `cnthp_rearm_checked`): the GIC + EL2-physical-timer + `HCR_EL2.IMO` glue
 //! behind the FIRST asynchronous IRQ ever taken at EL2 (the 0x480 slot). The
-//! M27b SMOKE step exercises that window with NO scheduler coupling (count K
-//! ticks, re-arm-before-EOI, hard eoi cap, teardown-first disarm) while the
-//! cooperative scheduler below stays exactly M27a.
+//! SMOKE phase exercises that window with NO scheduler coupling (count K
+//! ticks, re-arm-before-EOI, hard eoi cap, teardown-first disarm) BEFORE the
+//! real preemption run, separating "IRQ plumbing" from "scheduler" failures.
 //!
 //! Where aL2.5 ([`super::el2vgic`]) injects a virtual interrupt into ONE guest,
-//! M27a TIME-PARTITIONS TWO guest VMIDs under TWO distinct stage-2 roots: each
-//! trivial EL1 stub, when running, bumps a DISTINCT MMIO cell (the L2.3
-//! trap-and-emulate seam, per-VMID) then voluntarily YIELDS with `HVC #14`. The
-//! EL2 sync handler, on each yield, consults the Kani-proven
+//! M27 TIME-PARTITIONS TWO guest VMIDs under TWO distinct stage-2 roots: each
+//! trivial EL1 stub, when running, repeatedly bumps a DISTINCT MMIO cell (the
+//! L2.3 trap-and-emulate seam, per-VMID) in a pure spin -- it NEVER yields. The
+//! CNTHP deadline (the slot's `slot_deadline_delta` budget) expires
+//! asynchronously into EL2's 0x480 handler, which consults the Kani-proven
 //! [`tb_encode::tpsched::next_slot`], switches `VTTBR_EL2` to the next VMID's
 //! root (+ `tlbi vmalls12e1is`), folds a [`tb_encode::tpsched::SchedDecision`]
 //! into a running `sched_head` (via the M22 [`tb_encode::prov`] fold reused
-//! VERBATIM -- NO new fold math), and `eret`s into the next guest. After K
-//! bounded major-frame iterations the orchestrator ends with `HVC #13`,
-//! teardown-FIRST, and the monitor verifies: both VMIDs' MMIO cells advanced
-//! (both-progressed, neither starved), the observed VMID order is the tpsched
-//! round-robin (order-honored), `recompute(sched_head)` matches + a single-byte
-//! tamper flips it (fold-verified + tamper-caught), and the frame is conserved.
+//! VERBATIM -- NO new fold math), re-arms the next deadline BEFORE the EOI, and
+//! `eret`s into the next guest. After K bounded major frames the handler ends
+//! the run teardown-FIRST, and the monitor verifies: both VMIDs' MMIO cells
+//! advanced (both-progressed, neither starved), the observed VMID order is the
+//! tpsched round-robin (order-honored), `recompute(sched_head)` matches + a
+//! single-byte tamper flips it (fold-verified + tamper-caught), and the frame
+//! is conserved. (M27a, the shipped green floor this replaced, drove the SAME
+//! decision sequence from a voluntary `HVC #14` yield -- the swap changed WHO
+//! transfers control, never the decision/fold math.)
 //!
-//! ## Honest scope (the marker claims ONLY COOPERATIVE timing)
+//! ## Honest scope (the marker claims ONLY TCG-grade timing)
 //!
-//! M27a exercises EVERYTHING EXCEPT the timer IRQ -- two VMIDs, two stage-2
-//! roots, two forward-progress cells, round-robin order, the fold, the tamper
-//! check, both-progressed -- and **cannot IRQ-storm** (there is no async IRQ at
-//! all). The marker emits `timing=COOPERATIVE-HVC-YIELD` so it can NEVER
-//! impersonate the M27b real-CNTHP-preemption claim (`timing=TCG-NON-CYCLE-
-//! ACCURATE`). `realtime=NOT-CLAIMED` always.
+//! The preemption is REAL (an asynchronous CNTHP IRQ at EL2 wrests control from
+//! spinning guests), but it runs under QEMU TCG, which is NOT cycle-accurate:
+//! the slot budgets are a relative shape, not a latency claim. The marker emits
+//! `timing=TCG-NON-CYCLE-ACCURATE` -- and the run script REJECTS the retired
+//! M27a `timing=COOPERATIVE-HVC-YIELD` token, so neither rung can impersonate
+//! the other. `realtime=NOT-CLAIMED` always: no schedulability/WCET guarantee.
 //!
 //! ## Arming (HCR_EL2 -- absolute writes, mirroring `stage2.rs::arm_stage2_el2`)
 //!
 //! The boot baseline is `HCR_EL2 = 1<<31` (RW only). [`arm_sched_el2`] programs
 //! `VTCR_EL2`/`VTTBR_EL2` (the FIRST slot's root) + `HCR_EL2 = RW|VM` (stage-2
 //! ON, so each guest's distinct MMIO IPA stage-2-faults to the device seam);
-//! [`switch_vttbr_el2`] flips `VTTBR_EL2` to the next slot's root + flushes on
-//! each yield; [`disarm_sched_el2`] restores `HCR_EL2 = RW` + drops `VTTBR_EL2`
-//! + `tlbi vmalls12e1is` (teardown-first, the L2.1 discipline) BEFORE the
-//! monitor unwinds. NO `HCR_EL2.IMO`, NO CNTHP arming, NO vector-table edit --
-//! those are M27b.
+//! [`arm_cnthp_window_el2`] then layers `RW|IMO|VM` + the CNTHP deadline + PPI
+//! 26; [`switch_vttbr_el2`] flips `VTTBR_EL2` to the next slot's root + flushes
+//! on each preemption; [`disarm_cnthp_window_el2`] + [`disarm_sched_el2`]
+//! restore `HCR_EL2 = RW` + drop `VTTBR_EL2` + `tlbi vmalls12e1is`
+//! (teardown-first, the L2.1 discipline) BEFORE the monitor unwinds.
 //!
 //! ## The armed/decision cell (EL2-only; the outcome leaves via the x0 register)
 //!
@@ -145,11 +149,15 @@ pub(super) const EOI_HARD_CAP: u64 = 4 * K_MAX_FRAMES;
 pub(super) const TMODE_OFF: u64 = 0;
 /// M27b timer-window mode: the SMOKE window (count K ticks, no scheduler).
 pub(super) const TMODE_SMOKE: u64 = 1;
+/// M27b timer-window mode: the REAL preemption window -- each CNTHP tick drives
+/// [`note_switch`] (the round-robin + fold), the VTTBR world-switch, and the
+/// per-slot deadline re-arm. ONLY the timer transfers control between guests.
+pub(super) const TMODE_PREEMPT: u64 = 2;
 
 const _: () = assert!(CNTHP_PPI == 26 && CNTHP_PPI < 32); // a PPI: one ISENABLER0 bit
 const _: () = assert!(GICD_ICENABLER0 == 0x180);
 const _: () = assert!(K_SMOKE_TICKS > 0 && K_SMOKE_TICKS < EOI_HARD_CAP);
-const _: () = assert!(TMODE_OFF != TMODE_SMOKE);
+const _: () = assert!(TMODE_OFF != TMODE_SMOKE && TMODE_SMOKE != TMODE_PREEMPT);
 
 // ===========================================================================
 // The EL2 armed/decision context cell (single-accessor; EL1 NEVER references it).
@@ -324,7 +332,9 @@ fn store_head(head: &[u8; PROV_HASH_LEN]) {
     }
 }
 
-/// EL2: the count of voluntary yields observed (== world-switch count).
+/// EL2: the count of slot switches observed (M27b: CNTHP preemptions; the cell
+/// keeps its M27a `yields` name for vocabulary stability -- same semantics: one
+/// per world-switch).
 pub(super) fn yields_done() -> u64 {
     get(C_YIELDS_DONE)
 }
@@ -374,19 +384,23 @@ pub(super) fn set_timer_mode(m: u64) {
     put(C_TMODE, m);
 }
 
-/// EL2: the M27a YIELD step -- the heart of the cooperative scheduler. Called by
-/// the `HVC #14` handler on each voluntary yield. It:
+/// EL2: the SLOT-SWITCH step -- the heart of the scheduler, SHARED VERBATIM
+/// between M27a's cooperative yield (historical: the `HVC #14` handler) and
+/// M27b's CNTHP timer preemption (the 0x480 handler) -- the rename keeps the
+/// round-robin + the `SchedDecision` fold byte-identical across the swap so
+/// `m27_done_verdict`'s five properties hold unchanged. It:
 ///   1. records the OUTGOING VMID into the order trace (forward-progress order),
 ///   2. computes the next slot via the Kani-proven [`next_slot`],
 ///   3. canon-encodes a [`SchedDecision`] for this preemption + FOLDS it into the
 ///      running head via the M22 fold REUSED VERBATIM (`sched_hash` ->
 ///      `sched_chain_mix`, NO new fold math),
-///   4. bumps the frame/yield counters + the logical clock,
+///   4. bumps the frame/switch counters + the logical clock,
 ///   5. advances `current_slot` to the next slot.
 /// Returns the next slot's `(vttbr, entry_pc)` so the caller flips `VTTBR_EL2`
 /// and `eret`s into the next guest. PURE cell arithmetic + the proven leaf -- no
-/// alloc, no deep calls (the EL2 stack red-zone discipline).
-pub(super) fn note_yield() -> (usize, u64, u64) {
+/// alloc, no deep calls (the EL2 stack red-zone discipline + the SHALLOW
+/// async-handler mandate).
+pub(super) fn note_switch() -> (usize, u64, u64) {
     let cur = current_slot();
     let nxt = next_slot(cur);
     let vmid_from = vmid_for(cur);
@@ -451,7 +465,8 @@ pub(super) fn arm_sched_el2(vtcr_val: u64, vttbr0_val: u64) {
     // THEN enable stage-2 (HCR.VM=1) and `isb` again so the regime is fully in
     // place before the next EL1 access. The tables were published (`dsb ishst`)
     // at build time. No stack/flags effect; not `nomem` (it reconfigures
-    // translation). NO IMO, NO timer -- M27a is cooperative.
+    // translation). NO IMO, NO timer here -- `arm_cnthp_window_el2` layers those
+    // immediately after (the M27b composition).
     unsafe {
         asm!(
             "msr vtcr_el2,  {vtcr}",
@@ -588,9 +603,9 @@ pub(super) fn disarm_cnthp_window_el2() {
 }
 
 /// EL2: switch `VTTBR_EL2` to the next slot's stage-2 root (the world-switch on
-/// each voluntary yield) + `isb` + flush ALL stage-1&2 for the (changing) VMID so
-/// the next guest runs under its OWN stage-2 view. HCR_EL2 stays `RW|VM` (the
-/// window remains armed). Called by the `HVC #14` yield handler after [`note_yield`]
+/// each CNTHP preemption) + `isb` + flush ALL stage-1&2 for the (changing) VMID
+/// so the next guest runs under its OWN stage-2 view. HCR_EL2 stays armed (the
+/// window remains open). Called by the 0x480 timer handler after [`note_switch`]
 /// before resuming the next guest.
 pub(super) fn switch_vttbr_el2(vttbr_val: u64) {
     // SAFETY: EL2. Reprogram only the stage-2 ROOT (VTTBR_EL2, which also carries
