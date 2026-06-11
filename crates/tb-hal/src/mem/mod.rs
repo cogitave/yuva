@@ -697,8 +697,8 @@ impl BackingStore for VirtioBlkStore {
 // (behaviour-preserving move; the kernel calls these via the re-export below.)
 mod selftests;
 pub(crate) use selftests::{
-    bakeoff_selftest, exittel_selftest, exp_selftest, kan_selftest, opframe_selftest,
-    persist_selftest, prov_selftest,
+    bakeoff_selftest, exittel_selftest, exp_selftest, kan_selftest, opcmd_selftest,
+    opframe_selftest, persist_selftest, prov_selftest,
 };
 
 // --- T0: context registers (ACT-R buffers; const-bounded, no unbounded blob) --

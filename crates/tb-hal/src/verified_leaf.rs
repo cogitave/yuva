@@ -1166,3 +1166,80 @@ pub struct ExitTelemetryProof {
 pub fn exittel_selftest() -> ExitTelemetryProof {
     mem::exittel_selftest()
 }
+
+// ===========================================================================
+// M28: the verified OPERATOR-INBOUND command self-test facade -- the CAPSTONE
+// that closes the M23->M24->M25->M26->M27 learning loop. The RX dual of the M25
+// transcript: a SIMULATED enrolled verifier (a compiled-in test key, two creds)
+// answers the OS's freshness CHALLENGE (a fresh per-boot nonce) and submits a
+// well-formed, fresh, head-bound, DUAL-AUTHORIZED `ACTIVATE_CMD`; the RX path
+// ACCEPTS the valid command AND REJECTS (a) a stale-nonce replay, (b) a wrong-head
+// command, (c) a single-credential command, (d) a flipped-MAC command. The math is
+// the Kani-proven `tb_encode::opframe_rx` (which REUSES the M22 `tb_encode::prov`
+// digest verbatim for the keyed MAC + key-evolution); the verdict is a pure-data
+// struct the `#![forbid(unsafe_code)]` kernel matches on (mirroring [`OpframeProof`]).
+//
+// CRITICAL HONESTY: the accepted command is NECESSARY-NOT-SUFFICIENT -- `KAN_ACTIVE`
+// stays `false` (a `const false`; the command does NOT flip it). The architectural
+// "pending flag -> M24 reads it" seam is described in the proposal, but for THIS
+// self-test the assertion is simply that an accepted command leaves `KAN_ACTIVE ==
+// false` because M24's statistical bar is unmet on synthetic data. The witness MUST
+// carry `kan_active=0`. The MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV, NOT forgery-
+// resistant) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test key, not a
+// human + not a real enrolment ceremony) -- the marker proves the auth PLUMBING,
+// never that a human commanded. The honesty tokens are machine-emitted so the
+// run-scripts reject any overclaim. DoD: "M28: operator-cmd OK".
+// ===========================================================================
+
+/// M28 operator-inbound command self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`OpframeProof`]. The witness
+/// fields are POSITIVELY required on the boot witness line so the marker mechanically
+/// cannot claim an authentication property it did not verify, nor an activation the
+/// M24 bar does not support (`kan_active` is REQUIRED false).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpcmdProof {
+    /// THE ACCEPT: the SIMULATED enrolled verifier's well-formed, fresh, head-bound,
+    /// dual-authorized `ACTIVATE_CMD` was ACCEPTED by the RX path (decode + kind +
+    /// nonce + head-binding + dual-custody + keyed MAC all held). The kernel requires
+    /// this (rendered `accepted=1`).
+    pub accepted: bool,
+    /// A stale-nonce replay (a command echoing a prior challenge nonce) was REJECTED
+    /// (`RejectStale`) -- the freshness check (RATS RFC 9334 §10). The kernel requires
+    /// this (rendered `stale-rejected=1`).
+    pub stale_rejected: bool,
+    /// A wrong-head command (binding an `op_head` != the live head) was REJECTED
+    /// (`RejectWrongHead`) -- the Terrapin head-binding lesson. The kernel requires this
+    /// (rendered `wronghead-rejected=1`).
+    pub wronghead_rejected: bool,
+    /// A single-credential command (`cred_a_id == cred_b_id`) was REJECTED
+    /// (`RejectSingleCred`) -- the dual-custody / two-person rule. The kernel requires
+    /// this (rendered `single-cred-rejected=1`).
+    pub single_cred_rejected: bool,
+    /// A flipped-MAC command (a single tampered MAC byte) was REJECTED (`RejectBadMac`)
+    /// -- the keyed-MAC tamper-sensitivity. The kernel requires this (rendered
+    /// `badmac-rejected=1`).
+    pub badmac_rejected: bool,
+    /// The learned cell's activation state AFTER the accepted command. REQUIRED `false`
+    /// this milestone (necessary-not-sufficient: the command un-blocks the M24 gate's
+    /// oracle input, but M24's statistical bar is unmet on synthetic data, so the cell
+    /// stays DORMANT). The run-scripts REQUIRE `kan_active=0`.
+    pub kan_active: bool,
+    /// The per-boot challenge NONCE the OS issued + the verifier echoed, rendered as
+    /// `challenge=<hex16>` in the boot witness line (the freshness anchor).
+    pub challenge: u64,
+}
+
+/// M28: play the SIMULATED enrolled operator-verifier over the Kani-proven
+/// `tb_encode::opframe_rx` RX path (both arches) and report the outcome. See
+/// [`OpcmdProof`]. Pure value computation -- a compiled-in test key (two creds)
+/// answers the OS's per-boot freshness CHALLENGE with a well-formed, fresh, head-
+/// bound, DUAL-AUTHORIZED `ACTIVATE_CMD`; the RX path ACCEPTS the valid command and
+/// REJECTS (a) stale-nonce, (b) wrong-head, (c) single-credential, (d) flipped-MAC.
+/// Touches NO device beyond the serial the kernel renders over, and NO scheduler. The
+/// accepted command is NECESSARY-NOT-SUFFICIENT: `KAN_ACTIVE` stays `false` (M24's bar
+/// is unmet on synthetic data). HONEST: the MAC is `mac=KEYED-NONCRYPTO` (a keyed FNV,
+/// NOT forgery-resistant) and the oracle is `oracle=SIMULATED-ENROLLED-KEY` (a test
+/// key, not a human) -- the marker proves the auth PLUMBING, never that a human commanded.
+pub fn opcmd_selftest() -> OpcmdProof {
+    mem::opcmd_selftest()
+}

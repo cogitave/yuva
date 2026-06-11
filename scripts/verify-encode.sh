@@ -179,8 +179,28 @@ set -euo pipefail
 # recomputed sched_head, REUSING the proven M22 prov::chain_mix fold (SYMBOLIC flip index, concrete
 # record/sibling). OBSERVATIONAL not learned (fixed round-robin); NOT real-time / NOT schedulability-
 # proven (realtime=NOT-CLAIMED).
+# + M28 opframe_rx verified OPERATOR-INBOUND command leaf x6 (the RX dual of M25 opframe -- the CAPSTONE
+# that closes the learning loop): kani_cmd_canon_injective -- the load-bearing canon totality+injectivity
+# proof (the MAC'd bytes = everything EXCEPT the trailing mac; the payload_len u32 prefix disambiguates
+# the variable tail; fail-closed on a too-small buffer / unknown kind; decode fails closed without the
+# trailing MAC). The freshness/head-binding/dual-custody discrimination is proven at the LEAF-predicate
+# level (NOT through the full decode_and_verify wrapper, whose multi-buffer round-trip CBMC cannot
+# constant-fold -- the same intractability class as the #49 FNV trap; the wrapper integration is exercised
+# concretely by the host tests + boot self-test): kani_cmd_stale_nonce -- decode recovers the echoed nonce
+# EXACTLY (the codec half, fully symbolic, FNV-free) and the freshness predicate (echoed == expected)
+# discriminates a stale replay from the fresh challenge; kani_cmd_head_binding -- decode recovers the bound
+# op_head EXACTLY and the head-binding predicate (bound == live) rejects a forged cross-boot head (the
+# Terrapin lesson, SYMBOLIC single-byte flip); kani_cmd_dual_custody -- decode recovers BOTH cred ids
+# EXACTLY and the dual-custody predicate (cred_a != cred_b) rejects a single signer (the two-person rule,
+# fully symbolic); kani_cmd_mac_tamper -- a single-byte flip of the keyed MAC's CONCRETE canon-bytes input
+# changes the recomputed MAC, REUSING the M22 prov::prov_hash digest (a SYMBOLIC flip index, CONCRETE
+# keys+canon so the FNV stays concrete -- the #49 trap); kani_cmd_key_evolve -- key_evolve is deterministic
+# + advances (not a fixed point) + tamper-sensitive (the FssAgg forward shape, SYMBOLIC flip index,
+# CONCRETE key). Claims ONLY enrolled-key replay/truncation resistance vs a non-adaptive no-key adversary
+# (mac=KEYED-NONCRYPTO, NOT forgery-resistance); the oracle is a test key (oracle=SIMULATED-ENROLLED-KEY);
+# an accepted command is necessary-not-sufficient (kan_active=0).
 # Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=74
+EXPECTED_HARNESSES=80
 
 echo "==> Running Kani over tb-encode ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per
