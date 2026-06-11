@@ -4,23 +4,54 @@
 # encoders, the 16-byte IPC frame codec + bounded ring) with Kani over the
 # host-verifiable `tb-encode` crate, FAIL CLOSED.
 #
-# Emits the DoD marker `V1: kani-encoders OK` and exits 0 ONLY when:
+# SHARD MODES (#101 -- the prove-encode lane is sharded into 2 parallel CI
+# jobs; trigger: the first post-M29-stage-C CI pass measured 41m22s of the
+# 45-min cap and M31 stage A adds +6 harnesses):
+#   SHARD=all  (default) -- the single full counted pass, local-workflow
+#              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
+#              pinned EXPECTED_HARNESSES_TOTAL (90), marker `V1: kani-encoders OK`.
+#   SHARD=a|b  -- run ONLY that shard's pinned harness list (repeated
+#              `--harness <name>` + `--exact` -- exact-name matching, never
+#              substring, so e.g. kani_kan_envelope_no_widening can never
+#              shadow ..._m24), SUCCESSFUL must equal that shard's pinned
+#              count (the list length), marker `V1-shard-a: kani-encoders OK`
+#              / `V1-shard-b: kani-encoders OK` (DISTINCT tokens -- a shard
+#              marker never claims the full 90).
+# The shard lists + per-shard counts + the total live in ONE place,
+# scripts/kani-shards.sh (sourced below) -- consumed by this script in all
+# modes and by kani.yml only via SHARD=a|b. EVERY mode first runs the
+# fail-closed completeness guard (lists disjoint + exhaustive + in lockstep
+# with proofs.rs's '#[kani::proof]' count), so a renamed/added/dropped harness
+# can never silently vanish from coverage even when no full pass runs on CI.
+#
+# Emits the DoD marker for the asserted set and exits 0 ONLY when:
+#   * the completeness guard passes, AND
 #   * ZERO harnesses report `VERIFICATION:- FAILED`, AND
 #   * the count of `VERIFICATION:- SUCCESSFUL` EXACTLY equals the pinned
-#     EXPECTED_HARNESSES (so a silently deleted / renamed / vacuous harness can
-#     never let the gate pass -- the marker is tamper-evident).
+#     count for the asserted set -- counted from Kani's OWN output lines,
+#     never a static grep -- (so a silently deleted / renamed / vacuous
+#     harness can never let the gate pass -- the marker is tamper-evident).
 #
-# Run by .github/workflows/kani.yml (the `prove-encode` job) AFTER the
-# model-checking/kani-github-action step has installed Kani's own pinned
-# toolchain (so `cargo kani` is on PATH). Kani is NOT invoked through the
-# `kbuild` alias and NEVER via `--workspace` (that would drag tb-hal's inline
-# asm into CBMC), only the per-package `-p tb-encode` form, so -Zbuild-std and
-# the asm-bearing crates never contaminate this host verification. This is the
-# SIBLING gate to scripts/verify-caps.sh (M11); it does NOT touch that lane.
+# Run by .github/workflows/kani.yml (the `prove-encode-a` / `prove-encode-b`
+# jobs, SHARD=a|b) AFTER the model-checking/kani-github-action step has
+# installed Kani's own pinned toolchain (so `cargo kani` is on PATH). Kani is
+# NOT invoked through the `kbuild` alias and NEVER via `--workspace` (that
+# would drag tb-hal's inline asm into CBMC), only the per-package
+# `-p tb-encode` form, so -Zbuild-std and the asm-bearing crates never
+# contaminate this host verification. This is the SIBLING gate to
+# scripts/verify-caps.sh (M11); it does NOT touch that lane.
 set -euo pipefail
 
-# The exact number of `#[kani::proof]` harnesses in
-# crates/tb-encode/src/proofs.rs (VMX x4 + paging/EPT x4 + IPC frame/ring x3 +
+# The shard lists + pinned counts + the completeness guard (single source of
+# truth -- see the #101 header in that file for the bump procedure).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/kani-shards.sh
+. "$SCRIPT_DIR/kani-shards.sh"
+
+# The harness INVENTORY -- what each `#[kani::proof]` harness in
+# crates/tb-encode/src/proofs.rs proves; the pinned count + the shard lists
+# themselves live in scripts/kani-shards.sh (sourced above).
+# (VMX x4 + paging/EPT x4 + IPC frame/ring x3 +
 # memscore recall-ranking-math x4: log2_fixed/ln_fixed/bla_raw panic-free+bounded
 # and minmax-in-[0,SCALE] + L2.1 aarch64 stage-2/el2_trap encoders x5:
 # s2_leaf_wellformed, s2_table_and_vttbr, vtcr_wellformed, esr_decode_total,
@@ -306,28 +337,75 @@ set -euo pipefail
 # challenge / nonce each yields a DISTINCT tag (peer+challenge+nonce provably INSIDE
 # the MAC'd bytes -> the run-script lane cross-pin is real); NEG: an echo_tag that
 # dropped any of them from its MAC input fails the corresponding inequality.
-# Bump this in LOCKSTEP when adding/removing a harness; any mismatch fails the gate.
-EXPECTED_HARNESSES=90
+# The pinned count + the SHARD_A/SHARD_B lists now live in
+# scripts/kani-shards.sh (sourced above) -- bump THERE in LOCKSTEP when
+# adding/removing a harness (the #101 one-touch procedure: the new name goes
+# into exactly ONE shard list + EXPECTED_HARNESSES_TOTAL); any mismatch fails
+# the completeness guard below in every mode.
 
-echo "==> Running Kani over tb-encode ..."
+SHARD="${SHARD:-all}"
+case "$SHARD" in
+  a|b|all) ;;
+  *)
+    echo "ENCODE PROOF GATE: FAIL -- unknown SHARD='$SHARD' (must be a, b, or all)" >&2
+    exit 1
+    ;;
+esac
+
+# #101 completeness guard -- fail-closed in EVERY mode, BEFORE any proof runs:
+# the shard lists must be disjoint, exhaustive, and in lockstep with the
+# '#[kani::proof]' count in proofs.rs.
+shards_assert_complete
+
+# Select the harness set, its pinned count, and its DoD marker. Shard modes
+# pass every shard harness as `--harness <fully-qualified-name>` with
+# `--exact` (exact matching -- cargo-kani's default filter is SUBSTRING
+# matching, which could silently over-match a prefix-named sibling harness,
+# e.g. kani_kan_envelope_no_widening also matches ..._m24). `--exact`
+# requires the fully-qualified path: every tb-encode harness lives flat in
+# the `proofs` module (verified via `cargo kani list`), so the module prefix
+# is pinned ONCE here; if proofs.rs ever re-modularizes, the shard run match
+# fails and the SUCCESSFUL count mismatch fails the gate closed.
+HARNESS_PATH_PREFIX="proofs::"
+KANI_ARGS=()
+case "$SHARD" in
+  all)
+    EXPECTED="$EXPECTED_HARNESSES_TOTAL"
+    MARKER="V1: kani-encoders OK"
+    ;;
+  a)
+    EXPECTED="${#SHARD_A[@]}"
+    MARKER="V1-shard-a: kani-encoders OK"
+    KANI_ARGS+=(--exact)
+    for h in "${SHARD_A[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
+    ;;
+  b)
+    EXPECTED="${#SHARD_B[@]}"
+    MARKER="V1-shard-b: kani-encoders OK"
+    KANI_ARGS+=(--exact)
+    for h in "${SHARD_B[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
+    ;;
+esac
+
+echo "==> Running Kani over tb-encode (SHARD=$SHARD, expecting $EXPECTED harnesses) ..."
 # Capture both streams; --output-format=terse prints one VERIFICATION line per
 # harness. `|| true` so a non-zero Kani exit (a real proof failure) is handled by
 # the explicit checks below rather than aborting under `set -e`.
-OUT="$(cargo kani -p tb-encode --output-format=terse 2>&1 || true)"
+OUT="$(cargo kani -p tb-encode --output-format=terse ${KANI_ARGS[@]+"${KANI_ARGS[@]}"} 2>&1 || true)"
 printf '%s\n' "$OUT"
 
 FAILED="$(printf '%s\n' "$OUT" | grep -c 'VERIFICATION:- FAILED' || true)"
 SUCCEEDED="$(printf '%s\n' "$OUT" | grep -c 'VERIFICATION:- SUCCESSFUL' || true)"
 
 if [ "$FAILED" -ne 0 ]; then
-  echo "ENCODE PROOF GATE: FAIL -- $FAILED harness(es) reported VERIFICATION:- FAILED" >&2
+  echo "ENCODE PROOF GATE: FAIL -- $FAILED harness(es) reported VERIFICATION:- FAILED (SHARD=$SHARD)" >&2
   exit 1
 fi
 
-if [ "$SUCCEEDED" -ne "$EXPECTED_HARNESSES" ]; then
-  echo "ENCODE PROOF GATE: FAIL -- expected $EXPECTED_HARNESSES successful harnesses, saw $SUCCEEDED (regression / tamper / build error)" >&2
+if [ "$SUCCEEDED" -ne "$EXPECTED" ]; then
+  echo "ENCODE PROOF GATE: FAIL -- expected $EXPECTED successful harnesses for SHARD=$SHARD, saw $SUCCEEDED (regression / tamper / build error)" >&2
   exit 1
 fi
 
-echo "V1: kani-encoders OK"
+echo "$MARKER"
 exit 0

@@ -148,6 +148,15 @@ property.
 
 ### Option 4 — SHARD prove-encode into 2 parallel jobs — **PREPARE as the escape hatch, do not land now**
 
+> **STATUS UPDATE (#101, 2026-06-12): trigger FIRED — option 4 LANDED.** The
+> first post-stage-C CI pass measured **41m22s** (> the pre-agreed ~38-min
+> trigger; local 29.2 min — the runner delta is real) and M31 stage A adds +6
+> harnesses. Landed exactly as drafted below plus the mandatory completeness
+> guard: `prove-encode-a`/`prove-encode-b` (kani.yml), cost-balanced lists +
+> per-shard pinned counts + the total in ONE place (`scripts/kani-shards.sh`),
+> `verify-encode.sh` `SHARD=a|b|all` (all = the unchanged local single pass),
+> and `shards_assert_complete` fail-closed in every mode.
+
 Mechanics: two matrix jobs each running `cargo kani -p tb-encode --harness
 <name> --exact ...` over a pinned half of the list; `verify-encode.sh` takes a
 shard id and asserts per-shard `EXPECTED_HARNESSES_A/_B`. Lockstep cost is
