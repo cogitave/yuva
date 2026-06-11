@@ -143,12 +143,18 @@ skip/dormant variant while positively requiring its witness line.
   (a guest cannot fake a non-trapping store), with every `SchedDecision` folded into
   a tamper-evident `sched_head` via the M22 fold — the slot-successor /
   frame-conservation / decision-codec math is the verified `tb-encode::tpsched`
-  leaf. **Shipped as M27a**, the cooperative HVC-yield green floor, witnessed by
-  `sched: head=.. frames=.. vmids=0x2 both-progressed=1 order-honored=1
-  fold-verified=1 tamper-caught=1 frame-conserved=1 timing=COOPERATIVE-HVC-YIELD
-  realtime=NOT-CLAIMED` — the tokens machine-forbid impersonating M27b's real-timer
-  claim or any real-time/schedulability guarantee; the real-CNTHP timer-preemption
-  upgrade (**M27b**, #84) is the named next milestone.
+  leaf. **Landed as M27a (the cooperative green floor) then upgraded by M27b to
+  REAL CNTHP timer-preemption — the first asynchronous IRQ ever taken at EL2**
+  (the 0x480 Lower-EL IRQ vector, `HCR_EL2.IMO=1` only inside the armed window;
+  the guest stubs are pure store-spins with NO voluntary yield, so
+  `both-progressed=1` is only reachable via genuine timer preemption;
+  re-arm-before-EOI + IAR==26 verify + ISTATUS read-back + a hard EOI cap turn
+  any storm into a fast red), witnessed by `sched: head=.. frames=.. vmids=0x2
+  both-progressed=1 order-honored=1 fold-verified=1 tamper-caught=1
+  frame-conserved=1 timing=TCG-NON-CYCLE-ACCURATE realtime=NOT-CLAIMED` — the
+  tokens machine-forbid claiming cycle accuracy under TCG or any
+  real-time/schedulability guarantee, and the guard REJECTS the retired
+  cooperative token (M27a cannot impersonate M27b).
 - **The operator INBOUND channel (§7.5 human approval, §9) — M28, the
   exogenous-oracle CAPSTONE.** `M28: operator-cmd OK` is the NEW cumulative tail
   marker (printed after M26; M27 stays mid-chain): the RX dual of M25's transcript —
