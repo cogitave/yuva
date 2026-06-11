@@ -4490,6 +4490,117 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M29: khash-mac OK\n");
     }
 
+    // ---- M30: verified inference transport (the sovereignty A-chain channel) ----
+    // The channel a host model peer will speak in M31+ -- TRANSPORT ONLY this
+    // milestone (`backend=ECHO-ONLY`). The kernel emits an ECHO_REQ with a per-boot
+    // challenge over a modern (Version==2) virtio-console (DeviceID 3, port 0,
+    // VERSION_1-only, poll-only -- `mode=POLL`, the #71 guard pin); the HOST peer
+    // (which custodies a per-run OS-RNG key K + nonce N -- NEVER compiled into this
+    // image or its command line) answers with a khash echo tag binding
+    // peer_id||N||challenge||body INSIDE the MAC (the M28/Terrapin lesson) and
+    // reveals K on the channel; the kernel stream-re-frames the response through
+    // the Kani-proven `tb_encode::inferwire::FrameAccum`, decodes fail-closed, and
+    // `verify_echo`s the tag (LEG 1) -- plus the four in-boot negatives (badtag /
+    // wrongkey / partial / desync), each of which must FIRE. ALL value computation
+    // is the host-verifiable `tb_encode::inferwire` (+ the M29 `khash` it calls);
+    // this kernel stays zero-unsafe and only matches on the returned
+    // `InferChanProof`. HONEST (the proposal-§4 two-leg split, the M22
+    // mock-loopback lesson): `echo=HOST-KEYED-VERIFIED` is KERNEL-SCOPE -- it means
+    // "the tag verified against the key revealed on the channel and binds THIS
+    // boot's challenge", NEVER "not a loopback"; loopback exclusion is the run
+    // script's CROSS-PROCESS challenge/tag equality against the host peer's own
+    // `xport-harness:` line (LEG 2 -- a loopback can mint a self-consistent tag
+    // but cannot equal the host's khash(K,..) without the host-custodied K). The
+    // `transport=`/`bus=` lane tokens are mapped from the MAC-covered peer_id the
+    // verified tag just bound -- the kernel mechanically cannot mint them. The
+    // kernel NEVER prints K (the run script greps for a leak). `key=HOST-
+    // CUSTODIED-PER-RUN` claims custody, never confidentiality; `sec=ASSUMED-
+    // FROM-LITERATURE` is inherited from M29. DoD: "M30: infer-transport OK".
+    {
+        match tb_hal::xport_selftest() {
+            tb_hal::InferChanProof::Absent => {
+                // The LOUD graceful skip -- legitimate ONLY on lanes that attach no
+                // host peer (bench, l2-nested, vmm-boot until stage C); every
+                // peer-attached lane's guard REJECTS this variant BY NAME (§5.1).
+                tb_hal::serial_write_str("M30: infer-transport OK (no host peer, skipped)\n");
+            }
+            tb_hal::InferChanProof::LegacyUnsupported => {
+                // A legacy (Version != 2) console transport is rejected, never
+                // silently driven (the M19 idiom). No witness line is printed, so
+                // a peer-attached lane's positive-require fails red.
+                tb_hal::serial_write_str(
+                    "M30: infer-transport OK (legacy transport, skipped)\n",
+                );
+            }
+            tb_hal::InferChanProof::Failed { stage } => {
+                // #65 fail-closed: a present-then-silent or faulty peer is a HARD
+                // FAIL (no 'infer-transport OK' substring), never a skip -- a dead
+                // harness cannot masquerade as legitimately-absent (§10). Stage
+                // 0x3 is the bounded-poll session leg (the xport-timeout case).
+                if stage == 0x3 {
+                    tb_hal::serial_write_str("M30: FAIL xport-timeout stage=");
+                } else {
+                    tb_hal::serial_write_str("M30: FAIL xport stage=");
+                }
+                write_hex_u64(stage as u64);
+                tb_hal::serial_write_byte(b'\n');
+                tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
+            }
+            tb_hal::InferChanProof::Proven {
+                slot: _,
+                req_id,
+                resp_len: _,
+                challenge,
+                nonce,
+                tag,
+                peer_id,
+            } => {
+                // The lane tokens are selected by the MAC-COVERED peer_id the
+                // verified tag bound (0x01 = the tb-vmm backend lane, 0x02 = the
+                // QEMU chardev-harness lanes). An unknown peer_id never reaches
+                // here (the selftest fails closed at stage 0x5).
+                let (bus, transport) = if peer_id == 0x01 {
+                    ("VIRTIO-MMIO", "TB-VMM-HOST")
+                } else {
+                    ("SERIAL-FRAMED", "QEMU-CHARDEV-HARNESS")
+                };
+                // The REAL round-trip WITNESS line (proposal §5 -- positively
+                // required by the run scripts; leg 2 string-compares challenge=/
+                // tag= against the host's own `xport-harness:` line). The `=0x1`
+                // flags are EARNED: `Proven` is constructed ONLY when the echo
+                // verified AND all four negatives fired (fail-closed in the
+                // selftest); `qsz`/`tx`/`rx` witness the two-queue session (queue
+                // size 4, tx path proven, rx path proven). The trailing tokens
+                // are the machine-emitted honesty boundary -- the marker
+                // mechanically cannot claim a secure channel, a real model, or
+                // loopback exclusion.
+                tb_hal::serial_write_str("xport: bus=");
+                tb_hal::serial_write_str(bus);
+                tb_hal::serial_write_str(" qsz=0x4 tx=0x1 rx=0x1 challenge=");
+                write_hex_bytes16(&challenge);
+                tb_hal::serial_write_str(" nonce=");
+                write_hex_bytes16(&nonce);
+                tb_hal::serial_write_str(" tag=");
+                write_hex_bytes16(&tag);
+                tb_hal::serial_write_str(" req-id=");
+                write_hex_u64(req_id);
+                tb_hal::serial_write_str(
+                    " echo-verified=0x1 body-bitexact=0x1 badtag-rejected=0x1 \
+                     wrongkey-rejected=0x1 partial-rejected=0x1 desync-rejected=0x1 \
+                     mode=POLL transport=",
+                );
+                tb_hal::serial_write_str(transport);
+                tb_hal::serial_write_str(
+                    " echo=HOST-KEYED-VERIFIED key=HOST-CUSTODIED-PER-RUN \
+                     backend=ECHO-ONLY sec=ASSUMED-FROM-LITERATURE\n",
+                );
+                // The marker -- the NEW cumulative tail (M0..M30): emitted ONLY
+                // when the host-keyed echo verified and every negative fired.
+                tb_hal::serial_write_str("M30: infer-transport OK\n");
+            }
+        }
+    }
+
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
     tb_hal::stack_redzone_check();
@@ -4799,6 +4910,24 @@ fn trap_hook(info: &TrapInfo) -> TrapAction {
             tb_hal::serial_write_byte(b'\n');
             TrapAction::Halt
         }
+    }
+}
+
+/// M30: write a 16-byte array as a fixed-width 32-digit `0x…` hex string over
+/// serial, in WIRE BYTE ORDER (byte 0 first, two lowercase nibbles per byte).
+/// The host harness prints its `challenge=`/`tag=` fields in the SAME format,
+/// so the run script's leg-2 cross-process equality is an exact string
+/// compare. Pure safe Rust (no `core::fmt`, no allocation).
+fn write_hex_bytes16(bytes: &[u8; 16]) {
+    tb_hal::serial_write_str("0x");
+    let mut i = 0usize;
+    while i < 16 {
+        let b = bytes[i];
+        let hi = b >> 4;
+        let lo = b & 0xF;
+        tb_hal::serial_write_byte(if hi < 10 { b'0' + hi } else { b'a' + (hi - 10) });
+        tb_hal::serial_write_byte(if lo < 10 { b'0' + lo } else { b'a' + (lo - 10) });
+        i += 1;
     }
 }
 

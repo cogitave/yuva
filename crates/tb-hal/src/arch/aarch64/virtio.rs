@@ -686,3 +686,286 @@ pub fn blk_write(slot: u32, sector: u64, buf: &[u8; 512]) -> bool {
 pub fn blk_flush(slot: u32) -> bool {
     blk_request(slot, tb_encode::blkfmt::T_FLUSH, 0, None)
 }
+
+// ===========================================================================
+// M30: the poll-only modern virtio-console (DeviceID 3) CHANNEL driver -- the
+// guest<->host inference-transport seam. Reuses EVERY M19/M20 primitive
+// verbatim (reg_read/reg_write, the ram_* volatile accessors, the dmb_ishst/
+// dsb_sy/dmb_ishld barrier discipline, POLL_CAP, reset-before-frame-free, the
+// DeviceID-matching slot scan). The NEW silicon surface is the kernel's FIRST
+// TWO-queue setup: QueueSel=0 receiveq with a device-WRITE buffer posted
+// BEFORE DRIVER_OK (virtio v1.2 §5.3.6.1: populate the receive queue before
+// the port is used), QueueSel=1 transmitq. Negotiates ONLY VIRTIO_F_VERSION_1
+// -- deliberately NOT F_MULTIPORT (low bit 1) / F_SIZE (bit 0) /
+// F_EMERG_WRITE (bit 2), so per §5.3.2 the device collapses to exactly
+// receiveq(0)+transmitq(1) on port 0 (no control queue, no config space) and
+// port 0 stays bound to the QEMU chardev. POLL-ONLY (`mode=POLL`; the #71
+// watch applies the instant this grows a completion IRQ). The bytes moved are
+// OPAQUE here: ALL framing/MAC discipline is the Kani-proven
+// `tb_encode::inferwire`, called by the safe selftest layer -- this driver is
+// plumbing, exactly per the M30 proposal §1 ("the codec is the verified leaf;
+// the transport is plumbing").
+// ===========================================================================
+
+/// virtio-console DeviceID (§5.3: console = 3) -- the M30 channel device.
+const VIRTIO_DEV_CONSOLE: u32 = 3;
+
+// In-frame layout for one chan session (one 4 KiB DMA frame; TWO queues of
+// CHAN_Q_SIZE=4: each desc table 4*16=64 B, avail 4+2*4=12 B, used 4+8*4=36 B;
+// §2.7 alignment desc 16 / avail 2 / used 4 is met by every offset below):
+const CHAN_RX_DESC_OFF: u64 = 0x000; // receiveq (queue 0) descriptor table
+const CHAN_RX_AVAIL_OFF: u64 = 0x040;
+const CHAN_RX_USED_OFF: u64 = 0x080;
+const CHAN_TX_DESC_OFF: u64 = 0x0C0; // transmitq (queue 1) descriptor table
+const CHAN_TX_AVAIL_OFF: u64 = 0x100;
+const CHAN_TX_USED_OFF: u64 = 0x140;
+const CHAN_TX_BUF_OFF: u64 = 0x200; // the request bytes (device READS)
+const CHAN_RX_BUF_OFF: u64 = 0x400; // the response bytes (device WRITES)
+/// Both queues use size 4 (room for the re-posted rx descriptor sequence on a
+/// chunked stream; the M20 `BLK_Q_SIZE=4` precedent).
+const CHAN_Q_SIZE: u32 = 4;
+/// The tx staging capacity (one request frame; the M30 echo REQ is ~82 bytes).
+const CHAN_TX_BUF_CAP: usize = 0x200;
+/// The rx staging capacity (response frame + the channel key reveal).
+const CHAN_RX_BUF_CAP: usize = 0xC00;
+
+/// Probe the virtio-mmio bus for a MODERN (Version==2 readback -- the M30
+/// spike left this negotiation as the driver's proof) virtio-console
+/// (DeviceID==3). Returns `Some(slot)` if found and modern, `None` if absent
+/// or legacy-only. Mirrors [`blk_probe`].
+pub fn chan_probe() -> Option<u32> {
+    let base = SLOT_BASE;
+    let mut i: u32 = 0;
+    while i < N_SLOTS {
+        let s = base + (i as u64) * SLOT_STRIDE;
+        if reg_read(s, R_MAGIC) == VIRTIO_MAGIC && reg_read(s, R_DEVICE_ID) == VIRTIO_DEV_CONSOLE
+        {
+            if reg_read(s, R_VERSION) != VIRTIO_VERSION_MODERN {
+                return None; // legacy -> rejected, never silently used (§3a)
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the bus carries a LEGACY (Version != 2) console device but no
+/// modern one (Absent vs LegacyUnsupported disambiguation -- mirrors
+/// [`blk_saw_legacy`]).
+pub fn chan_saw_legacy() -> bool {
+    let base = SLOT_BASE;
+    let mut i: u32 = 0;
+    let mut legacy = false;
+    while i < N_SLOTS {
+        let s = base + (i as u64) * SLOT_STRIDE;
+        if reg_read(s, R_MAGIC) == VIRTIO_MAGIC && reg_read(s, R_DEVICE_ID) == VIRTIO_DEV_CONSOLE
+        {
+            if reg_read(s, R_VERSION) == VIRTIO_VERSION_MODERN {
+                return false;
+            }
+            legacy = true;
+        }
+        i += 1;
+    }
+    legacy
+}
+
+/// Run ONE request/response session over the virtio-console channel at `slot`:
+/// initialize the device fresh (reset -> ACK -> DRIVER -> VERSION_1-only ->
+/// FEATURES_OK readback -> rx queue with a posted device-WRITE buffer BEFORE
+/// DRIVER_OK -> tx queue -> DRIVER_OK), transmit `req` (tx-kick, poll tx-used
+/// under [`POLL_CAP`]), then collect rx completions into `resp` until it is
+/// COMPLETELY filled (the caller sizes `resp` to the exact expected byte
+/// count -- the M30 echo protocol's response length is known a priori), then
+/// reset the device + free the DMA frame. Returns `Some(resp.len())` on
+/// success, `None` fail-closed on ANY fault (feature rejection, queue
+/// failure, poll-cap exhaustion -- a dead/silent peer can stall but never
+/// hang the boot). POLL-ONLY: both avail rings carry
+/// `VIRTQ_AVAIL_F_NO_INTERRUPT`; completion is a bounded used-ring spin.
+pub fn chan_send_recv(slot: u32, req: &[u8], resp: &mut [u8]) -> Option<usize> {
+    if req.is_empty() || req.len() > CHAN_TX_BUF_CAP || resp.is_empty()
+        || resp.len() > CHAN_RX_BUF_CAP
+    {
+        return None;
+    }
+    let dev = SLOT_BASE + (slot as u64) * SLOT_STRIDE;
+    let frame = crate::frame_alloc()?;
+    // Clean slate (rings polled against 0; pmm frames are not zeroed).
+    let mut z: u64 = 0;
+    while z < 4096 {
+        ram_w64(frame + z, 0);
+        z += 8;
+    }
+    let rx_desc = frame + CHAN_RX_DESC_OFF;
+    let rx_avail = frame + CHAN_RX_AVAIL_OFF;
+    let rx_used = frame + CHAN_RX_USED_OFF;
+    let tx_desc = frame + CHAN_TX_DESC_OFF;
+    let tx_avail = frame + CHAN_TX_AVAIL_OFF;
+    let tx_used = frame + CHAN_TX_USED_OFF;
+    let tx_buf = frame + CHAN_TX_BUF_OFF;
+    let rx_buf = frame + CHAN_RX_BUF_OFF;
+
+    // Stage the request bytes before the device can see anything.
+    let mut k = 0u64;
+    while k < req.len() as u64 {
+        ram_w8(tx_buf + k, req[k as usize]);
+        k += 1;
+    }
+
+    // Modern handshake: reset -> ACK -> DRIVER -> negotiate VERSION_1 ONLY.
+    reg_write(dev, R_STATUS, 0);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER);
+    reg_write(dev, R_DEVICE_FEATURES_SEL, 1);
+    let df_hi = reg_read(dev, R_DEVICE_FEATURES);
+    if df_hi & VIRTIO_F_VERSION_1_HI == 0 {
+        return chan_fail(dev, frame);
+    }
+    // Low dword = 0: F_SIZE(0) / F_MULTIPORT(1) / F_EMERG_WRITE(2) are all
+    // REJECTED -- §5.3.2 then pins the device to receiveq(0)+transmitq(1).
+    reg_write(dev, R_DRIVER_FEATURES_SEL, 0);
+    reg_write(dev, R_DRIVER_FEATURES, 0);
+    reg_write(dev, R_DRIVER_FEATURES_SEL, 1);
+    reg_write(dev, R_DRIVER_FEATURES, VIRTIO_F_VERSION_1_HI);
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK);
+    if reg_read(dev, R_STATUS) & S_FEATURES_OK == 0 {
+        return chan_fail(dev, frame);
+    }
+
+    // Queue 0 (receiveq): set up + POST the device-WRITE buffer BEFORE
+    // DRIVER_OK (§5.3.6.1 -- the device must find an rx buffer the moment the
+    // port opens; the spike left exactly this negotiation to the driver).
+    reg_write(dev, R_QUEUE_SEL, 0);
+    if reg_read(dev, R_QUEUE_NUM_MAX) == 0 {
+        return chan_fail(dev, frame);
+    }
+    reg_write(dev, R_QUEUE_NUM, CHAN_Q_SIZE);
+    reg_write(dev, R_QUEUE_DESC_LOW, rx_desc as u32);
+    reg_write(dev, R_QUEUE_DESC_HIGH, (rx_desc >> 32) as u32);
+    reg_write(dev, R_QUEUE_DRIVER_LOW, rx_avail as u32);
+    reg_write(dev, R_QUEUE_DRIVER_HIGH, (rx_avail >> 32) as u32);
+    reg_write(dev, R_QUEUE_DEVICE_LOW, rx_used as u32);
+    reg_write(dev, R_QUEUE_DEVICE_HIGH, (rx_used >> 32) as u32);
+    // rx desc 0: the whole expected response window, device-writable.
+    ram_w64(rx_desc, rx_buf);
+    ram_w32(rx_desc + 8, resp.len() as u32);
+    ram_w16(rx_desc + 12, VIRTQ_DESC_F_WRITE);
+    ram_w16(rx_desc + 14, 0);
+    ram_w16(rx_avail, VIRTQ_AVAIL_F_NO_INTERRUPT); // flags: poll-only
+    ram_w16(rx_avail + 4, 0); // ring[0] = desc 0
+    dmb_ishst();
+    ram_w16(rx_avail + 2, 1); // avail.idx = 1: rx buffer POSTED pre-DRIVER_OK
+    reg_write(dev, R_QUEUE_READY, 1);
+    if reg_read(dev, R_QUEUE_READY) != 1 {
+        return chan_fail(dev, frame);
+    }
+
+    // Queue 1 (transmitq): set up; the tx descriptor publishes after DRIVER_OK.
+    reg_write(dev, R_QUEUE_SEL, 1);
+    if reg_read(dev, R_QUEUE_NUM_MAX) == 0 {
+        return chan_fail(dev, frame);
+    }
+    reg_write(dev, R_QUEUE_NUM, CHAN_Q_SIZE);
+    reg_write(dev, R_QUEUE_DESC_LOW, tx_desc as u32);
+    reg_write(dev, R_QUEUE_DESC_HIGH, (tx_desc >> 32) as u32);
+    reg_write(dev, R_QUEUE_DRIVER_LOW, tx_avail as u32);
+    reg_write(dev, R_QUEUE_DRIVER_HIGH, (tx_avail >> 32) as u32);
+    reg_write(dev, R_QUEUE_DEVICE_LOW, tx_used as u32);
+    reg_write(dev, R_QUEUE_DEVICE_HIGH, (tx_used >> 32) as u32);
+    ram_w16(tx_avail, VIRTQ_AVAIL_F_NO_INTERRUPT); // flags: poll-only
+    reg_write(dev, R_QUEUE_READY, 1);
+    if reg_read(dev, R_QUEUE_READY) != 1 {
+        return chan_fail(dev, frame);
+    }
+
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
+
+    // TX: one device-READ descriptor carrying the request; kick queue 1 and
+    // poll its used ring (the device consumed the bytes into the chardev).
+    ram_w64(tx_desc, tx_buf);
+    ram_w32(tx_desc + 8, req.len() as u32);
+    ram_w16(tx_desc + 12, 0); // device READS (no WRITE flag), terminal
+    ram_w16(tx_desc + 14, 0);
+    ram_w16(tx_avail + 4, 0); // ring[0] = desc 0
+    dmb_ishst();
+    ram_w16(tx_avail + 2, 1); // tx avail.idx = 1
+    dsb_sy();
+    reg_write(dev, R_QUEUE_NOTIFY, 1); // kick the TRANSMITQ (queue index 1)
+    let mut spins: u64 = 0;
+    loop {
+        if ram_r16(tx_used + 2) != 0 {
+            break;
+        }
+        spins += 1;
+        if spins >= POLL_CAP {
+            return chan_fail(dev, frame);
+        }
+    }
+    dmb_ishld();
+
+    // RX: collect used completions until `resp` is completely filled. A byte
+    // STREAM peer may deliver the response in several chunks (each consuming
+    // one posted descriptor), so after a partial completion the remaining
+    // window is RE-POSTED. Bounded: every wait spins under POLL_CAP.
+    let mut written: usize = 0;
+    let mut rx_avail_idx: u16 = 1; // one buffer already posted pre-DRIVER_OK
+    let mut rx_used_seen: u16 = 0;
+    while written < resp.len() {
+        let mut rspins: u64 = 0;
+        loop {
+            if ram_r16(rx_used + 2) != rx_used_seen {
+                break;
+            }
+            rspins += 1;
+            if rspins >= POLL_CAP {
+                return chan_fail(dev, frame); // present-then-silent: hard fail
+            }
+        }
+        dmb_ishld(); // order the len/data loads after the used.idx load
+        let entry = rx_used + 4 + 8 * ((rx_used_seen as u64) % (CHAN_Q_SIZE as u64));
+        let len = ram_r32(entry + 4) as usize; // used.ring[i].len
+        rx_used_seen = rx_used_seen.wrapping_add(1);
+        let remain = resp.len() - written;
+        let take = if len > remain { remain } else { len };
+        let mut b = 0u64;
+        while b < take as u64 {
+            resp[written + b as usize] = ram_r8(rx_buf + b);
+            b += 1;
+        }
+        written += take;
+        if written < resp.len() {
+            // Re-post the rx window for the remaining bytes.
+            let remaining = (resp.len() - written) as u32;
+            ram_w64(rx_desc, rx_buf);
+            ram_w32(rx_desc + 8, remaining);
+            ram_w16(rx_desc + 12, VIRTQ_DESC_F_WRITE);
+            ram_w16(rx_desc + 14, 0);
+            ram_w16(
+                rx_avail + 4 + 2 * ((rx_avail_idx as u64) % (CHAN_Q_SIZE as u64)),
+                0,
+            );
+            dmb_ishst();
+            rx_avail_idx = rx_avail_idx.wrapping_add(1);
+            ram_w16(rx_avail + 2, rx_avail_idx);
+            dsb_sy();
+            reg_write(dev, R_QUEUE_NOTIFY, 0); // kick the RECEIVEQ (queue 0)
+        }
+    }
+
+    // Success: reset the device (detaches both queues, stops DMA) before the
+    // frame returns to the free list -- no leak, no dangling reference.
+    reg_write(dev, R_STATUS, 0);
+    crate::frame_free(frame);
+    Some(written)
+}
+
+/// Fail-closed chan teardown: set FAILED (§2.1.2 -- the device stops
+/// processing both queues), reclaim the DMA frame, report `None`. Mirrors the
+/// M19 [`fail`] discipline.
+#[inline]
+fn chan_fail(dev: u64, frame: u64) -> Option<usize> {
+    reg_write(dev, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FAILED);
+    crate::frame_free(frame);
+    None
+}

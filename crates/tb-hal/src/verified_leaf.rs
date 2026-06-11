@@ -1272,3 +1272,97 @@ pub struct OpcmdProof {
 pub fn opcmd_selftest() -> OpcmdProof {
     mem::opcmd_selftest()
 }
+
+// ===========================================================================
+// M30: the verified INFERENCE-TRANSPORT self-test facade -- the sovereignty
+// A-chain's channel to a host model peer (transport ONLY; the adapter is M31).
+// Mirrors the `VirtioProof`/`PersistProof` device-facade pattern: a closed,
+// pure-data verdict the `#![forbid(unsafe_code)]` kernel matches on. ALL
+// silicon-unsafe (the virtio-console two-queue MMIO/DMA session) is in
+// `arch::*::virtio::chan_*`; ALL value computation (frame codec, stream
+// re-framing, the host-keyed echo MAC) is the Kani-proven
+// `tb_encode::inferwire` (+ the M29 `tb_encode::khash` it calls); the
+// orchestration is the safe `mem::xport_selftest`.
+//
+// THE ANTI-HOLLOW SHAPE (proposal §4 -- the M22 mock-loopback lesson): the
+// host peer custodies a per-run OS-RNG key K + nonce N; the kernel emits an
+// ECHO_REQ with a per-boot challenge; the host answers with a khash echo tag
+// binding peer_id||N||challenge||body INSIDE the MAC and reveals K on the
+// channel; the kernel recomputes + verifies (LEG 1, this facade) and the run
+// script string-compares the kernel-witnessed challenge/tag against the host
+// peer's OWN printed line (LEG 2, the loopback killer -- a loopback can mint a
+// self-consistent tag but cannot equal the host's khash(K,..) without the
+// host-custodied K). `echo=HOST-KEYED-VERIFIED` is therefore KERNEL-SCOPE;
+// `key=HOST-CUSTODIED-PER-RUN` claims custody, never confidentiality (K rides
+// the channel in cleartext); `backend=ECHO-ONLY` (no model, no semantics);
+// `mode=POLL` (no IRQ path -- the #71 guard pin); `sec=ASSUMED-FROM-
+// LITERATURE` is inherited from M29. DoD: "M30: infer-transport OK".
+// ===========================================================================
+
+/// M30 inference-transport self-test outcome (returned to the kernel for
+/// marker rendering). A closed, pure-data verdict -- mirroring
+/// [`VirtioProof`]/[`PersistProof`] (proposal §3b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferChanProof {
+    /// No virtio-console (DeviceID 3) in any scanned slot -- a GRACEFUL skip
+    /// rendered LOUDLY as `M30: infer-transport OK (no host peer, skipped)`.
+    /// Legitimate ONLY on lanes that attach no peer (bench, l2-nested,
+    /// vmm-boot until stage C); every peer-attached lane REJECTS it by name.
+    Absent,
+    /// A virtio-console was found but it is LEGACY (`Version` != 2) -- an
+    /// honest skip (this driver speaks only the modern transport; a legacy
+    /// slot is rejected, never silently driven).
+    LegacyUnsupported,
+    /// THE PROOF (leg 1 of the §4 composition): the full modern two-queue
+    /// handshake + ONE host-keyed echo round-trip ran; the response was
+    /// stream-re-framed through the proven `FrameAccum`, decoded fail-closed,
+    /// and `verify_echo` ACCEPTED it against the channel-revealed per-run key
+    /// (kind + correlation binding + challenge echo + body-bitexact + tag
+    /// recompute); AND all four in-boot negatives (badtag / wrongkey /
+    /// partial / desync) REJECTED. Constructed ONLY when every leg held --
+    /// the witness flags the kernel renders as `=0x1` are earned per boot,
+    /// fail-closed, never compiled-in defaults.
+    Proven {
+        /// The virtio-mmio slot index the console channel was found at.
+        slot: u32,
+        /// The correlation id of the echo round-trip (witness `req-id=`).
+        req_id: u64,
+        /// The decoded response FRAME length in bytes (the channel additionally
+        /// carried the [`tb_encode::inferwire::INFER_KEY_REVEAL_LEN`] trailer).
+        resp_len: u64,
+        /// The per-boot challenge the response provably echoed + MAC-bound
+        /// (witness `challenge=`; leg 2 string-compares it cross-process).
+        challenge: [u8; 16],
+        /// The HOST-chosen per-run nonce, MAC-covered (witness `nonce=`).
+        nonce: [u8; 16],
+        /// The verified truncated khash echo tag (witness `tag=`; leg 2
+        /// string-compares it against the host peer's own printed line).
+        tag: [u8; 16],
+        /// The MAC-covered host peer identity byte (0x01 = TB-VMM-HOST, 0x02 =
+        /// QEMU-CHARDEV-HARNESS) -- the kernel maps it to the `bus=`/
+        /// `transport=` lane tokens, so the lane label is bound INSIDE the tag
+        /// it just verified (the kernel mechanically cannot mint it).
+        peer_id: u8,
+    },
+    /// Found + driven, but the round-trip failed fail-closed. `stage`
+    /// localises the failure (0x2 req-canon, 0x3 channel session/poll-cap --
+    /// the present-then-silent peer, 0x4 stream-reframe/decode, 0x5 unknown
+    /// peer label, 0x6 echo-verify, 0x7 a negative control did not fire). The
+    /// kernel renders it WITHOUT an 'infer-transport OK' substring -- red.
+    Failed {
+        /// The pipeline stage that failed (see the variant doc).
+        stage: u32,
+    },
+}
+
+/// M30: run the host-keyed echo round-trip over the virtio-console channel
+/// (both arches) and report the outcome. See [`InferChanProof`]. Poll-only
+/// (no completion IRQ -- `mode=POLL`, the #71 guard pin), touches NO
+/// scheduler; all raw device work is in `arch::*::virtio::chan_*`, all value
+/// computation is the Kani-proven `tb_encode::inferwire` + `tb_encode::khash`,
+/// the orchestration is safe `mem::xport_selftest`. Absent (no DeviceID 3) is
+/// a graceful LOUD skip; a present-then-silent peer is a hard `Failed`, never
+/// a skip (proposal §10).
+pub fn xport_selftest() -> InferChanProof {
+    mem::xport_selftest()
+}

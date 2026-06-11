@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M29: khash-mac OK"
+MARKER="M30: infer-transport OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -52,8 +52,40 @@ fi
 # (the kernel scans, finds no DeviceID==2, and renders the green
 # "(no disk, skipped)" skip) is unaffected -- this lane proves the REAL path.
 IMG="$(mktemp)"
-trap 'rm -f "$IMG"' EXIT
+
+# M30: the HOST-keyed echo peer (the QEMU-chardev-harness lane -- proposal
+# §4/§5). QEMU exposes a virtio-console (virtio-serial-device + virtconsole,
+# the spike-verified config on BOTH pinned builds: qemu-6.2 local + 8.2.2 CI)
+# whose port 0 is a unix-socket chardev; the xport-harness binary CUSTODIES a
+# per-run OS-RNG key K + nonce N (K is NEVER in the guest image or on this
+# command line -- key=HOST-CUSTODIED-PER-RUN), answers the kernel's ECHO_REQ
+# with the khash-transformed echo + the channel-layer K reveal, and prints its
+# OWN `xport-harness:` witness to a SEPARATE capture stream. The guard block
+# below string-compares the kernel's challenge/tag against the harness's
+# (leg 2 -- CROSS-PROCESS equality with a host-custodied key is the loopback
+# killer) and negatively asserts K never leaked into the guest serial output.
+XSOCK="$(mktemp -u)"  # the chardev unix socket path (QEMU creates the listener)
+XHOUT="$(mktemp)"     # the harness's stdout -- the SEPARATE leg-2 capture stream
+XKEY="$(mktemp)"      # the harness-custodied key hex (the §5.7 key-leak check input)
+trap 'rm -f "$IMG" "$XSOCK" "$XHOUT" "$XKEY"' EXIT
 truncate -s 4M "$IMG"
+
+HARNESS_BIN="${REPO_ROOT}/tools/xport-harness/target/release/xport-harness"
+if [[ ! -x "${HARNESS_BIN}" ]]; then
+  if command -v cargo >/dev/null 2>&1; then
+    echo "[run-aarch64] building xport-harness (host, release)" >&2
+    ( cd "${REPO_ROOT}/tools/xport-harness" && cargo build --release >&2 )
+  else
+    # The containerised CI boot has no cargo: the workflow builds the harness
+    # on the runner FIRST (see ci.yml); a missing binary here is a lane fault.
+    echo "[run-aarch64] FAIL: ${HARNESS_BIN} missing and cargo unavailable -- build it first:" >&2
+    echo "[run-aarch64]   cargo build --release --manifest-path tools/xport-harness/Cargo.toml" >&2
+    exit 1
+  fi
+fi
+"${HARNESS_BIN}" --socket "${XSOCK}" --key-out "${XKEY}" \
+  --timeout-secs $((TIMEOUT_SECS + 60)) > "${XHOUT}" 2>&1 &
+XPID=$!
 
 # Print the exact QEMU build FIRST (fix_plan §B): the hosted ubuntu-24.04 runner
 # image may ship a different 8.2.x point-release than the apt snapshot tested
@@ -107,6 +139,9 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -device virtio-rng-device \
         -drive file="$IMG",if=none,format=raw,id=vblk0 \
         -device virtio-blk-device,drive=vblk0 \
+        -chardev socket,id=xport0,path="${XSOCK}",server=on,wait=off \
+        -device virtio-serial-device \
+        -device virtconsole,chardev=xport0 \
         -semihosting \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
@@ -114,6 +149,20 @@ QEMU_RC=$?
 set -e
 
 printf '%s\n' "${OUTPUT}"
+
+# M30: reap the echo harness (it exits on socket EOF once QEMU terminates;
+# bounded wait + a hard kill so a wedged harness can never hang the lane), then
+# surface its SEPARATE capture stream into the log for traceability. The guard
+# block compares ${OUTPUT} (guest serial) against ${HARNESS_OUT} (host stdout)
+# -- two independently produced streams; neither is folded into the other.
+for _ in $(seq 1 50); do
+  kill -0 "${XPID}" 2>/dev/null || break
+  sleep 0.1
+done
+kill -9 "${XPID}" 2>/dev/null || true
+wait "${XPID}" 2>/dev/null || true
+HARNESS_OUT="$(cat "${XHOUT}" 2>/dev/null || true)"
+printf '%s\n' "${HARNESS_OUT}"
 
 if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     # M4: the user/ring (EL0 drop -> svc -> trap-back) proof must print its OK
@@ -407,6 +456,96 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M28/M29 marker/witness carries an overclaim ('validated'/'crypto'/'authenticated-human'/'forgery'/'provably-secure'/'unforgeable'/'collision-resistant'/'preimage-resistant'/'constant-time'/'tamper-proof'/'quantum'/'FIPS-certified'/'guaranteed'/'unbreakable') -- the implementation is verified, the primitive is ASSUMED-FROM-LITERATURE; crypto claims live ONLY in the structured stripped tokens (M29 proposal §7 honesty discipline)" >&2
         exit 1
     fi
+    # M29 is no longer the top-level grep (M30 displaced it as the cumulative tail);
+    # assert it directly so the M29 -> M30 order stays fail-closed + traceable.
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M29: khash-mac OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M29: khash-mac OK' missing (M29 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M30 GUARDS (proposal §5 -- house order: skip-reject, positive-require,
+    # by-name rejects, lane-cross-pin, #71 tripwire, cross-process, key-leak,
+    # strip-then-reject). This lane ATTACHES a host peer (the chardev harness),
+    # so the anti-hollow composition is REQUIRED in full.
+    #
+    # (§5.1) Skip-variant reject BY NAME (the M20 idiom): an attached lane must
+    # never take the graceful no-peer (or legacy) skip path.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M30: infer-transport OK (no host peer, skipped)'; then
+        echo "[run-aarch64] FAIL -- M30 ran in SKIP mode (no host peer found) but this lane attaches the chardev harness -- the host-keyed echo round-trip was NOT exercised" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'M30: infer-transport OK (legacy transport, skipped)'; then
+        echo "[run-aarch64] FAIL -- M30 took the legacy-transport skip but this lane attaches a MODERN (force-legacy=false) console -- the Version=2 negotiation regressed" >&2
+        exit 1
+    fi
+    # (§5.2) POSITIVE-REQUIRE the full xport witness: every flag =1, every token
+    # literal, the lane's own bus/transport tokens (chardev lane: SERIAL-FRAMED +
+    # QEMU-CHARDEV-HARNESS). A marker without this witness is a hollow pass.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'xport: bus=SERIAL-FRAMED qsz=0x4 tx=0x0*1 rx=0x0*1 challenge=0x[0-9a-f]{32} nonce=0x[0-9a-f]{32} tag=0x[0-9a-f]{32} req-id=0x[0-9a-f]{16} echo-verified=0x0*1 body-bitexact=0x0*1 badtag-rejected=0x0*1 wrongkey-rejected=0x0*1 partial-rejected=0x0*1 desync-rejected=0x0*1 mode=POLL transport=QEMU-CHARDEV-HARNESS echo=HOST-KEYED-VERIFIED key=HOST-CUSTODIED-PER-RUN backend=ECHO-ONLY sec=ASSUMED-FROM-LITERATURE'; then
+        echo "[run-aarch64] FAIL -- M30 marker present but the real witness 'xport: bus=SERIAL-FRAMED .. challenge=.. nonce=.. tag=.. echo-verified=0x1 .. mode=POLL transport=QEMU-CHARDEV-HARNESS echo=HOST-KEYED-VERIFIED key=HOST-CUSTODIED-PER-RUN backend=ECHO-ONLY sec=ASSUMED-FROM-LITERATURE' was NOT seen (hollow M30 pass)" >&2
+        exit 1
+    fi
+    # (§5.3) Loopback variants rejected BY NAME (case-insensitive, near the M30
+    # marker/witness): the M22 mock-loopback design is structurally banned.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M30:|xport:)' | grep -qiE -- 'transport=IN-KERNEL-LOOPBACK|transport=MOCK-BACKEND|transport=GUEST-SELF|echo=SELF-KEYED|echo=GUEST-KEYED|loopback|self-echo'; then
+        echo "[run-aarch64] FAIL -- M30 marker/witness carries a LOOPBACK token (IN-KERNEL-LOOPBACK/MOCK-BACKEND/GUEST-SELF/SELF-KEYED/GUEST-KEYED/loopback/self-echo) -- the M22 hollow-loopback design is banned by name (M30 proposal §5.3)" >&2
+        exit 1
+    fi
+    # (§5.4) Lane-token cross-pin: the chardev lane must NEVER carry the vmm
+    # lane's evidence class (peer_id is MAC-covered; a mislabel is a fault).
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'transport=TB-VMM-HOST'; then
+        echo "[run-aarch64] FAIL -- the chardev lane carries 'transport=TB-VMM-HOST' -- no lane borrows the other's evidence class (M30 proposal §5.4 lane cross-pin)" >&2
+        exit 1
+    fi
+    # (§5.5) The #71 tripwire: M30 is poll-only BY GUARD PIN. Flipping this is
+    # the designated visible act that forces a #71 disposition first.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M30:|xport:)' | grep -qE -- 'mode=IRQ'; then
+        echo "[run-aarch64] FAIL -- M30 witness carries 'mode=IRQ' -- the completion-IRQ migration is BLOCKED until a #71 (TCG ghost-IRQ) disposition is recorded (M30 proposal §5.5 tripwire)" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])xport:' | grep -vE -- 'mode=POLL' | grep -q .; then
+        echo "[run-aarch64] FAIL -- an xport: witness line lacks 'mode=POLL' -- any non-poll completion mode is rejected (M30 proposal §5.5)" >&2
+        exit 1
+    fi
+    # (§5.6) THE CROSS-PROCESS ROUND-TRIP (leg 2 -- the loopback killer): the
+    # kernel-witnessed challenge/tag must STRING-EQUAL the host harness's OWN
+    # line from its SEPARATE capture stream. A loopback can mint a self-
+    # consistent tag but cannot equal khash(K,..) without the host-custodied K.
+    if ! printf '%s\n' "${HARNESS_OUT}" | grep -qE -- 'xport-harness: peer=QEMU-CHARDEV-HARNESS challenge=0x[0-9a-f]{32} tag=0x[0-9a-f]{32} key-custody=HOST'; then
+        echo "[run-aarch64] FAIL -- the host harness witness 'xport-harness: peer=QEMU-CHARDEV-HARNESS challenge=.. tag=.. key-custody=HOST' was NOT seen on the harness's capture stream (no host peer answered -- leg 2 of the anti-hollow composition is missing)" >&2
+        exit 1
+    fi
+    K_CH="$(printf '%s\n' "${OUTPUT}" | grep -E '(^|[^[:alnum:]])xport: ' | grep -oE 'challenge=0x[0-9a-f]{32}' | head -1)"
+    K_TAG="$(printf '%s\n' "${OUTPUT}" | grep -E '(^|[^[:alnum:]])xport: ' | grep -oE '(^| )tag=0x[0-9a-f]{32}' | head -1 | tr -d ' ')"
+    H_CH="$(printf '%s\n' "${HARNESS_OUT}" | grep -F 'xport-harness: ' | grep -oE 'challenge=0x[0-9a-f]{32}' | head -1)"
+    H_TAG="$(printf '%s\n' "${HARNESS_OUT}" | grep -F 'xport-harness: ' | grep -oE '(^| )tag=0x[0-9a-f]{32}' | head -1 | tr -d ' ')"
+    if [[ -z "${K_CH}" || -z "${K_TAG}" || "${K_CH}" != "${H_CH}" || "${K_TAG}" != "${H_TAG}" ]]; then
+        echo "[run-aarch64] FAIL -- CROSS-PROCESS mismatch: kernel (${K_CH:-none} ${K_TAG:-none}) vs harness (${H_CH:-none} ${H_TAG:-none}); the bytes did not provably cross the guest/host boundary both ways (M30 proposal §5.6 -- the loopback killer)" >&2
+        exit 1
+    fi
+    # (§5.7) Key-LEAK negative: the host-custodied K's hex must appear NOWHERE
+    # in the guest serial output (the kernel must never print the revealed key).
+    KHEX="$(cat "${XKEY}" 2>/dev/null || true)"
+    if [[ -z "${KHEX}" ]]; then
+        echo "[run-aarch64] FAIL -- the harness key file is empty -- the §5.7 key-leak check has no input (harness fault)" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -qiF -- "${KHEX}"; then
+        echo "[run-aarch64] FAIL -- the host-custodied per-run key LEAKED into the guest serial output (M30 proposal §5.7 key-leak negative)" >&2
+        exit 1
+    fi
+    # (§5.8) Strip-then-reject overclaims: strip the declared structured tokens
+    # FIRST (each carries a would-be-rejected substring), then reject the
+    # network/crypto/inference overclaim vocabulary near the M30 marker/witness.
+    # The M29 global rejects above stay in force.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M30:|xport:)' \
+         | sed -e 's/HOST-KEYED-VERIFIED//g' -e 's/HOST-CUSTODIED-PER-RUN//g' \
+               -e 's/ASSUMED-FROM-LITERATURE//g' -e 's/ECHO-ONLY//g' \
+               -e 's/SERIAL-FRAMED//g' -e 's/VIRTIO-MMIO//g' \
+               -e 's/QEMU-CHARDEV-HARNESS//g' -e 's/TB-VMM-HOST//g' \
+         | grep -qiE -- 'network|internet|online|TLS|SSL|HTTPS|encrypt|confidential|secure[- ]channel|authenticated|cloud|remote[- ]model|real[- ]infer|model[- ](served|loaded)|validated|evaluated'; then
+        echo "[run-aarch64] FAIL -- M30 marker/witness carries an overclaim ('network'/'TLS'/'encrypt'/'authenticated'/'secure-channel'/'remote-model'/'real-infer'/'validated'/...) -- M30 is a LOCAL host-process echo transport; claims live ONLY in the structured stripped tokens (M30 proposal §5.8)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -569,7 +708,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK')"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held)"
     exit 0
 fi
 
