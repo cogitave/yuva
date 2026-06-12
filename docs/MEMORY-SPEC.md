@@ -1,4 +1,4 @@
-# TABOS Memory Specification (Default Memory Structure)
+# Yuva Memory Specification (Default Memory Structure)
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
 > Basis: [RESEARCH-REPORT §4](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
@@ -7,7 +7,7 @@
 
 ## 0. Principle
 
-**In TABOS, memory is not a library but a kernel guarantee.** When each agent is born, the tier set below exists automatically; no framework code is required. The kernel guarantees *the store, the index, the quotas, the consistency and the provenance*; *the intelligence that decides what matters* (enrichment, op selection, distillation) lives in pluggable userspace services (LLM-agnosticism: exokernel separation — protection in the kernel, policy outside).
+**In Yuva, memory is not a library but a kernel guarantee.** When each agent is born, the tier set below exists automatically; no framework code is required. The kernel guarantees *the store, the index, the quotas, the consistency and the provenance*; *the intelligence that decides what matters* (enrichment, op selection, distillation) lives in pluggable userspace services (LLM-agnosticism: exokernel separation — protection in the kernel, policy outside).
 
 ## 1. Tier Architecture **[DECISION — T0–T5 + BLOCKS structure derived from the fivefold convergence of the survey; rationale: 84 architectures, arXiv:1610.08602]**
 
@@ -32,7 +32,7 @@ T5  ARCHIVAL / PARAMETRIC  (optional modules) Vector-archival (Letta-style) ·
                         semantics (the last-write-wins library bug is resolved in the kernel).
 ```
 
-Deviation rationales (the survey's own rule: *deviation needs justification*): the survey's **sensory** tier is not a separate tier in TABOS — the percept/ingest flow lands in T0 registers (ACT-R perceptual buffer model); T5 and BLOCKS are optional/add-on layers on top of the fivefold core (T0–T4).
+Deviation rationales (the survey's own rule: *deviation needs justification*): the survey's **sensory** tier is not a separate tier in Yuva — the percept/ingest flow lands in T0 registers (ACT-R perceptual buffer model); T5 and BLOCKS are optional/add-on layers on top of the fivefold core (T0–T4).
 
 Union-namespace ergonomics: the session-scratch tier is bound on top of the persistent tier; `tb_recall` lands in union order ([ARCHITECTURE §3](ARCHITECTURE.md)).
 
@@ -62,7 +62,7 @@ Union-namespace ergonomics: the session-scratch tier is bound on top of the pers
 - **Update decision with a four-op vocabulary**: `ADD / UPDATE / DELETE(→tombstone) / NOOP` — the LLM "oracle" that makes the policy decision is pluggable (function-calling interface, Mem0); the kernel is what *executes* the op.
 - **Retrieval is a three-stage pipeline, not a monolithic search** (Zep): ① candidate search — hybrid default: lexical (BM25) + dense (cosine) + graph/BFS in parallel; ② rerank — pluggable: RRF/MMR/cross-encoder/node-distance; ③ context constructor — templated, with validity date ranges.
 - **Default ranking (weighted sum)**: `score = w_a·BLA(d=0.5) + w_r·relevance + w_i·importance` (components min-max normalized, default w=1) — the additive form is faithful to GA's validated score (α_rec·rec + α_imp·imp + α_rel·rel, all α=1) and to ACT-R's own activation equation (A = B + S + P + ε); BLA(d=0.5) is the best-validated 50-year-old constant on which both Soar and ACT-R converge; spreading activation (priming from buffer content, fan-effect penalized), partial match and noise are **OFF by default** (ACT-R conservatism).
-- **Finsts** [DECISION]: the kernel keeps a bounded + time-limited "just returned" set per agent and offers `exclude_recent` / `retrieve_next` iteration semantics — the 40-year-old breaker of the RAG return-the-same-result loop (ACT-R 4/3 s; TABOS default scaled to session length [OPEN]).
+- **Finsts** [DECISION]: the kernel keeps a bounded + time-limited "just returned" set per agent and offers `exclude_recent` / `retrieve_next` iteration semantics — the 40-year-old breaker of the RAG return-the-same-result loop (ACT-R 4/3 s; Yuva default scaled to session length [OPEN]).
 - **Indexing scope** [PROPOSAL]: the default index covers agent *outputs too*, not just user inputs — Zep's single-session-assistant regression (−17.7%, gpt-4o) showed that derived tiers lose assistant-side detail.
 - **Copy-on-retrieve** [PROPOSAL]: retrieval instantiates a *copy* into working memory (Soar LTI/STI distinction); the long-term store changes only by explicit commit — no accidental in-place mutation.
 - **Access metadata is written on the read path** → relatime-style batching [OPEN].
@@ -80,7 +80,7 @@ Union-namespace ergonomics: the session-scratch tier is bound on top of the pers
 - **Write-amplification is quota'd in tokens** (disk quota analogy): unbounded LLM-derivation can inflate by more than 20× (Zep measurement: 26K→600K+); space-bank-style hierarchical budget (KeyKOS).
 - p95 retrieval budget **<200 ms** (Mem0 proved it); **escape hatch**: for a high-stakes query, raw-episode replay is always addressable (at a 10-17 s cost — full-context ~5 J-point ceiling difference).
 
-## 6. Forgetting **[PROPOSAL — where the field has not solved it, TABOS design]**
+## 6. Forgetting **[PROPOSAL — where the field has not solved it, Yuva design]**
 
 No primary system implements tested real deletion; the converged safe composition:
 
@@ -91,7 +91,7 @@ No primary system implements tested real deletion; the converged safe compositio
 
 ## 7. Multi-Agent Memory Namespaces **[PROPOSAL — greenfield; no standard in the literature]**
 
-Survey §8.2 declares this area open; the TABOS design:
+Survey §8.2 declares this area open; the Yuva design:
 
 ```
 memory:private/<agent>/…    owner only; default home
@@ -107,4 +107,4 @@ blocks:<name>               pinned shared segments; CAS/versioned write + watch
 
 ## 8. Benchmark Reality **[OPEN]**
 
-Existing benchmarks (DMR saturated at 98%; LOCOMO conversation-QA; all systems F1<4 on DialSim) do not measure OS-lifetime agent memory. TABOS must define its own evaluation harness: tool-use traces, code tasks, cross-task skill transfer, multi-agent sessions, life cycles lasting weeks. ([OPEN-QUESTIONS §Memory](OPEN-QUESTIONS.md))
+Existing benchmarks (DMR saturated at 98%; LOCOMO conversation-QA; all systems F1<4 on DialSim) do not measure OS-lifetime agent memory. Yuva must define its own evaluation harness: tool-use traces, code tasks, cross-task skill transfer, multi-agent sessions, life cycles lasting weeks. ([OPEN-QUESTIONS §Memory](OPEN-QUESTIONS.md))

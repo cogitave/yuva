@@ -9,7 +9,7 @@ dispatch). The guest does ~zero, byte-identical work under each ABI — it emits
 one serial byte and parks — so the delta *is* the VMM-spawn difference.
 
 This replaces the OLD bench.yml "Axis A" row, which compared
-tb-vmm-boots-TABOS against FC-boots-a-real-Linux-kernel (two *different*
+tb-vmm-boots-Yuva against FC-boots-a-real-Linux-kernel (two *different*
 guests) — the forbidden apples-to-oranges. Axis-A here removes that confound
 with one common nano-guest. See `docs/BENCHMARKS.md` §1-§7.
 

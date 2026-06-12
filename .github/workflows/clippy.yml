@@ -1,4 +1,4 @@
-# TABOS static-lint gate (Clippy).
+# Yuva static-lint gate (Clippy).
 #
 # Runs Clippy with `-D warnings` over the PURE, host-buildable,
 # `#![forbid(unsafe_code)]` leaf crates -- `tb-caps-core` (the Rights algebra +

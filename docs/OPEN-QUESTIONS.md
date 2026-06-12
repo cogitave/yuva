@@ -1,4 +1,4 @@
-# TABOS Open Questions
+# Yuva Open Questions
 
 > Status: v1.0 · Priority: **P0** = must close before spec freeze · **P1** = before the Phase-1 prototype · **P2** = before the relevant phase starts
 > Source: domain-based openQuestions outputs from the three research waves ([`../research/raw/`](../research/raw/)) + questions arising during document authoring.
@@ -80,7 +80,7 @@
 | P1 | ACP's consolidation into A2A (mid-2025 rumors) must be verified from a primary source; if ACP is sunset, offline-discovery + await/resume are internalized directly | Bridge, or native feature |
 | P1 | The normative final form of the A2A discovery well-known URI (agent.json → agent-card.json migration) | Discovery daemon spec |
 | P2 | Post-survey protocols (AGNTCY, Agora arXiv:2410.11905, AP2/payments): does any introduce a kernel-relevant new primitive? | Periodic scan |
-| P2 | AIOS Cerebrum agent-hub mechanics must be read deeply (package/distribution/discovery) — input to the TABOS package manager design | Phase 4 |
+| P2 | AIOS Cerebrum agent-hub mechanics must be read deeply (package/distribution/discovery) — input to the Yuva package manager design | Phase 4 |
 | P2 | Independent benchmark of E2B's latency claims (80 ms vs <200 ms) — the bar of success criterion #1 must be fixed by measurement | with the self-host repo |
 | P2 | Scope of the .af import converter: which fields carry over losslessly; how are the archival/secret gaps filled? | [AGENTS-SPEC §3](AGENTS-SPEC.md) |
 
@@ -89,7 +89,7 @@
 | P | Question | Context |
 |---|---|---|
 | P1 | **Formal trademark search (Nice 9/42)** — once the final name is settled, for that name: USPTO/EUIPO/TURKPATENT search; a human/attorney job since it is not bot-accessible | All vettings were at the registry-level |
-| P2 | **Final name decision** + (but only after the decision) namespace reservation — TABOS is a code name, reservation deliberately deferred; note: the half-life of virgin spaces is short (agnix 0→267⭐ in ~1 year), once the name is settled one must act fast | Arda (2026-06-06): "think of it as a code name" |
+| P2 | **Final name decision** + (but only after the decision) namespace reservation — **RESOLVED (2026-06): the final name is Yuva** (no acronym; TABOS was the code name). Namespace reservation is now actionable; the half-life of virgin spaces is short (agnix 0→267⭐ in ~1 year), so act fast | Arda (2026-06): "just Yuva" |
 | P1 | Full web sweep on big engines (Google/Bing) for the final name — mandatory before announcement (lesson from round 2: registry/Mojeek level is not enough); record: `naming-tabos.json` web column NOT SWEPT | [naming-tabos.json](../research/raw/naming-tabos.json) |
 | P2 | The risk of confusion with the current owner of tabos.org (German FOSS group, flathub `org.tabos.*`) is low but must be monitored; the RDAP entity lookup of the tabos.com (1996) owner was not done | Naming report |
 
@@ -101,7 +101,7 @@
 | P1 | Audit of the `no_std` core dependency base — Rust std/core is not yet verified (AWS initiative ongoing, ~7.5k unsafe functions); which minimal crate set will the kernel trust? | AWS verify-std initiative |
 | P1 | When does native-Rust inference (candle/mistral.rs) fully replace the C++ engine for single-node/dense models — is a fully-Rust node image possible? | stack-fit finding |
 | P2 | Is Ferrocene qualification (ASIL D) really necessary — will the functional-safety/automotive market be entered, or is FLS+consortium-guidelines sufficient? | EU CRA vs ISO 26262 |
-| P2 | How does the EU CRA timeline (Sep 2026 reporting, Dec 2027 CE) fit into the TABOS release plan — when is the SBOM/provenance pipeline set up? | Reg. (EU) 2024/2847 |
+| P2 | How does the EU CRA timeline (Sep 2026 reporting, Dec 2027 CE) fit into the Yuva release plan — when is the SBOM/provenance pipeline set up? | Reg. (EU) 2024/2847 |
 
 ## H. Process / Methodology
 
@@ -120,7 +120,7 @@
 | P1 | SMP / AP bring-up: M0-M4 are single-core; a Type-1 needs per-pCPU VMXON + per-vCPU VMCS. Not yet designed | type1-x86-vmx gap |
 | P1 | VMX-reachability probe: IA32_FEATURE_CONTROL may be BIOS-locked / VMX disabled — need a "can we reach VMX root here?" check before committing to L2 on a box | type1-x86-vmx gap |
 | P2 | Bare-metal platform bring-up body: UEFI (uefi-rs) + ACPI (MADT/DMAR/MCFG) + PCIe ECAM + APIC/GIC + SMMU + timer calibration — a large separate work stream | firmware-baremetal gap |
-| P2 | TABOS "certified hardware" list: ACS-clean IOMMU groups required for safe device passthrough | driver-gpu gap |
+| P2 | Yuva "certified hardware" list: ACS-clean IOMMU groups required for safe device passthrough | driver-gpu gap |
 
 ---
 

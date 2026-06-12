@@ -13,7 +13,8 @@
 //! address) plus the 64-bit `_tb_start` that the project's own `tb-vmm` jumps
 //! to directly in long mode — NO PVH note, NO A0 trampoline on that path. Both
 //! notes coexist in the PT_NOTE phdr and both entries coexist in `.text`:
-//! QEMU/Firecracker use the Xen note, tb-vmm uses TABOS, one runs per boot.
+//! QEMU/Firecracker use the Xen note, tb-vmm uses the TABOS note, one runs per
+//! boot.
 //! M1 adds CPU trap handling: `gdt` installs a permanent flat 64-bit GDT + TSS
 //! (IST stacks), `idt` installs the 256-gate IDT, and `trap` holds the entry
 //! thunks + the extern "C" handler that dispatches into safe Rust policy.

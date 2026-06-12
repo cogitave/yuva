@@ -5,7 +5,7 @@
 // `#![no_std]`. Mirrors the existing `tb-encode` leaf crate.
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
-//! `tb-caps-core` -- the host-verifiable capability CORE of TABOS M11.
+//! `tb-caps-core` -- the host-verifiable capability CORE of Yuva M11.
 //!
 //! This crate is the SINGLE SOURCE OF TRUTH for the two pieces of the M11
 //! capability machinery whose correctness M18's frozen boundary reduces to:

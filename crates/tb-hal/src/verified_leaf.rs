@@ -71,7 +71,7 @@ pub fn vmx_selftest() -> VmxProof {
 // L2.0: EL2 (nVHE) world-switch self-test facade (the aarch64 L2 sovereignty
 // track — the ARM realization of the x86 VMX-root rung).
 //
-// The aarch64 proof that TABOS *is* the hypervisor: booted at EL2 (QEMU
+// The aarch64 proof that Yuva *is* the hypervisor: booted at EL2 (QEMU
 // `virt,virtualization=on`), installed a resident nVHE EL2 monitor, dropped to
 // EL1 to run M0..M18 unchanged, then at this slot does a real EL1<->EL2
 // world-switch — a bootstrap `HVC #0` from the running EL1 kernel ERETs into a
@@ -130,7 +130,7 @@ pub fn el2_selftest() -> El2Proof {
 // EPT-violation handling — the SECOND L2 sovereignty rung, one EL down from the
 // stage-1 MMU and built ON TOP of L2.0's resident EL2 monitor).
 //
-// Where L2.0 proved TABOS *is* the hypervisor (a real EL1<->EL2 world-switch),
+// Where L2.0 proved Yuva *is* the hypervisor (a real EL1<->EL2 world-switch),
 // L2.1 proves the R/W second-stage leaf is THE isolation primitive: inside a
 // short self-test window the EL2 monitor arms stage-2 (HCR_EL2.VM=1) over a
 // table that identity-maps everything the guest needs to RUN but leaves ONE IPA
@@ -197,7 +197,7 @@ pub fn stage2_selftest() -> Stage2Proof {
 // `arm_exit_handlers[]` table — the THIRD L2 sovereignty rung, built ON TOP of
 // L2.0's resident EL2 monitor and SIBLING to L2.1's stage-2 demand path).
 //
-// Where L2.0 proved TABOS *is* the hypervisor and L2.1 proved the stage-2 leaf
+// Where L2.0 proved Yuva *is* the hypervisor and L2.1 proved the stage-2 leaf
 // is the isolation primitive, L2.2 proves the EL2 *exit-dispatch table* itself:
 // inside a short self-test window the monitor routes EVERY guest exit through
 // the PURE, Kani-proven `tb_encode::el2_trap::classify_exit` (the ARM analog of
@@ -333,7 +333,7 @@ pub fn el2_trap_selftest() -> TrapProof {
 
 // ===========================================================================
 // aL2.4: EL2 nested-guest (GENUINE two-stage) self-test facade — a REAL minimal
-// TABOS guest that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU
+// Yuva guest that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU
 // live, the FIFTH L2 rung built ON TOP of L2.0's resident EL2 monitor.
 //
 // The monitor arms the GiB0+GiB1 identity stage-2 (HCR_EL2.VM=1) and erets into a
@@ -581,7 +581,7 @@ pub fn smmu_selftest() -> SmmuProof {
 
 // ===========================================================================
 // M27 (M27b): the CNTHP TIMER-PREEMPTED two-VMID sovereign time-partition
-// scheduler self-test facade — the sovereignty pillar's "TABOS owns time for two
+// scheduler self-test facade — the sovereignty pillar's "Yuva owns time for two
 // guests" rung, built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam +
 // M22's fold. M27b upgraded the M27a cooperative green floor to REAL preemption:
 // two trivial EL1 guest stubs run under TWO distinct VMIDs (two stage-2 roots);
@@ -727,7 +727,7 @@ pub fn virtio_selftest() -> VirtioProof {
 }
 
 // ===========================================================================
-// M20: durable persistence self-test facade -- the first time ANYTHING in TABOS
+// M20: durable persistence self-test facade -- the first time ANYTHING in Yuva
 // outlives a boot. Mirrors the `VirtioProof` pattern verbatim: a pure-data
 // verdict the `#![forbid(unsafe_code)]` kernel matches on. ALL silicon-unsafe
 // (the virtio-blk MMIO/DMA ring) is in `arch::*::virtio`; the on-disk codecs are

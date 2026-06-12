@@ -477,7 +477,7 @@ fn kani_minmax_in_scale_range() {
 /// the address field.
 ///
 /// NEGATIVE CONTROL: dropping `S2_AF` from `s2_leaf_2mib` makes the `e & S2_AF`
-/// assert FAIL -- the cleared-Access-Flag abort-on-first-access bug (TABOS
+/// assert FAIL -- the cleared-Access-Flag abort-on-first-access bug (Yuva
 /// installs no AF-fault handler, so a leaf without AF faults the guest's load).
 #[kani::proof]
 fn kani_s2_leaf_wellformed() {

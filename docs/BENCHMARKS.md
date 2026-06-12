@@ -1,9 +1,9 @@
-# TABOS Benchmarks — boot time
+# Yuva Benchmarks — boot time
 
 > Why an agent-native OS measures boot time at all: an agent's cold-start
 > latency is the floor on how fast a new agent (or a fresh per-task sandbox) can
 > begin thinking. Dense, multi-tenant agent fleets live or die on it. So from M5
-> onward TABOS measures its own boot time on every change, and compares — *
+> onward Yuva measures its own boot time on every change, and compares — *
 > honestly, with cited sources and matched metrics* — against the systems it
 > competes with. This file is generated/maintained by the milestone pipeline
 > (`.claude/skills/tabos-milestone`); the harness is
@@ -32,7 +32,7 @@ classes. The classes:
 5. **Container/sandbox/Wasm cold start** — *no guest kernel boots at all*
    (runc/gVisor ~1 s lifecycle; Wasmtime ~5 µs; V8 isolate <5 ms).
 
-## 2. How TABOS measures its own boot
+## 2. How Yuva measures its own boot
 
 [`scripts/bench-boot.sh`](../scripts/bench-boot.sh) records wall-clock from the
 **VMM/QEMU process spawn** to two serial events (matching class **2**'s
@@ -61,7 +61,7 @@ and prints two deltas on serial — these exclude the VMM/host floor entirely:
   figure (the apples-to-apples metric vs Unikraft ~1 ms / OSv ~4–5 ms, **class 1**).
   Measured: it is a *tiny fraction of a percent* of the self-test span — e.g.
   locally under TCG, `boot-ready` ≈ 2.0 M cycles (x86_64) vs the `boot-cycles`
-  self-test span ≈ 5.2 B (≈0.04 %); aarch64 ≈ 32 k vs ≈ 63 M — i.e. **TABOS's
+  self-test span ≈ 5.2 B (≈0.04 %); aarch64 ≈ 32 k vs ≈ 63 M — i.e. **Yuva's
   actual boot is essentially instantaneous; every large number elsewhere on this
   page is self-test work or the VMM floor, not boot.** The quotable figure is
   this counter from a `--release` build under KVM (see §6) — and because it is an
@@ -116,7 +116,7 @@ non-comparable.)
 > until one exists the aarch64 lane publishes only the green functional marker
 > (`L2.1: stage2 OK`), no quotable latency (§5–§6).
 
-### TABOS measured — today (kernel boots the cumulative M0…M26 self-test then halts)
+### Yuva measured — today (kernel boots the cumulative M0…M26 self-test then halts)
 
 | Build | Accel | boot-to-first-output (median) | boot+selftest (median) | Notes |
 |---|---|---|---|---|
@@ -132,17 +132,17 @@ non-comparable.)
 > kernel-heap window — ~3 k frame mappings plus 24 MiB of pattern traffic — which
 > pushes the TCG figure to ~1.1 s. **None of this is "boot":** it is one-time
 > init + an exhaustive correctness self-test, all hardware-fast under KVM (the
-> guest boot to first output is unchanged at ~28 ms). The honest TABOS claim
+> guest boot to first output is unchanged at ~28 ms). The honest Yuva claim
 > stays architectural (§4), with the guest-only boot figure now **MEASURED at
 > ~0.5 ms** (`--release`, microvm+KVM; §3).
 
 > **Read these numbers correctly — they measure the harness's t0 (VMM process
-> spawn), not the TABOS kernel.** The clearest evidence: the KVM run on the CI
+> spawn), not the Yuva kernel.** The clearest evidence: the KVM run on the CI
 > box (~47 ms) is *slower* than local TCG emulation (~26 ms). A faster CPU +
 > hardware virt producing a *larger* number is only possible if the figure is
 > dominated by **QEMU process startup + (on CI) nested-KVM overhead on a
 > contended shared runner**, not by the guest — exactly the methodology trap §1
-> warns about. The TABOS kernel itself (a few-KB uncompressed image, no firmware,
+> warns about. The Yuva kernel itself (a few-KB uncompressed image, no firmware,
 > no bootloader, no decompress, direct long-mode entry) is a *small fraction* of
 > either number; the wall-clock is the VMM/host floor every guest on that host
 > shares. (Caveat: the harness reliably times first-output but currently captures
@@ -150,7 +150,7 @@ non-comparable.)
 > KVM the whole self-test streams out before the reader settles; this is a
 > harness-robustness limitation, tracked, not a kernel issue.)
 >
-> A clean, VMM-independent **guest-only** boot figure (the one that places TABOS
+> A clean, VMM-independent **guest-only** boot figure (the one that places Yuva
 > next to Unikraft/OSv in Bucket 1) needs **in-guest cycle timing** — which
 > **landed at M8**: `tb_hal::read_cycle_counter()` reads `rdtsc` (x86_64) /
 > `CNTPCT_EL0` (aarch64), the kernel samples it at `rust_main` entry and just
@@ -165,11 +165,11 @@ non-comparable.)
 
 ## 3. The comparison — grouped so it is apples-to-apples
 
-Three buckets. TABOS is a **Bucket 1** system (a from-scratch unikernel-class
-kernel). Bucket 2 is what TABOS *avoids the init cost of*; Bucket 3 is a
+Three buckets. Yuva is a **Bucket 1** system (a from-scratch unikernel-class
+kernel). Bucket 2 is what Yuva *avoids the init cost of*; Bucket 3 is a
 different model entirely (shared host kernel) and is context only.
 
-### Bucket 1 — kernel-only, no firmware (guest first-instruction → ready) · *TABOS's peer group*
+### Bucket 1 — kernel-only, no firmware (guest first-instruction → ready) · *Yuva's peer group*
 
 | System | Boot | Metric / setup | Source | Conf. |
 |---|---|---|---|---|
@@ -179,7 +179,7 @@ different model entirely (shared host kernel) and is context only.
 | **OSv** | **4–5 ms** (Firecracker) | first instr → `main()`, read-only rootfs (cross-measure); ATC'14 origin | [ATC'14](https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity) | high |
 | Minimal **custom Linux** | **6 ms** (Firecracker `--boot-timer`) | vCPU start → userland MMIO write; SMP off, 2 MiB hugepages | [davidv.dev](https://blog.davidv.dev/posts/minimizing-linux-boot-times/) | low |
 | **Hermitux** | **30–32 ms** (uHyve) | boot → application (cross-measure) | [arXiv:2104.12721](https://arxiv.org/abs/2104.12721) | medium |
-| **TABOS** | **~0.5 ms measured** (≈1.35 M cycles, `--release`, KVM) | **guest-only, in-guest rdtsc**: `rust_main` entry → serial-ready (M0 done), BEFORE the M0+ self-test span. `boot-ready-cycles=0x14a396` = **1,352,598 cycles** under `-M microvm -accel kvm -cpu host`, ÷ the **measured TSC base** (CPUID leaf `0x15`, printed on the same boot — never an inferred core GHz; see §2) ≈ **0.48–0.52 ms** (the pre-`rust_main` `_start` asm is a handful of instructions, so first-instr→ready ≈ this + ε). Tiny no_std image, no driver/FS/ACPI/SMP probing — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI); lands at Bucket 1's fast end, peer to Unikraft's guest-only sub-ms. | this repo (`microvm-kvm` CI bench step) | medium |
+| **Yuva** | **~0.5 ms measured** (≈1.35 M cycles, `--release`, KVM) | **guest-only, in-guest rdtsc**: `rust_main` entry → serial-ready (M0 done), BEFORE the M0+ self-test span. `boot-ready-cycles=0x14a396` = **1,352,598 cycles** under `-M microvm -accel kvm -cpu host`, ÷ the **measured TSC base** (CPUID leaf `0x15`, printed on the same boot — never an inferred core GHz; see §2) ≈ **0.48–0.52 ms** (the pre-`rust_main` `_start` asm is a handful of instructions, so first-instr→ready ≈ this + ε). Tiny no_std image, no driver/FS/ACPI/SMP probing — strictly *less* to do than OSv (ZFS) or minimal Linux (SMP/ACPI); lands at Bucket 1's fast end, peer to Unikraft's guest-only sub-ms. | this repo (`microvm-kvm` CI bench step) | medium |
 
 ### Bucket 2 — full-stack microVM/VM: (firmware?) + Linux kernel + init (VMM-start → `/sbin/init`)
 
@@ -191,8 +191,8 @@ different model entirely (shared host kernel) and is context only.
 | **QEMU q35 + SeaBIOS** | **~245 ms** (exec→userspace) | per-phase: QEMU init 34 ms · SeaBIOS **8.9 ms** · fw→`start_kernel` (decompress) **78.8 ms** · `start_kernel`→init **122 ms** | [Garzarella](https://stefano-garzarella.github.io/posts/2019-08-24-qemu-linux-boot-time/) | low |
 | **Alpine** on Firecracker | **~330 ms** | first instr → app (cross-measure) | [arXiv:2104.12721](https://arxiv.org/abs/2104.12721) | medium |
 | **Stock Ubuntu kernel** on Firecracker | **~1 s** (+900 ms vs minimal) | *same* Firecracker, stock kernel | [NSDI'20](https://www.usenix.org/system/files/nsdi20-paper-agache.pdf) | high |
-| **TABOS** *(band-C, VMM-inclusive — MEASURED)* | **~3.0 ms** (`tb-vmm` spawn → guest boot-ready; median, n=30; p99 ~3.9 ms) | host `clock_gettime` from `tb-vmm` process spawn → the guest's `0x510` boot-ready PIO write (the FC `--boot-timer` analog), on the **SAME** GitHub KVM runner where **Firecracker `v1.12.1`** booting a minimal Linux guest took **~103 ms** (median, n=30; p99 ~184 ms) spawn → its guest's first serial byte — a **~34×** gap. **CAVEAT (load-bearing):** this compares *different guests* — TABOS (no_std, unikernel-class, **no Linux to boot**) vs full Linux — so it reflects "TABOS has no Linux" **+** "`tb-vmm` is thin", **not** a pure VMM-overhead claim (that needs the same trivial guest under both — **see the axis-A row below**, which measures exactly that: **11.1×** on one common nano-guest). Absolute ms are **runner-relative** (nested-virt); only the **same-runner ratio** is the fair cross-system point. The guest-only **0.5 ms** figure (Bucket 1) is a *different* metric class and is **not** comparable to this band. | `bench.yml` CI (`fc6322c`) | medium |
-| **TABOS `tb-vmm` vs Firecracker** *(axis-A, TRUE apples-to-apples — MEASURED)* | **11.1×** — `tb-vmm` **13.2 ms** vs Firecracker **146.3 ms** (median, n=30; p99 16.6 / 186.8 ms) | The **same** ~4.8 KiB dual-note PVH + `tb-boot` **nano-guest** (`bench/nano-guest/`) — whose only work is to emit one COM1 line then `hlt` — booted under **both** VMMs on the **same** KVM runner; host `date` from process spawn → the guest's standalone `A` serial line (`grep -qx A`, byte-identical method both sides). **No different-guest confound:** the binary is byte-identical — Firecracker auto-selects PVH from the `.note.Xen` PHYS32_ENTRY note, `tb-vmm` enters 64-bit via the `.note.TABOS` note. `tb-vmm`'s **native in-process `0x510`** clock puts its *internal* spawn at **0.985 ms** (FC has no equivalent, so the ratio uses the host-poll column for both). **Finding:** Firecracker needs ~146 ms to bring even a *trivial* guest to its first instruction — so its cold start is dominated by **VMM spawn/setup**, NOT guest boot. Absolute ms are **runner-relative**; the same-runner **ratio** is the fair cross-system claim. | `bench.yml` axis-A (`c4b7460`) | medium |
+| **Yuva** *(band-C, VMM-inclusive — MEASURED)* | **~3.0 ms** (`tb-vmm` spawn → guest boot-ready; median, n=30; p99 ~3.9 ms) | host `clock_gettime` from `tb-vmm` process spawn → the guest's `0x510` boot-ready PIO write (the FC `--boot-timer` analog), on the **SAME** GitHub KVM runner where **Firecracker `v1.12.1`** booting a minimal Linux guest took **~103 ms** (median, n=30; p99 ~184 ms) spawn → its guest's first serial byte — a **~34×** gap. **CAVEAT (load-bearing):** this compares *different guests* — Yuva (no_std, unikernel-class, **no Linux to boot**) vs full Linux — so it reflects "TABOS has no Linux" **+** "`tb-vmm` is thin", **not** a pure VMM-overhead claim (that needs the same trivial guest under both — **see the axis-A row below**, which measures exactly that: **11.1×** on one common nano-guest). Absolute ms are **runner-relative** (nested-virt); only the **same-runner ratio** is the fair cross-system point. The guest-only **0.5 ms** figure (Bucket 1) is a *different* metric class and is **not** comparable to this band. | `bench.yml` CI (`fc6322c`) | medium |
+| **Yuva `tb-vmm` vs Firecracker** *(axis-A, TRUE apples-to-apples — MEASURED)* | **11.1×** — `tb-vmm` **13.2 ms** vs Firecracker **146.3 ms** (median, n=30; p99 16.6 / 186.8 ms) | The **same** ~4.8 KiB dual-note PVH + `tb-boot` **nano-guest** (`bench/nano-guest/`) — whose only work is to emit one COM1 line then `hlt` — booted under **both** VMMs on the **same** KVM runner; host `date` from process spawn → the guest's standalone `A` serial line (`grep -qx A`, byte-identical method both sides). **No different-guest confound:** the binary is byte-identical — Firecracker auto-selects PVH from the `.note.Xen` PHYS32_ENTRY note, `tb-vmm` enters 64-bit via the `.note.TABOS` note. `tb-vmm`'s **native in-process `0x510`** clock puts its *internal* spawn at **0.985 ms** (FC has no equivalent, so the ratio uses the host-poll column for both). **Finding:** Firecracker needs ~146 ms to bring even a *trivial* guest to its first instruction — so its cold start is dominated by **VMM spawn/setup**, NOT guest boot. Absolute ms are **runner-relative**; the same-runner **ratio** is the fair cross-system claim. | `bench.yml` axis-A (`c4b7460`) | medium |
 
 ### Bucket 3 — container/sandbox/FaaS/Wasm cold start (no guest kernel) · *context only*
 
@@ -206,7 +206,7 @@ different model entirely (shared host kernel) and is context only.
 
 ## 4. Why a from-scratch PVH / `tb-boot` kernel starts ahead
 
-The genuine, defensible TABOS win is the **firmware + bootloader + decompress +
+The genuine, defensible Yuva win is the **firmware + bootloader + decompress +
 Linux-kernel-init budget it simply never pays.** A legacy
 `SeaBIOS/OVMF → GRUB → compressed bzImage` path spends, *before the kernel's
 first instruction*:
@@ -221,15 +221,15 @@ first instruction*:
 
 A Firecracker / QEMU-`microvm` / **PVH direct-boot** guest collapses that whole
 budget to **~0–20 ms** (qboot ~20 ms; a true PVH/direct *uncompressed* image
-~0). TABOS is built precisely for this: its dual ELF entry notes (Xen PVH for
+~0). Yuva is built precisely for this: its dual ELF entry notes (Xen PVH for
 QEMU/Firecracker, the TABOS note for `tb-vmm`) mean **no SeaBIOS/OVMF, no
 real-mode stub, no GRUB, no self-decompress** (tiny uncompressed image). Its
-`t0` is essentially *"the vCPU starts executing TABOS"* — there is no firmware
+`t0` is essentially *"the vCPU starts executing Yuva"* — there is no firmware
 tax to pay. Within Bucket 1, guest-only boot is determined by *image size +
 work-before-ready*, not language: a no_std kernel with no driver probing, no
 module loading, no FS mount, and a direct long-mode entry has strictly less to
 do than OSv (ZFS rootfs) or minimal Linux (which had to *disable SMP* and use
-huge pages just to reach 6 ms). So TABOS belongs at Bucket 1's fast end, and
+huge pages just to reach 6 ms). So Yuva belongs at Bucket 1's fast end, and
 runs **orders of magnitude** below any full-Linux microVM (Bucket 2's
 18–330 ms) — because most of *their* time is Linux kernel init that a
 from-scratch kernel never runs.
@@ -268,7 +268,7 @@ this axis — **not** a boot figure, and never placed in the boot buckets.
 a `CNTPCT_EL0` exit-latency count from TCG is meaningless. This axis therefore
 stays empty in the TCG CI and is filled only from a **KVM-accelerated or
 bare-metal Arm host** (an open hardware question; no Arm KVM box in CI yet). On
-the *boot* axis TABOS's peers are Unikraft's sub-ms and OSv's 4–5 ms guest-only
+the *boot* axis Yuva's peers are Unikraft's sub-ms and OSv's 4–5 ms guest-only
 figures [[EuroSys'21](https://arxiv.org/abs/2104.12721); [ATC'14](https://www.usenix.org/conference/atc14/technical-sessions/presentation/kivity)];
 on *this* axis the peer is NOVA's exit latency [[EuroSys'10](https://hypervisor.org/eurosys2010.pdf)]
 — keeping the two axes apart is itself part of the honesty discipline (§6).
@@ -284,17 +284,17 @@ on *this* axis the peer is NOVA's exit latency [[EuroSys'10](https://hypervisor.
 - **We never headline a guest-only µs figure against a competitor's end-to-end
   ms figure.** That exact metric mismatch is what makes most published unikernel
   boot claims non-comparable.
-- **TABOS today boots a self-test and halts** — it has no userspace/agent-ready
+- **Yuva today boots a self-test and halts** — it has no userspace/agent-ready
   state yet, so the only honest metric right now is *VMM-start → serial marker,
-  KVM*. When TABOS gains an agent-ready state, the second clock
+  KVM*. When Yuva gains an agent-ready state, the second clock
   (guest-first-instruction → agent-ready) is added and reported alongside.
 - **Quotable figures come from a `--release` build under `tb-vmm`, timed by an
   in-guest cycle counter — never a `debug` build or QEMU wall-clock.** (Standing
   rule, 2026-06-07.) A `debug/tabos-kernel` wall-clock number under QEMU/KVM
-  conflates three things we do *not* want in a TABOS figure: unoptimized guest
+  conflates three things we do *not* want in a Yuva figure: unoptimized guest
   code, QEMU's heavyweight device-model VMM floor (tens of ms vs Firecracker's
   ~6 ms thin-VMM floor — i.e. **a QEMU wall-clock can be *slower* than
-  Firecracker purely from the VMM, telling us nothing about TABOS**), and host
+  Firecracker purely from the VMM, telling us nothing about Yuva**), and host
   scheduling noise. The defensible number is **`rdtsc` (x86_64) / `CNTPCT_EL0`
   (aarch64) read in-guest, release build, under `tb-vmm`** — which **landed at
   M8**: `tb_hal::read_cycle_counter()` is sampled at `rust_main` entry and just

@@ -15,7 +15,7 @@
 //!
 //! FAIL-CLOSED: the walk requires `P` AND `U/S` at EVERY level (SDM Vol.3A 4.6:
 //! a user access needs U/S=1 in every controlling entry), rejects any `PS` huge
-//! leaf in the user range (TABOS maps only 4 KiB user leaves), enforces `R/W` on
+//! leaf in the user range (Yuva maps only 4 KiB user leaves), enforces `R/W` on
 //! the leaf for a write, and asserts the translated frame lies inside the boot
 //! identity window BEFORE any access -- each failure is a typed [`CopyFault`],
 //! never a wild deref.
@@ -43,7 +43,7 @@ const PTE_RW: u64 = 1 << 1;
 /// required at EVERY level of a user translation (SDM Vol.3A 4.6).
 const PTE_US: u64 = 1 << 2;
 /// Page-Size bit (SDM Table 4-15; Linux `_PAGE_BIT_PSE 7`): a huge leaf
-/// (2 MiB at PD / 1 GiB at PDPT). TABOS maps user memory only with 4 KiB leaves,
+/// (2 MiB at PD / 1 GiB at PDPT). Yuva maps user memory only with 4 KiB leaves,
 /// so a `PS` entry anywhere in the user walk is rejected fail-closed.
 const PTE_PS: u64 = 1 << 7;
 

@@ -1,4 +1,4 @@
-# TABOS Process and Methodology Document
+# Yuva Process and Methodology Document
 
 > Status: v1.0 · Purpose: an **auditable record** of the process the planning phase actually followed, an honest mapping against two recognized frameworks (**Design Thinking**, **Microsoft Success by Design**), and the closing of gaps.
 > Framework sources: [IxDF — What is Design Thinking](https://www.interaction-design.org/literature/topics/design-thinking) · [Microsoft Learn — Success by Design](https://learn.microsoft.com/en-us/dynamics365/guidance/implementation-guide/success-by-design)
@@ -17,7 +17,7 @@ Until now this project followed an **implicit** methodology (research → multi-
 | 1 | Scope clarification | 3 structured questions (architecture layer, model assumption, output format) → Arda's decisions | [VISION](VISION.md), memory record |
 | 2 | Wave 1: deep-research | 105 subagents: 5 search axes → 23 primary sources → 115 claims → 3-vote adversarial verification (partial due to API failure) | [`verified-wave1.json`](../research/raw/verified-wave1.json) (3 confirmations) |
 | 3 | Wave 2: verify + expand | 35 subagents: source-grouped re-verification of 22 claims (9×3 votes) + 8 domain investigations | [`verified.json`](../research/raw/verified.json) (20+2), `expand-*.json` (100 findings) |
-| 4 | Naming | vetting of 24+7 candidates → 7/7 + most eliminated → **TABOS code name** (Arda) + post-decision vetting | [`expand-naming.json`](../research/raw/expand-naming.json), [`naming-round2.json`](../research/raw/naming-round2.json), [`naming-tabos.json`](../research/raw/naming-tabos.json) |
+| 4 | Naming | vetting of 24+7 candidates → 7/7 + most eliminated → **TABOS code name** (Arda; the final name **Yuva** was decided 2026-06) + post-decision vetting | [`expand-naming.json`](../research/raw/expand-naming.json), [`naming-round2.json`](../research/raw/naming-round2.json), [`naming-tabos.json`](../research/raw/naming-tabos.json) |
 | 5 | Document set authoring | 8 documents, marked with [DECISION]/[PROPOSAL]/[OPEN] status | `README` + `docs/*` |
 | 6 | Adversarial review | 3 independent reviewers (claim fidelity / internal consistency / completeness) → 1 critical + 14 major + 9 minor → **29 corrections** applied | review output workflow `wf_f1a0e71d`; corrections in the documents |
 | 7 | Code name correction | "TABOS = code name, no hardcoding, no reservation" (Arda) → 9 corrections | README naming note, OPEN-QUESTIONS §G |
@@ -43,7 +43,7 @@ Microsoft's definition: 5 methodology-agnostic phases (**Discover, Initiate, Imp
 
 ### 3.1 Phase mapping
 
-| SbD phase | TABOS counterpart | Status |
+| SbD phase | Yuva counterpart | Status |
 |---|---|---|
 | **Discover** | Scope clarification + three research waves (requirement discovery = literature + existing-system gaps) | ✅ Completed |
 | **Initiate** | Document set = "high-level solution design"; workflows = [VISION §8 phases](VISION.md) | ✅ This phase |
@@ -80,9 +80,9 @@ SbD wants "7 categories, 30+ measures, R/Y/G". Our counterpart is the 6 measurab
 
 ## 4. Personas and JTBD (draft — to be validated, §H)
 
-TABOS's unique situation: **the primary "user" is not human.** Four personas:
+Yuva's unique situation: **the primary "user" is not human.** Four personas:
 
-| Persona | Who | JTBD (job-to-be-done) | Counterpart in TABOS |
+| Persona | Who | JTBD (job-to-be-done) | Counterpart in Yuva |
 |---|---|---|---|
 | **P1 — The agent itself** | The OS's primary citizen | "Carry out my task without context overflow, without losing my memory, knowing exactly what my authority is; and be able to escalate when stuck" | Memory guarantee, T0 registers, impasse traps, model-readable errors |
 | **P2 — Agent developer** | Engineer writing agents/skills | "Build persistent, secure, portable agents without writing framework code; and be able to debug behavior" | Default memory, .taf image, `cat /agent/<id>/trace`, WIT-typed skill ABI |

@@ -1,6 +1,6 @@
 //! Pure radix-512 page-table + EPT entry algebra.
 //!
-//! Both TABOS architectures use the SAME translation-table shape: a 4 KiB table
+//! Both Yuva architectures use the SAME translation-table shape: a 4 KiB table
 //! of 512 x 8-byte entries, each level consuming a 9-bit slice of the virtual
 //! address (Intel SDM Vol 3A §4.5 "4-Level Paging", Table 4-15 entry formats;
 //! Arm ARM DDI 0487 VMSAv8-64 with the 4 KiB granule). This module is that
@@ -45,7 +45,7 @@ pub const SHIFT_4K: u32 = 12;
 
 /// Output-address bits common to both architectures' 4 KiB-granule entries:
 /// bits `[47:12]`. `[51:48]` are deliberately NOT included (x86 address bits up
-/// to MAXPHYADDR vs. VMSAv8 upper attributes); every TABOS table/frame sits far
+/// to MAXPHYADDR vs. VMSAv8 upper attributes); every Yuva table/frame sits far
 /// below `2^47`, so no address bit is ever masked away.
 pub const ENTRY_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 

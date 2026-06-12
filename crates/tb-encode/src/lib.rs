@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! `tb-encode` -- the host-verifiable PURE bit-level encoders/validators of TABOS.
+//! `tb-encode` -- the host-verifiable PURE bit-level encoders/validators of Yuva.
 //!
 //! This crate is the SINGLE SOURCE OF TRUTH for the *value computation* that
 //! sits one millimetre in front of the kernel's silicon-`unsafe`: the bit

@@ -290,7 +290,7 @@ const FAIL_TRAP_BAD_MAGIC: u64 = 0x0000_0D23_0000_0006;
 /// or a stray sysreg access while the window was armed -- fail-closed, never a
 /// silent emulate).
 const FAIL_TRAP_BAD_SYSREG: u64 = 0x0000_0D23_0000_0007;
-/// A data abort that was NOT emulatable (ISV=0 / S1PTW=1 -- TABOS has no
+/// A data abort that was NOT emulatable (ISV=0 / S1PTW=1 -- Yuva has no
 /// instruction decoder, so it fails closed, the KVM `KVM_EXIT_ARM_NISV` analog).
 const FAIL_TRAP_MMIO_NISV: u64 = 0x0000_0D23_0000_0008;
 // 0x0000_0D23_0000_0009 (was FAIL_TRAP_BAD_IPA) is retired: a data abort at a
@@ -309,7 +309,7 @@ const _: () = assert!(SYSREG_EMU_VAL == 0x5103 && MMIO_VAL == 0x0D51 && TRAP_GUE
 const _: () = assert!(TRAP_SYSREG_BIT == 1 && TRAP_MMIO_WR_BIT == 2 && TRAP_MMIO_RD_BIT == 4);
 
 // ===========================================================================
-// aL2.4 NESTED-GUEST constants (the fifth L2 rung: a REAL minimal TABOS guest
+// aL2.4 NESTED-GUEST constants (the fifth L2 rung: a REAL minimal Yuva guest
 // that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU live -- a
 // GENUINE two-stage walk -- and takes its OWN EL1 exception, then HVCs done).
 // ===========================================================================
@@ -835,7 +835,7 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
             }
             el2_return_to_kernel(FAIL_BAD_EC, esr);
         }
-        // No SMC emulation path exists in TABOS yet -- surface it honestly as a
+        // No SMC emulation path exists in Yuva yet -- surface it honestly as a
         // fail rather than silently passing (the fail-closed table discipline).
         ExitClass::Smc => el2_return_to_kernel(FAIL_BAD_EC, esr),
         // An HVC64 -- fall through to the immediate dispatch below (UNCHANGED).
@@ -1640,9 +1640,9 @@ fn el2_mmio_emulate(frame: *mut Frame, esr: u64) -> ! {
         // L2.1-mis-route guard only.
         aarch64_el2_stage2_abort(frame, esr);
     }
-    // The abort MUST be emulatable: ISV=1 (a single-GP LDR/STR TABOS can decode)
+    // The abort MUST be emulatable: ISV=1 (a single-GP LDR/STR Yuva can decode)
     // and S1PTW=0. Else fail closed (the KVM `KVM_EXIT_ARM_NISV` early-out --
-    // TABOS has no instruction decoder, so it NEVER blind-decodes).
+    // Yuva has no instruction decoder, so it NEVER blind-decodes).
     if !dabt_is_emulatable(esr) {
         super::el2mmio::disarm_trap_el2();
         el2_return_to_kernel(FAIL_TRAP_MMIO_NISV, esr);

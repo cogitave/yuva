@@ -13,7 +13,7 @@
 //!
 //! FAIL-CLOSED (Arm ARM VMSAv8-64, transcribed in `mmu.rs`): every interior
 //! descriptor (L1/L2) must be a VALID TABLE (low bits 0b11) -- a block
-//! descriptor (0b01) in the user range is rejected as `NotPresent` (TABOS maps
+//! descriptor (0b01) in the user range is rejected as `NotPresent` (Yuva maps
 //! only 4 KiB user leaves); the L3 leaf must be a valid PAGE (0b11) with the
 //! Access Flag (`AF`, bit 10) set and EL0 access enabled (`AP[1]` = bit 6) else
 //! `NotUser`, and for a write `AP[2]` (bit 7, read-only) must be CLEAR else

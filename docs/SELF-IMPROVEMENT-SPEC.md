@@ -1,4 +1,4 @@
-# TABOS Self-Improvement Specification
+# Yuva Self-Improvement Specification
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
 > Basis: [RESEARCH-REPORT §7](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md)
@@ -19,7 +19,7 @@ A lower rung can never override a higher one. This order is not configuration bu
 
 - **Frozen (OUTSIDE the agent's self-modification scope):** kernel, evaluators/safety detectors, the evolution machine (archive maintenance, parent selection), budget accounting, audit/lineage log.
 - **Evolving (default write authority):** the agent's *own* config subtree — prompts, tool selection, workflow code, memory contents. Scope expansion (shared tools, other agents, local model weights) is an explicit capability grant.
-- **Measurer-measured separation** [DECISION]: in DGM the visible evaluator was actually hacked (node 114, which removed logging and bypassed the detector); hidden hacking decreased. In TABOS `Evaluator` objects are *never* visible in the agent's rights mask; the instrumentation markers the kernel injects into the agent's I/O are outside the agent's write authority; since a single visible metric will be Goodharted, **multiple held-out evaluators** are the default.
+- **Measurer-measured separation** [DECISION]: in DGM the visible evaluator was actually hacked (node 114, which removed logging and bypassed the detector); hidden hacking decreased. In Yuva `Evaluator` objects are *never* visible in the agent's rights mask; the instrumentation markers the kernel injects into the agent's I/O are outside the agent's write authority; since a single visible metric will be Goodharted, **multiple held-out evaluators** are the default.
 
 ## 2. Evolution Service API **[PROPOSAL — the survey taxonomy becomes the signature]**
 
@@ -81,4 +81,4 @@ Each step is written to an **append-only lineage log** (bound to the archive); r
 
 ## 9. Telemetry **[OPEN]**
 
-The field is on "snapshot-based" evaluation; cross-generation safety drift is not measured. The TABOS default: continuous safety metrics for each agent version (Safety Score / Risk Ratio / Leakage Rate class — 2507.21046 Table 6) are published by the kernel; longitudinal benchmark design is open work.
+The field is on "snapshot-based" evaluation; cross-generation safety drift is not measured. The Yuva default: continuous safety metrics for each agent version (Safety Score / Risk Ratio / Leakage Rate class — 2507.21046 Table 6) are published by the kernel; longitudinal benchmark design is open work.

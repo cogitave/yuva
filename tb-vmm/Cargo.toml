@@ -1,7 +1,7 @@
-# tb-vmm — TABOS sovereign userspace VMM (the L1 sovereignty rung).
+# tb-vmm — Yuva sovereign userspace VMM (the L1 sovereignty rung).
 #
 # tb-vmm is a STD, Linux-hosted x86_64 binary that drives /dev/kvm via the
-# rust-vmm crates. It boots the SAME TABOS kernel ELF the QEMU/PVH path boots,
+# rust-vmm crates. It boots the SAME Yuva kernel ELF the QEMU/PVH path boots,
 # but through OUR own boot contract (tb-boot v0), entering the guest DIRECTLY in
 # 64-bit long mode — no PVH note, no A0 32->64 trampoline.
 #
@@ -19,7 +19,7 @@ name = "tb-vmm"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "TABOS sovereign userspace VMM (L1): boots the TABOS kernel via the tb-boot v0 contract on /dev/kvm."
+description = "Yuva sovereign userspace VMM (L1): boots the Yuva kernel via the tb-boot v0 contract on /dev/kvm."
 license = "Apache-2.0"
 
 # Declaring an (empty) [workspace] makes tb-vmm an INDEPENDENT nested workspace.

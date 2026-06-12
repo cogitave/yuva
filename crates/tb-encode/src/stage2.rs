@@ -24,7 +24,7 @@
 //!     Write-Back (the EPT-`WB` analog), `0x0` = Device-nGnRnE.
 //!   * `SH[9:8]` -- shareability; `0b11` = inner shareable (matches the kernel's
 //!     stage-1 Normal mappings).
-//!   * `AF` -- Access Flag, **bit[10], MANDATORY on every leaf**: TABOS installs
+//!   * `AF` -- Access Flag, **bit[10], MANDATORY on every leaf**: Yuva installs
 //!     no Access-Flag-fault handler, so a cleared AF = a synchronous abort on
 //!     first access (the same rule `arch/aarch64/mmu.rs` documents for stage-1).
 //!   * `XN[54:53]` -- stage-2 execute-never (optional; `0b10` = XN at all ELs on

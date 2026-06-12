@@ -2,7 +2,7 @@
 //!
 //! **Bootstrap-only (M0).** Per KERNEL-FOUNDATION-SPEC §2/§3 (unit A0) the
 //! 32->64 trampoline is *deleted* once `tb-vmm` / `tb-boot v0` enters directly
-//! in 64-bit long mode. This is the ONLY x86_64 boot assembly in TABOS.
+//! in 64-bit long mode. This is the ONLY x86_64 boot assembly in Yuva.
 //!
 //! Boot contract (verified facts — obey exactly):
 //!  * PVH "x86/HVM direct boot ABI": QEMU `-kernel` and Firecracker select PVH

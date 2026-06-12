@@ -43,7 +43,7 @@
 pub enum CopyFault {
     /// A controlling paging-structure entry (interior or leaf) was not
     /// present/valid -- or an unexpected huge/block leaf appeared in the user
-    /// range (TABOS maps only 4 KiB user leaves, so it is rejected fail-closed).
+    /// range (Yuva maps only 4 KiB user leaves, so it is rejected fail-closed).
     NotPresent,
     /// A controlling entry lacked user (EL0 / `U/S`) accessibility at some level
     /// of the walk -- a supervisor-only page presented as a user buffer.

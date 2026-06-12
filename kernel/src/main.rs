@@ -1,4 +1,4 @@
-//! TABOS kernel entry shim (M4: user/ring boundary).
+//! Yuva kernel entry shim (M4: user/ring boundary).
 //!
 //! Framekernel rule: the kernel crate is otherwise safe Rust. THIS file is the
 //! single permitted exception. It contains no `unsafe {}` blocks; the only
@@ -493,13 +493,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         let mut s = String::new();
         let mut k = 0;
         while k < 128 {
-            s.push_str("tabos-");
+            s.push_str("yuva-");
             k += 1;
         }
-        if s.len() != 128 * 6 {
+        if s.len() != 128 * 5 {
             m5_fail("String length wrong");
         }
-        if !s.starts_with("tabos-") || !s.ends_with("tabos-") {
+        if !s.starts_with("yuva-") || !s.ends_with("yuva-") {
             m5_fail("String content wrong");
         }
     } // s dropped
@@ -3399,7 +3399,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     // --- L2.0: VMX-root + 1-instruction nested guest + caught VM-exit --------
     // The FIRST rung of the L2 sovereignty track (tb-core, a from-scratch Type-1
-    // microhypervisor): the smallest proof that TABOS *is* the hypervisor. The
+    // microhypervisor): the smallest proof that Yuva *is* the hypervisor. The
     // already-booted kernel (now playing L1) drives the full Intel VMX-root
     // bring-up -- VMXON + a minimal VMCS + an EPT identity map + a 1-`CPUID`
     // long-mode nested L2 guest + the host<->guest world switch + catching the
@@ -3605,7 +3605,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
-    // --- aL2.4: EL2 nested guest (GENUINE two-stage) -- a REAL minimal TABOS
+    // --- aL2.4: EL2 nested guest (GENUINE two-stage) -- a REAL minimal Yuva
     // guest that runs at EL1 UNDER our EL2 stage-2 with its OWN stage-1 MMU live,
     // the FIFTH L2 rung built ON TOP of L2.0's resident EL2 monitor. The monitor
     // arms the GiB0+GiB1 identity stage-2 (HCR_EL2.VM=1) and erets into a guest
@@ -3756,7 +3756,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     // --- M27 (M27b): the CNTHP TIMER-PREEMPTED two-VMID sovereign time-partition
-    // scheduler -- the sovereignty pillar's "TABOS owns time for two guests" rung,
+    // scheduler -- the sovereignty pillar's "Yuva owns time for two guests" rung,
     // built ON TOP of L2.1's stage-2 + L2.3's trap-and-emulate seam + M22's fold.
     // The EL2 monitor arms TWO distinct stage-2 roots (VMID 0 + 1) + the CNTHP
     // (EL2 physical timer) window -- the FIRST asynchronous IRQ ever taken at EL2

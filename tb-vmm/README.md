@@ -1,11 +1,11 @@
-# tb-vmm — TABOS sovereign userspace VMM (the L1 rung)
+# tb-vmm — Yuva sovereign userspace VMM (the L1 rung)
 
-> **What this is.** `tb-vmm` is TABOS's own thin **userspace** virtual-machine
+> **What this is.** `tb-vmm` is Yuva's own thin **userspace** virtual-machine
 > monitor. It boots the **same** `tabos-kernel` ELF that QEMU boots — but over
-> the host's `/dev/kvm`, through TABOS's **own** boot contract (`tb-boot v0`),
+> the host's `/dev/kvm`, through Yuva's **own** boot contract (`tb-boot v0`),
 > entering the guest **directly in 64-bit long mode**. On this path there is
 > **no PVH ELF note** and **no `A0` 32→64 trampoline**: the bootstrap-OS boot
-> protocol is deleted and replaced by a contract TABOS owns end-to-end.
+> protocol is deleted and replaced by a contract Yuva owns end-to-end.
 >
 > This is the **L1** step of the sovereignty ladder
 > ([SOVEREIGNTY-ROADMAP §1, §7](../docs/SOVEREIGNTY-ROADMAP.md)). `tb-vmm` is a
@@ -20,7 +20,7 @@
 The sovereignty ladder (full detail in
 [SOVEREIGNTY-ROADMAP](../docs/SOVEREIGNTY-ROADMAP.md)):
 
-| Rung | What TABOS owns | Still trusts |
+| Rung | What Yuva owns | Still trusts |
 |---|---|---|
 | **L0** (was) | nothing below the guest boundary | host Linux + KVM + a stock VMM (QEMU/Firecracker) |
 | **L1** (this) | the **boot contract** + the **machine/device model** (`tb-vmm` + `tb-boot v0`) | host Linux **+ KVM** (world switch, EPT, vCPU scheduling, IRQ routing) |
@@ -187,7 +187,7 @@ rsp    = top of a reserved boot stack         (courtesy; see note)
 
 **Deviation from Firecracker `LinuxBoot`:** Firecracker targets the Linux 64-bit
 boot protocol, so it sets `rsi = ZERO_PAGE_START` (boot_params) and
-`rsp/rbp = BOOT_STACK_POINTER`. TABOS does **not** use the Linux boot protocol:
+`rsp/rbp = BOOT_STACK_POINTER`. Yuva does **not** use the Linux boot protocol:
 the kernel entry is a Rust `extern "C" fn rust_main(boot_info: usize)`, so we use
 the **SysV C ABI** — `rdi = TbBootInfo*`, `rsi = 0`. The kernel's `_tb_start`
 establishes its own `RSP` (a reserved 64-bit boot stack) before calling
@@ -349,5 +349,5 @@ is sequenced after x86_64 lands — not built to parity up front.
   rust-vmm/kvm-ioctls README.
 * Xen PVH (the contract we replace on this path): `XEN_ELFNOTE_PHYS32_ENTRY`,
   `hvm_start_info` — xenbits.xen.org/docs/unstable/misc/pvh.html.
-* TABOS internal: [SOVEREIGNTY-ROADMAP](../docs/SOVEREIGNTY-ROADMAP.md) §1/§3/§7,
+* Yuva internal: [SOVEREIGNTY-ROADMAP](../docs/SOVEREIGNTY-ROADMAP.md) §1/§3/§7,
   [MILESTONES](../docs/MILESTONES.md), [BUILD](../BUILD.md).

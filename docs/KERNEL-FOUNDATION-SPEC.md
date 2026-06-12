@@ -1,4 +1,4 @@
-# TABOS Kernel Foundation & Assembly Specification
+# Yuva Kernel Foundation & Assembly Specification
 
 > Status: v1.0 · **All items [DECISION]** — this document deliberately contains no open decisions (locked to scenario).
 > Scope: the `tb-hal` foundation crate — the layer where ALL of the kernel's `unsafe` + ALL assembly is confined. Every crate above it is `#![forbid(unsafe_code)]`.
@@ -10,7 +10,7 @@
 
 ## 0. Decision Summary and Resolved Conflict
 
-The TABOS kernel boots **as a guest on a Firecracker/KVM-class VMM**; not bare-metal. This **deletes** a large amount of assembly without costing the agent anything. All remaining assembly is written in a single `tb-hal` foundation crate, using Rust 1.88+ `#[unsafe(naked)]` + `naked_asm!` / `global_asm!`.
+The Yuva kernel boots **as a guest on a Firecracker/KVM-class VMM**; not bare-metal. This **deletes** a large amount of assembly without costing the agent anything. All remaining assembly is written in a single `tb-hal` foundation crate, using Rust 1.88+ `#[unsafe(naked)]` + `naked_asm!` / `global_asm!`.
 
 **Boot path — sovereignty revision** (detail: [SOVEREIGNTY §2](SOVEREIGNTY.md)): This document originally chose **LinuxBoot** (solely on the trampoline-deletion rationale). Arda's directive "entirely our own build, no Linux" (2026-06-07) shifted the priority. **New decision:**
 - **Canonical = `tb-boot v0`** — our own owned handoff contract, produced by our own thin VMM **`tb-vmm`** (rust-vmm based, single-vCPU Mirage); enters directly in 64-bit long mode → **no trampoline, no Linux, no Xen**.
@@ -119,7 +119,7 @@ Phase-1 kernel foundation in 5 milestones; each tied to the asm units above and 
 | **M3 — MMU** | A6, A7, A8, A9 + typed page-table | higher-half map + TLB-flush test; aarch64 BBM; single-vCPU TLBI variant measurement |
 | **M4 — (v2 gate) user/ring** | A12 (ring3/EL0) | transition to EL0/ring3 + back; syscall fast-path; capability dispatch edge |
 
-| **MV — `tb-vmm` (owned VMM)** | rust-vmm crates + `tb-boot v0` contract; single-vCPU | TABOS boots on its own VMM; `tb-boot` 64-bit direct; the A0 trampoline + PVH dependency is **deleted** |
+| **MV — `tb-vmm` (owned VMM)** | rust-vmm crates + `tb-boot v0` contract; single-vCPU | Yuva boots on its own VMM; `tb-boot` 64-bit direct; the A0 trampoline + PVH dependency is **deleted** |
 
 **Dependency:** M0 → M1 → M2 → M3 (sequential); **MV** parallel after M0 (canonical target; A0 is deleted on landing); M4 a separate phase (v2), after v1 is frozen. Thanks to the single-vCPU decision, **A13 (AP/SMP) is in no milestone** — the next major phase.
 
