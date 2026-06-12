@@ -142,6 +142,37 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
   model), and the load-bearing verdict is the GUEST's own readback (x0=0x2E5), with
   the EL2 alias readback as secondary corroboration only.
 
+- **The aL2.4b full-kernel-guest glue + the carve/guestlog leaves (silicon-unsafe
+  glue OUTSIDE the proof boundary; the two new leaves INSIDE it).** The
+  `tb-hal/arch/aarch64/{el2/l24b_guest,inguest,stage2,pmm}.rs` glue boots the
+  LITERAL full M0..M31 kernel image (`-device loader`-staged at the carve) as an
+  EL1 guest under VMID 2's FIRST non-identity stage-2 (the new Kani-proven
+  `tb_encode::stage2::guest_carve_pa` map — guest IPA `0x4000_0000+off` → carve
+  PA `0x4600_0000+off`, injective + range-bounded), handed the frozen
+  `build_handoff_flagged`(IN-GUEST) block. The guest's PL011 is trapped and
+  re-emitted as injection-proof `guestlog:` hex frames (the new Kani-proven
+  `tb_encode::guestlog` codec — total + injective + no-raw-leak); completion is
+  judged from MONITOR-witnessed evidence only (the doorbell store-count + the
+  per-boot nonce echo, `HVC #17` done, the final WFI trapped under
+  `HCR_EL2.TWI`). **RESIDUAL ASSUMPTIONS (silicon-only, TCG-invisible — the
+  survey §7b-1 class):** (1) the image/boot-block writes are cleaned to PoC
+  (`dc cvac` per line + `dsb ish`) before the eret so the MMU-off guest reads
+  the bytes, not stale cache — `cachemodel=TCG-COHERENT-UNTESTED` (TCG is
+  cache-coherent, so a missing clean is invisible on CI and lights up only on
+  real silicon); (2) the guest boots MMU-off — the monitor resets the inherited
+  host `SCTLR_EL1` to `INIT_SCTLR_EL1_MMU_OFF` (0x30D00800) before the eret (the
+  arm64 boot-protocol clause); (3) the host EL1 state the guest clobbers
+  (`TTBR0_EL1`/`TCR_EL1`/`MAIR_EL1`/`SCTLR_EL1`/`VBAR_EL1`/`SP_EL0`, and `SP_EL1`
+  at EL2) is saved before `HVC #16` and restored at teardown, so the host
+  resumes on its OWN stage-1 (the marker discipline proves clean resume: the
+  HOST chain's `M31` tail must print BEFORE the L2.4b block runs). The
+  confinement claim is honest only to the LANDED adversarial depth (a host-RAM
+  store → witnessed fault + dropped; forged markers → hex-framed only;
+  semihosting suppressed); `gic=PASSTHROUGH-SOLE-GUEST` / `timer=PHYS-PASSTHROUGH`
+  are honest only because the host is parked + `IMO=0` (the monitor does NOT yet
+  preempt the guest — Stage 3). The marker rejects `isolated`/`verified-guest`/
+  `sandboxed`/`KVM-class`/`SMP`/`cycle-accurate`.
+
 - **The L2.3 trap-and-emulate glue (silicon-unsafe, OUTSIDE the proof boundary).**
   The `tb-hal/arch/aarch64/{el2mmio,el2,stage2}.rs` glue that arms the trap window
   (`msr HCR_EL2 = RW|VM|TVM`), decodes a trapped sysreg WRITE / MMIO LDR-STR via

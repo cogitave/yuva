@@ -118,7 +118,7 @@ kernel/linker/*.ld      per-arch linker scripts
 scripts/run-*.sh        QEMU launch + serial-marker assertion (the executable DoD)
 ```
 
-## 2. The milestone chain (M0 → M31, + L2.0 … L2.6)
+## 2. The milestone chain (M0 → M31, + L2.0 … L2.6, + aL2.4b)
 
 Each milestone has an **executable Definition-of-Done (DoD)**: a marker string
 the kernel prints over serial once that capability works. The kernel runs the
@@ -150,10 +150,18 @@ prompt → the `infer_bytes` byte path → a MAC'd chunked wire exchange with th
 host peer's deterministic mock serve loop → the response DIGEST folded into the
 M25 transcript; its `infer: …` witness carries the custody/TCB honesty tokens,
 its `infer-dump:` lines are lowercase-hex injection-proofed, and the LIVE
-ANTHROPIC half is stage C — operator-gated, never in the cumulative chain)
+ANTHROPIC half is stage C — operator-gated, never in the cumulative chain),
+and — aarch64-only, after M31 — the `L2.4b: el1-kernel-guest OK`
+full-kernel-guest marker (the LITERAL full M0…M31 kernel booted as a
+stage-2-confined EL1 guest under the resident EL2 monitor; the marker is
+emitted by the MONITOR from witnessed evidence — `guestboot:`/`guestprobe:`/
+`guestchain:` + the honesty-token `guest: …` line — never from guest text,
+and the guest's whole serial is re-emitted as injection-proof `guestlog:` hex
+frames; on x86_64 it prints the loud `(aarch64-only, hardware-gated #37,
+skipped)` token)
 (each preceded by its anti-hollow witness line: `prov: …`, `exp: …`, `bakeoff: …`,
-`opframe: …`, `exittel: …`, `khash: …`, `opcmd: …`, `xport: …`, `infer: …`) — the
-ordered sequence (detailed through M22) is listed further below.
+`opframe: …`, `exittel: …`, `khash: …`, `opcmd: …`, `xport: …`, `infer: …`,
+`guestboot: …`) — the ordered sequence (detailed through M22) is listed further below.
 
 | Milestone | Capability | x86_64 mechanism | aarch64 mechanism | DoD marker |
 |---|---|---|---|---|
