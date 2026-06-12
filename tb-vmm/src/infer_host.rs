@@ -230,7 +230,7 @@ impl InferHost {
         // guest's `xport:` line). key-custody=VMM names THIS custody domain.
         let line = format!(
             "xport-harness: peer=TB-VMM-HOST challenge=0x{} tag=0x{} key-custody=VMM\n",
-            hex(&[0u8; 16]), // MUTATION (negative evidence): witness forged
+            hex(&req.challenge),
             hex(&tag)
         );
         self.witness_write(&line);
