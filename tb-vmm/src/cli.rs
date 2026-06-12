@@ -25,6 +25,14 @@ OPTIONS:\n\
                             `spawn-ready-ns=<n> phase-kvm-ns=.. ...` line when\n\
                             the guest writes the boot-ready PIO port (0x510),\n\
                             then keep running until the timeout guard.\n\
+    --xport-out <PATH>      M30: write the host-peer witness lines\n\
+                            (`xport-harness: peer=TB-VMM-HOST ..`) to PATH\n\
+                            instead of stderr — the run script's SEPARATE\n\
+                            leg-2 capture stream (guest serial rides stdout;\n\
+                            the guest can never write this file).\n\
+    --xport-key-out <PATH>  M30: write the per-run host-custodied echo key K\n\
+                            as lowercase hex to PATH (the run script's §5.7\n\
+                            key-leak negative input — never a witness).\n\
     -h, --help              Print this help.\n";
 
 /// The default kernel image path (the debug build of the custom target).
@@ -53,6 +61,12 @@ pub struct Config {
     /// Whether to time the spawn path and print the machine-parseable
     /// `spawn-ready-ns=..` breakdown when the guest writes the boot-ready port.
     pub report_spawn: bool,
+    /// M30: where the in-process host peer writes its `xport-harness:` witness
+    /// lines (the run script's separate leg-2 capture stream). `None` = stderr.
+    pub xport_out: Option<PathBuf>,
+    /// M30: where the per-run host-custodied echo key K is written as hex (the
+    /// run script's key-leak-negative input). `None` = nowhere (never printed).
+    pub xport_key_out: Option<PathBuf>,
 }
 
 /// The outcome of parsing argv.
@@ -112,6 +126,8 @@ impl Cli {
         let mut timeout_secs = DEFAULT_TIMEOUT_SECS;
         let mut print_exit = false;
         let mut report_spawn = false;
+        let mut xport_out: Option<PathBuf> = None;
+        let mut xport_key_out: Option<PathBuf> = None;
 
         while let Some(arg) = it.next() {
             match arg {
@@ -124,6 +140,12 @@ impl Cli {
                 }
                 "--print-exit" => print_exit = true,
                 "--report-spawn" => report_spawn = true,
+                "--xport-out" => {
+                    xport_out = Some(PathBuf::from(req_value(&mut it, "--xport-out")?))
+                }
+                "--xport-key-out" => {
+                    xport_key_out = Some(PathBuf::from(req_value(&mut it, "--xport-key-out")?))
+                }
                 other => return Err(CliError::Unknown(other.to_string())),
             }
         }
@@ -139,6 +161,8 @@ impl Cli {
             timeout_secs,
             print_exit,
             report_spawn,
+            xport_out,
+            xport_key_out,
         }))
     }
 }
@@ -178,6 +202,8 @@ mod tests {
                 assert_eq!(c.timeout_secs, DEFAULT_TIMEOUT_SECS);
                 assert!(!c.print_exit);
                 assert!(!c.report_spawn);
+                assert!(c.xport_out.is_none());
+                assert!(c.xport_key_out.is_none());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -197,6 +223,10 @@ mod tests {
             "60",
             "--print-exit",
             "--report-spawn",
+            "--xport-out",
+            "/tmp/xport-witness.txt",
+            "--xport-key-out",
+            "/tmp/xport-key.hex",
         ])
         .unwrap();
         let CliAction::Run(c) = action else {
@@ -208,6 +238,20 @@ mod tests {
         assert_eq!(c.timeout_secs, 60);
         assert!(c.print_exit);
         assert!(c.report_spawn);
+        assert_eq!(c.xport_out, Some(PathBuf::from("/tmp/xport-witness.txt")));
+        assert_eq!(c.xport_key_out, Some(PathBuf::from("/tmp/xport-key.hex")));
+    }
+
+    #[test]
+    fn xport_flags_require_values() {
+        assert_eq!(
+            parse(&["tb-vmm", "--xport-out"]).unwrap_err(),
+            CliError::MissingValue("--xport-out")
+        );
+        assert_eq!(
+            parse(&["tb-vmm", "--xport-key-out"]).unwrap_err(),
+            CliError::MissingValue("--xport-key-out")
+        );
     }
 
     #[test]

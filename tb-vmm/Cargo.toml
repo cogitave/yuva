@@ -49,6 +49,13 @@ vm-memory = { version = "0.16", features = ["backend-mmap"] }
 # so the coupling is intentionally minimal (see boot.rs static asserts).
 tb-boot = { path = "../crates/tb-boot" }
 
+# M30 stage C: the verified inferwire codec + khash leaves (no_std +
+# forbid(unsafe_code), zero deps — they build for the host triple by design).
+# tb-vmm's virtio-console backend is the SAME-math host peer the kernel's
+# xport/infer self-tests speak to — never a second codec implementation (the
+# M30 research §8 rule; the xport-harness precedent).
+tb-encode = { path = "../crates/tb-encode" }
+
 [profile.release]
 panic = "abort"
 lto = true
