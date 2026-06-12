@@ -574,6 +574,89 @@ pub(super) fn s2_vmid() -> u64 {
 }
 
 // ===========================================================================
+// aL2.4b: the FULL-KERNEL guest stage-2 — the FIRST NON-IDENTITY stage-2 in
+// the codebase (the isolation flip). Geometry per the Kani-locked
+// `tb_encode::stage2` carve leaf:
+//   * GiB1 L1[1] -> an L2 table whose ONLY valid entries map guest IPA
+//     `0x4000_0000 + i*2MiB` -> carve PA `0x4600_0000 + i*2MiB` (16 Normal-WB
+//     2 MiB blocks, the `guest_carve_pa` leaf per block). The doorbell IPA
+//     (0x4200_0000), the host-RAM probe IPA, and EVERY other RAM IPA are
+//     UNMAPPED -> they stage-2-fault to the monitor (confinement).
+//   * GiB0 L1[0] -> an L2 table whose ONLY valid entry is the 2 MiB Device
+//     block at 0x0800_0000 (GICD+GICC identity pass-through — honest for a
+//     sole guest with the host parked and IMO=0: gic=PASSTHROUGH-SOLE-GUEST).
+//     The PL011 block (0x0900_0000, which also contains the SMMU regs) and
+//     the virtio-mmio block (0x0A00_0000) are deliberately ABSENT: trapped
+//     and emulated/RAZ-WI by the monitor (uart=TRAPPED-EMULATED /
+//     virtio=OPEN-BUS-ABSENT).
+// Built at EL1 (frame_alloc) like every other builder here; armed at EL2 by
+// the HVC #16 handler under its own VMID.
+// ===========================================================================
+
+/// The aL2.4b guest VMID: distinct from the L2.x [`VMID`] (1) and the M27
+/// pair (0/1) so its TLB entries can never alias another rung's.
+pub(super) const KGUEST_VMID: u64 = 2;
+
+/// The GICv2 2 MiB device block (GICD @ 0x0800_0000 + GICC @ 0x0801_0000 +
+/// GICH/GICV — all inside one 2 MiB block) identity-passed-through to the
+/// sole guest.
+const KGUEST_GIC_BLOCK: u64 = 0x0800_0000;
+
+const _: () = assert!(KGUEST_VMID != VMID); // never the L2.x VMID
+const _: () = assert!(KGUEST_VMID != 0 && KGUEST_VMID != 1); // never the M27 pair
+const _: () = assert!(KGUEST_GIC_BLOCK & (BLOCK_2M - 1) == 0); // 2 MiB-aligned
+
+/// EL1: build the aL2.4b guest stage-2 and return the L1 root PA (`None` on
+/// physical-frame OOM). See the section comment for the exact (non-identity)
+/// geometry. The per-block IPA->PA math is the Kani-proven
+/// [`tb_encode::stage2::guest_carve_pa`] leaf — injective + range-bounded, so
+/// no descriptor written here can reach host RAM outside the carve.
+pub(super) fn build_guest_stage2() -> Option<u64> {
+    use tb_encode::stage2::{guest_carve_pa, GUEST_CARVE_SIZE, GUEST_IPA_BASE};
+
+    let root = frame_alloc_zeroed()?;
+    let l2_gib0 = frame_alloc_zeroed()?;
+    let l2_gib1 = frame_alloc_zeroed()?;
+
+    // GiB0: ONLY the GIC 2 MiB Device block (identity). Everything else in
+    // the device gigabyte — the PL011/SMMU block, the virtio block — is left
+    // INVALID so the guest's access stage-2-faults to the monitor.
+    s2_set(
+        l2_gib0,
+        level_index(KGUEST_GIC_BLOCK, SHIFT_2M),
+        s2_leaf_2mib(KGUEST_GIC_BLOCK, S2_MEMATTR_DEVICE),
+    );
+
+    // GiB1: the 16 carve blocks — guest IPA 0x4000_0000+i*2M -> carve PA
+    // 0x4600_0000+i*2M (Normal-WB). The Kani-proven leaf supplies each PA;
+    // a `None` for an in-window block is structurally impossible (the leaf is
+    // total over the window) but stays fail-closed regardless.
+    let mut off: u64 = 0;
+    while off < GUEST_CARVE_SIZE {
+        let ipa = GUEST_IPA_BASE + off;
+        match guest_carve_pa(ipa) {
+            Some(pa) => s2_set(
+                l2_gib1,
+                level_index(ipa, SHIFT_2M),
+                s2_leaf_2mib(pa, S2_MEMATTR_NORMAL_WB),
+            ),
+            None => return None,
+        }
+        off += BLOCK_2M;
+    }
+
+    // L1 root: [0] -> the (one-entry) device table, [1] -> the carve table.
+    // Every other L1 slot stays INVALID — any stray guest IPA faults.
+    s2_set(root, level_index(GIB0_DEVICE_BASE, SHIFT_1G), s2_table(l2_gib0));
+    s2_set(root, level_index(GIB1_RAM_BASE, SHIFT_1G), s2_table(l2_gib1));
+
+    // Publish the whole hierarchy to the (EL1 + EL2) stage-2 walker.
+    dsb_ishst();
+    isb();
+    Some(root)
+}
+
+// ===========================================================================
 // EL2-only: arm / disarm stage-2 (the msr VTCR/VTTBR/HCR.VM writes).
 // ===========================================================================
 

@@ -257,6 +257,13 @@ pub fn qemu_exit_success() {
         serial_write_str("qemu-exit: UNEXPECTED entry (un-armed) -- stray control flow\n");
         arch::halt();
     }
+    // aL2.4b IN-GUEST mode: a semihosting exit from a TCG EL1 guest kills the
+    // WHOLE VM, host included -- route to the doorbell/done/WFI park instead
+    // (the armed gate above still holds: only the single legitimate
+    // end-of-chain site reaches the park's clean status-0 path).
+    if arch::in_guest() {
+        arch::guest_exit_park(true);
+    }
     arch::qemu_exit_success()
 }
 
@@ -268,8 +275,36 @@ pub fn qemu_exit_success() {
 /// which is already a red verdict -- fail-closed either way.
 #[cfg(target_arch = "aarch64")]
 pub fn qemu_exit_failure() {
+    // aL2.4b IN-GUEST mode: never semihost from the confined guest (it would
+    // kill the host VM too). The fail park issues `HVC #17` with a nonzero
+    // status, so the monitor tears down and the HOST lane goes red in
+    // seconds (the host then exits 1 itself) -- fail-closed, fail-fast.
+    if arch::in_guest() {
+        arch::guest_exit_park(false);
+    }
     arch::qemu_exit_failure()
 }
+
+/// aL2.4b: consume a validated `TbBootInfo` (the kernel calls this ONLY
+/// inside its `read_boot_magic == TB_BOOT_MAGIC` branch): records the
+/// IN-GUEST flag and parses the launch cmdline's `tb.nonce=`/`tb.probe=`
+/// values. A no-op for a flags=0 block (the tb-vmm path). aarch64-only --
+/// the x86_64 tb-boot path has no in-guest mode (hardware-gated #37).
+#[cfg(target_arch = "aarch64")]
+pub fn tb_boot_consume(boot_info: usize) {
+    arch::tb_boot_consume(boot_info)
+}
+
+/// aL2.4b: the kernel-guest fail codes the kernel renders as NAMED classes
+/// (`L2.4b: HANG class=storm ...`, the early-park stall, the nisv-abort, the
+/// guest-reported chain failure, the confinement-breach IPA) -- re-exported
+/// so the `forbid(unsafe_code)` kernel can match `KernelGuestProof::Faulted`
+/// codes against named constants instead of magic numbers.
+#[cfg(target_arch = "aarch64")]
+pub use arch::{
+    KGUEST_FAIL_EARLY_PARK, KGUEST_FAIL_NISV, KGUEST_FAIL_REPORTED, KGUEST_FAIL_STORM,
+    KGUEST_FAIL_UNEXPECTED_IPA,
+};
 
 /// Fatal-milestone termination (#65 fix): surface the failure to the harness
 /// IMMEDIATELY with a NONZERO exit instead of parking to the wall-clock
@@ -726,20 +761,33 @@ pub fn user_demo() -> bool {
 /// `tb-vmm` booted us via tb-boot v0; a mismatch (e.g. a PVH `hvm_start_info`
 /// pointer, whose magic is `0x336e_c578`) is simply ignored, never misread.
 ///
-/// The read is guarded to the architecture's identity-mapped low window
-/// (`[0x1000, 1 GiB)` on x86_64 — the PVH `_start` / tb-vmm 2 MiB-page identity
-/// region, which is present and readable) and to 8-byte alignment, so a stray
-/// or out-of-window pointer can never fault the boot path; it just yields
-/// `None`. aarch64 is an MV follow-up: there the FDT pointer (QEMU `virt` places
-/// it at `0x4000_0000`) falls outside this window and is correctly ignored.
+/// The read is guarded to the architecture's identity/flat-readable boot
+/// window and to 8-byte alignment, so a stray or out-of-window pointer can
+/// never fault the boot path; it just yields `None`:
+///  * **x86_64** — `[0x1000, 1 GiB)`: the PVH `_start` / tb-vmm 2 MiB-page
+///    identity region, present and readable on both boot paths.
+///  * **aarch64** — `[0x4000_0000, 0x8000_0000)`: the QEMU `virt` DRAM
+///    gigabyte. At `rust_main` entry the MMU is still OFF (flat physical
+///    addressing), and after `mmu_init` the same gigabyte is identity-mapped,
+///    so an 8-byte read of any DRAM address cannot fault. On the `_start`/FDT
+///    path the pointer lands on the DTB (`0xD00DFEED..` big-endian — never
+///    equal to `TB_BOOT_MAGIC`, so it is fail-closed-ignored); on the
+///    `_tb_start` path (tb-vmm, or the aL2.4b in-guest boot at IPA
+///    `0x4000_1000`) it lands on a genuine `TbBootInfo`.
 pub fn read_boot_magic(boot_info: usize) -> Option<u64> {
-    // Lowest address we will touch (reject the null page) and the first address
-    // past the identity-mapped window. Both x86_64 boot paths map [0, 1 GiB)
-    // with 2 MiB pages: PVH `_start` builds __boot_pd; tb-vmm builds the same
-    // shape (Firecracker `regs.rs::setup_page_tables`). Anything in range is
-    // present, so an 8-byte read there cannot page-fault.
+    // Lowest address we will touch and the first address past the readable
+    // window, per-arch (see the doc comment). x86_64: both boot paths map
+    // [0, 1 GiB) with 2 MiB pages (PVH `_start`'s __boot_pd; tb-vmm's
+    // Firecracker-shaped tables). aarch64: the DRAM gigabyte, flat (MMU off)
+    // or identity-mapped (M3) — either way present.
+    #[cfg(target_arch = "x86_64")]
     const WINDOW_LO: usize = 0x1000;
+    #[cfg(target_arch = "x86_64")]
     const WINDOW_HI: usize = 0x4000_0000; // 1 GiB, exclusive upper bound
+    #[cfg(target_arch = "aarch64")]
+    const WINDOW_LO: usize = 0x4000_0000; // QEMU `virt` DRAM base
+    #[cfg(target_arch = "aarch64")]
+    const WINDOW_HI: usize = 0x8000_0000; // top of the identity RAM gigabyte
 
     if boot_info < WINDOW_LO {
         return None;
@@ -754,14 +802,15 @@ pub fn read_boot_magic(boot_info: usize) -> Option<u64> {
         return None;
     }
 
-    // SAFETY: `boot_info` is in [0x1000, 1 GiB - 8] and 8-byte aligned (checked
-    // above), so it lies inside the present, identity-mapped 2 MiB-page region
-    // the active boot path established (PVH `_start` or tb-vmm), making this
-    // 8-byte read both mapped and aligned. `u64` has no invalid bit patterns,
-    // so whatever bytes are there form a valid value (we never act on it unless
-    // it equals `TB_BOOT_MAGIC`). `read_volatile` stops the optimiser from
-    // making assumptions about this foreign, single-producer boot word. The
-    // pointee is boot RAM that outlives this call.
+    // SAFETY: `boot_info` is inside the per-arch readable boot window and
+    // 8-byte aligned (checked above): on x86_64 the identity-mapped 2 MiB-page
+    // region both boot paths establish; on aarch64 the QEMU `virt` DRAM
+    // gigabyte, readable flat (MMU off) at entry and identity-mapped (M3)
+    // later. `u64` has no invalid bit patterns, so whatever bytes are there
+    // form a valid value (we never act on it unless it equals
+    // `TB_BOOT_MAGIC`). `read_volatile` stops the optimiser from making
+    // assumptions about this foreign, single-producer boot word. The pointee
+    // is boot RAM that outlives this call.
     let magic = unsafe { (boot_info as *const u64).read_volatile() };
     Some(magic)
 }

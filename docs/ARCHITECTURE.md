@@ -162,6 +162,41 @@ the live-lane vocabulary by name).
   tokens machine-forbid claiming cycle accuracy under TCG or any
   real-time/schedulability guarantee, and the guard REJECTS the retired
   cooperative token (M27a cannot impersonate M27b).
+- **The LITERAL full kernel as a stage-2-confined EL1 guest (sovereignty —
+  "replace Firecracker"; the M34 prerequisite) — aL2.4b.** `L2.4b:
+  el1-kernel-guest OK` is the aarch64-only tail (after M31; x86 prints the loud
+  `(aarch64-only, hardware-gated #37, skipped)` token): a SECOND copy of this
+  very kernel image, `-device loader`-staged at a pmm-reserved top-32 MiB carve,
+  booted as an EL1 guest under the resident EL2 monitor's FIRST NON-IDENTITY
+  stage-2 (guest IPA `0x4000_0000+off` → carve PA `0x4600_0000+off`; the
+  Kani-proven `tb_encode::stage2::guest_carve_pa` map; NOTHING outside the carve
+  + one GIC pass-through block is mapped, so a guest store to a host-RAM IPA
+  stage-2-faults). It runs ITS full M0..M31 chain confined — the EL2-gated rungs
+  (L2.0..L2.6, M26, M27) take their machine-emitted `(no EL2, skipped)` form
+  (BOOTED_AT_EL2=0 via the `_tb_start` path), the device rungs skip via open-bus
+  RAZ/WI absence — its serial trapped and re-emitted as injection-proof
+  `guestlog:` hex frames (the Kani-proven `tb_encode::guestlog` codec). The
+  marker is emitted by the MONITOR from non-text witnessed evidence ONLY (the
+  doorbell store-count + the per-boot nonce echo at a watched unmapped IPA, the
+  `HVC #17` done hypercall, the final WFI trapped under `HCR_EL2.TWI`, the
+  confinement-probe fault, the in-guest discriminator read back from guest
+  memory) — never from guest text; the guest's framed chain is corroborating
+  (pre-M34 it is OUR trusted image; at the M34 boundary the same bytes drop to
+  zero weight — same plumbing). Witnessed by `guestboot: launched=1
+  carve=0x46000000+32M nonce=.. doorbell=.. nonce-echo=1 final-wfi=1
+  hostram-faults=0 ..` + `guestprobe: ..stage2-fault=1 store-landed=0..` +
+  `guestchain: contract-v0=1 entryel=0xff guest-el2=0x0 chain-done=1 m31-tail=1`
+  + the honesty-token `guest: guest=FULL-KERNEL-EL1 ram=STAGE2-CONFINED-32M
+  loader=QEMU-DEVICE-LOADER gic=PASSTHROUGH-SOLE-GUEST timer=PHYS-PASSTHROUGH
+  uart=TRAPPED-EMULATED virtio=OPEN-BUS-ABSENT guestlog=HEX-FRAMED-UNTRUSTED
+  exit=WFI-PARK-DOORBELL smp=UP-ONLY rootfs=NONE timing=TCG-NON-CYCLE-ACCURATE
+  cachemodel=TCG-COHERENT-UNTESTED realtime=NOT-CLAIMED` line. **Landed as
+  Stages 1+2 (confined boot + guestlog + the in-guest acceptance profile);
+  Stage 3 — the monitor-PREEMPTIBLE guest (`IMO=1` + the CNTHP deadline + GICD
+  emulate + GICC→GICV remap + multi-LR injection) — is deferred.** The monitor
+  does NOT yet witness preemption or recursive isolation; the marker claims only
+  that the literal full-chain kernel runs as the EL1 guest, stage-2-confined to
+  its carve, with zero guest source changes.
 - **The operator INBOUND channel (§7.5 human approval, §9) — M28, the
   exogenous-oracle CAPSTONE.** `M28: operator-cmd OK` is the NEW cumulative tail
   marker (printed after M26; M27 stays mid-chain): the RX dual of M25's transcript —
@@ -403,7 +438,7 @@ PINNED-VECTOR one-khash-execution shape, mutation-tested per the M31 proposal
 parallel jobs** (`prove-encode-a`/`prove-encode-b` — the first post-M29-stage-C
 pass measured 41m22s of the 45-min cap, past the pre-agreed ~38-min option-4
 trigger); the shard lists, the per-shard pinned counts (the list lengths) and
-the pinned total **`EXPECTED_HARNESSES_TOTAL=96`** live in ONE place,
+the pinned total **`EXPECTED_HARNESSES_TOTAL=102`** live in ONE place,
 `scripts/kani-shards.sh`, consumed by `scripts/verify-encode.sh`
 (`SHARD=a|b|all`; `all` = the unchanged local single full pass). Every mode
 first runs the fail-closed **completeness guard** (lists disjoint + exhaustive,
@@ -435,7 +470,7 @@ QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reache
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
 **kani** (three jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and the
 #101 cost-balanced shard pair `prove-encode-a`/`prove-encode-b` over `tb-encode`
-= 46 + 50 of the 96 harnesses, completeness-guarded); **miri** (the Tier-0 dynamic UB
+= 52 + 50 of the 102 harnesses, completeness-guarded); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI

@@ -309,6 +309,7 @@ pub mod el2_trap;
 pub mod exittel;
 pub mod exp;
 pub mod explore;
+pub mod guestlog;
 pub mod inferwire;
 pub mod ipc_frame;
 pub mod kancell;

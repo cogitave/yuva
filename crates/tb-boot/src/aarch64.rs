@@ -205,6 +205,21 @@ pub fn build_handoff(
     cmdline: &[u8],
     entry_point: u64,
 ) -> Result<Aarch64Handoff, Aarch64HandoffError> {
+    build_handoff_flagged(ram, mem_regions, cmdline, entry_point, 0)
+}
+
+/// [`build_handoff`] with an explicit [`TbBootInfo::flags`] value (aL2.4b: the
+/// EL2 monitor's launch facade passes [`crate::TB_BOOT_FLAG_IN_GUEST`] so the
+/// confined guest suppresses the semihosting exit). The layout, placement and
+/// register-file contract are BYTE-IDENTICAL to [`build_handoff`] -- the flag
+/// rides the existing `flags` field (passed 0 by every pre-aL2.4b caller).
+pub fn build_handoff_flagged(
+    ram: &mut [u8],
+    mem_regions: &[TbMemRegion],
+    cmdline: &[u8],
+    entry_point: u64,
+    flags: u32,
+) -> Result<Aarch64Handoff, Aarch64HandoffError> {
     let n = mem_regions.len() as u64;
     let regions_end = AARCH64_MEM_REGIONS_ADDR + n * (TbMemRegion::SIZE as u64);
     if regions_end > AARCH64_CMDLINE_ADDR {
@@ -226,7 +241,7 @@ pub fn build_handoff(
 
     // (3) The root TbBootInfo (magic/version pre-filled by `new`).
     let info = TbBootInfo::new(
-        0, // flags
+        flags,
         AARCH64_MEM_REGIONS_ADDR,
         n,
         AARCH64_CMDLINE_ADDR,
@@ -364,6 +379,39 @@ mod tests {
         // Exactly six register writes -- nothing else is spliced.
         assert_eq!(h.regs.len(), AARCH64_HANDOFF_REG_COUNT);
         assert_eq!(AARCH64_HANDOFF_REG_COUNT, 6);
+    }
+
+    #[test]
+    fn flagged_handoff_rides_the_existing_flags_field_layout_unchanged() {
+        // aL2.4b: the IN-GUEST bit reuses the existing `flags` field -- the
+        // placement, regions, cmdline and register file are BYTE-IDENTICAL to
+        // the flags=0 handoff; ONLY the 4-byte flags word differs.
+        let regions = [TbMemRegion::new(0x4000_0000, 0x0200_0000, MemKind::Ram)];
+        let entry = 0x4008_0000u64;
+        let mut ram0 = ram();
+        let h0 = build_handoff(&mut ram0, &regions, b"tb.nonce=0123", entry).unwrap();
+        let mut ram1 = ram();
+        let h1 = build_handoff_flagged(
+            &mut ram1,
+            &regions,
+            b"tb.nonce=0123",
+            entry,
+            crate::TB_BOOT_FLAG_IN_GUEST,
+        )
+        .unwrap();
+        assert_eq!(h0.info.flags, 0);
+        assert_eq!(h1.info.flags, crate::TB_BOOT_FLAG_IN_GUEST);
+        assert_eq!(h0.regs, h1.regs, "the register-file splice is flag-independent");
+        // The serialized blocks differ ONLY in the 4 flags bytes @ info+12.
+        let off = (AARCH64_BOOT_INFO_ADDR - AARCH64_GUEST_RAM_BASE) as usize;
+        for i in 0..ram0.len() {
+            if (off + 12..off + 16).contains(&i) {
+                continue;
+            }
+            assert_eq!(ram0[i], ram1[i], "non-flags byte {i} drifted");
+        }
+        let back = TbBootInfo::read_validated(&ram1[off..]).unwrap();
+        assert_eq!(back.flags & crate::TB_BOOT_FLAG_IN_GUEST, 1);
     }
 
     #[test]

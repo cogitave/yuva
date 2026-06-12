@@ -37,6 +37,7 @@ mod el2vgic; // aL2.5: vGIC virtual-interrupt injection arming (HCR.IMO|TWI + GI
 mod el2mmio; // L2.3: trap-and-emulate arming (HCR.VM|TVM) + the MMIO device seam + served cell.
 mod exits; // L2.2: EL2 exit-dispatch arming (HCR.TWI|TWE + CPTR.TFP) + served-mask cell.
 mod exits_vectors; // L2.2: __l2_guest_vectors EL1 table (inject-UNDEF target); pure asm.
+mod inguest; // aL2.4b: IN-GUEST mode (TbBootInfo flag/nonce consume + the doorbell/done/WFI park).
 mod mmu; // M3: cold MMU bring-up + 4 KiB map / BBM remap self-test.
 mod pmm; // M6: QEMU `virt` boot memory-map source (hard-coded map + DTB reserve).
 mod sched; // M2: ctx_switch (x19..x30 + SP) + initial-frame fabrication.
@@ -56,6 +57,12 @@ pub use el2::el2_exits_selftest; // L2.2: the safe EL2 exit-dispatch self-test f
 pub use el2::el2_trap_selftest; // L2.3: the safe trap-and-emulate self-test facade.
 pub use el2::stage2_selftest; // L2.1: the safe stage-2 demand-translation self-test facade.
 pub use el2::el2_nested_guest_selftest; // aL2.4: the safe nested-guest (two-stage) self-test facade.
+pub use el2::el2_kernel_guest_selftest; // aL2.4b: the safe full-kernel-guest launch facade.
+pub use el2::{
+    KGUEST_FAIL_EARLY_PARK, KGUEST_FAIL_NISV, KGUEST_FAIL_REPORTED, KGUEST_FAIL_STORM,
+    KGUEST_FAIL_UNEXPECTED_IPA,
+}; // aL2.4b: the render-class fail codes (HANG storm/stall naming in the kernel).
+pub use inguest::{guest_exit_park, in_guest, tb_boot_consume}; // aL2.4b: IN-GUEST mode.
 pub use el2::el2_vgic_selftest; // aL2.5: the safe vGIC virtual-interrupt-injection self-test facade.
 pub use el2::sched_selftest; // M27a: the safe cooperative two-VMID time-partition scheduler self-test facade.
 pub use smmu::smmu_selftest; // aL2.6: the safe SMMUv3 stage-2 table-programming self-test facade.

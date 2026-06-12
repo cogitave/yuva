@@ -142,6 +142,23 @@ jobs:
       - name: Build xport-harness (M30 host echo peer)
         run: cargo build --release --manifest-path tools/xport-harness/Cargo.toml
 
+      # aL2.4b: pre-generate the full-kernel EL1 guest image (the flat binary
+      # the aarch64 boot's `-device loader` stages at the carve). Produced HERE
+      # on the runner (which has rustup's llvm-tools llvm-objcopy) because the
+      # aarch64 boot runs in a cargo-less debian:trixie-slim container -- the
+      # bind-mounted /work carries this prebuilt `<ELF>.guest.bin`, and
+      # run-aarch64.sh's mtime check (`KERNEL -nt GUEST_BIN`) then SKIPS the
+      # in-container regen (which has no objcopy). aarch64-only; the x86 lane
+      # ignores it. Mirrors the xport-harness prebuild pattern above.
+      - name: Pre-generate the aL2.4b guest image (aarch64)
+        if: ${{ matrix.arch == 'aarch64' }}
+        run: |
+          TV='${{ matrix.target_var }}'
+          ELF="target/${!TV}/debug/${KERNEL_BIN}"
+          OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy | head -1)"
+          "${OBJCOPY}" -O binary "${ELF}" "${ELF}.guest.bin"
+          ls -l "${ELF}.guest.bin"
+
       # The run script boots the freshly built ELF under QEMU (TCG), greps the
       # serial log for the milestone DoD marker, and exits 0 only on a hit.
       #
@@ -189,4 +206,4 @@ jobs:
             -v "$PWD":/work -w /work \
             -e QEMU_TIMEOUT="${QEMU_TIMEOUT}" \
             "${{ matrix.boot_in_container }}" \
-            bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"
+            bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} xxd >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"

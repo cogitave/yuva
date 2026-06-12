@@ -73,6 +73,18 @@ use super::{stage2, timer};
 mod l24_nested;
 pub use l24_nested::el2_nested_guest_selftest;
 
+// --- aL2.4b full-kernel-guest rung: the `l24b_guest` child module --------------
+// (the HVC #16/#17 launch/done handlers, the trapped-PL011/doorbell/probe
+// stage-2 abort emulate, the guestlog frame emitter, and the EL1 launch
+// facade -- the literal M0..M31 kernel as a stage-2-confined EL1 guest).
+mod l24b_guest;
+pub use l24b_guest::el2_kernel_guest_selftest;
+pub use l24b_guest::{
+    FAIL_KG_EARLY_PARK as KGUEST_FAIL_EARLY_PARK, FAIL_KG_GUEST_REPORTED as KGUEST_FAIL_REPORTED,
+    FAIL_KG_NISV as KGUEST_FAIL_NISV, FAIL_KG_STORM as KGUEST_FAIL_STORM,
+    FAIL_KG_UNEXPECTED_IPA as KGUEST_FAIL_UNEXPECTED_IPA,
+};
+
 // --- aL2.5 vGIC rung: extracted to the `l25_vgic` child module ----------------
 // (the naked guest stub + the vector-table address helper + the safe facade;
 // a pure behavior-preserving code move, the mem/selftests.rs pattern).
@@ -608,11 +620,30 @@ const M27_SLOT1_TICKS: u64 = 0x2000;
 const M27_VMID0: u16 = 0;
 const M27_VMID1: u16 = 1;
 
+// ===========================================================================
+// aL2.4b full-kernel-guest constants (the launch vocabulary -- survey MISSING
+// #5). HVC immediates: #16 arm/launch, #17 doorbell/done. The handler bodies
+// live in the `l24b_guest` child module; the immediates are pinned HERE with
+// every other rung's so the dispatch vocabulary has one home.
+// ===========================================================================
+
+/// aL2.4b: the kernel's full-guest LAUNCH HVC immediate (`hvc #16`) -- "stash
+/// the launch context (nonce/probe/SP_EL1), arm the carve stage-2 (VMID 2) +
+/// HCR_EL2 = RW|VM|TWI, and eret into the staged guest image's `_tb_start`
+/// with X0 = TbBootInfo* (the frozen tb-boot splice contract)".
+const HVC_KGUEST_ARM: u64 = 16;
+/// aL2.4b: the guest's DOORBELL/DONE HVC immediate (`hvc #17`) -- x0 = status
+/// (0 = the single armed clean-exit site was reached), x1 = the nonce echo.
+/// Status 0 records done and resumes the guest (its next trapped WFI is the
+/// completion witness); nonzero tears down and fails the host lane fast.
+const HVC_KGUEST_DONE: u64 = 17;
+
 // Tier-1 compile-time locks on the M27a dispatch constants (a drift is a build
 // error). The HVC immediates are distinct from every existing rung's (0..11) and
 // from each other; the FAIL codes are distinct nonzero.
 const _: () = assert!(HVC_SCHED_ARM == 12 && HVC_SCHED_DONE == 13 && HVC_SCHED_YIELD == 14);
 const _: () = assert!(HVC_SCHED_TIMER_SMOKE == 15); // the next free imm after #14
+const _: () = assert!(HVC_KGUEST_ARM == 16 && HVC_KGUEST_DONE == 17); // aL2.4b: the next free pair
 const _: () = assert!(M27_SLOT0_TICKS != 0 && M27_SLOT1_TICKS != 0);
 const _: () = assert!(M27_SLOT0_TICKS != M27_SLOT1_TICKS); // a non-trivial conserved sum
 const _: () = assert!(M27_VMID0 != M27_VMID1); // two DISTINCT VMIDs
@@ -754,6 +785,15 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
         // device seam + ELR ADVANCE), routed BEFORE the L2.1 demand path so the
         // device IPA never reaches the demand-map (it stays unmapped per access).
         ExitClass::StageTwoAbort => {
+            // aL2.4b: the full-kernel-guest window. EVERY guest stage-2 abort
+            // (its trapped PL011/SMMU/virtio I/O, the doorbell, the
+            // confinement probe, any stray touch) routes through the
+            // kernel-guest emulate table. Checked FIRST + gated on the
+            // l24b_guest armed flag (the windows never overlap in time), so
+            // when it is NOT armed this is byte-identical to the prior path.
+            if l24b_guest::armed() {
+                l24b_guest::kguest_abort(frame, esr);
+            }
             // M27: the timer-preempted two-VMID scheduler window. A guest's store
             // to its DISTINCT (unmapped) device IPA stage-2-faults here -> route it
             // through the per-VMID MMIO counter seam + advance ELR (the L2.3
@@ -773,6 +813,14 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
         // `kvm_handle_wfx`), recording the arm fired; outside the window it is
         // unexpected -> fail closed.
         ExitClass::Wfx => {
+            // aL2.4b: the full-kernel-guest window -- the guest's final WFI
+            // park (the completion witness, post-done) or an early park (the
+            // guest died mid-chain -> the fast named red). Checked FIRST,
+            // gated on the l24b_guest armed flag (never armed concurrently
+            // with the exits/vgic windows -- the self-tests run sequentially).
+            if l24b_guest::armed() {
+                l24b_guest::kguest_wfx(frame, esr);
+            }
             // aL2.5: the vGIC injection branch (mutually exclusive with the L2.2
             // exits window -- the self-tests run sequentially so at most one is
             // armed; a debug-assert pins it). On the guest's trapped WFI (the
@@ -1335,6 +1383,21 @@ pub(super) extern "C" fn aarch64_el2_sync_handler(frame: *mut Frame) -> ! {
                     options(noreturn),
                 );
             }
+        }
+        HVC_KGUEST_ARM => {
+            // imm == 16: the kernel's aL2.4b full-guest launch (the context
+            // rides the frame: x0=VTCR, x1=VTTBR, x2=entry IPA, x3=TbBootInfo
+            // IPA, x4=nonce, x5=probe IPA). Never returns.
+            l24b_guest::kguest_launch(frame);
+        }
+        HVC_KGUEST_DONE => {
+            // imm == 17: the guest's doorbell/done hypercall (x0=status,
+            // x1=nonce echo) -- ONLY meaningful while the kernel-guest window
+            // is armed; a stray hvc #17 outside it falls to FAIL_BAD_IMM.
+            if l24b_guest::armed() {
+                l24b_guest::kguest_done(frame);
+            }
+            el2_return_to_kernel(FAIL_BAD_IMM, HVC_KGUEST_DONE);
         }
         other => {
             // A valid HVC64 but an unexpected immediate -- fail, don't loop.

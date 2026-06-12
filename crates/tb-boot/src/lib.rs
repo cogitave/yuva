@@ -96,6 +96,15 @@ pub const TB_BOOT_MAGIC: u64 = brand::BOOT_MAGIC;
 /// incompatible layout change; readers reject any other value.
 pub const TB_BOOT_VERSION: u32 = 0;
 
+/// [`TbBootInfo::flags`] bit 0 -- **IN-GUEST** (aL2.4b §2.3): the kernel is
+/// running as a stage-2-confined EL1 guest under the resident EL2 monitor.
+/// It must NOT issue the semihosting QEMU-exit at end-of-chain (from a TCG
+/// EL1 guest that kills the WHOLE VM, host included); it signals completion
+/// through the monitor-watched doorbell + the `HVC #17` done hypercall and
+/// parks in `wfi` instead. Reuses the existing `flags` field -- NO layout
+/// change (the v0 contract is untouched; flags was passed 0 until aL2.4b).
+pub const TB_BOOT_FLAG_IN_GUEST: u32 = 1 << 0;
+
 /// [`TbMemRegion::kind`] value for usable RAM.
 pub const TB_MEM_KIND_RAM: u32 = 1;
 
