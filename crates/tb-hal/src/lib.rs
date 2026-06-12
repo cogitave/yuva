@@ -2486,6 +2486,34 @@ pub fn agent_model_dispatch(
     Some((ret.status as u32, ret.value))
 }
 
+/// M31: the BYTE-prompt model-invoke facade -- drive the
+/// `M_MODEL_INVOKE_BYTES` body ([`caps::HandleTable::model_invoke_bytes`],
+/// `INVOKE_MODEL`-gated at the M11 chokepoint exactly like the scalar arm)
+/// against `t`'s OWN table with kernel-owned byte buffers (the
+/// [`agent_chan_send_bytes`] / [`agent_block_map`] precedent: a byte-buffer-
+/// dependent body rides the kernel facade, the registered method number keeps
+/// the ABI space closed). Returns `(status, backend_result)`; `None` only if
+/// `t` is not an agent. The backend result is `Some` ONLY when the gate
+/// passed and a real [`crate::infer::ModelSession`] ran `infer_bytes`.
+#[allow(clippy::type_complexity)] // the closed status x backend-Result product, spelled once
+pub fn agent_model_invoke_bytes(
+    t: Task,
+    sess: caps::Handle,
+    prompt: &[u8],
+    resp_out: &mut [u8],
+) -> Option<(
+    u32,
+    Option<Result<(usize, infer::StopReason), infer::InferError>>,
+)> {
+    let slot = t.raw();
+    if slot >= MAX_TASKS {
+        return None;
+    }
+    let ap = AGENTS.slot(slot).as_mut()?;
+    let (st, res) = ap.table.model_invoke_bytes(sess, prompt, resp_out);
+    Some((st as u32, res))
+}
+
 // ===========================================================================
 // M18: frozen-kernel self-improvement harness (held-out evaluator + skill tier)
 // ===========================================================================

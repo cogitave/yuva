@@ -165,7 +165,28 @@ pub trait InferBackend: Sync {
     /// longest-prefix routing key consumed by [`resolve`].
     fn scheme(&self) -> &'static str;
     /// Run ONE synchronous, deterministic inference at M16.
+    ///
+    /// HISTORY NOTE (M31): this u64-scalar path is the M16 toy contract, kept
+    /// for source compatibility (the M16 self-test + marker ride it). The
+    /// REAL prompt/response contract is [`InferBackend::infer_bytes`]; this
+    /// scalar method is removed at a named future cleanup, never silently.
     fn infer(&self, req: &InferRequest) -> InferResponse;
+    /// M31: run ONE synchronous BYTE-prompt inference (the path the M16
+    /// design deferred -- proposal §3a). Object-safe, zero-alloc: the caller
+    /// owns both buffers; the backend writes the response into `resp_out` and
+    /// returns `(resp_len, stop_reason)`, or a returnable [`InferError`]
+    /// (fail-closed: an empty or over-[`tb_encode::inferwire::INFER_BODY_CAP`]
+    /// prompt is `ContextExceeded`; a too-small `resp_out` is `Cancelled`).
+    /// The default body keeps every non-byte backend source-compatible:
+    /// `Unavailable` until a backend opts in.
+    fn infer_bytes(
+        &self,
+        _model: ModelId,
+        _prompt: &[u8],
+        _resp_out: &mut [u8],
+    ) -> Result<(usize, StopReason), InferError> {
+        Err(InferError::Unavailable)
+    }
 }
 
 /// STATELESS, deterministic loopback -- NO clock, NO rng, NO I/O (QEMU has no
@@ -191,6 +212,32 @@ impl InferBackend for MockBackend {
             token: req.prompt ^ 0xA110_C0DE,
             stop_reason: StopReason::EndTurn,
         }
+    }
+    /// M31: the MOCK-DETERMINISTIC byte path -- the verified leaf's shared
+    /// [`tb_encode::inferwire::mock_infer`] transform (a pure uhash-keystream
+    /// expansion; no clock, no RNG, bit-for-bit CI-reproducible). The SAME
+    /// function the `xport-harness` host serve loop applies, so the boot
+    /// self-test can require the wire-delivered response to EQUAL this
+    /// in-kernel expectation. HONEST: a deterministic transform, not a model
+    /// -- `backend=MOCK-DETERMINISTIC` on every witness line says so.
+    fn infer_bytes(
+        &self,
+        _model: ModelId,
+        prompt: &[u8],
+        resp_out: &mut [u8],
+    ) -> Result<(usize, StopReason), InferError> {
+        use tb_encode::inferwire::{mock_infer, INFER_BODY_CAP, INFER_MOCK_RESP_LEN};
+        if prompt.is_empty() || prompt.len() > INFER_BODY_CAP {
+            return Err(InferError::ContextExceeded);
+        }
+        if resp_out.len() < INFER_MOCK_RESP_LEN {
+            return Err(InferError::Cancelled); // caller buffer too small
+        }
+        let n = mock_infer(prompt, resp_out);
+        if n == 0 {
+            return Err(InferError::Unavailable); // unreachable given the guards
+        }
+        Ok((n, StopReason::EndTurn))
     }
 }
 
@@ -229,5 +276,18 @@ impl ModelSession {
             model: self.model,
             prompt,
         })
+    }
+
+    /// M31: one BYTE-prompt invocation against the bound backend (the
+    /// [`InferBackend::infer_bytes`] path). Reached ONLY through the session
+    /// capability via the M11 chokepoint (`M_MODEL_INVOKE_BYTES`, gated by the
+    /// same `INVOKE_MODEL` right; the byte buffers ride the kernel facade --
+    /// the M14.1/M15 address-space-dependent-body precedent).
+    pub fn invoke_bytes(
+        &self,
+        prompt: &[u8],
+        resp_out: &mut [u8],
+    ) -> Result<(usize, StopReason), InferError> {
+        self.backend.infer_bytes(self.model, prompt, resp_out)
     }
 }

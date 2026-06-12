@@ -708,23 +708,30 @@ fn op_emit_frame(
 /// It (a) SEEDS the same memory-pressure scenario as the M23 self-test (>=3 low-
 /// importance writes + a recall + a real M17 [`MemSubstrate::forget_sweep`]) so the
 /// substrate carries a LIVE M22 provenance `chain_head` AND >=1 M23 forget-decision;
-/// (b) EMITS a 4-frame transcript -- `INTRO`(seq 0, `prev_head` = the LIVE M22 head:
+/// (b) EMITS a 5-frame transcript -- `INTRO`(seq 0, `prev_head` = the LIVE M22 head:
 /// the "which instance am I" binding), `MARKER`(seq 1), `EXPERIENCE_DIGEST`(seq 2,
 /// payload = the MOST-BORDERLINE M23 record's canonical bytes, ranked by
-/// `opframe::borderline_gap` -- the Settles active-learning query), and the closing
-/// `GATE_VERDICT`(seq 3, payload = the committed final seq LE + the honest M24 verdict
-/// byte) -- folding each into a running `op_head` via the REUSED M22 fold; (c) plays
+/// `opframe::borderline_gap` -- the Settles active-learning query), the M31
+/// INFERENCE-DIGEST `MARKER`(seq 3, payload = `infer_fold_payload` -- `req_id (u64
+/// LE) || op_hash(response-bytes)` from the channel-free MOCK-DETERMINISTIC e2e the
+/// kernel ran at the capability chokepoint; the DIGEST, never raw model bytes:
+/// fixed-width, injection-inert, the layered-payload convention -- M31 proposal
+/// §3d), and the closing `GATE_VERDICT`(seq 4, payload = the committed final seq LE
+/// + the honest M24 verdict byte) -- folding each into a running `op_head` via the
+/// REUSED M22 fold, the M31 frame BEFORE the closing commit so the committed final
+/// seq covers it (the tail-truncation catch); (c) plays
 /// the SIMULATED operator-verifier: independently re-fold the committed frame ids and
 /// confirm `op_head` + a genuine inclusion proof, assert the `seq` is strictly
 /// `seqs[i]==i` (no gap/reorder/dup), assert the `INTRO` binds the LIVE M22 head,
 /// assert the closing `GATE_VERDICT` commits the final seq (so a reader expecting a
 /// longer transcript -- a truncated tail -- is REJECTED), and FLIP ONE BYTE of a
 /// committed frame's canonical bytes to prove the recompute REJECTS (head-mismatch
-/// AND inclusion-fail). The marker is withheld unless EVERY leg holds. HONEST: the
+/// AND inclusion-fail). The marker is withheld unless EVERY leg holds (an EMPTY
+/// `infer_fold_payload` fails closed -- the M31 e2e provably ran first). HONEST: the
 /// fold is keyless (tamper-EVIDENCE -- a cryptographic hash since M29-C but unkeyed,
 /// not authenticity -- `keyed=0`) and the
 /// verifier is the OS's own plumbing, NOT a human (`oracle=HUMAN-DEFERRED-M26`).
-pub(crate) fn opframe_selftest() -> crate::OpframeProof {
+pub(crate) fn opframe_selftest(infer_fold_payload: &[u8]) -> crate::OpframeProof {
     use tb_encode::opframe::{
         self, gate_commits_final_seq, intro_binds, op_hash, op_head_witness, op_recompute,
         op_verify_inclusion, seq_index_exact, PROV_HASH_LEN,
@@ -784,6 +791,12 @@ pub(crate) fn opframe_selftest() -> crate::OpframeProof {
     if digest_payload.is_empty() {
         return fail(0, 0); // no forget-decision surfaced -> nothing to attest (fail-closed)
     }
+    // M31: the inference-digest fold payload must exist (req_id u64 LE + the
+    // 32-byte op_hash of the response) -- an empty/short payload means the
+    // channel-free mock e2e did NOT run first, fail-closed.
+    if infer_fold_payload.len() != 8 + tb_encode::opframe::PROV_HASH_LEN {
+        return fail(0, 0);
+    }
 
     // (b) EMIT the 4-frame transcript, folding each canonical frame into op_head. We
     //     KEEP each frame's canonical bytes (for the INTRO-binding / truncation /
@@ -822,9 +835,21 @@ pub(crate) fn opframe_selftest() -> crate::OpframeProof {
     ) {
         return fail(op_head_witness(op_head), 2);
     }
-    // GATE_VERDICT(3): the closing frame commits the final seq (3) + the honest M24
+    // M31 INFERENCE-DIGEST MARKER(3): the channel-free MOCK-DETERMINISTIC e2e's
+    // `req_id || op_hash(response)` -- the DIGEST, never the dump (fixed-width,
+    // injection-inert; M31 proposal §3d: kind=MARKER via the layered-payload
+    // convention, partition CANDIDATE, folded BEFORE the closing GATE_VERDICT so
+    // the committed final seq covers it -- the tail-truncation catch).
+    let prev3 = op_head;
+    if !op_emit_frame(
+        &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
+        opframe::kind::MARKER, OPFRAME_SEV_INFO, 3, 4, prev3, infer_fold_payload,
+    ) {
+        return fail(op_head_witness(op_head), 3);
+    }
+    // GATE_VERDICT(4): the closing frame commits the final seq (4) + the honest M24
     // verdict byte (0 == gate-not-met, the dormant outcome -- never a forged activation).
-    let final_seq: u64 = 3;
+    let final_seq: u64 = 4;
     let mut gate_payload = [0u8; 9];
     let fs = final_seq.to_le_bytes();
     let mut i = 0usize;
@@ -833,16 +858,16 @@ pub(crate) fn opframe_selftest() -> crate::OpframeProof {
         i += 1;
     }
     gate_payload[8] = 0; // M24 verdict: gate-not-met (dormant) -- the honest outcome
-    let prev3 = op_head;
+    let prev4 = op_head;
     if !op_emit_frame(
         &mut op_head, &mut ids, &mut seqs, &mut frame_bytes, &mut scratch,
-        opframe::kind::GATE_VERDICT, OPFRAME_SEV_WARN, final_seq, 4, prev3, &gate_payload,
+        opframe::kind::GATE_VERDICT, OPFRAME_SEV_WARN, final_seq, 5, prev4, &gate_payload,
     ) {
-        return fail(op_head_witness(op_head), 3);
+        return fail(op_head_witness(op_head), 4);
     }
 
     let frames = ids.len() as u64;
-    if frames != 4 {
+    if frames != 5 {
         return fail(op_head_witness(op_head), frames);
     }
     let committed = op_head;
@@ -1458,6 +1483,368 @@ pub(crate) fn xport_selftest() -> crate::InferChanProof {
         nonce,
         tag,
         peer_id: resp.peer_id,
+        key, // M31: carried forward for the inference-adapter wire legs
+    }
+}
+
+// --- M31: the verified inference-adapter WIRE self-test (the marker body) ----
+
+/// The hard cap on verified `INFER_PENDING` heartbeats per exchange (M31
+/// proposal §2f -- pendings reset the poll budget but can never be unbounded;
+/// the deterministic stage-B harness sends EXACTLY ONE).
+const INFER_PENDING_CAP: u64 = 8;
+
+/// M31: run the inference-adapter WIRE legs over the (already M30-proven)
+/// virtio-console channel and report a [`crate::InferWireProof`]. The
+/// channel-free half of the M31 e2e -- M13-context recall, the in-kernel
+/// MOCK-DETERMINISTIC `infer_bytes`, and the M25 transcript fold -- runs at
+/// the capability chokepoint in the kernel (the M13/M16 dispatch idiom);
+/// THIS function proves the NEW framing transits the real guest/host
+/// boundary, fail-closed path included:
+///
+/// 1. Mint the per-boot M31 challenge (`uhash(label || cycle-counter)`, the
+///    M30 idiom; the label derives from the brand crate) + the probe
+///    correlation id. Every M31 frame the kernel sends is MAC'd with the
+///    channel-revealed K under the NEW `infer_tag` domain (`verify_infer_req`
+///    is the host's symmetric check).
+/// 2. THE KEYLESS WIRE-ERR CHECK (proposal §3d): send ONE `INFER_REQ`
+///    carrying the designated `INFER_NOKEY_PROBE` body; the keyless harness
+///    answers a MAC'd `ERR code=NO-KEY` which must verify (`infer_tag` under
+///    the new domain, this boot's challenge echoed, the M30 nonce carried)
+///    and decode through the CLOSED enum -- `wire-err-handled=0x1` is earned,
+///    never assumed.
+/// 3. THE CHUNKED MOCK EXCHANGE: send the agent-assembled prompt as a MAC'd
+///    single-chunk `INFER_REQ`; the harness answers EXACTLY ONE MAC'd
+///    `INFER_PENDING` heartbeat (liveness plumbing, NEVER a completion) then
+///    the deterministic `mock_infer` response as MAC'd `INFER_RESP` chunks
+///    (1280 bytes -> 2 chunks, so the proven [`InferAssembler`] does real
+///    wire work every boot). The kernel stream-re-frames through
+///    `FrameAccum`, MAC-verifies EVERY frame via `verify_infer_resp`,
+///    reassembles, and requires the assembled body to (a) pass the
+///    assembler's own digest-commitment check and (b) EQUAL the in-kernel
+///    `infer_bytes` expectation BIT-EXACTLY -- the cross-process determinism
+///    check (the harness computes the SAME shared leaf transform).
+/// 4. THE FOUR IN-BOOT NEGATIVES (the runtime mirror of the §8 harnesses;
+///    each must FIRE or the whole proof is `Failed`): badmac (a flipped tag
+///    byte on a REAL received chunk frame must reject), digest-mismatch (a
+///    scratch assembler must reject a completion whose recomputed body digest
+///    misses the commitment), oversize (a sub-header declaring total_len >
+///    `INFER_BODY_CAP` must reject -- reject-never-truncate, the 413 mirror),
+///    and err-taxonomy (an out-of-enum ERR code and a contradicted retryable
+///    flag must reject).
+///
+/// HONEST: `backend=MOCK-DETERMINISTIC` -- the host applies a deterministic
+/// transform, no model is called, no network exists; the witness tokens say
+/// exactly that, and the run-script guards reject any live/real vocabulary
+/// near the M31 lines. The expected response length/chunking is derivable a
+/// priori from the SHARED compile-time consts (both ends compile this leaf),
+/// which is what lets the poll-driven channel size its receive window.
+pub(crate) fn infer_wire_selftest(
+    slot: u32,
+    key: &[u8; 32],
+    m30_nonce: &[u8; 16],
+    req_id: u64,
+    prompt: &[u8],
+    expected_resp: &[u8],
+) -> crate::InferWireProof {
+    use tb_encode::inferwire::{
+        body_digest, canon, decode, err_decode, errcode, infer_chunk_count,
+        infer_chunks_wire_len, infer_tag, kind, subhdr_decode, AsmPush, FrameAccum,
+        InferAssembler, InferFrame, SubHdr, INFER_ACCUM_CAP, INFER_BODY_CAP,
+        INFER_CHALLENGE_LEN, INFER_ERR_PAYLOAD_LEN, INFER_HEADER_LEN, INFER_MOCK_RESP_LEN,
+        INFER_NOKEY_PROBE, INFER_SUBHDR_LEN,
+    };
+    use tb_encode::khash::uhash;
+
+    let fail = |stage: u32| crate::InferWireProof::Failed { stage };
+
+    // 1. The per-boot M31 challenge + probe correlation id (the M30 idiom).
+    const LABEL: &[u8] = concat!(brand::brand_upper!(), "-M31-CHALLENGE-V1").as_bytes();
+    let ticks = crate::read_cycle_counter();
+    let mut seed = [0u8; LABEL.len() + 8];
+    let mut i = 0usize;
+    while i < LABEL.len() {
+        seed[i] = LABEL[i];
+        i += 1;
+    }
+    let tb = ticks.to_le_bytes();
+    let mut t = 0usize;
+    while t < 8 {
+        seed[LABEL.len() + t] = tb[t];
+        t += 1;
+    }
+    let h = uhash(&seed);
+    let mut challenge = [0u8; INFER_CHALLENGE_LEN];
+    let mut c = 0usize;
+    while c < INFER_CHALLENGE_LEN {
+        challenge[c] = h[c];
+        c += 1;
+    }
+    let mut probe_rid = u64::from_le_bytes([
+        h[16], h[17], h[18], h[19], h[20], h[21], h[22], h[23],
+    ]);
+    if probe_rid == req_id {
+        probe_rid ^= 1; // the two in-boot exchanges never share an id
+    }
+
+    // 2. THE KEYLESS WIRE-ERR CHECK: INFER_REQ(NOKEY_PROBE) -> MAC'd ERR NO-KEY.
+    let probe_sub = SubHdr {
+        seq: 0,
+        more: false,
+        total_len: INFER_NOKEY_PROBE.len() as u32,
+        body_digest: body_digest(INFER_NOKEY_PROBE),
+    };
+    const PROBE_PAYLOAD_LEN: usize = INFER_SUBHDR_LEN + INFER_NOKEY_PROBE.len();
+    let mut probe_payload = [0u8; PROBE_PAYLOAD_LEN];
+    if tb_encode::inferwire::subhdr_canon(&probe_sub, &mut probe_payload) != INFER_SUBHDR_LEN {
+        return fail(0x10);
+    }
+    let mut p = 0usize;
+    while p < INFER_NOKEY_PROBE.len() {
+        probe_payload[INFER_SUBHDR_LEN + p] = INFER_NOKEY_PROBE[p];
+        p += 1;
+    }
+    let probe_tag = infer_tag(
+        key,
+        0,
+        &[0u8; 16],
+        &challenge,
+        probe_rid,
+        kind::INFER_REQ,
+        &probe_sub,
+        INFER_NOKEY_PROBE,
+    );
+    let probe_frame = InferFrame {
+        kind: kind::INFER_REQ,
+        req_id: probe_rid,
+        challenge,
+        nonce: [0u8; 16],
+        peer_id: 0,
+        tag: probe_tag,
+        payload: &probe_payload,
+    };
+    let mut probe_wire = [0u8; INFER_HEADER_LEN + PROBE_PAYLOAD_LEN];
+    let pn = canon(&probe_frame, &mut probe_wire);
+    if pn != probe_wire.len() {
+        return fail(0x10);
+    }
+    // The expected answer is EXACTLY one ERR frame (closed payload).
+    const ERR_RESP_LEN: usize = INFER_HEADER_LEN + INFER_ERR_PAYLOAD_LEN;
+    let mut err_buf = [0u8; ERR_RESP_LEN];
+    match crate::arch::chan_send_recv(slot, &probe_wire[..pn], &mut err_buf) {
+        Some(n) if n == ERR_RESP_LEN => {}
+        _ => return fail(0x11), // present-then-silent: hard fail, never a skip
+    }
+    let mut acc: FrameAccum<INFER_ACCUM_CAP> = FrameAccum::new();
+    let mut fl = 0usize;
+    let mut fed = 0usize;
+    let mut b = 0usize;
+    while b < ERR_RESP_LEN {
+        if let Some(n) = acc.push_byte(err_buf[b]) {
+            fl = n;
+            fed = b + 1;
+            break;
+        }
+        b += 1;
+    }
+    if fl == 0 || fed != ERR_RESP_LEN {
+        return fail(0x12);
+    }
+    let wire_err_handled = match decode(&acc.bytes()[..fl]) {
+        Some(f) if f.kind == kind::ERR && f.nonce == *m30_nonce => {
+            match tb_encode::inferwire::verify_infer_resp(key, &f, probe_rid, &challenge) {
+                Some((_, chunk)) => matches!(err_decode(chunk), Some((errcode::NO_KEY, false))),
+                None => false,
+            }
+        }
+        _ => false,
+    };
+    if !wire_err_handled {
+        return fail(0x13);
+    }
+
+    // 3. THE CHUNKED MOCK EXCHANGE (prompt -> 1 PENDING + 2 RESP chunks).
+    if prompt.is_empty() || expected_resp.len() != INFER_MOCK_RESP_LEN {
+        return fail(0x20);
+    }
+    let req_sub = SubHdr {
+        seq: 0,
+        more: false,
+        total_len: prompt.len() as u32,
+        body_digest: body_digest(prompt),
+    };
+    let mut req_payload = alloc::vec![0u8; INFER_SUBHDR_LEN + prompt.len()];
+    if tb_encode::inferwire::subhdr_canon(&req_sub, &mut req_payload) != INFER_SUBHDR_LEN {
+        return fail(0x20);
+    }
+    req_payload[INFER_SUBHDR_LEN..].copy_from_slice(prompt);
+    let req_tag = infer_tag(
+        key,
+        0,
+        &[0u8; 16],
+        &challenge,
+        req_id,
+        kind::INFER_REQ,
+        &req_sub,
+        prompt,
+    );
+    let req_frame = InferFrame {
+        kind: kind::INFER_REQ,
+        req_id,
+        challenge,
+        nonce: [0u8; 16],
+        peer_id: 0,
+        tag: req_tag,
+        payload: &req_payload,
+    };
+    let mut req_wire = alloc::vec![0u8; INFER_HEADER_LEN + req_payload.len()];
+    let rn = canon(&req_frame, &mut req_wire);
+    if rn != req_wire.len() {
+        return fail(0x20);
+    }
+    // The response length is derivable a priori from the SHARED consts:
+    // one empty-payload PENDING frame + the fixed-discipline chunk sequence.
+    let expect_rx = INFER_HEADER_LEN + infer_chunks_wire_len(expected_resp.len());
+    let mut rx = alloc::vec![0u8; expect_rx];
+    match crate::arch::chan_send_recv(slot, &req_wire[..rn], &mut rx) {
+        Some(n) if n == expect_rx => {}
+        _ => return fail(0x21),
+    }
+
+    // Stream-reframe + MAC-verify EVERY frame + chunk-assemble.
+    let mut acc: FrameAccum<INFER_ACCUM_CAP> = FrameAccum::new();
+    let mut asm: InferAssembler<INFER_MOCK_RESP_LEN> = InferAssembler::new();
+    let mut pending: u64 = 0;
+    let mut chunks: u64 = 0;
+    let mut body_len: usize = 0;
+    let mut last_chunk_frame: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut rb = 0usize;
+    while rb < expect_rx {
+        let emitted = acc.push_byte(rx[rb]);
+        rb += 1;
+        let flen = match emitted {
+            Some(n) => n,
+            None => continue,
+        };
+        let frame = match decode(&acc.bytes()[..flen]) {
+            Some(f) => f,
+            None => return fail(0x22),
+        };
+        if frame.nonce != *m30_nonce {
+            return fail(0x22); // the per-run host nonce must carry through
+        }
+        let (sub, chunk) =
+            match tb_encode::inferwire::verify_infer_resp(key, &frame, req_id, &challenge) {
+                Some(x) => x,
+                None => return fail(0x23), // an unMAC'd/spliced frame never lands
+            };
+        match frame.kind {
+            kind::INFER_PENDING => {
+                // Liveness plumbing only: BEFORE any chunk, bounded, never a
+                // completion (a run that ends on pendings fails at 0x25).
+                if chunks != 0 {
+                    return fail(0x25);
+                }
+                pending += 1;
+                if pending > INFER_PENDING_CAP {
+                    return fail(0x25);
+                }
+            }
+            kind::INFER_RESP => {
+                match asm.push_chunk(&sub, chunk) {
+                    AsmPush::Accepted => chunks += 1,
+                    AsmPush::Complete(n) => {
+                        chunks += 1;
+                        body_len = n;
+                        // Keep the FINAL chunk frame bytes for the badmac
+                        // negative (a REAL received frame, not a synthetic).
+                        last_chunk_frame.clear();
+                        last_chunk_frame.extend_from_slice(&acc.bytes()[..flen]);
+                    }
+                    AsmPush::Rejected => return fail(0x24),
+                }
+            }
+            _ => return fail(0x23), // an ERR mid-mock-exchange is a fault
+        }
+        acc.consume(flen);
+    }
+    // Completion + the cross-process determinism check: the wire body must
+    // EQUAL the in-kernel infer_bytes expectation bit-for-bit.
+    if !asm.is_done() || body_len != expected_resp.len() || !acc.is_empty() {
+        return fail(0x25);
+    }
+    if pending != 1 || chunks != infer_chunk_count(expected_resp.len()) as u64 {
+        return fail(0x25); // the deterministic protocol shape is exact
+    }
+    if asm.body() != expected_resp {
+        return fail(0x26);
+    }
+
+    // 4. THE FOUR IN-BOOT NEGATIVES (each must FIRE; the runtime mirror of
+    //    the kani_infer_* harnesses -- scratch state, never the live session).
+    // (a) badmac: flip one tag byte of the REAL final chunk frame.
+    let badmac_rejected = {
+        let mut tampered = last_chunk_frame.clone();
+        if tampered.len() <= 46 {
+            return fail(0x27);
+        }
+        tampered[46] ^= 0x01; // OFF_TAG: the first tag byte
+        match decode(&tampered) {
+            Some(f) => {
+                tb_encode::inferwire::verify_infer_resp(key, &f, req_id, &challenge).is_none()
+            }
+            None => false, // it must still DECODE (the tag is not structural)
+        }
+    };
+    // (b) digest mismatch: a completion whose recomputed body digest misses
+    //     the locked commitment must reject (the commitment arbitrates).
+    let digest_mismatch_rejected = {
+        let body = [0xA5u8; 8];
+        let mut wrong = body_digest(&body);
+        wrong[0] ^= 0x01;
+        let sub = SubHdr {
+            seq: 0,
+            more: false,
+            total_len: 8,
+            body_digest: wrong,
+        };
+        let mut scratch: InferAssembler<8> = InferAssembler::new();
+        scratch.push_chunk(&sub, &body) == AsmPush::Rejected && !scratch.is_done()
+    };
+    // (c) oversize: total_len > INFER_BODY_CAP rejects at the codec
+    //     (reject-never-truncate, the 413 mirror).
+    let oversize_rejected = {
+        let mut raw = [0u8; INFER_SUBHDR_LEN];
+        // seq=0, sflags=0, rsv=0, total_len = CAP+1, digest=zeros.
+        let bad = ((INFER_BODY_CAP as u32) + 1).to_le_bytes();
+        raw[4] = bad[0];
+        raw[5] = bad[1];
+        raw[6] = bad[2];
+        raw[7] = bad[3];
+        subhdr_decode(&raw).is_none()
+    };
+    // (d) ERR taxonomy: an out-of-enum code and a contradicted retryable
+    //     flag both reject (the closed-enum discipline).
+    let err_taxonomy_rejected = {
+        let unknown = [0xE7u8, 0x03, 0x00, 0x00]; // code 999: not a member
+        let contradicted = {
+            let mut p = [0u8; INFER_ERR_PAYLOAD_LEN];
+            let n = tb_encode::inferwire::err_canon(errcode::NO_KEY, &mut p);
+            p[2] ^= 1; // NO_KEY is non-retryable; claim otherwise
+            n == INFER_ERR_PAYLOAD_LEN && err_decode(&p).is_none()
+        };
+        err_decode(&unknown).is_none() && contradicted
+    };
+    if !badmac_rejected || !digest_mismatch_rejected || !oversize_rejected
+        || !err_taxonomy_rejected
+    {
+        return fail(0x27);
+    }
+
+    crate::InferWireProof::Proven {
+        pending,
+        chunks,
+        resp_len: body_len as u64,
     }
 }
 

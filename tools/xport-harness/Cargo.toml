@@ -1,14 +1,23 @@
-# xport-harness — the M30 HOST peer for the QEMU chardev lanes (stage B).
+# xport-harness — the M30/M31 HOST peer for the QEMU chardev lanes.
 #
-# A small std, Linux-hosted binary that answers the kernel's inferwire ECHO_REQ
-# over the QEMU virtconsole chardev unix socket. It CUSTODIES the per-run echo
-# key K (32 B) + nonce N (16 B), both sampled from the host OS RNG at startup —
-# the key is NEVER in the guest image, on the guest command line, or in
-# guest-visible config space (the M30 proposal §4 anti-hollow custody rule);
-# the harness reveals K on the CHANNEL (cleartext trailer) for the kernel's
-# leg-1 recompute, and prints its OWN `xport-harness:` witness line so the run
-# script can string-compare challenge/tag CROSS-PROCESS (leg 2, the loopback
-# killer).
+# A small std, Linux-hosted binary serving the kernel over the QEMU virtconsole
+# chardev unix socket. M30: it answers inferwire ECHO_REQ with the host-keyed
+# khash echo — it CUSTODIES the per-run key K (32 B) + nonce N (16 B), both
+# sampled from the host OS RNG at startup; the key is NEVER in the guest image,
+# on the guest command line, or in guest-visible config space (the M30 proposal
+# §4 anti-hollow custody rule); the harness reveals K on the CHANNEL (cleartext
+# trailer) for the kernel's leg-1 recompute, and prints its OWN
+# `xport-harness:` witness line so the run script can string-compare
+# challenge/tag CROSS-PROCESS (leg 2, the loopback killer). M31 (stage B): its
+# serve loop ALSO answers MAC'd INFER_REQ chunk sequences — the designated
+# NOKEY probe gets a MAC'd closed-enum `ERR code=NO-KEY` (this harness holds NO
+# API key, and says so fail-closed), any other body gets EXACTLY ONE MAC'd
+# INFER_PENDING heartbeat + the SHARED deterministic `mock_infer` response as
+# MAC'd chunks under the new "YUVA-M31-INFER-V1" domain. ZERO network, ZERO
+# TLS, ZERO secrets here: the ANTHROPIC-LIVE bridge (ureq+rustls+serde_json) is
+# the operator-gated M31 stage C, a separate landing — its deps deliberately do
+# NOT exist in this manifest yet (the LANGUAGE-AND-STANDARDS §6 ledger row is
+# pre-landed for it).
 #
 # It links the SAME `tb-encode` inferwire+khash leaves the kernel uses — never
 # a second codec implementation in shell/python (the M30 research §8 rule).
@@ -21,7 +30,7 @@ name = "xport-harness"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Yuva M30 host echo peer: answers inferwire ECHO_REQ over a QEMU chardev unix socket with a host-keyed khash echo."
+description = "Yuva M30/M31 host peer: answers inferwire ECHO_REQ with a host-keyed khash echo and serves the M31 MAC-chunked MOCK-DETERMINISTIC inference exchange over a QEMU chardev unix socket."
 license = "Apache-2.0"
 
 # An independent nested workspace (the tb-vmm precedent): cargo auto-excludes

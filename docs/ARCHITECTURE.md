@@ -1,6 +1,6 @@
 # Yuva Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M30 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M31 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,14 +8,17 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M30 cumulative tail is below. The authoritative, executable record is the
+M31 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M30: infer-transport OK` marker, then assert each milestone directly and reject
+`M31: infer-e2e OK backend=MOCK-DETERMINISTIC` marker, then assert each
+milestone directly and reject
 the skip/dormant variant while positively requiring its witness line (and, for
 M30, ALSO string-compare the kernel-witnessed challenge/tag against the
-`xport-harness` host peer's own line -- the cross-process anti-hollow leg).
+`xport-harness` host peer's own line -- the cross-process anti-hollow leg; for
+M31, ALSO pin the injection-proofed dump grammar + the ESC tripwire and reject
+the live-lane vocabulary by name).
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
 
@@ -237,8 +240,8 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   provenance-hash cutover (`prov_hash` → `khash::uhash`) and #75 Merkle
   inclusion proofs; the #74 signed root is a separate signature primitive,
   explicitly out of khash scope.
-- **The verified INFERENCE TRANSPORT (stages A+B) — M30, the NEW cumulative
-  tail.** `M30: infer-transport OK` (printed after M29): the sovereignty
+- **The verified INFERENCE TRANSPORT (stages A+B) — M30, the cumulative
+  tail until M31 landed.** `M30: infer-transport OK` (printed after M29): the sovereignty
   A-chain's channel to a host model peer (#87), promoting the M22 runner-up
   with the anti-hollow amendment that makes its in-kernel mock-loopback
   structurally impossible. ONE new verified codec leaf, `tb-encode::inferwire`
@@ -277,6 +280,56 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   the chardev lanes already discharge the REQUIRED both-arches DoD on TCG,
   accel-independent, and `run-vmm-x86_64.sh` stays at its M19 marker until
   stage C lands.
+- **The verified INFERENCE ADAPTER, stages A+B (the mock lane) — M31, the NEW
+  cumulative tail.** `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (printed
+  after M30): the first MEANING on the M30 channel (#89). The `inferwire` leaf
+  is EXTENDED — deliberately NOT a 21st leaf (same magic, same ver, the M30
+  header codec byte-identical) — with the closed kinds
+  `INFER_REQ`/`INFER_RESP`/`INFER_PENDING`, closed-enum `ERR` payload
+  semantics (10 codes, the retryable flag BOUND to the code; raw provider
+  text never rides the wire), the 24-byte IN-PAYLOAD chunk sub-header (seq +
+  MORE + total_len + whole-body digest[16]) for stop-and-wait chunking under
+  the UNTOUCHED 1024 payload cap, the compile-time shared
+  `INFER_BODY_CAP=8192` (reject-never-truncate — both ends compile the SAME
+  leaf, so compile-time agreement is the negotiation), the per-chunk MAC
+  `khash(K, "YUVA-M31-INFER-V1" || peer || nonce || challenge || req_id ||
+  kind || seq || sflags || total_len || body_digest || chunk)[..16]`
+  (everything that adjudicates INSIDE the MAC — a reordered/spliced chunk
+  fails VERIFICATION, not just assembly), the Kani-proven chunk-at-a-time
+  fail-closed `InferAssembler` (completion requires digest-commitment
+  equality; any reject poisons), and the SHARED deterministic `mock_infer`
+  transform (1280 B — always chunks). The kernel retires the M16 u64 toy:
+  the object-safe zero-alloc `infer_bytes` byte path + `M_MODEL_INVOKE_BYTES=32`
+  at the SAME `INVOKE_MODEL` chokepoint (byte buffers ride the kernel facade,
+  the M14.1/M15 precedent; the scalar path stays for M16 compatibility).
+  EVERY BOOT, the mock-lane e2e: an in-kernel agent recalls M13 context
+  through the chokepoint (stamping the unfiltered RECALL_TOUCH survival
+  trace), serializes the scalars into the byte prompt
+  (`context=M13-SCALAR-RECALL`), runs the ROUTES-registered
+  MOCK-DETERMINISTIC backend, folds `req_id || op_hash(response)` into the
+  M25 transcript BEFORE its closing GATE_VERDICT (the DIGEST, never the dump
+  — the transcript is 5 frames since M31), then proves the WIRE legs against
+  the keyless harness serve loop: a MAC'd `ERR code=NO-KEY` answer to the
+  designated probe (`wire-err-handled=0x1` — the fail-closed path transits
+  the boundary in-boot), EXACTLY ONE MAC'd `INFER_PENDING` heartbeat
+  (liveness plumbing, never a completion), the deterministic response as 2
+  MAC'd chunks reassembled + digest-verified + required BIT-EQUAL to the
+  in-kernel expectation (the cross-process determinism check), and four
+  in-boot negatives (badmac/digest-mismatch/oversize/err-taxonomy).
+  INJECTION-PROOFING: all model-derived bytes cross serial ONLY
+  lowercase-hex-encoded (`infer-dump:` lines — regex-inert, ESC-tripwired,
+  grammar-pinned by the guards), with out-of-band `resp-len=` and the
+  fixed-width `resp-digest=` commitment. HONEST: `backend=MOCK-DETERMINISTIC`
+  (a transform, NOT a model — the e2e proves plumbing, never intelligence;
+  the strip-then-reject guards ban the vocabulary), `key=CAPREF-HOST-CUSTODIED`
+  (no secret exists anywhere on the mock lane), `host=RESIDUAL-TCB`,
+  `ambient=ZERO-IN-GUEST` (scoped in-guest only). **Stage C — the
+  ANTHROPIC-LIVE bridge (`ureq`+`rustls`+`serde_json`, host-bridge-only per
+  the LANGUAGE-AND-STANDARDS §0/§6 [DECISION] rows), `real-infer.yml`
+  (`workflow_dispatch`), the challenge-nonce liveness protocol, and
+  `M31: real-infer OK backend=ANTHROPIC-LIVE` — is the OPERATOR'S lane:
+  secret-gated, never a required check, never unattended, its marker banned
+  from the cumulative chain by name.**
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the
@@ -339,11 +392,18 @@ fail-closed `canon`/`decode`, the `FrameAccum` byte-stream re-framer with
 proven never-overflow resync, the correlation iff-theorem, and the host-keyed
 `echo_tag`/`verify_echo` -- ONE domain-separated khash call binding
 peer_id‖nonce‖challenge‖body inside the MAC; mutation-tested per the M30
-proposal §6). Since **#101** the CI lane is **sharded into two cost-balanced
+proposal §6; EXTENDED at M31 with the closed inference kinds + closed-enum ERR
+semantics, the 24-byte chunk sub-header, the compile-time `INFER_BODY_CAP=8192`,
+the per-chunk `infer_tag`/`verify_infer_resp`/`verify_infer_req` MAC under the
+NEW `"YUVA-M31-INFER-V1"` domain, the chunk-at-a-time fail-closed
+`InferAssembler`, the closed `errcode` enum, and the shared deterministic
+`mock_infer` transform -- +6 harnesses, the khash-bearing pair in the
+PINNED-VECTOR one-khash-execution shape, mutation-tested per the M31 proposal
+§8). Since **#101** the CI lane is **sharded into two cost-balanced
 parallel jobs** (`prove-encode-a`/`prove-encode-b` — the first post-M29-stage-C
 pass measured 41m22s of the 45-min cap, past the pre-agreed ~38-min option-4
 trigger); the shard lists, the per-shard pinned counts (the list lengths) and
-the pinned total **`EXPECTED_HARNESSES_TOTAL=90`** live in ONE place,
+the pinned total **`EXPECTED_HARNESSES_TOTAL=96`** live in ONE place,
 `scripts/kani-shards.sh`, consumed by `scripts/verify-encode.sh`
 (`SHARD=a|b|all`; `all` = the unchanged local single full pass). Every mode
 first runs the fail-closed **completeness guard** (lists disjoint + exhaustive,
@@ -359,10 +419,12 @@ since the `prove-encode-*` lanes have hard timeouts.
 
 *CI lanes.* Ten distinct CI jobs across eight workflow files guard the tree:
 **ci** — the one required full-chain dual-arch gate, building on the runner and
-booting both arches under pure QEMU-TCG to the final `M30: infer-transport OK`
-marker (since M30 each lane also spawns the `xport-harness` host echo peer
+booting both arches under pure QEMU-TCG to the final `M31: infer-e2e OK backend=MOCK-DETERMINISTIC`
+marker (since M30 each lane also spawns the `xport-harness` host peer
 against a QEMU virtconsole chardev socket and cross-process-compares the M30
-challenge/tag between guest serial and harness stdout)
+challenge/tag between guest serial and harness stdout; since M31 the harness's
+serve loop additionally answers the MAC'd chunked mock inference exchange the
+M31 guards adjudicate)
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
@@ -373,7 +435,7 @@ QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reache
 `M18: evolve OK`, plus a non-blocking `--release` boot-ready-cycles bench);
 **kani** (three jobs: `prove-caps` over `tb-caps-core` = 12 harnesses, and the
 #101 cost-balanced shard pair `prove-encode-a`/`prove-encode-b` over `tb-encode`
-= 46 + 44 of the 90 harnesses, completeness-guarded); **miri** (the Tier-0 dynamic UB
+= 46 + 50 of the 96 harnesses, completeness-guarded); **miri** (the Tier-0 dynamic UB
 gate over the forbid-unsafe leaf crates, `T0: miri OK`); **clippy** (static-lint
 over the forbid-unsafe leaf crates, `S0: clippy OK`); and **bench** (non-blocking
 `tb-vmm` vs Firecracker boot benchmark). `CARGO_INCREMENTAL=0` is the CI

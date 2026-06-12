@@ -63,13 +63,16 @@ cost three blind ~30-min CI round-trips once — never again).
   kernel path) + Kani harnesses + the Miri gate. tb-hal CALLS the leaf byte-identically.
 - **No float** on any kernel path (fixed-point only).
 - **Cumulative DoD**: each milestone prints an EXACT serial marker; the kernel runs
-  M0..latest every boot. The current tail is **`M30: infer-transport OK`** — the marker
-  both run scripts grep for, printed after M29 (its `xport:` witness is ALSO
-  cross-process-compared against the `xport-harness` host peer's own line). (Chain: M0…M18, M18.1/.2, then on
+  M0..latest every boot. The current tail is **`M31: infer-e2e OK
+  backend=MOCK-DETERMINISTIC`** — the marker both run scripts grep for, printed
+  after M30 (its `infer:` witness carries the custody/TCB tokens; the M31 guards
+  also pin the lowercase-hex `infer-dump:` grammar + an ESC tripwire and reject
+  live/real vocabulary by name). (Chain: M0…M18, M18.1/.2, then on
   aarch64 L2.0…L2.6 and M27 sovereign-scheduler [two-VMID, M27a cooperative —
   mid-chain, before M19], then M19 virtio-rng, M20 persist, M21 kan-policy [DORMANT],
   M22 provenance, then the learning-loop arc M23 experience, M24 bakeoff [honest gate,
-  gate-not-met], M25 operator-transcript, M26 exit-telemetry [PRODUCER-only], then
+  gate-not-met], M25 operator-transcript [5 frames since M31 — the inference-digest
+  MARKER folds before the closing GATE_VERDICT], M26 exit-telemetry [PRODUCER-only], then
   M28 operator-cmd [the INBOUND dual of M25 — closes the loop; an Accept is
   necessary-NOT-sufficient: kan_active=0, M24's statistical bar still gates], then
   M29 khash-mac [the M28 MAC re-pointed at the verified BLAKE2s-256 khash leaf —
@@ -78,7 +81,16 @@ cost three blind ~30-min CI round-trips once — never again).
   virtio-console seam + the host-keyed echo, two-leg anti-hollow (kernel verify
   x cross-process challenge/tag equality vs the xport-harness host peer);
   backend=ECHO-ONLY, key=HOST-CUSTODIED-PER-RUN, mode=POLL #71-pinned; stage C
-  (the tb-vmm TB-VMM-HOST backend) split to its own follow-up].)
+  (the tb-vmm TB-VMM-HOST backend) split to its own follow-up], then M31
+  infer-e2e [stages A+B: the inferwire ADAPTER extension (chunked MAC'd byte
+  bodies, INFER_BODY_CAP=8192 reject-never-truncate, the chunk-at-a-time
+  InferAssembler) + the infer_bytes byte path (M_MODEL_INVOKE_BYTES=32) + the
+  every-boot mock e2e (M13 recall -> byte prompt -> the shared deterministic
+  mock_infer -> the M25 digest fold -> the MAC-chunked wire exchange with the
+  keyless harness serve loop, ERR NO-KEY probe + ONE PENDING + bit-exact
+  determinism equality); backend=MOCK-DETERMINISTIC key=CAPREF-HOST-CUSTODIED
+  host=RESIDUAL-TCB ambient=ZERO-IN-GUEST; stage C (the ANTHROPIC-LIVE bridge +
+  real-infer.yml) is the OPERATOR'S lane — secrets + network, NEVER unattended].)
 - **Two arches** (x86_64 + aarch64) and **multiple boot paths** (PVH/microvm, tb-boot/
   tb-vmm, KVM/TCG) must stay green.
 - **The build + boot are the arbiter.** A reviewer that says "sound" is not enough;
@@ -160,14 +172,14 @@ cost three blind ~30-min CI round-trips once — never again).
    - Bump `scripts/kani-shards.sh` **in LOCKSTEP** — the #101 ONE-TOUCH procedure:
      add the new harness name to exactly ONE shard list (pick the lighter shard;
      annotate the measured local time if >~20s) AND bump `EXPECTED_HARNESSES_TOTAL`
-     (currently **90**), plus the `kani.yml` "currently 90" comment. The fail-closed
+     (currently **96**), plus the `kani.yml` "currently 96" comment. The fail-closed
      completeness guard (`shards_assert_complete`, run in every verify-encode.sh
      mode) makes a vacuous/deleted/renamed/shard-unassigned harness fail the gate.
      The kani lane has 3 jobs: `prove-caps` (tb-caps-core, M11 rights-subset,
      12 harnesses, marker `M11: caps-subset PROVEN`) and the #101 cost-balanced
-     shard pair `prove-encode-a`/`prove-encode-b` (tb-encode, 46+44 of the 90
+     shard pair `prove-encode-a`/`prove-encode-b` (tb-encode, 46+50 of the 96
      harnesses, markers `V1-shard-a: kani-encoders OK`/`V1-shard-b: kani-encoders OK`,
-     30-min hard timeouts; local `SHARD=all` keeps the single 90-harness pass and
+     30-min hard timeouts; local `SHARD=all` keeps the single 96-harness pass and
      `V1: kani-encoders OK`). Never `--workspace`
      (drags tb-hal asm into CBMC).
 
