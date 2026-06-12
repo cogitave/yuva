@@ -20,18 +20,26 @@ use crate::arch::{self, BootParams};
 use crate::cli::Config;
 use crate::device::Bus;
 use crate::error::VmmError;
+use crate::infer_host::InferHost;
 use crate::loader;
 use crate::memory::GuestRam;
 use crate::report::{self, BootReady, ReadyCell, SpawnPhases};
 use crate::serial::Serial;
+use crate::virtio_mmio::{VirtioMmio, XPORT_MMIO_BASE, XPORT_MMIO_LEN};
 
 /// COM1 base port + register span (16550 has 8 registers).
 const COM1_BASE: u64 = 0x3f8;
 const COM1_LEN: u64 = 8;
 
-/// Upper bound on VM exits before we declare the guest hung. The M0-M4 boot
-/// produces only a few thousand exits (serial bytes), so this is vast headroom.
-const MAX_EXITS: u64 = 5_000_000;
+/// Upper bound on VM exits before we declare the guest hung. The FULL
+/// cumulative M0..M31 chain boots under this lane: its exits are dominated by
+/// serial PIO (one `IoOut` per guest byte; the whole chain prints tens of
+/// kilobytes, so well under one million), and the M30 stage-C virtio-console
+/// sessions add only a handful of MMIO exits each (~40 register accesses + 2-3
+/// notifies per session, three sessions per boot — the guest's used-ring polls
+/// are RAM reads, not exits). 20M is deliberately defensive headroom over that
+/// profile while still bounding a pathological exit storm.
+const MAX_EXITS: u64 = 20_000_000;
 
 /// Why the run loop stopped *cleanly*. There is exactly one clean stop: the
 /// kernel executing `HLT` after printing the final milestone marker. Every other
@@ -134,12 +142,29 @@ impl Vmm {
         // the BootReady (0x510) device that timestamps the guest's boot-ready
         // PIO write into a shared cell (the `--report-spawn` axis-A clock).
         let mut pio_bus = Bus::new();
-        let mmio_bus = Bus::new();
+        let mut mmio_bus = Bus::new();
         let serial = Arc::new(Mutex::new(Serial::new(Box::new(io::stdout()))));
         pio_bus.register(COM1_BASE, COM1_LEN, serial)?;
         let ready_cell = report::ready_cell();
         let boot_ready = Arc::new(Mutex::new(BootReady::new(ready_cell.clone())));
         pio_bus.register(report::BOOT_READY_PORT, report::BOOT_READY_LEN, boot_ready)?;
+
+        // M30 stage C: tb-vmm's FIRST mmio_bus device — the modern virtio-mmio
+        // virtio-console transport fronting the in-process M30/M31 host peer
+        // (`transport=TB-VMM-HOST`). Registered at slot 0 of the kernel's
+        // hard-coded scan window (0xFEB0_0000, stride 0x200 — above the
+        // 256 MiB guest RAM, so accesses arrive as KVM_EXIT_MMIO for free).
+        // The device holds a clone of the guest memory (vm-memory regions are
+        // internally shared — a cheap handle) to walk the virtqueues. The peer
+        // custodies a per-run OS-RNG key+nonce (proposal §4: K is born HERE,
+        // never in the guest image or on any command line) and writes its
+        // leg-2 witness to `--xport-out` (a stream the guest cannot reach).
+        let host = InferHost::from_config(
+            config.xport_out.as_deref(),
+            config.xport_key_out.as_deref(),
+        )?;
+        let xport = Arc::new(Mutex::new(VirtioMmio::new(ram.inner().clone(), host)));
+        mmio_bus.register(XPORT_MMIO_BASE, XPORT_MMIO_LEN, xport)?;
 
         // Arch boot configuration (boot structures + sregs/regs).
         let params = BootParams {
