@@ -664,6 +664,99 @@ pub fn sched_selftest() -> SchedProof {
 }
 
 // ===========================================================================
+// aL2.4b: the FULL-KERNEL EL1 guest self-test facade — the literal M0..M31
+// kernel image booted as a stage-2-CONFINED EL1 guest under the resident EL2
+// monitor (the M34 champion/challenger prerequisite).
+//
+// Unlike aL2.4's ~80-instruction in-image stub, the guest here is a SECOND
+// copy of this very kernel (staged by the run-script `-device loader` at the
+// reserved top-32 MiB carve), handed the frozen `tb_boot::aarch64`
+// `build_handoff` block (X0=TbBootInfo*, PC=_tb_start, SPSR=0x3C5) with the
+// IN-GUEST flag, running its OWN stage-1 MMU under the FIRST NON-IDENTITY
+// stage-2 in the codebase (guest IPA 0x4000_0000+off -> carve PA — link
+// address == IPA, no relocation; NOTHING outside the carve + the GIC
+// pass-through block is mapped). Its PL011 is trapped-and-emulated: every
+// guest serial byte is re-emitted as an injection-proof `guestlog:` hex frame
+// (the Kani-proven `tb_encode::guestlog` leaf). Completion is judged from
+// MONITOR-WITNESSED, non-text evidence ONLY: the doorbell MMIO store-count at
+// a watched unmapped IPA carrying the per-boot nonce, the `HVC #17` done
+// hypercall, and the final WFI trapped under HCR_EL2.TWI. Guest text is
+// corroborating evidence (it is OUR trusted image, pre-M34) checked by the
+// run-script's GUEST-stream profile, never by this facade.
+//
+// ALL the asm/unsafe is confined to tb-hal's arch/aarch64/{el2/l24b_guest,
+// stage2, inguest}.rs; this crate stays unsafe-free and the kernel only
+// branches on the closed enum. On x86_64 the realization is hardware-gated
+// (#37, parked) — the kernel prints the loud aarch64-only skip token.
+// ===========================================================================
+
+/// aL2.4b full-kernel EL1 guest self-test outcome (returned to the kernel for
+/// marker rendering). A SIBLING of [`SchedProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelGuestProof {
+    /// x86_64: the Track-A `L2.4: tabos-guest` realization is hardware-gated
+    /// (#37); the kernel prints the loud aarch64-only skip token.
+    NotApplicable,
+    /// We did NOT boot at EL2 (plain QEMU `virt`, or we ARE the confined
+    /// guest ourselves — one level of nesting is the claim): no resident
+    /// monitor, so no launch is attempted — a graceful green skip in the
+    /// required `(no EL2, skipped)` form.
+    Unavailable,
+    /// No guest image is staged at the carve (`-device loader` absent — the
+    /// demo/bench lanes): a graceful green skip in the `(no guest image,
+    /// skipped)` form. The boot lane attaches the loader and REJECTS this
+    /// variant by name (the M20 no-disk anti-hollow idiom).
+    NoImage,
+    /// The launch ran but the monitor (or the facade's post-flight checks)
+    /// reported a fault: a stage-2 build OOM, a guest-reported chain failure,
+    /// an early park (the guest died before `HVC #17`), a trap storm, an
+    /// unexpected stage-2 fault outside every emulated window, an ISV=0 abort
+    /// on an emulated IPA, a doorbell/nonce mismatch, a missed confinement
+    /// probe, or a wrong in-guest discriminator readback. `code` is the
+    /// nonzero diagnostic; `info` carries the fault detail (e.g. the last
+    /// trapped IPA for the storm/unexpected classes).
+    Faulted {
+        /// The nonzero failure code (monitor x0, or a facade post-flight code).
+        code: u64,
+        /// Fault detail (monitor x1: last-trap IPA/ESR, status, ...).
+        info: u64,
+    },
+    /// THE PROOF (monitor-witnessed, non-text): the full-kernel guest booted
+    /// confined, echoed the per-boot nonce through the doorbell MMIO window
+    /// (count above threshold), signalled done (`HVC #17` status 0 — reachable
+    /// only from the guest's single armed clean-exit site, so the chain
+    /// completed), parked in its final WFI (trapped under TWI), performed
+    /// EXACTLY ONE confinement-probe store to a host-RAM IPA that FAULTED and
+    /// did NOT land, and read back the in-guest discriminator
+    /// (`BOOT_ENTRY_EL == 0xFF`, `BOOTED_AT_EL2 == 0`) from guest memory.
+    Proven {
+        /// The monitor-chosen per-boot nonce the guest echoed.
+        nonce: u64,
+        /// Doorbell MMIO store-count witnessed at the watched unmapped IPA.
+        doorbell: u64,
+        /// Confinement-probe fault count (exactly 1: faulted, never landed).
+        probe: u64,
+        /// Total guest traps the monitor serviced (diagnostic; storm-capped).
+        traps: u64,
+    },
+}
+
+/// aL2.4b: launch the full-kernel EL1 guest under the monitor's stage-2 and
+/// judge it from monitor-witnessed evidence (aarch64). See [`KernelGuestProof`].
+#[cfg(target_arch = "aarch64")]
+pub fn el2_kernel_guest_selftest() -> KernelGuestProof {
+    arch::el2_kernel_guest_selftest()
+}
+
+/// aL2.4b: x86_64's realization (Track A `L2.4: tabos-guest`) is hardware-gated
+/// on #37, so this reports [`KernelGuestProof::NotApplicable`] (the kernel
+/// prints the loud aarch64-only skip token — never a silent pass).
+#[cfg(target_arch = "x86_64")]
+pub fn el2_kernel_guest_selftest() -> KernelGuestProof {
+    KernelGuestProof::NotApplicable
+}
+
+// ===========================================================================
 // M19: poll-based virtio-mmio virtio-rng self-test facade — the kernel's FIRST
 // real device I/O.
 //

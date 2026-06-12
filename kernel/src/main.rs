@@ -299,6 +299,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // skips it and emits the same markers below.
     if tb_hal::read_boot_magic(boot_info) == Some(tb_boot::TB_BOOT_MAGIC) {
         tb_hal::serial_write_str("tb-boot: contract v0 OK\n");
+        // aL2.4b: consume the validated boot block -- records the IN-GUEST
+        // flag (the end-of-chain semihosting exit is then replaced by the
+        // doorbell/done/WFI park) and the launch cmdline's nonce/probe
+        // values. A no-op for a flags=0 block (the tb-vmm path).
+        #[cfg(target_arch = "aarch64")]
+        tb_hal::tb_boot_consume(boot_info);
     }
 
     tb_hal::serial_write_str("hello from rust_main\n");
@@ -4902,6 +4908,132 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             }
         }
     }
+
+    // ---- aL2.4b: the FULL KERNEL as a stage-2-confined EL1 guest (the M34
+    // champion/challenger prerequisite). The host chain above is COMPLETE
+    // (M0..M31 printed); now boot a SECOND copy of this very image -- staged
+    // by the run-script `-device loader` at the pmm-reserved top-32 MiB carve
+    // -- as an EL1 guest under the resident EL2 monitor's FIRST non-identity
+    // stage-2 (guest IPA 0x4000_0000+off -> carve PA; link-addr == IPA, no
+    // relocation). The guest runs ITS full M0..M31 chain under the in-guest
+    // acceptance profile (every EL2-gated rung takes its machine-emitted
+    // `(no EL2, skipped)` form -- BOOTED_AT_EL2=0 via _tb_start -- and the
+    // device rungs skip via the open-bus RAZ/WI absence), its serial trapped
+    // and re-emitted as injection-proof `guestlog:` hex frames. The marker
+    // below is emitted from MONITOR-WITNESSED, non-text evidence ONLY
+    // (proposal §2.7): the doorbell store-count + per-boot nonce echo at a
+    // watched unmapped IPA, the HVC #17 done hypercall, the final WFI trapped
+    // under TWI, the confinement-probe fault (a guest store to host RAM that
+    // provably did NOT land), and the in-guest discriminator read back from
+    // guest memory. Guest text is corroborating evidence only, checked by the
+    // run-script GUEST-stream profile. DoD: "L2.4b: el1-kernel-guest OK".
+    #[cfg(target_arch = "aarch64")]
+    {
+        match tb_hal::el2_kernel_guest_selftest() {
+            tb_hal::KernelGuestProof::Proven {
+                nonce,
+                doorbell,
+                probe,
+                traps,
+            } => {
+                // The monitor-witnessed boot evidence (all gates fail-closed
+                // at EL2/post-flight: reaching Proven implies every =1 below).
+                tb_hal::serial_write_str("guestboot: launched=1 carve=0x46000000+32M nonce=");
+                write_hex_u64(nonce);
+                tb_hal::serial_write_str(" doorbell=");
+                write_hex_u64(doorbell);
+                tb_hal::serial_write_str(" nonce-echo=1 final-wfi=1 hostram-faults=0 traps=");
+                write_hex_u64(traps);
+                tb_hal::serial_write_byte(b'\n');
+                // Adversarial case (a): the confinement-probe witness -- the
+                // guest's store to a host-RAM IPA stage-2-FAULTED (witnessed,
+                // counted) and did NOT land (the host's sentinel re-checked
+                // byte-identical post-flight; fail-closed above).
+                tb_hal::serial_write_str(
+                    "guestprobe: hostram-store stage2-fault=1 store-landed=0 probes=",
+                );
+                write_hex_u64(probe);
+                tb_hal::serial_write_byte(b'\n');
+                // The chain-custody evidence the HOST can witness without
+                // trusting guest text: the boot-block consumption proven by
+                // the nonce echo (contract-v0), the _tb_start discriminator
+                // read back from GUEST memory (entryel/el2), and the done
+                // hypercall reachable only from the single armed clean-exit
+                // site AFTER the guest's M31 tail (chain-done/m31-tail). The
+                // guest's per-milestone text profile is the run-script's
+                // GUEST-stream guard set (corroborating, pre-M34).
+                tb_hal::serial_write_str(
+                    "guestchain: contract-v0=1 entryel=0xff guest-el2=0x0 chain-done=1 m31-tail=1\n",
+                );
+                // The honesty-token line (proposal §3 verbatim).
+                tb_hal::serial_write_str(
+                    "guest: guest=FULL-KERNEL-EL1 ram=STAGE2-CONFINED-32M \
+                     loader=QEMU-DEVICE-LOADER gic=PASSTHROUGH-SOLE-GUEST \
+                     timer=PHYS-PASSTHROUGH uart=TRAPPED-EMULATED \
+                     virtio=OPEN-BUS-ABSENT guestlog=HEX-FRAMED-UNTRUSTED \
+                     exit=WFI-PARK-DOORBELL smp=UP-ONLY rootfs=NONE \
+                     timing=TCG-NON-CYCLE-ACCURATE cachemodel=TCG-COHERENT-UNTESTED \
+                     realtime=NOT-CLAIMED\n",
+                );
+                tb_hal::serial_write_str("L2.4b: el1-kernel-guest OK\n"); // <-- the aL2.4b DoD marker
+            }
+            tb_hal::KernelGuestProof::Unavailable => {
+                // No resident monitor (plain `virt`) -- OR we ARE the confined
+                // guest (BOOTED_AT_EL2=0 on the _tb_start path): one level of
+                // nesting is the claim, so the in-guest profile REQUIRES this
+                // exact skip form.
+                tb_hal::serial_write_str("L2.4b: el1-kernel-guest OK (no EL2, skipped)\n");
+            }
+            tb_hal::KernelGuestProof::NoImage => {
+                // No `-device loader` on this lane (demo/bench): a graceful
+                // skip the boot lane REJECTS by name (the M20 no-disk idiom).
+                tb_hal::serial_write_str("L2.4b: el1-kernel-guest OK (no guest image, skipped)\n");
+            }
+            tb_hal::KernelGuestProof::NotApplicable => {
+                // unreachable on aarch64; kept for match exhaustiveness.
+                tb_hal::serial_write_str(
+                    "L2.4b: el1-kernel-guest (aarch64-only, hardware-gated #37, skipped)\n",
+                );
+            }
+            tb_hal::KernelGuestProof::Faulted { code, info } => {
+                // The named fast reds (the §7b hang-class discipline): a trap
+                // storm renders the HANG line with the last trapped IPA; an
+                // early park (the guest died mid-chain) renders the stall
+                // class; everything else is the generic named red. All exit 1
+                // in seconds -- never a silent wall-clock timeout.
+                if code == tb_hal::KGUEST_FAIL_STORM {
+                    tb_hal::serial_write_str("L2.4b: HANG class=storm last-trap=");
+                    write_hex_u64(info);
+                    tb_hal::serial_write_byte(b'\n');
+                } else if code == tb_hal::KGUEST_FAIL_EARLY_PARK {
+                    tb_hal::serial_write_str("L2.4b: HANG class=stall guest-parked-early esr=");
+                    write_hex_u64(info);
+                    tb_hal::serial_write_byte(b'\n');
+                } else if code == tb_hal::KGUEST_FAIL_UNEXPECTED_IPA {
+                    tb_hal::serial_write_str("L2.4b: FAIL unexpected-stage2-fault ipa=");
+                    write_hex_u64(info);
+                    tb_hal::serial_write_byte(b'\n');
+                } else if code == tb_hal::KGUEST_FAIL_REPORTED {
+                    tb_hal::serial_write_str("L2.4b: FAIL guest-reported status=");
+                    write_hex_u64(info);
+                    tb_hal::serial_write_byte(b'\n');
+                } else {
+                    tb_hal::serial_write_str("L2.4b: FAIL code=");
+                    write_hex_u64(code);
+                    tb_hal::serial_write_str(" info=");
+                    write_hex_u64(info);
+                    tb_hal::serial_write_byte(b'\n');
+                }
+                tb_hal::fail_exit();
+            }
+        }
+    }
+    // x86_64: the Track-A realization (`L2.4: tabos-guest`) is hardware-gated
+    // on #37 -- print the LOUD skip token (never a silent pass; §3).
+    #[cfg(target_arch = "x86_64")]
+    tb_hal::serial_write_str(
+        "L2.4b: el1-kernel-guest (aarch64-only, hardware-gated #37, skipped)\n",
+    );
 
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]

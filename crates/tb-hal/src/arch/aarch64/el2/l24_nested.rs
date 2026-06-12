@@ -16,7 +16,7 @@ use super::*;
 // ===========================================================================
 
 /// EL1: read `TTBR0_EL1` (the kernel's live stage-1 root). Side-effect-free.
-fn read_ttbr0_el1() -> u64 {
+pub(super) fn read_ttbr0_el1() -> u64 {
     let v: u64;
     // SAFETY: TTBR0_EL1 is EL1-readable; `mrs` has no memory/stack effect.
     unsafe {
@@ -26,7 +26,7 @@ fn read_ttbr0_el1() -> u64 {
 }
 
 /// EL1: read `TCR_EL1`. Side-effect-free.
-fn read_tcr_el1() -> u64 {
+pub(super) fn read_tcr_el1() -> u64 {
     let v: u64;
     // SAFETY: TCR_EL1 is EL1-readable; side-effect-free.
     unsafe {
@@ -36,7 +36,7 @@ fn read_tcr_el1() -> u64 {
 }
 
 /// EL1: read `MAIR_EL1`. Side-effect-free.
-fn read_mair_el1() -> u64 {
+pub(super) fn read_mair_el1() -> u64 {
     let v: u64;
     // SAFETY: MAIR_EL1 is EL1-readable; side-effect-free.
     unsafe {
@@ -46,7 +46,7 @@ fn read_mair_el1() -> u64 {
 }
 
 /// EL1: read `SCTLR_EL1`. Side-effect-free.
-fn read_sctlr_el1() -> u64 {
+pub(super) fn read_sctlr_el1() -> u64 {
     let v: u64;
     // SAFETY: SCTLR_EL1 is EL1-readable; side-effect-free.
     unsafe {
@@ -61,7 +61,7 @@ fn read_sctlr_el1() -> u64 {
 /// resumes on its OWN stage-1 with no stale guest translation surviving. This is
 /// the aL2.4 EL1-side teardown (the guest never left EL1's sysregs as it found
 /// them, unlike aL2.0..aL2.3). Mirrors `mmu.rs`'s cold-entry hygiene.
-fn restore_kernel_stage1(mair: u64, tcr: u64, ttbr0: u64, sctlr: u64, vbar: u64) {
+pub(super) fn restore_kernel_stage1(mair: u64, tcr: u64, ttbr0: u64, sctlr: u64, vbar: u64) {
     // SAFETY: EL1. We write the kernel's OWN previously-saved stage-1 sysregs
     // (read moments earlier from these same registers), `isb`-synchronize, flush
     // the local EL1 TLB + I-cache (the guest's TTBR0/ASID-0 entries are now
