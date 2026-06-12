@@ -13,11 +13,15 @@
 # NOKEY probe gets a MAC'd closed-enum `ERR code=NO-KEY` (this harness holds NO
 # API key, and says so fail-closed), any other body gets EXACTLY ONE MAC'd
 # INFER_PENDING heartbeat + the SHARED deterministic `mock_infer` response as
-# MAC'd chunks under the new "YUVA-M31-INFER-V1" domain. ZERO network, ZERO
-# TLS, ZERO secrets here: the ANTHROPIC-LIVE bridge (ureq+rustls+serde_json) is
-# the operator-gated M31 stage C, a separate landing — its deps deliberately do
-# NOT exist in this manifest yet (the LANGUAGE-AND-STANDARDS §6 ledger row is
-# pre-landed for it).
+# MAC'd chunks under the new "YUVA-M31-INFER-V1" domain. In the DEFAULT mode:
+# ZERO network, ZERO TLS, ZERO secrets — the push/PR CI lanes only ever run
+# this mode. M31 stage C (src/live.rs): the operator-gated ANTHROPIC-LIVE
+# bridge — `--anthropic`/`XPORT_ANTHROPIC=1` + `ANTHROPIC_API_KEY` (env ONLY)
+# make EXACTLY ONE pinned Messages API call per run, AFTER the guest exchange
+# (which stays byte-identical to mock mode in every mode: the stage-B kernel
+# pins the wire shape bit-exactly, so no live byte ever rides the channel);
+# triggered only by the operator-dispatched real-infer.yml workflow, NEVER by
+# unattended runs.
 #
 # It links the SAME `tb-encode` inferwire+khash leaves the kernel uses — never
 # a second codec implementation in shell/python (the M30 research §8 rule).
@@ -46,6 +50,16 @@ path = "src/main.rs"
 # deps — they build for the host triple by design, which is exactly what makes
 # this harness the SAME-math peer instead of a re-implementation).
 tb-encode = { path = "../../crates/tb-encode" }
+
+# M31 stage C — the ANTHROPIC-LIVE bridge deps: EXACTLY the
+# LANGUAGE-AND-STANDARDS §6 "Remote-API host deps" ledger row (sovereignty-
+# ledger status ACCEPTED-PERMANENT, host-bridge-confined). `ureq`'s default
+# `tls` feature IS rustls — the ledgered TLS stack rides transitively (see
+# Cargo.lock); the kernel / no_std workspace never inherits any of this (the
+# nested-workspace firewall above). Runner-up `reqwest` was rejected for
+# dragging tokio into a one-call bridge (M31 proposal §4).
+ureq = "2"
+serde_json = "1"
 
 [profile.release]
 panic = "abort"

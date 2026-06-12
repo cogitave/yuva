@@ -40,10 +40,28 @@
 //!      grep nor the guest-side M31 filters).
 //!
 //! HONEST: `backend=MOCK-DETERMINISTIC` -- this process applies a
-//! deterministic transform; no model is loaded, no network is touched, no
-//! TLS exists here. The ANTHROPIC-LIVE bridge is M31 stage C: a separate,
-//! operator-gated landing (`workflow_dispatch` + a repo secret), NEVER part
-//! of unattended runs.
+//! deterministic transform; no model is loaded and, in the DEFAULT mode, no
+//! network is touched and no TLS exists.
+//!
+//! M31 stage C (the ANTHROPIC-LIVE bridge -- operator-gated, NEVER part of
+//! unattended runs): with the `--anthropic` flag (or `XPORT_ANTHROPIC=1` --
+//! the env opt-in exists because the required-lane run scripts hardcode this
+//! binary's argv and MUST stay byte-identical) AND `ANTHROPIC_API_KEY` in the
+//! env, the serve loop ADDITIONALLY makes EXACTLY ONE Messages API call when
+//! the kernel's real-prompt `INFER_REQ` completes -- see [`live`] for the full
+//! design and the honest stage-C scope notes. Three invariants the live mode
+//! NEVER breaks:
+//!
+//! * the GUEST exchange is byte-identical to mock mode (the stage-B kernel
+//!   pins the wire shape exactly -- `selftests.rs` stages 0x21/0x25/0x26 --
+//!   so the cumulative chain stays green and no live byte rides the channel);
+//! * the live call happens AFTER the guest is answered (the kernel's
+//!   `POLL_CAP` cannot absorb HTTP latency, and extra PENDINGs are forbidden
+//!   by the exact-shape check);
+//! * opt-in without the key is a LOUD startup refusal (exit 3,
+//!   [`live::NO_KEY_REFUSAL`]) -- never a silent mock fallback wearing the
+//!   live token, and the key itself is never printed (every live-path line is
+//!   scrubbed).
 //!
 //! It also writes K's hex to `--key-out` so the run script can NEGATIVELY
 //! assert the key never leaked into the guest serial output (§5.7) -- that
@@ -52,6 +70,8 @@
 //! Exit codes: 0 = served at least one echo (then drained to EOF); 1 =
 //! timeout or I/O fault (a dead lane is LOUD -- the run script fails on a
 //! missing `xport-harness:` line either way).
+
+mod live;
 
 use std::env;
 use std::fs::File;
@@ -141,9 +161,11 @@ struct Inflight {
 
 fn main() {
     // --- args: --socket <path> [--key-out <path>] [--timeout-secs <n>] -----
+    // --- [--anthropic]  (M31 stage C: the operator-gated live serve mode) --
     let mut socket_path: Option<String> = None;
     let mut key_out: Option<String> = None;
     let mut timeout_secs: u64 = 300;
+    let mut anthropic = false;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -155,6 +177,7 @@ fn main() {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(timeout_secs)
             }
+            "--anthropic" => anthropic = true,
             other => {
                 eprintln!("xport-harness: unknown arg '{other}'");
                 exit(2);
@@ -164,10 +187,39 @@ fn main() {
     let socket_path = match socket_path {
         Some(p) => p,
         None => {
-            eprintln!("usage: xport-harness --socket <unix-socket> [--key-out <file>] [--timeout-secs <n>]");
+            eprintln!("usage: xport-harness --socket <unix-socket> [--key-out <file>] [--timeout-secs <n>] [--anthropic]");
             exit(2);
         }
     };
+
+    // --- M31 stage C: the live-mode gate (OFF by default; double opt-in) ---
+    // The flag is the canonical switch; `XPORT_ANTHROPIC=1` (strict: exactly
+    // "1") is the env equivalent because the required-lane run scripts
+    // hardcode this binary's argv and stay byte-identical -- the live
+    // workflow exports the env var instead. NEITHER is ever set by the
+    // push/PR CI lanes, and without the additional `ANTHROPIC_API_KEY`
+    // secret the gate below refuses LOUDLY -- the live path is structurally
+    // unreachable from unattended runs.
+    let live_mode =
+        anthropic || env::var("XPORT_ANTHROPIC").map(|v| v == "1").unwrap_or(false);
+    let live_key: Option<String> = if live_mode {
+        match env::var(live::KEY_ENV) {
+            Ok(k) if !k.is_empty() => Some(k),
+            _ => {
+                // The documented LOUD refusal: never a silent mock fallback
+                // wearing the live token, never an invented key (exit 3 --
+                // distinct from the usage error 2 and the lane fault 1).
+                eprintln!("{}", live::NO_KEY_REFUSAL);
+                exit(3);
+            }
+        }
+    } else {
+        None
+    };
+    // The spend-guard latch: at most ONE live call per process, no matter how
+    // many INFER_REQ bodies complete (set BEFORE the call, so even a panicky
+    // unwind path can never double-spend).
+    let mut live_done = false;
 
     // --- the per-run HOST-custodied key + nonce (OS RNG; M30 proposal §4) ---
     let kvec = os_random(INFER_KEY_LEN);
@@ -312,7 +364,39 @@ fn main() {
                             let challenge = fl_state.challenge;
                             let body = fl_state.asm.body()[..blen].to_vec();
                             inflight = None;
+                            // The GUEST exchange first, byte-identical to mock
+                            // mode in EVERY mode: the stage-B kernel sizes its
+                            // receive window a priori and requires exactly one
+                            // PENDING + the bit-exact deterministic mock
+                            // response (selftests.rs stages 0x21/0x25/0x26),
+                            // so no live byte can ride the channel and no HTTP
+                            // latency may sit between the request and this
+                            // answer (POLL_CAP is sub-second under KVM).
                             serve_infer(&mut stream, &key, &nonce, &challenge, req_id, &body);
+                            // M31 stage C: the ONE operator-gated live call
+                            // rides ALONGSIDE, after the guest is answered.
+                            // The liveness nonce is the kernel's per-boot wire
+                            // challenge (minted in-guest from the cycle
+                            // counter -- fresh every boot, so a canned/replay
+                            // fixture fails the §5 transform check); the NOKEY
+                            // probe never triggers it (that body is the
+                            // designated fail-closed wire-ERR check, not a
+                            // prompt). The host-leg verdict prints on THIS
+                            // process's stdout; real-infer.yml adjudicates it
+                            // -- the kernel-side live leg (§5.5) is a NAMED
+                            // kernel follow-up, deliberately absent here.
+                            if live_key.is_some()
+                                && !live_done
+                                && body.as_slice() != INFER_NOKEY_PROBE
+                            {
+                                live_done = true; // the latch: at most ONE call
+                                let api_key =
+                                    live_key.as_deref().expect("live_key checked above");
+                                let transport = live::UreqTransport::new();
+                                live::run_live_exchange(
+                                    &transport, api_key, &challenge, &body,
+                                );
+                            }
                         }
                     }
                 }

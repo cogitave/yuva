@@ -1,0 +1,195 @@
+# Yuva M31 stage C — the operator-gated ANTHROPIC-LIVE lane ("the hello").
+#
+# WHAT THIS IS: the project's first real model call. One x86_64 boot of the
+# full cumulative chain (the UNTOUCHED scripts/run-x86_64.sh — every required
+# marker and guard exactly as on the push/PR lanes), with the xport-harness
+# host bridge in live mode: when the kernel's real-prompt INFER_REQ completes
+# on the M30 channel, the bridge makes EXACTLY ONE pinned Messages API call
+# (model claude-haiku-4-5, max_tokens 64 — both compile-time consts in
+# tools/xport-harness/src/live.rs, the operator's spend pin), verifies the
+# §5 HEX-REVERSE liveness transform of the kernel's per-boot wire challenge,
+# and prints its host-leg witness. This job adjudicates that witness and
+# prints the workflow-level verdict `M31: real-infer OK backend=ANTHROPIC-LIVE`
+# (the M31 proposal's dual-marker live spelling).
+#
+# WHAT THIS IS NOT (M31 proposal §10/§13, binding):
+#   * NEVER a required check. The trigger below is `workflow_dispatch` ONLY —
+#     no push, no pull_request, no pull_request_target (the pwn-request
+#     footgun), no schedule — so this workflow can never run on a PR event
+#     and can never appear in (or be added to) the required-check set; the
+#     CI-required cumulative chain is ci.yml's MOCK-DETERMINISTIC lane alone.
+#   * NEVER unattended. Network + a secret = flake + exfil surface; the
+#     proposal states the live lane's unfitness for overnight runs verbatim.
+#     Every run is an explicit operator dispatch.
+#   * NEVER red on a missing secret: absent ANTHROPIC_API_KEY is the LOUD
+#     NAMED skip below (::warning:: + exit 0), per §7.1 — and silence (secret
+#     present, no verdict line) is a hard FAIL, never a pass.
+#
+# KERNEL-SIDE TRUTH (the stage-C landing note): the stage-B kernel pins the
+# wire exchange to the deterministic mock shape bit-exactly
+# (tb-hal/src/mem/selftests.rs stages 0x21/0x25/0x26), so the guest-bound
+# response stays MOCK-DETERMINISTIC on this lane too — the kernel marker this
+# job asserts is the same cumulative tail as everywhere else, and the LIVE
+# verdict is host-adjudicated from the bridge witness. The kernel-leg of the
+# §5 liveness protocol (§5.5: the in-guest transform search + the guest-serial
+# live witness/marker) is a NAMED kernel follow-up, not claimed here.
+#
+# SPEND GUARD: one job, no matrix, no retries; the harness latches at most ONE
+# API call per process; the concurrency group serializes stacked dispatches.
+# A re-run is always a fresh, deliberate operator action.
+#
+# OPERATOR'S TWO STEPS (docs/RUN-THE-HELLO.md):
+#   gh secret set ANTHROPIC_API_KEY
+#   gh workflow run real-infer.yml
+
+name: real-infer
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-infer
+  cancel-in-progress: false
+
+# Build identity — mirrors scripts/project.env (the ci.yml convention).
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+
+jobs:
+  real-infer:
+    name: M31 stage C — one boot, one pinned live call (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # §7.1 — the secret gate: absent => the LOUD NAMED skip, exit 0 (green).
+      # The probe-step pattern (proposal §10): the expression only tests
+      # presence; the key itself is not in this step's env.
+      - name: Gate on the operator secret (absent => LOUD skip)
+        id: gate
+        env:
+          KEY_PRESENT: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [ "${KEY_PRESENT}" != "true" ]; then
+            echo "::warning::M31 real-infer SKIPPED reason=ANTHROPIC_API_KEY-absent -- provision the repo secret (gh secret set ANTHROPIC_API_KEY) and re-dispatch (gh workflow run real-infer.yml)"
+            echo "M31-live: SKIP reason=ANTHROPIC_API_KEY-absent"
+            {
+              echo '## M31 real-infer: SKIP'
+              echo '`M31-live: SKIP reason=ANTHROPIC_API_KEY-absent` — provision the repo secret, then re-dispatch.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        if: steps.gate.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+
+      - name: Install QEMU (headless)
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Build kernel (x86_64)
+        if: steps.gate.outputs.skip != 'true'
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
+
+      - name: Build xport-harness (the stage-C live bridge)
+        if: steps.gate.outputs.skip != 'true'
+        run: cargo build --release --manifest-path tools/xport-harness/Cargo.toml
+
+      # ONE boot of the UNTOUCHED required-lane script. The live mode is
+      # activated by env ONLY (XPORT_ANTHROPIC=1 + the secret), because the
+      # run script hardcodes the harness argv and must stay byte-identical to
+      # the required lanes. The kernel chain, every mock guard, and the M30
+      # cross-process legs are enforced by the script's own exit code exactly
+      # as on ci.yml. QEMU runs its full wall-clock ceiling (the kernel parks
+      # after the chain), which is the window the ONE HTTP call completes in
+      # — answer-first sequencing means the guest never waits on the network.
+      - name: Boot the cumulative chain + ONE live call (the hello)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XPORT_ANTHROPIC: "1"
+          QEMU_TIMEOUT: 90
+        run: |
+          set -o pipefail
+          bash scripts/run-x86_64.sh 2>&1 | tee boot.log
+
+      # The host-leg adjudication (§5.4/§5.7/§12). Needs the secret ONLY for
+      # the key-leak negative grep (which never prints it).
+      - name: Adjudicate the live verdict (host leg)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          LOG=boot.log
+
+          # (a) the key-leak negative FIRST (the §5.7 class): the operator
+          # secret must appear NOWHERE in the captured lane log. grep -F with
+          # the key as the pattern never echoes it.
+          if grep -qF -- "${ANTHROPIC_API_KEY}" "${LOG}"; then
+            echo "::error::M31 real-infer FAIL: the API key leaked into the lane log (key-leak negative fired)"
+            exit 1
+          fi
+
+          # (b) the kernel chain: the run script already exited 0 only on the
+          # full cumulative chain + guards; assert the tail marker literally
+          # anyway (belt-and-braces, and the summary quotes it).
+          if ! grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' "${LOG}"; then
+            echo "::error::M31 real-infer FAIL: the cumulative kernel-chain marker is missing from the boot log"
+            exit 1
+          fi
+
+          # (c) EXACTLY ONE live verdict line — the spend pin, observable.
+          VERDICTS="$(grep -cE -- '^xport-harness-infer: backend=ANTHROPIC-LIVE ' "${LOG}" || true)"
+          if [ "${VERDICTS}" != "1" ]; then
+            echo "::error::M31 real-infer FAIL: expected exactly ONE live verdict line, saw ${VERDICTS} (silence is FAIL — present-then-silent discipline; >1 would mean the one-call latch broke)"
+            exit 1
+          fi
+
+          # (d) the §5.4 host-leg acceptance: 200 + request-id evidence +
+          # transform-ok=1, on the exact witness grammar (hex + closed tokens
+          # only — the model text itself appears nowhere; its digest is the
+          # commitment).
+          WITNESS_RE='^xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x[0-9a-f]{32} transform=HEX-REVERSE transform-ok=1 http=200 reqid-hex=[0-9a-f]+ resp-digest=0x[0-9a-f]{32} model=claude-haiku-4-5 max-tokens=64 stop=[A-Z-]+ key-custody=HOST-ENV$'
+          WITNESS="$(grep -E -- "${WITNESS_RE}" "${LOG}" | head -1 || true)"
+          if [ -z "${WITNESS}" ]; then
+            FAILLINE="$(grep -E -- '^xport-harness-infer: backend=ANTHROPIC-LIVE .*transform-ok=0' "${LOG}" | head -1 || true)"
+            echo "::error::M31 real-infer FAIL: no §5.4 witness; verdict line: ${FAILLINE:-<absent — silence is FAIL>}"
+            {
+              echo '## M31 real-infer: FAIL'
+              echo '```'
+              echo "${FAILLINE:-no live verdict line at all (silence is FAIL)}"
+              echo '```'
+              echo 'Distinct outcomes (proposal §12, never conflated): `TRANSFORM-MISS` / `REFUSAL` are model-behavior verdicts (reported, never retried into a pass); `RATE-LIMITED` / `OVERLOADED` / `API-ERROR` / `TIMEOUT` are FAIL-RETRYABLE — re-dispatch when the provider recovers; `AUTH` means the provisioned key is invalid.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # (e) the workflow-level verdict — the proposal's dual-marker live
+          # spelling, printed HERE (host-adjudicated; see the header note on
+          # the kernel-leg follow-up). The witness (sans key by construction
+          # and by check (a)) is the run summary.
+          echo "${WITNESS}"
+          echo "M31: real-infer OK backend=ANTHROPIC-LIVE"
+          {
+            echo '## M31 real-infer: OK'
+            echo '```'
+            echo "${WITNESS}"
+            echo 'M31: real-infer OK backend=ANTHROPIC-LIVE'
+            echo '```'
+            echo 'The kernel chain stayed green on the same boot: `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (the cumulative tail — the guest exchange is the deterministic wire shape on every lane; the live response is host-witnessed by digest, and its model text appears nowhere in any log).'
+          } >> "$GITHUB_STEP_SUMMARY"
