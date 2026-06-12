@@ -623,8 +623,8 @@ short, on a Linux host (or WSL2) with a Rust nightly that has `rust-src` +
 
 ```sh
 # Build (per arch)
-cargo kbuild --target targets/x86_64-tabos-none.json
-cargo kbuild --target targets/aarch64-tabos-none.json
+cargo kbuild --target targets/x86_64-yuva-none.json
+cargo kbuild --target targets/aarch64-yuva-none.json
 
 # Boot under QEMU and assert the milestone marker (exit 0 = PASS)
 bash scripts/run-x86_64.sh

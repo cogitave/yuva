@@ -15,7 +15,7 @@
 # and the `CapTable` slot/generation/free-list logic.
 #
 # Miri CANNOT run the bare-metal kernel: `tb-hal` carries inline asm and targets
-# the `*-tabos-none` (`os = "none"`) triples Miri has no runtime for. So the
+# the `*-yuva-none` (`os = "none"`) triples Miri has no runtime for. So the
 # surface is deliberately the two pure leaf crates ONLY -- the SAME crates Kani
 # verifies, zero model drift, zero contact with any boot path.
 #

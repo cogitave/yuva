@@ -24,7 +24,7 @@ license = "Apache-2.0"
 
 # Declaring an (empty) [workspace] makes tb-vmm an INDEPENDENT nested workspace.
 # Cargo auto-excludes nested workspaces from the parent no_std workspace, so
-# `cargo build -p tabos-kernel` never pulls in this host crate, and tb-vmm gets
+# `cargo build -p yuva-kernel` never pulls in this host crate, and tb-vmm gets
 # its own Cargo.lock. See tb-vmm/.cargo/config.toml + README.md for the
 # build-std interaction with the parent .cargo/config.toml.
 [workspace]

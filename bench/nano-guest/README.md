@@ -15,7 +15,7 @@ with one common nano-guest. See `docs/BENCHMARKS.md` §1-§7.
 
 ## Strategy A (chosen): one common dual-note binary
 
-Proven feasible because the existing `tabos-kernel` ELF already boots under
+Proven feasible because the existing `yuva-kernel` ELF already boots under
 both VMMs from a single image. The nano-guest is that same skeleton stripped to
 nothing:
 
@@ -127,5 +127,5 @@ equivalent-minimal binaries from the SAME `nano-guest.S` by selecting one note +
 one stub each (the other loader's note/stub gc'd), then soften the claim to
 "equivalent-minimal guests (each the smallest signal-and-halt payload for its
 VMM's ABI)" and state plainly it is two binaries. The existing dual-booting
-`tabos-kernel` makes this unnecessary, and the verified single ELF above
+`yuva-kernel` makes this unnecessary, and the verified single ELF above
 confirms Strategy A holds.

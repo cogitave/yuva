@@ -27,8 +27,8 @@ use core::arch::global_asm;
 
 global_asm!(
     ".text",
-    ".globl __tabos_vmx_launch",
-    "__tabos_vmx_launch:",
+    ".globl __yuva_vmx_launch",
+    "__yuva_vmx_launch:",
     // Preserve the host callee-saved registers (the guest will trash GPRs).
     "push rbp",
     "push rbx",
@@ -61,7 +61,7 @@ global_asm!(
 );
 
 extern "C" {
-    fn __tabos_vmx_launch() -> u64;
+    fn __yuva_vmx_launch() -> u64;
 }
 
 /// Execute the world switch: launch the guest, catch its (single) VM-exit, and
@@ -73,5 +73,5 @@ extern "C" {
 /// + EPTP). The guest's one instruction must be an unconditional-exit
 /// instruction (CPUID) so exactly one exit occurs.
 pub(super) unsafe fn launch() -> bool {
-    unsafe { __tabos_vmx_launch() == 0 }
+    unsafe { __yuva_vmx_launch() == 0 }
 }

@@ -36,7 +36,7 @@
 //!    push x0..x30 + `ELR_EL1` + `SPSR_EL1`; `mov x0, sp`; `bl` into Rust;
 //!    reload `ELR_EL1`/`SPSR_EL1` (the handler may have advanced `ELR_EL1` by 4
 //!    to resume past a `brk`); pop x0..x30; `eret`.
-//!  * The target spec `targets/aarch64-tabos-none.json` is `abi: softfloat`
+//!  * The target spec `targets/aarch64-yuva-none.json` is `abi: softfloat`
 //!    with `-fp-armv8,-neon`, so the V/SIMD registers carry no live state and
 //!    are intentionally NOT part of the frame (FP context save lands with
 //!    preemption / userspace FP, not M1/M4).

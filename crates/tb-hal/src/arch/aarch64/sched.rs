@@ -51,7 +51,7 @@
 //!    Linux v6.6 `arch/arm64/kernel/process.c` `copy_thread`:
 //!    `p->thread.cpu_context.pc = (unsigned long)ret_from_fork;` — a new
 //!    task's first switch "returns" into a fabricated entry point.
-//!  * No FP/SIMD state is saved: `targets/aarch64-tabos-none.json` is
+//!  * No FP/SIMD state is saved: `targets/aarch64-yuva-none.json` is
 //!    `abi: softfloat` with `-fp-armv8,-neon`, so the V registers carry no
 //!    live values (same reasoning as the M1 `TrapFrame` in `vectors.rs`).
 //!

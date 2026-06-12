@@ -1,4 +1,10 @@
-# Cargo build configuration for the none-class TABOS targets.
+# Cargo build configuration for the none-class Yuva targets.
+#
+# NAMING: the package name (`yuva-kernel`) and the target stems
+# (`x86_64-yuva-none` / `aarch64-yuva-none`) mirror scripts/project.env — the
+# single source of truth for the build identifiers. A rename changes that file,
+# this config, kernel/Cargo.toml, targets/*.json and the workflow env: blocks
+# together.
 #
 # Sources:
 #    https://os.phil-opp.com/minimal-rust-kernel/  ("The build-std Option")
@@ -20,8 +26,8 @@
 [alias]
 # Build the no_std kernel for a custom none-class target spec. Append the
 # target (and optionally --release):
-#   cargo kbuild --target targets/x86_64-tabos-none.json
-#   cargo kbuild --release --target targets/aarch64-tabos-none.json
+#   cargo kbuild --target targets/x86_64-yuva-none.json
+#   cargo kbuild --release --target targets/aarch64-yuva-none.json
 # Flags: -Zbuild-std recompiles core + compiler_builtins + alloc from rust-src
 # (no precompiled std exists for none-class triples; `alloc` is needed since M5
 # brought a #[global_allocator] online, so the kernel's `extern crate alloc`
@@ -29,12 +35,12 @@
 # (needed the moment the kernel copies/zeroes memory); -Zjson-target-spec lets
 # cargo accept a `.json` target file on recent nightlies. Requires the nightly
 # toolchain pinned in rust-toolchain.toml.
-kbuild = "build -p tabos-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec"
+kbuild = "build -p yuva-kernel -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec"
 
 # ---- x86_64: PVH ELF, loads at 1 MiB, links with kernel/linker/x86_64.ld ----
-# `[target.<stem>]` matches `--target targets/x86_64-tabos-none.json` by the
+# `[target.<stem>]` matches `--target targets/x86_64-yuva-none.json` by the
 # file-name stem (Cargo custom-JSON-target matching rule).
-[target.x86_64-tabos-none]
+[target.x86_64-yuva-none]
 # rust-lld (ld.lld) consumes `-T<script>`. The script keeps the
 # XEN_ELFNOTE_PHYS32_ENTRY note and places .text at 0x0010_0000.
 rustflags = ["-C", "link-arg=-Tkernel/linker/x86_64.ld"]
@@ -42,6 +48,6 @@ rustflags = ["-C", "link-arg=-Tkernel/linker/x86_64.ld"]
 runner = ["bash", "scripts/run-x86_64.sh"]
 
 # ---- aarch64: QEMU virt first-light, links with kernel/linker/aarch64.ld ----
-[target.aarch64-tabos-none]
+[target.aarch64-yuva-none]
 rustflags = ["-C", "link-arg=-Tkernel/linker/aarch64.ld"]
 runner = ["bash", "scripts/run-aarch64.sh"]

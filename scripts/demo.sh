@@ -28,15 +28,17 @@ set -euo pipefail
 case ":${PATH}:" in *":${HOME}/.cargo/bin:"*) :;; *) PATH="${HOME}/.cargo/bin:${PATH}";; esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Build identifiers (KERNEL_BIN, TARGET_X86, TARGET_A64) — the single source of truth.
+. "${REPO_ROOT}/scripts/project.env"
 ARCH="${1:-aarch64}"
 PROFILE="${PROFILE:-debug}"
 
 case "${ARCH}" in
-  aarch64) TARGET="aarch64-tabos-none"; QEMU="${QEMU:-qemu-system-aarch64}";;
-  x86_64)  TARGET="x86_64-tabos-none";  QEMU="${QEMU:-qemu-system-x86_64}";;
+  aarch64) TARGET="${TARGET_A64}"; QEMU="${QEMU:-qemu-system-aarch64}";;
+  x86_64)  TARGET="${TARGET_X86}"; QEMU="${QEMU:-qemu-system-x86_64}";;
   *) echo "usage: scripts/demo.sh [aarch64|x86_64]" >&2; exit 2;;
 esac
-KERNEL="${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel"
+KERNEL="${REPO_ROOT}/target/${TARGET}/${PROFILE}/${KERNEL_BIN}"
 
 if ! command -v "${QEMU}" >/dev/null 2>&1; then
   echo "error: ${QEMU} not found (in WSL: sudo apt-get install qemu-system-x86 qemu-system-arm)" >&2

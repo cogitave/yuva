@@ -11,7 +11,7 @@
 # - llvm-tools: ships llvm-objcopy/objdump/readelf etc. used to inspect the ELF
 #   (e.g. confirm the XEN_ELFNOTE_PHYS32_ENTRY note is present) in BUILD.md.
 #
-# We deliberately list NO `targets`: x86_64-tabos-none / aarch64-tabos-none are
+# We deliberately list NO `targets`: x86_64-yuva-none / aarch64-yuva-none are
 # not rustup targets; they are built from /targets/*.json via build-std.
 
 [toolchain]

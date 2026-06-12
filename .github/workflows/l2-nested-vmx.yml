@@ -23,6 +23,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Build identity — MIRRORS scripts/project.env (the single source of truth at
+# the script level); a rename changes that file and these env: blocks together.
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+  TARGET_A64: aarch64-yuva-none
+
 jobs:
   l2-vmx:
     name: L2.0 nested-VMX proof (x86_64, KVM -cpu host)
@@ -65,7 +72,7 @@ jobs:
           key: ${{ runner.os }}-cargo-l2vmx-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (custom target)
-        run: cargo kbuild --target targets/x86_64-tabos-none.json
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
 
       - name: Install QEMU
         if: env.KVM_OK == '1'
@@ -75,7 +82,7 @@ jobs:
         if: env.KVM_OK == '1'
         continue-on-error: true
         run: |
-          K=target/x86_64-tabos-none/debug/tabos-kernel
+          K="target/${TARGET_X86}/debug/${KERNEL_BIN}"
           # -cpu host passes through the runner vCPU's features; if the L0 host
           # enabled nested VMX, the guest sees VMX and L2.0 takes the real path.
           timeout 30 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \

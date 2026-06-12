@@ -27,6 +27,8 @@ set -euo pipefail
 
 ARCH="${1:-x86_64}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Build identifiers (KERNEL_BIN, TARGET_X86, TARGET_A64) — the single source of truth.
+. "${REPO_ROOT}/scripts/project.env"
 ITER="${ITER:-10}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-20}"
 FIRST_MARKER="hello from rust_main"
@@ -37,18 +39,20 @@ FINAL_MARKER="M30: infer-transport OK"
 
 case "${ARCH}" in
   x86_64)
-    KERNEL="${2:-${REPO_ROOT}/target/x86_64-tabos-none/debug/tabos-kernel}"
+    TARGET="${TARGET_X86}"
+    KERNEL="${2:-${REPO_ROOT}/target/${TARGET}/debug/${KERNEL_BIN}}"
     QEMU="${QEMU:-qemu-system-x86_64}"
     ;;
   aarch64)
-    KERNEL="${2:-${REPO_ROOT}/target/aarch64-tabos-none/debug/tabos-kernel}"
+    TARGET="${TARGET_A64}"
+    KERNEL="${2:-${REPO_ROOT}/target/${TARGET}/debug/${KERNEL_BIN}}"
     QEMU="${QEMU:-qemu-system-aarch64 -semihosting}"
     ;;
   *) echo "usage: bench-boot.sh <x86_64|aarch64> [kernel]" >&2; exit 2 ;;
 esac
 
 command -v "${QEMU}" >/dev/null 2>&1 || { echo "error: ${QEMU} not on PATH" >&2; exit 2; }
-[[ -f "${KERNEL}" ]] || { echo "error: kernel not found: ${KERNEL} (build with: cargo kbuild --target targets/${ARCH}-tabos-none.json)" >&2; exit 2; }
+[[ -f "${KERNEL}" ]] || { echo "error: kernel not found: ${KERNEL} (build with: cargo kbuild --target targets/${TARGET}.json)" >&2; exit 2; }
 
 # Accel selection.
 ACCEL="tcg"; CPU_X86="qemu64"

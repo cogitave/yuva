@@ -11,7 +11,7 @@
 # the diff.
 #
 # Scope note: this gate deliberately does NOT lint the bare-metal kernel or
-# `tb-hal`. Those target the custom `*-tabos-none` specs and need `-Zbuild-std`
+# `tb-hal`. Those target the custom `*-yuva-none` specs and need `-Zbuild-std`
 # (plus they carry the deliberately-unconfined silicon `unsafe`), so a
 # kernel-wide Clippy pass is a separate, larger effort. `-p <crate>` (never
 # `--workspace`) keeps this lane fast, host-native, and free of build-std.

@@ -42,14 +42,24 @@ concurrency:
 
 # Pin Firecracker + its CI guest version so the number is reproducible. CI_VERSION
 # is the major.minor of FC_VER (the firecracker-ci/<CI_VERSION>/ S3 prefix layout).
+#
+# KERNEL_BIN / TARGET_* — build identity, MIRRORS scripts/project.env (the
+# single source of truth at the script level); a rename changes that file and
+# these env: blocks together. NOTE: the nano-guest note-grep guard below greps
+# the literal TABOS ELF-note bytes — that is the WIRE constant the binary still
+# emits (tb-boot note name), NOT a build identifier; it is deliberately not
+# routed through these vars.
 env:
   FC_VER: v1.12.1
   FC_CI_VERSION: v1.12
   BENCH_ITERS: 30
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+  TARGET_A64: aarch64-yuva-none
 
 jobs:
   bench:
-    name: TABOS vs Firecracker boot bench (x86_64, /dev/kvm)
+    name: Yuva vs Firecracker boot bench (x86_64, /dev/kvm)
     runs-on: ubuntu-latest
     # Informational lane: a failed measurement must never red-X the PR.
     continue-on-error: true
@@ -87,7 +97,7 @@ jobs:
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (--release, custom target)
-        run: cargo kbuild --release --target targets/x86_64-tabos-none.json
+        run: cargo kbuild --release --target "targets/${TARGET_X86}.json"
 
       - name: Build tb-vmm (--release)
         run: cd tb-vmm && cargo build --release
@@ -128,7 +138,7 @@ jobs:
         if: env.KVM_OK == '1'
         run: |
           set -o pipefail
-          K=target/x86_64-tabos-none/release/tabos-kernel
+          K="target/${TARGET_X86}/release/${KERNEL_BIN}"
           TBVMM=tb-vmm/target/release/tb-vmm
           : > tbvmm-spawn-ns.txt
           BRC=""; TSC=""
