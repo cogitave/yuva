@@ -2276,9 +2276,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         if s != den {
             m15_fail("map with a READ-less block handle was not Denied");
         }
-        let (s, _) = tb_hal::agent_block_dispatch(agent_c, 32, hb_c, 0, 0, 0).unwrap_or((ok, 0));
+        // (33 is the lowest UNKNOWN method since M31 registered
+        // M_MODEL_INVOKE_BYTES=32 -- presenting a BLOCK handle to the model
+        // byte-invoke ABI number is the separate wrong-payload class, probed
+        // through the kernel facade below at the M31 block.)
+        let (s, _) = tb_hal::agent_block_dispatch(agent_c, 33, hb_c, 0, 0, 0).unwrap_or((ok, 0));
         if s != badmethod {
-            m15_fail("unknown block method 32 was not BadMethod");
+            m15_fail("unknown block method 33 was not BadMethod");
         }
         tb_hal::serial_write_str(
             "blocks: non-block BadCap + READ-less Denied + bad-method BadMethod\n",
@@ -2523,8 +2527,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             m16_fail("M_MODEL_INVOKE on a non-session not BadCap");
         }
 
-        // (7) closed-set probe: an unknown method stays BadMethod (M_BLOCK_READ=31
-        // is the highest).
+        // (7) closed-set probe: an unknown method stays BadMethod
+        // (M_MODEL_INVOKE_BYTES=32 is the highest since M31; 33 is unknown).
         let (s, _) =
             tb_hal::agent_model_dispatch(agent_c, 33, sess, 0).unwrap_or((ok, 0));
         if s != badmethod {
@@ -4201,6 +4205,162 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // ---- M31 (part 1 of 2): the channel-free MOCK-DETERMINISTIC inference e2e ----
+    // The first MEANING bound for the M30 channel, gathered BEFORE the M25 block so
+    // the transcript can fold the inference DIGEST before its closing GATE_VERDICT
+    // (M31 proposal §3d). The in-kernel selftest agent, through the capability
+    // chokepoint (the M13/M16 dispatch idiom): M_MEM_WRITE seeds three deterministic
+    // context records into agent C's born-with home -> M_MEM_RECALL (Rights::RECALL,
+    // the 3-stage ranked pipeline) recalls them by query token -> M_MEM_READ/
+    // read_touch(id) returns each u64 value AND stamps the unfiltered RECALL_TOUCH
+    // xp record (context-gathering automatically leaves the M24 survival-label
+    // trace). The recalled scalars serialize LE into the byte PROMPT
+    // (context=M13-SCALAR-RECALL -- M13 stores u64 scalars, not byte blobs; byte-
+    // payload memory records are a named deferral) -> the M31 infer_bytes byte path
+    // (M_MODEL_INVOKE_BYTES, the SAME INVOKE_MODEL gate, byte buffers on the kernel
+    // facade -- the M14.1/M15 precedent) runs the ROUTES-registered
+    // MOCK-DETERMINISTIC backend (the shared tb-encode mock_infer transform: no
+    // clock, no RNG, bit-for-bit reproducible) -> the response DIGEST (op_hash --
+    // never the raw bytes) + the deterministic req_id become the M25 fold payload.
+    // The NARROWed-session negative proves the new byte-path gate still bites.
+    // Placed AFTER every other agent-home consumer (M17/M18) so all prior fold
+    // heads/witnesses stay byte-identical; the ONLY downstream observable is the
+    // M25 tx_head (the designed M31 displacement) + the M31 witness after M30.
+    // This block prints NOTHING on success (the witness rides part 2); any fault
+    // is a hard fail (#65 -- red NOW).
+    let (m31_req_id, m31_digest32, m31_prompt, m31_resp, m31_recalls) = {
+        use tb_hal::caps::{self, Handle};
+
+        fn m31_fail(why: &str) -> ! {
+            tb_hal::serial_write_str("M31: FAIL e2e ");
+            tb_hal::serial_write_str(why);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit()
+        }
+
+        let ok = caps::SysStatus::Ok as u32;
+        let den = caps::SysStatus::Denied as u32;
+
+        // (1) CONTEXT SOURCE: three deterministic records through the chokepoint
+        // (M_MEM_WRITE op=0 ADD; key/value/importance fixed so the whole e2e --
+        // prompt, req_id, digest, the M25 fold -- is CI-reproducible bit-for-bit).
+        const M31_KEY: u64 = 0x0000_0000_4D31_C001; // the M31 context query token
+        const M31_VALS: [u64; 3] = [0x5955_5641_0000_0001, 0x5955_5641_0000_0002, 0x5955_5641_0000_0003];
+        let mut w = 0usize;
+        while w < M31_VALS.len() {
+            let (s, _id) = tb_hal::agent_mem_dispatch(
+                agent_c, caps::M_MEM_WRITE, 0, M31_KEY, M31_VALS[w], 5,
+            )
+            .unwrap_or((den, 0));
+            if s != ok {
+                m31_fail("context write not Ok");
+            }
+            w += 1;
+        }
+
+        // (2) RECALL + READ-TOUCH: gather the context via M_MEM_RECALL (cursor-
+        // paginated; each hit mints a record handle whose M_MEM_READ yields the id)
+        // then M_MEM_READ on the HOME (read_touch -- the RECALL_TOUCH-stamping
+        // unfiltered path) for each value. recalls = the count the witness prints.
+        let mut prompt: Vec<u8> = Vec::new();
+        let mut recalls: u64 = 0;
+        let mut r = 0u64;
+        while r < M31_VALS.len() as u64 {
+            let (s, rec_raw) = tb_hal::agent_mem_dispatch(
+                agent_c, caps::M_MEM_RECALL, M31_KEY, r, 1, 0,
+            )
+            .unwrap_or((den, 0));
+            if s != ok {
+                m31_fail("recall not Ok");
+            }
+            let (s, id) = tb_hal::agent_model_dispatch(
+                agent_c, caps::M_MEM_READ, Handle::from_raw(rec_raw), 0,
+            )
+            .unwrap_or((den, 0));
+            if s != ok {
+                m31_fail("record-id read not Ok");
+            }
+            let (s, value) =
+                tb_hal::agent_mem_dispatch(agent_c, caps::M_MEM_READ, id, 0, 0, 0)
+                    .unwrap_or((den, 0));
+            if s != ok {
+                m31_fail("read_touch not Ok");
+            }
+            prompt.extend_from_slice(&value.to_le_bytes());
+            recalls += 1;
+            r += 1;
+        }
+        if recalls != M31_VALS.len() as u64 || prompt.len() != 24 {
+            m31_fail("context gathering incomplete");
+        }
+
+        // (3) THE BYTE PATH: open the mock session, invoke M_MODEL_INVOKE_BYTES.
+        let (s, sraw) =
+            tb_hal::agent_model_open(agent_c, "model:mock/echo").unwrap_or((den, 0));
+        if s != ok {
+            m31_fail("open model:mock/echo not Ok");
+        }
+        let sess = Handle::from_raw(sraw);
+        let mut resp = alloc::vec![0u8; tb_hal::INFER_MOCK_RESP_LEN];
+        let (s, result) = tb_hal::agent_model_invoke_bytes(agent_c, sess, &prompt, &mut resp)
+            .unwrap_or((den, None));
+        if s != ok {
+            m31_fail("invoke_bytes not Ok");
+        }
+        let (resp_len, stop) = match result {
+            Some(Ok(x)) => x,
+            _ => m31_fail("invoke_bytes backend error"),
+        };
+        if resp_len != tb_hal::INFER_MOCK_RESP_LEN
+            || stop != tb_hal::infer::StopReason::EndTurn
+        {
+            m31_fail("mock response shape wrong");
+        }
+        resp.truncate(resp_len);
+        // Determinism: a second invocation must reproduce bit-for-bit.
+        let mut resp2 = alloc::vec![0u8; tb_hal::INFER_MOCK_RESP_LEN];
+        match tb_hal::agent_model_invoke_bytes(agent_c, sess, &prompt, &mut resp2) {
+            Some((s2, Some(Ok((n2, _))))) if s2 == ok && n2 == resp_len => {
+                if resp2[..n2] != resp[..] {
+                    m31_fail("mock transform not deterministic");
+                }
+            }
+            _ => m31_fail("second invoke_bytes failed"),
+        }
+
+        // (4) THE GATE STILL BITES on the byte path: NARROW the session to drop
+        // INVOKE_MODEL, then invoke_bytes -> Denied (the M16 idiom on method 32).
+        let (s, nraw) = tb_hal::agent_model_dispatch(agent_c, caps::M_HANDLE_NARROW, sess, 0)
+            .unwrap_or((den, 0));
+        if s != ok {
+            m31_fail("narrow session failed");
+        }
+        let no_inv = Handle::from_raw(nraw);
+        let mut scratch = alloc::vec![0u8; tb_hal::INFER_MOCK_RESP_LEN];
+        match tb_hal::agent_model_invoke_bytes(agent_c, no_inv, &prompt, &mut scratch) {
+            Some((s, None)) if s == den => {}
+            _ => m31_fail("invoke_bytes without INVOKE_MODEL not Denied"),
+        }
+        // (4b) NON-SESSION: the byte path on a Generic cap minted WITH
+        // INVOKE_MODEL -> BadCap (the payload-None branch -- the M16 leg-6
+        // idiom on the new method).
+        let badcap = caps::SysStatus::BadCap as u32;
+        let gen = tb_hal::agent_mint_generic(agent_c, caps::Rights::INVOKE_MODEL)
+            .unwrap_or_else(|| m31_fail("mint generic INVOKE_MODEL cap failed"));
+        match tb_hal::agent_model_invoke_bytes(agent_c, gen, &prompt, &mut scratch) {
+            Some((s, None)) if s == badcap => {}
+            _ => m31_fail("invoke_bytes on a non-session not BadCap"),
+        }
+
+        // (5) The deterministic evidence: req_id from the prompt digest; the
+        // response digest (op_hash full width -- its leading 16 bytes equal the
+        // wire body_digest commitment, ONE digest discipline).
+        let req_id = tb_hal::infer_req_id_for(&prompt);
+        let digest32 = tb_hal::infer_resp_digest(&resp);
+        (req_id, digest32, prompt, resp, recalls)
+    };
+    let m31_fold = tb_hal::infer_fold_payload(m31_req_id, &m31_digest32);
+
     // ---- M25: verified OPERATOR TRANSCRIPT (the exogenous-oracle channel) --------
     // The COMMUNICATION pillar's outbound half. M24's honest gate REFUSES to activate
     // the learned cell because a self-graded loop has no EXOGENOUS oracle; M25 builds
@@ -4227,9 +4387,14 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // IN-RAM this milestone, so M20's two-phase commit + the M22/M23 heads stay byte-
     // identical (the M22 `chain_head` is READ for the binding, never mutated). The
     // honesty tokens are machine-emitted so the marker mechanically cannot overclaim.
-    // DoD: "M25: operator OK".
+    // DoD: "M25: operator OK". Since M31 the transcript carries ONE additional
+    // frame BEFORE the closing GATE_VERDICT: the inference-digest MARKER
+    // (payload = req_id || op_hash(response) from the part-1 e2e above -- the
+    // DIGEST, never raw model bytes), so the committed final seq covers the
+    // inference evidence (frames 4 -> 5; the tx_head displacement is the
+    // designed M31 change -- every OTHER fold head stays byte-identical).
     {
-        let op = tb_hal::opframe_selftest();
+        let op = tb_hal::opframe_selftest(&m31_fold);
         // FAIL-CLOSED: the clean transcript must verify (recompute==head) AND a genuine
         // inclusion proof must verify AND the seq must be strictly monotone AND the
         // INTRO must bind the live M22 head AND the closing GATE_VERDICT must catch a
@@ -4518,6 +4683,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // kernel NEVER prints K (the run script greps for a leak). `key=HOST-
     // CUSTODIED-PER-RUN` claims custody, never confidentiality; `sec=ASSUMED-
     // FROM-LITERATURE` is inherited from M29. DoD: "M30: infer-transport OK".
+    // M31: a Proven channel hands its (slot, revealed key K, host nonce N)
+    // forward so the M31 wire legs can MAC/verify under the NEW infer domain.
+    let mut m31_chan: Option<(u32, [u8; 32], [u8; 16])> = None;
     {
         match tb_hal::xport_selftest() {
             tb_hal::InferChanProof::Absent => {
@@ -4549,13 +4717,14 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 tb_hal::fail_exit(); // #65: red NOW, not at the wall-clock ceiling
             }
             tb_hal::InferChanProof::Proven {
-                slot: _,
+                slot,
                 req_id,
                 resp_len: _,
                 challenge,
                 nonce,
                 tag,
                 peer_id,
+                key,
             } => {
                 // The lane tokens are selected by the MAC-COVERED peer_id the
                 // verified tag bound (0x01 = the tb-vmm backend lane, 0x02 = the
@@ -4596,9 +4765,140 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                     " echo=HOST-KEYED-VERIFIED key=HOST-CUSTODIED-PER-RUN \
                      backend=ECHO-ONLY sec=ASSUMED-FROM-LITERATURE\n",
                 );
-                // The marker -- the NEW cumulative tail (M0..M30): emitted ONLY
-                // when the host-keyed echo verified and every negative fired.
+                // The M30 marker (no longer the cumulative tail -- M31
+                // displaced it; the run scripts assert it directly): emitted
+                // ONLY when the host-keyed echo verified and every negative
+                // fired.
                 tb_hal::serial_write_str("M30: infer-transport OK\n");
+                m31_chan = Some((slot, key, nonce));
+            }
+        }
+    }
+
+    // ---- M31 (part 2 of 2): the inference-adapter WIRE legs + witness + marker --
+    // The CI-required mock-lane DoD (M31 proposal §3d/§7 -- zero network, zero
+    // secrets; the LIVE half is stage C, operator-gated, NEVER in unattended runs).
+    // With the channel Proven, the kernel: (a) sends ONE MAC'd INFER_REQ carrying
+    // the designated NOKEY probe -- the keyless harness answers a MAC'd `ERR
+    // code=NO-KEY` that must verify under the NEW "YUVA-M31-INFER-V1" domain and
+    // decode through the CLOSED enum (`wire-err-handled=0x1`, earned -- the new
+    // framing transits the boundary in-boot, fail-closed path included); (b) sends
+    // the part-1 agent prompt as a MAC'd chunked INFER_REQ -- the harness answers
+    // EXACTLY ONE MAC'd INFER_PENDING heartbeat (liveness plumbing, never a
+    // completion) + the deterministic mock_infer response as MAC'd INFER_RESP
+    // chunks (1280 B -> 2 chunks: the Kani-proven InferAssembler does real wire
+    // work), which must reassemble, pass the digest commitment, AND equal the
+    // in-kernel part-1 response BIT-EXACTLY (the cross-process determinism check
+    // -- both ends compile the SAME tb-encode transform); (c) fires the four
+    // in-boot negatives (badmac / digest-mismatch / oversize-reject / err-
+    // taxonomy). INJECTION-PROOFING (proposal §6): the response dump crosses
+    // serial ONLY lowercase-hex-encoded (regex-inert -- it cannot forge an
+    // `M31:` marker/token or carry ESC), line-capped, with the authoritative
+    // resp-len OUT of band on the witness and resp-digest as the fixed-width
+    // commitment (the dump is never the evidence; the digest already folded into
+    // the M25 transcript BEFORE its closing commit). HONEST tokens, machine-
+    // emitted: backend=MOCK-DETERMINISTIC (a transform, not a model -- plumbing,
+    // not intelligence), context=M13-SCALAR-RECALL, fold=M25-TRANSCRIPT,
+    // key=CAPREF-HOST-CUSTODIED (no secret exists anywhere on this lane; the
+    // standing custody rule), host=RESIDUAL-TCB (the harness is trusted ground),
+    // ambient=ZERO-IN-GUEST (scoped in-guest ONLY), sec=ASSUMED-FROM-LITERATURE
+    // (inherited). On a channel-less lane (vmm/bench) the wire half skips LOUDLY
+    // -- the skip variant deliberately LACKS the backend token, so it can never
+    // satisfy the cumulative-tail grep; every peer-attached lane rejects it by
+    // name. DoD: "M31: infer-e2e OK backend=MOCK-DETERMINISTIC".
+    {
+        match m31_chan {
+            None => {
+                // The LOUD graceful skip (no backend token -- structurally
+                // unable to pass the attached lanes' cumulative grep).
+                tb_hal::serial_write_str("M31: infer-e2e OK (no host peer, skipped)\n");
+            }
+            Some((slot, key, nonce)) => {
+                match tb_hal::infer_wire_selftest(
+                    slot,
+                    &key,
+                    &nonce,
+                    m31_req_id,
+                    &m31_prompt,
+                    &m31_resp,
+                ) {
+                    tb_hal::InferWireProof::Failed { stage } => {
+                        // #65 fail-closed: a present-then-silent or faulty peer
+                        // is a HARD FAIL (no 'infer-e2e OK' substring). Stage
+                        // 0x11/0x21 are the bounded-poll session legs.
+                        if stage == 0x11 || stage == 0x21 {
+                            tb_hal::serial_write_str("M31: FAIL xport-timeout stage=");
+                        } else {
+                            tb_hal::serial_write_str("M31: FAIL infer stage=");
+                        }
+                        write_hex_u64(stage as u64);
+                        tb_hal::serial_write_byte(b'\n');
+                        tb_hal::fail_exit();
+                    }
+                    tb_hal::InferWireProof::Proven {
+                        pending,
+                        chunks,
+                        resp_len,
+                    } => {
+                        // The INJECTION-PROOFED response dump (proposal §6):
+                        // lowercase hex ONLY, fixed per-line cap (64 bytes ->
+                        // 128 hex chars), total dump capped at 2 lines -- the
+                        // dump is bounded TRANSPARENCY, never the evidence.
+                        let dump_cap = core::cmp::min(m31_resp.len(), 128);
+                        let mut off = 0usize;
+                        let mut seq = 0u64;
+                        while off < dump_cap {
+                            let end = core::cmp::min(off + 64, dump_cap);
+                            tb_hal::serial_write_str("infer-dump: req-id=");
+                            write_hex_u64(m31_req_id);
+                            tb_hal::serial_write_str(" seq=");
+                            write_hex_u64(seq);
+                            tb_hal::serial_write_str(" resp-hex=");
+                            write_hex_bytes(&m31_resp[off..end]);
+                            tb_hal::serial_write_byte(b'\n');
+                            off = end;
+                            seq += 1;
+                        }
+                        // The REAL e2e WITNESS line (proposal §7 verbatim,
+                        // positively required by the run scripts; the wire
+                        // evidence tokens are appended after the locked
+                        // prefix). resp-digest is the leading 16 bytes of the
+                        // op_hash the M25 transcript folded -- out-of-band,
+                        // truncation-evident, fixed-width.
+                        let mut d16 = [0u8; 16];
+                        d16.copy_from_slice(&m31_digest32[..16]);
+                        tb_hal::serial_write_str(
+                            "infer: backend=MOCK-DETERMINISTIC context=M13-SCALAR-RECALL recalls=",
+                        );
+                        write_hex_u64(m31_recalls);
+                        tb_hal::serial_write_str(" prompt-len=");
+                        write_hex_u64(m31_prompt.len() as u64);
+                        tb_hal::serial_write_str(" resp-len=");
+                        write_hex_u64(resp_len);
+                        tb_hal::serial_write_str(" resp-digest=");
+                        write_hex_bytes16(&d16);
+                        tb_hal::serial_write_str(" req-id=");
+                        write_hex_u64(m31_req_id);
+                        tb_hal::serial_write_str(
+                            " stop=END-TURN wire-err-handled=0x1 fold=M25-TRANSCRIPT \
+                             key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB \
+                             ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE chunks=",
+                        );
+                        write_hex_u64(chunks);
+                        tb_hal::serial_write_str(" pending=");
+                        write_hex_u64(pending);
+                        tb_hal::serial_write_byte(b'\n');
+                        // The marker -- the NEW cumulative tail (M0..M31):
+                        // emitted ONLY when the wire-ERR check verified, the
+                        // chunked exchange MAC-verified + digest-matched +
+                        // equaled the in-kernel deterministic expectation, and
+                        // every negative fired. The backend token INSIDE the
+                        // marker is load-bearing: the skip variant lacks it.
+                        tb_hal::serial_write_str(
+                            "M31: infer-e2e OK backend=MOCK-DETERMINISTIC\n",
+                        );
+                    }
+                }
             }
         }
     }
@@ -4924,6 +5224,26 @@ fn write_hex_bytes16(bytes: &[u8; 16]) {
     tb_hal::serial_write_str("0x");
     let mut i = 0usize;
     while i < 16 {
+        let b = bytes[i];
+        let hi = b >> 4;
+        let lo = b & 0xF;
+        tb_hal::serial_write_byte(if hi < 10 { b'0' + hi } else { b'a' + (hi - 10) });
+        tb_hal::serial_write_byte(if lo < 10 { b'0' + lo } else { b'a' + (lo - 10) });
+        i += 1;
+    }
+}
+
+/// M31: write an arbitrary byte slice as bare lowercase hex (NO `0x` prefix --
+/// the strict `[0-9a-f]+` grammar the run-script raw-leak tripwire pins) over
+/// serial, in wire byte order. The INJECTION-PROOFING encoder (M31 proposal
+/// §6): every model-derived byte crosses serial ONLY through this -- the
+/// lowercase-hex alphabet is regex-inert by construction (no `:`, space,
+/// newline, uppercase `M`, `=`, or ESC 0x1b), so untrusted response bytes can
+/// neither forge an `M31:`-prefixed marker/token nor carry an ANSI sequence.
+/// Pure safe Rust (no `core::fmt`, no allocation).
+fn write_hex_bytes(bytes: &[u8]) {
+    let mut i = 0usize;
+    while i < bytes.len() {
         let b = bytes[i];
         let hi = b >> 4;
         let lo = b & 0xF;

@@ -79,11 +79,14 @@ use crate::opframe_rx::{
 };
 use crate::khash::{kat_ok, khash, uhash, KAT_ABC_UNKEYED, KHASH_KEY_LEN, KHASH_TAG_LEN};
 use crate::inferwire::{
-    canon as iw_canon, decode as iw_decode, echo_tag, kind as iw_kind, peer as iw_peer,
-    resp_binds_req, verify_echo, FrameAccum, InferFrame, INFER_ACCUM_CAP, INFER_CHALLENGE_LEN,
-    INFER_HEADER_LEN, INFER_KEY_LEN, INFER_MAGIC, INFER_NONCE_LEN, INFER_PAYLOAD_CAP,
-    INFER_TAG_LEN, INFER_VER, OFF_FLAGS as IW_OFF_FLAGS, OFF_KIND as IW_OFF_KIND,
-    OFF_MAGIC as IW_OFF_MAGIC, OFF_PAYLOAD_LEN as IW_OFF_PAYLOAD_LEN, OFF_VER as IW_OFF_VER,
+    body_digest, canon as iw_canon, decode as iw_decode, echo_tag, err_canon, err_code_known,
+    err_decode, err_retryable, errcode, infer_tag, kind as iw_kind, peer as iw_peer,
+    resp_binds_req, subhdr_canon, subhdr_decode, verify_echo, verify_infer_resp, AsmPush,
+    FrameAccum, InferAssembler, InferFrame, SubHdr, INFER_ACCUM_CAP, INFER_BODY_CAP,
+    INFER_CHALLENGE_LEN, INFER_DOMAIN, INFER_ERR_PAYLOAD_LEN, INFER_HEADER_LEN, INFER_KEY_LEN,
+    INFER_MAGIC, INFER_NONCE_LEN, INFER_PAYLOAD_CAP, INFER_SUBHDR_LEN, INFER_TAG_LEN, INFER_VER,
+    OFF_FLAGS as IW_OFF_FLAGS, OFF_KIND as IW_OFF_KIND, OFF_MAGIC as IW_OFF_MAGIC,
+    OFF_PAYLOAD_LEN as IW_OFF_PAYLOAD_LEN, OFF_VER as IW_OFF_VER, SFLAG_MORE,
 };
 use crate::explore::{explore_propensity_q, PROPENSITY_SCALE};
 use crate::bakeoff::{
@@ -4259,4 +4262,492 @@ fn kani_inferwire_peer_label_bound() {
     let mut n2 = nonce;
     n2[15] ^= 0x80;
     assert!(base != echo_tag(&key, iw_peer::TB_VMM_HOST, &n2, &chal, &body));
+}
+
+// ===========================================================================
+// M31: the inferwire INFERENCE-ADAPTER extension (proposal §8) -- the chunked
+// byte-body framing on the SAME leaf: kind extension, the 24-byte in-payload
+// SubHdr, the per-chunk infer_tag MAC under the NEW domain separator, the
+// chunk-at-a-time InferAssembler (NOT a byte-push trace -- the M30 FrameAccum
+// CBMC-floor lesson), and the closed ERR payload enum. The #49 budget
+// discipline throughout: khash bodies run on CONCRETE inputs only; symbolic
+// flips cover indexes/predicates/sub-header bytes, never key material; NO
+// symbolic PRF/collision harness (overclaim-by-implication, banned).
+// ===========================================================================
+
+/// A concrete M31 sub-header (helper; digest bytes pattern-derived).
+#[cfg(kani)]
+fn kani_m31_sub(seq: u16, more: bool, total_len: u32) -> SubHdr {
+    let mut d = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        d[i] = (i as u8).wrapping_mul(19).wrapping_add(11);
+        i += 1;
+    }
+    SubHdr {
+        seq,
+        more,
+        total_len,
+        body_digest: d,
+    }
+}
+
+/// (1) M31 KIND EXTENSION (proposal §8.1): the canon/decode round-trip holds
+/// for the NEW closed kinds INFER_REQ/INFER_RESP/INFER_PENDING at boundary
+/// payload lengths {0, 2}, exactly as harness (1) proved for the M30 kinds.
+///
+/// NEGATIVE CONTROL (the extension does not widen totality): a fully-SYMBOLIC
+/// kind byte OUTSIDE the closed set {1..6} fail-closes BOTH ways -- `canon`
+/// returns 0 and a valid wire with the kind byte rewritten rejects at
+/// `decode` -- so kind 7+ (and 0) keeps rejecting everywhere.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_kind_ext() {
+    let payload = [0xB7u8; 2];
+    let mut l = 0usize;
+    while l < 2 {
+        let plen = [0usize, 2][l];
+        let mut k = 0usize;
+        while k < 3 {
+            let kt = [iw_kind::INFER_REQ, iw_kind::INFER_RESP, iw_kind::INFER_PENDING][k];
+            let mut f = kani_iw_frame(&payload[..plen]);
+            f.kind = kt;
+            let mut buf = [0u8; INFER_HEADER_LEN + 2];
+            let n = iw_canon(&f, &mut buf);
+            assert!(n == INFER_HEADER_LEN + plen);
+            let d = match iw_decode(&buf[..n]) {
+                Some(d) => d,
+                None => panic!("valid M31 kind must decode"),
+            };
+            assert!(d.kind == kt);
+            assert!(d.req_id == f.req_id);
+            assert!(d.payload.len() == plen);
+            k += 1;
+        }
+        l += 1;
+    }
+
+    // NEG: a symbolic kind outside the closed set rejects at canon AND decode.
+    let bad: u8 = kani::any();
+    kani::assume(bad == 0 || bad > iw_kind::INFER_PENDING);
+    let mut f = kani_iw_frame(&payload);
+    f.kind = bad;
+    let mut buf = [0u8; INFER_HEADER_LEN + 2];
+    assert!(iw_canon(&f, &mut buf) == 0);
+    let mut wire = [0u8; INFER_HEADER_LEN + 2];
+    let mut g = kani_iw_frame(&payload);
+    g.kind = iw_kind::INFER_RESP;
+    let n = iw_canon(&g, &mut wire);
+    assert!(n == INFER_HEADER_LEN + 2);
+    wire[IW_OFF_KIND] = bad;
+    assert!(iw_decode(&wire[..n]).is_none());
+}
+
+/// (2) M31 SUB-HEADER TOTALITY + round-trip (proposal §8.2): over a SYMBOLIC
+/// seq / MORE flag / total_len (in the valid 1..=INFER_BODY_CAP band) /
+/// digest bytes, `subhdr_decode(subhdr_canon(s)) == s`; every truncation
+/// rejects; a reserved `sflags` bit (1..7, symbolic over all such values) or
+/// a nonzero `rsv` byte rejects; an out-of-band total_len (0 or over-cap,
+/// symbolic) rejects at canon AND decode. khash-FREE.
+///
+/// NEGATIVE CONTROL (non-vacuous rejector): the exactly-valid sub-header
+/// decodes `Some` -- a decoder that rejects everything fails the round-trip.
+#[kani::proof]
+#[kani::unwind(30)]
+fn kani_infer_subhdr_total() {
+    // Symbolic round-trip over the full valid envelope.
+    let seq: u16 = kani::any();
+    let more: bool = kani::any();
+    let total_len: u32 = kani::any();
+    kani::assume(total_len >= 1 && total_len as usize <= INFER_BODY_CAP);
+    let digest: [u8; 16] = kani::any();
+    let s = SubHdr {
+        seq,
+        more,
+        total_len,
+        body_digest: digest,
+    };
+    let mut buf = [0u8; INFER_SUBHDR_LEN];
+    assert!(subhdr_canon(&s, &mut buf) == INFER_SUBHDR_LEN);
+    match subhdr_decode(&buf) {
+        Some(d) => {
+            assert!(d.seq == seq);
+            assert!(d.more == more);
+            assert!(d.total_len == total_len);
+            assert!(d.body_digest == digest);
+        }
+        None => panic!("valid sub-header must decode (non-vacuous rejector)"),
+    }
+
+    // Every truncation rejects (symbolic cut).
+    let cut: usize = kani::any();
+    kani::assume(cut < INFER_SUBHDR_LEN);
+    assert!(subhdr_decode(&buf[..cut]).is_none());
+
+    // A reserved sflags bit rejects (symbolic over ALL values with bits 1..7).
+    let sf: u8 = kani::any();
+    kani::assume(sf & !SFLAG_MORE != 0);
+    let mut bf = buf;
+    bf[2] = sf;
+    assert!(subhdr_decode(&bf).is_none());
+
+    // A nonzero rsv byte rejects (symbolic over all 255 nonzero values).
+    let rv: u8 = kani::any();
+    kani::assume(rv != 0);
+    let mut br = buf;
+    br[3] = rv;
+    assert!(subhdr_decode(&br).is_none());
+
+    // An out-of-band total_len rejects at canon AND decode (symbolic).
+    let bad_total: u32 = kani::any();
+    kani::assume(bad_total == 0 || bad_total as usize > INFER_BODY_CAP);
+    let mut bs = s;
+    bs.total_len = bad_total;
+    let mut scratch = [0u8; INFER_SUBHDR_LEN];
+    assert!(subhdr_canon(&bs, &mut scratch) == 0);
+    let mut bt = buf;
+    let tb = bad_total.to_le_bytes();
+    bt[4] = tb[0];
+    bt[5] = tb[1];
+    bt[6] = tb[2];
+    bt[7] = tb[3];
+    assert!(subhdr_decode(&bt).is_none());
+}
+
+/// (3) M31 ASSEMBLER discipline at a TINY const-generic cap (proposal §8.3 --
+/// chunk-at-a-time BY DESIGN, never a byte-push trace: the M30 FrameAccum
+/// measured CBMC floor was byte-wise accumulation, which this shape avoids;
+/// `InferAssembler` is const-generic, so the index/capacity discipline proven
+/// at CAP=8 is the SAME code path the real `INFER_BODY_CAP` alias runs):
+/// in-order chunks assemble to EXACTLY total_len with the recomputed digest
+/// equal to the commitment (total == CAP, the off-by-one-capacity killer --
+/// every buffer index on the copy path is Kani-checked); a SYMBOLIC
+/// wrong-first-seq / wrong-second-seq (out-of-order/duplicate/gap), a
+/// SYMBOLIC total_len drift, a digest drift at a symbolic flip index, a
+/// SYMBOLIC over-capacity total_len, and an overflow-past-total chunk ALL
+/// reject; rejection POISONS (nothing resurrects). The digest legs run uhash
+/// on an 8-byte CONCRETE body only (2 compressions total, the #49 budget).
+///
+/// NEGATIVE CONTROL (no fabricated completion): every reject leg asserts NO
+/// `Complete` was returned, and the poisoned assembler rejects a would-be
+/// valid retry -- an assembler that fabricated completion on garbage (or
+/// resurrected after a reject) fails these.
+#[kani::proof]
+#[kani::unwind(70)] // covers the khash compress loop inside the 2 digest legs
+fn kani_infer_assembler() {
+    const CAP: usize = 8;
+    let body = [0xC1u8, 0x02, 0x33, 0x44, 0x95, 0x66, 0x77, 0xE8];
+    let dig = body_digest(&body); // ONE uhash call (concrete 8 bytes)
+    let mk = |seq: u16, more: bool, total: u32, d: [u8; 16]| SubHdr {
+        seq,
+        more,
+        total_len: total,
+        body_digest: d,
+    };
+
+    // CLEAN: 2 in-order chunks (4+4) complete EXACTLY at total == CAP.
+    let mut asm: InferAssembler<CAP> = InferAssembler::new();
+    assert!(asm.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(asm.len() <= CAP);
+    match asm.push_chunk(&mk(1, false, 8, dig), &body[4..]) {
+        AsmPush::Complete(n) => assert!(n == 8),
+        _ => panic!("genuine in-order chunks must complete"),
+    }
+    assert!(asm.is_done());
+    let out = asm.body();
+    let mut i = 0usize;
+    while i < 8 {
+        assert!(out[i] == body[i]);
+        i += 1;
+    }
+    // Nothing pushes after completion.
+    assert!(asm.push_chunk(&mk(2, false, 8, dig), &body[..1]) == AsmPush::Rejected);
+
+    // A SYMBOLIC wrong first seq rejects + poisons (out-of-order start).
+    let s0: u16 = kani::any();
+    kani::assume(s0 != 0);
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(s0, true, 8, dig), &body[..4]) == AsmPush::Rejected);
+    // POISONED: the would-be valid retry stays rejected (no resurrection).
+    assert!(a.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Rejected);
+
+    // A SYMBOLIC wrong SECOND seq rejects (duplicate s1==0 / gap s1>=2 alike).
+    let s1: u16 = kani::any();
+    kani::assume(s1 != 1);
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(a.push_chunk(&mk(s1, false, 8, dig), &body[4..]) == AsmPush::Rejected);
+
+    // A SYMBOLIC total_len drift on the second chunk rejects.
+    let t1: u32 = kani::any();
+    kani::assume(t1 != 8);
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(a.push_chunk(&mk(1, false, t1, dig), &body[4..]) == AsmPush::Rejected);
+
+    // A digest DRIFT at a SYMBOLIC flip index rejects (commitment locked).
+    let di: usize = kani::any();
+    kani::assume(di < 16);
+    let mut d2 = dig;
+    d2[di] ^= 0x01;
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(a.push_chunk(&mk(1, false, 8, d2), &body[4..]) == AsmPush::Rejected);
+
+    // A SYMBOLIC over-capacity total_len rejects at the FIRST chunk
+    // (capacity overflow can never start -- the off-by-one killer's twin).
+    let big: u32 = kani::any();
+    kani::assume(big as usize > CAP);
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, true, big, dig), &body[..4]) == AsmPush::Rejected);
+
+    // Overflow past total_len rejects (sum-of-chunks > total -- 4+8 > 8).
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(a.push_chunk(&mk(1, true, 8, dig), &body[..8]) == AsmPush::Rejected);
+
+    // A WRONG completion digest rejects: the assembled bytes' recomputed
+    // digest must equal the locked commitment (ONE more uhash, concrete).
+    let mut wrong = dig;
+    wrong[0] ^= 0x01;
+    let mut a: InferAssembler<CAP> = InferAssembler::new();
+    assert!(a.push_chunk(&mk(0, false, 8, wrong), &body[..8]) == AsmPush::Rejected);
+    assert!(!a.is_done());
+
+    // NEG (garbage never emits a body): an all-MORE stream can never
+    // complete -- it rejects at the would-overrun chunk, done stays false.
+    let mut g: InferAssembler<CAP> = InferAssembler::new();
+    assert!(g.push_chunk(&mk(0, true, 8, dig), &body[..4]) == AsmPush::Accepted);
+    assert!(g.push_chunk(&mk(1, true, 8, dig), &body[4..]) == AsmPush::Rejected);
+    assert!(!g.is_done());
+}
+
+/// The PINNED M31 response-binding tag vector: `infer_tag` over the harness's
+/// exact concrete inputs (key 0x6D*32, the `kani_iw_frame` challenge/nonce
+/// patterns, peer QEMU_CHARDEV_HARNESS, req_id A5A5_5A5A_0123_4567, kind
+/// INFER_RESP, sub = `kani_m31_sub(1, true, 64)`, the 8-byte chunk in the
+/// harness), computed by the SAME leaf under `cargo test` (the
+/// `khash_vectors` pinned-KAT idiom; re-derivable in one host-test line).
+/// Recomputing it inside the harness would cost a second ~70s CBMC khash
+/// execution (measured) for zero proof value -- and the pin is STRONGER: any
+/// construction drift (a dropped seq/field/label, a swapped label, a field
+/// reorder) moves the recomputed tag off this constant and turns the iff RED.
+#[cfg(kani)]
+const KANI_RESP_BINDING_PIN: [u8; INFER_TAG_LEN] = [
+    0x80, 0x2e, 0xe6, 0xf6, 0x8d, 0x3c, 0x05, 0x3a, 0xfc, 0xb6, 0xe4, 0x4e, 0x28, 0x55, 0xfa,
+    0x94,
+];
+
+/// (4) M31 RESPONSE BINDING (proposal §8.4) -- THE IFF-THEOREM, pinned-vector
+/// shape: over a FULLY SYMBOLIC tag, `verify_infer_resp` accepts the genuine
+/// frame IFF the presented tag equals the PINNED genuine MAC
+/// ([`KANI_RESP_BINDING_PIN`]) -- ONE khash execution total (the recompute
+/// inside `verify_infer_resp`; the M31 MAC message is 90 bytes = key + 2
+/// message blocks, MEASURED ~70s per CBMC execution, so the #49 budget holds
+/// exactly one). The iff SUBSUMES the per-bit flip/restore legs (a flipped
+/// tag is a symbolic-tag instance on the != side; the restored tag is the ==
+/// side) and KILLS every construction-drift mutant AT THE KANI LEVEL: an
+/// `infer_tag` that drops seq (or any field, or the domain label) from its
+/// MAC input recomputes a tag off the pin, the iff fails, RED -- the §8
+/// mutation set's dropped-seq killer. The pre-MAC binding legs (a reflected
+/// REQ kind, a wrong correlation id, a non-echoed challenge, a body-bearing
+/// PENDING) reject CONCRETELY before any khash runs (constant propagation
+/// prunes the MAC branch).
+///
+/// MEASURED #49 ladder record (every proposal-sketch form walked + killed):
+/// a symbolic flip index over the payload bytes made the khash message
+/// symbolic-choice (>5 min, killed); 5 khash executions (construct + 4
+/// verifies) = 235s; `kani::solver(kissat)` changed NOTHING (the cost is
+/// CBMC formula construction, not SAT); the pinned-vector iff is the rung
+/// that fits the budget.
+///
+/// NEGATIVE CONTROL (non-vacuous both ways, by the iff itself): a verifier
+/// that rejects everything fails the == direction; one that ignores the tag
+/// fails the != direction; a drifted/mutated MAC construction fails the ==
+/// direction.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_infer_resp_binding() {
+    let key: [u8; INFER_KEY_LEN] = [0x6Du8; INFER_KEY_LEN];
+    let chunk = [0x42u8, 0x99, 0x17, 0xE0, 0x3B, 0x70, 0x55, 0x08];
+    let req_id: u64 = 0xA5A5_5A5A_0123_4567;
+    let sub = kani_m31_sub(1, true, 64);
+    // The genuine frame shape: payload = subhdr || chunk; the tag SYMBOLIC.
+    let base = kani_iw_frame(&[]);
+    let mut payload = [0u8; INFER_SUBHDR_LEN + 8];
+    assert!(subhdr_canon(&sub, &mut payload) == INFER_SUBHDR_LEN);
+    let mut i = 0usize;
+    while i < 8 {
+        payload[INFER_SUBHDR_LEN + i] = chunk[i];
+        i += 1;
+    }
+    let sym_tag: [u8; INFER_TAG_LEN] = kani::any();
+    let mut f = base;
+    f.kind = iw_kind::INFER_RESP;
+    f.req_id = req_id;
+    f.tag = sym_tag;
+    f.payload = &payload;
+    let chal = base.challenge;
+
+    // THE IFF (the one khash execution): accept <=> the symbolic tag equals
+    // the pinned genuine MAC; on acceptance the parsed parts round-trip.
+    match verify_infer_resp(&key, &f, req_id, &chal) {
+        Some((s, c)) => {
+            assert!(sym_tag == KANI_RESP_BINDING_PIN);
+            assert!(s == sub);
+            assert!(c.len() == 8);
+            let mut k = 0usize;
+            while k < 8 {
+                assert!(c[k] == chunk[k]);
+                k += 1;
+            }
+        }
+        None => assert!(sym_tag != KANI_RESP_BINDING_PIN),
+    }
+
+    // The pre-MAC binding legs (concrete -- the khash branch is pruned): a
+    // reflected REQ kind, a wrong correlation id, a non-echoed challenge,
+    // and a body-bearing PENDING all reject even WITH the genuine tag.
+    let mut good = f;
+    good.tag = KANI_RESP_BINDING_PIN;
+    let mut refl = good;
+    refl.kind = iw_kind::INFER_REQ; // a reflected REQ never binds
+    assert!(verify_infer_resp(&key, &refl, req_id, &chal).is_none());
+    assert!(verify_infer_resp(&key, &good, req_id ^ 1, &chal).is_none());
+    let mut c2 = chal;
+    c2[0] ^= 0x01;
+    assert!(verify_infer_resp(&key, &good, req_id, &c2).is_none());
+    let mut pend = good;
+    pend.kind = iw_kind::INFER_PENDING; // a pending heartbeat carries no body
+    assert!(verify_infer_resp(&key, &pend, req_id, &chal).is_none());
+}
+
+/// The PINNED M31 domain-separation vectors (the `khash_vectors` pinned-KAT
+/// idiom; one host-test line re-derives both): on key 0x2B*32, peer
+/// TB_VMM_HOST, the `kani_iw_frame` nonce/challenge patterns, req_id
+/// DEAD_BEEF_0000_0031, kind INFER_RESP, sub = `kani_m31_sub(0, false, 12)`,
+/// chunk 0x5A*8 -- `KANI_DOMAIN_INFER_PIN` is `infer_tag`'s output and
+/// `KANI_DOMAIN_ECHO_PIN` is `echo_tag`'s output over the EXACTLY-ALIGNED
+/// suffix (`req_id‖kind‖seq‖sflags‖total_len‖body_digest‖chunk` as the echo
+/// body), so the two MAC inputs differ ONLY in their leading domain labels.
+#[cfg(kani)]
+const KANI_DOMAIN_INFER_PIN: [u8; INFER_TAG_LEN] = [
+    0xb0, 0xf5, 0x43, 0xcd, 0x78, 0x71, 0xc3, 0x44, 0x77, 0x40, 0xf5, 0x18, 0x2a, 0xbc, 0x72,
+    0xa0,
+];
+/// See [`KANI_DOMAIN_INFER_PIN`].
+#[cfg(kani)]
+const KANI_DOMAIN_ECHO_PIN: [u8; INFER_TAG_LEN] = [
+    0x52, 0x09, 0x82, 0x30, 0x37, 0xf9, 0x3e, 0x8c, 0x35, 0xd7, 0xa8, 0x0a, 0x88, 0x2d, 0x96,
+    0x9f,
+];
+
+/// (5) M31 DOMAIN SEPARATION (proposal §8.5), pinned-vector shape: on inputs
+/// whose echo body is EXACTLY the serialized M31 MAC suffix (so the two MAC
+/// inputs differ ONLY in their leading domain labels), `infer_tag`'s output
+/// equals its PIN and differs from the ECHO pin -- ONE khash execution (the
+/// M31 message is 90 bytes = 3 compressions, MEASURED ~70-75s per CBMC
+/// execution; the two-live-call form measured 179s, `kissat` changed
+/// nothing, so the echo side rides its pin). The label is therefore
+/// load-bearing: a SWAPPED-label `infer_tag` outputs the ECHO pin (the !=
+/// fails RED) and a DROPPED-label/drifted construction outputs neither (the
+/// == fails RED) -- the §8 mutation set's swapped-label killer, both
+/// directions. The echo pin's own genuineness + the LIVE two-call inequality
+/// run as the NAMED delegation: the `m31_domain_separated_from_echo` host
+/// test executes the real `echo_tag`-vs-`infer_tag` pair on these aligned
+/// inputs under `cargo test` AND the Miri UB gate over this exact code.
+///
+/// NEGATIVE CONTROL: the == direction (a drifted construction misses the
+/// pin) and the != direction (a label swap hits the echo pin) are each a
+/// concrete mutant killer; the labels are additionally pinned distinct.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_infer_domain_sep() {
+    let key: [u8; INFER_KEY_LEN] = [0x2Bu8; INFER_KEY_LEN];
+    let base = kani_iw_frame(&[]);
+    let sub = kani_m31_sub(0, false, 12);
+    let chunk = [0x5Au8; 8];
+    let req_id: u64 = 0xDEAD_BEEF_0000_0031;
+
+    let m = infer_tag(
+        &key,
+        iw_peer::TB_VMM_HOST,
+        &base.nonce,
+        &base.challenge,
+        req_id,
+        iw_kind::INFER_RESP,
+        &sub,
+        &chunk,
+    );
+    // == : the construction is genuine (any drift / dropped label misses).
+    assert!(m == KANI_DOMAIN_INFER_PIN);
+    // != : the label separates the domains (a swapped label HITS the echo
+    // pin on these aligned inputs and fails here).
+    assert!(m != KANI_DOMAIN_ECHO_PIN);
+
+    // The two brand-derived labels are pinned distinct (a swap is visible
+    // at the byte level too).
+    assert!(INFER_DOMAIN != crate::inferwire::ECHO_DOMAIN);
+}
+
+/// (6) M31 ERR CLOSED ENUM (proposal §8.6): over a fully-SYMBOLIC code,
+/// `err_canon` encodes IFF the code is a member of the closed [`errcode`]
+/// enum, the encoded payload decodes back to `(code, err_retryable(code))`
+/// (the retryable binding round-trips), and a flag that CONTRADICTS the
+/// canonical binding rejects; over a fully-SYMBOLIC 4-byte payload, decode is
+/// total and accept-SOUND (Some implies a known code + the canonical flag +
+/// a zero reserved byte). khash-FREE.
+///
+/// NEGATIVE CONTROL (non-vacuous): a valid code decodes (the round-trip), and
+/// the wrong-length payloads (3/5 bytes) reject.
+#[kani::proof]
+#[kani::unwind(8)]
+fn kani_infer_err_closed() {
+    // Encode iff member; the retryable binding round-trips.
+    let code: u16 = kani::any();
+    let mut p = [0u8; INFER_ERR_PAYLOAD_LEN];
+    let n = err_canon(code, &mut p);
+    if err_code_known(code) {
+        assert!(n == INFER_ERR_PAYLOAD_LEN);
+        match err_decode(&p) {
+            Some((c, r)) => {
+                assert!(c == code);
+                assert!(r == err_retryable(code));
+            }
+            None => panic!("canonical ERR payload must decode (non-vacuous)"),
+        }
+        // A contradicted retryable flag rejects (the binding is enforced).
+        let mut fp = p;
+        fp[2] ^= 0x01;
+        assert!(err_decode(&fp).is_none());
+        // A nonzero reserved byte rejects (symbolic).
+        let rv: u8 = kani::any();
+        kani::assume(rv != 0);
+        let mut rp = p;
+        rp[3] = rv;
+        assert!(err_decode(&rp).is_none());
+    } else {
+        assert!(n == 0); // outside the closed enum: fail-closed, no write
+    }
+
+    // Accept-soundness over a fully-symbolic payload (totality included).
+    let raw: [u8; INFER_ERR_PAYLOAD_LEN] = kani::any();
+    if let Some((c, r)) = err_decode(&raw) {
+        assert!(err_code_known(c));
+        assert!(r == err_retryable(c));
+        assert!(raw[3] == 0);
+    }
+
+    // Wrong lengths reject (never a prefix/suffix parse).
+    let known = errcode::NO_KEY;
+    let mut ok = [0u8; INFER_ERR_PAYLOAD_LEN];
+    assert!(err_canon(known, &mut ok) == INFER_ERR_PAYLOAD_LEN);
+    assert!(err_decode(&ok[..3]).is_none());
+    let mut long = [0u8; INFER_ERR_PAYLOAD_LEN + 1];
+    let mut i = 0usize;
+    while i < INFER_ERR_PAYLOAD_LEN {
+        long[i] = ok[i];
+        i += 1;
+    }
+    assert!(err_decode(&long).is_none());
 }

@@ -9,7 +9,7 @@
 # 45-min cap and M31 stage A adds +6 harnesses):
 #   SHARD=all  (default) -- the single full counted pass, local-workflow
 #              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
-#              pinned EXPECTED_HARNESSES_TOTAL (90), marker `V1: kani-encoders OK`.
+#              pinned EXPECTED_HARNESSES_TOTAL (96), marker `V1: kani-encoders OK`.
 #   SHARD=a|b  -- run ONLY that shard's pinned harness list (repeated
 #              `--harness <name>` + `--exact` -- exact-name matching, never
 #              substring, so e.g. kani_kan_envelope_no_widening can never
@@ -337,6 +337,58 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # challenge / nonce each yields a DISTINCT tag (peer+challenge+nonce provably INSIDE
 # the MAC'd bytes -> the run-script lane cross-pin is real); NEG: an echo_tag that
 # dropped any of them from its MAC input fails the corresponding inequality.
+# + M31 inferwire INFERENCE-ADAPTER extension x6 (the chunked byte-body framing on
+# the SAME leaf -- kinds INFER_REQ/INFER_RESP/INFER_PENDING, the 24-byte in-payload
+# SubHdr, the per-chunk infer_tag MAC under the NEW "YUVA-M31-INFER-V1" domain
+# separator binding peer‖nonce‖challenge‖req_id‖kind‖seq‖sflags‖total_len‖
+# body_digest‖chunk INSIDE the MAC, the compile-time INFER_BODY_CAP=8192
+# reject-never-truncate bound, the chunk-at-a-time InferAssembler -- deliberately
+# NOT a byte-push trace, the M30 FrameAccum CBMC-floor lesson -- and the closed ERR
+# payload enum; #49 budget: khash bodies on CONCRETE short messages only, symbolic
+# flips over indexes/predicates/sub-header bytes, never key material; each harness
+# MUTATION-TESTED per M31 proposal §8 -- a dropped seq in infer_tag's MAC input, an
+# off-by-one assembler cap, a flipped sub-header bounds check, and swapped domain
+# labels each turn a named harness RED, recorded in the M31 PR):
+# kani_inferwire_kind_ext -- canon/decode round-trip for the NEW kinds 4/5/6 at
+# boundary payload lengths; NEG: a symbolic kind outside the closed set {1..6}
+# fail-closes at canon AND decode (the extension does not widen totality);
+# kani_infer_subhdr_total -- symbolic SubHdr round-trip over the full valid
+# envelope, every truncation rejects, reserved sflags bits 1..7 / nonzero rsv /
+# out-of-band total_len (0 or over-cap, symbolic) reject; NEG: the exactly-valid
+# sub-header decodes (non-vacuous rejector); kani_infer_assembler -- at a TINY
+# const-generic cap (CAP=8, the same code path the real INFER_BODY_CAP alias runs):
+# in-order chunks assemble to EXACTLY total_len at total==CAP (the off-by-one
+# capacity killer, every copy index Kani-checked), symbolic wrong-first/second seq
+# (out-of-order/dup/gap), symbolic total_len drift, digest drift at a symbolic flip
+# index, symbolic over-capacity total_len, and overflow-past-total ALL reject and
+# POISON; completion requires the recomputed whole-body digest to equal the locked
+# commitment; NEG: no reject leg ever returns Complete + the poisoned assembler
+# rejects a valid retry (no fabricated/resurrected completion);
+# kani_infer_resp_binding -- THE IFF-THEOREM, pinned-vector shape (the khash KAT
+# idiom): over a FULLY SYMBOLIC tag, verify_infer_resp accepts the genuine frame
+# IFF the tag equals the PINNED genuine MAC (KANI_RESP_BINDING_PIN, re-derived by
+# the m31_kani_pins_rederive host test through the real leaf) -- ONE khash
+# execution (the 90-byte M31 MAC message measured ~70s/execution in CBMC; the
+# proposal-sketch forms all measured over budget: symbolic payload flips >5min,
+# 5-execution flip/restore 235s, kissat no help -- the cost is formula
+# construction, not SAT); the iff subsumes flip/restore AND kills every
+# construction-drift mutant at the Kani level (dropped seq/field/label -> the
+# recompute misses the pin -> RED); the pre-MAC binding legs (reflected REQ /
+# wrong req_id / wrong challenge / body-bearing PENDING) reject concretely with
+# the khash branch pruned; NEG: the iff itself is non-vacuous both ways (a
+# reject-everything verifier fails ==, a tag-ignoring verifier fails !=);
+# kani_infer_domain_sep -- pinned-vector shape: on inputs whose echo body is
+# EXACTLY the serialized M31 MAC suffix (the two MAC inputs differ ONLY in their
+# leading domain labels), infer_tag's output == its PIN and != the ECHO pin (one
+# khash execution; a SWAPPED label hits the echo pin and fails !=, a DROPPED
+# label misses the infer pin and fails ==); the live two-call inequality + both
+# pins' genuineness run as the NAMED delegation m31_kani_pins_rederive under
+# cargo test + Miri; NEG: both pin directions are concrete mutant killers and
+# the label bytes are pinned distinct; kani_infer_err_closed -- over a fully
+# symbolic code, err_canon encodes IFF the code is in the closed enum and the
+# retryable binding round-trips; a contradicted flag / nonzero reserved byte /
+# wrong payload length reject; accept-soundness over a fully-symbolic 4-byte
+# payload; NEG: a valid code decodes.
 # The pinned count + the SHARD_A/SHARD_B lists now live in
 # scripts/kani-shards.sh (sourced above) -- bump THERE in LOCKSTEP when
 # adding/removing a harness (the #101 one-touch procedure: the new name goes

@@ -8,7 +8,7 @@
 # required), scrape the serial output for the milestone marker, and exit
 # non-zero (fail-closed) if it never appears or the guest times out.
 #
-# Since M30 both lanes ALSO spawn the xport-harness host echo peer against a
+# Since M30 both lanes ALSO spawn the xport-harness host peer against a
 # QEMU virtconsole chardev unix socket (the spike-verified
 # `-device virtio-serial-device -device virtconsole` config): the kernel's
 # verified inference-transport channel must complete a HOST-KEYED echo whose
@@ -129,7 +129,12 @@ jobs:
       # custodies the per-run echo key/nonce (OS RNG -- never in the guest
       # image or on the QEMU command line) and prints the `xport-harness:`
       # witness the M30 guards string-compare CROSS-PROCESS against the
-      # kernel's `xport:` line (the anti-hollow leg 2). Built HERE (not inside
+      # kernel's `xport:` line (the anti-hollow leg 2). Since M31 its serve
+      # loop ALSO answers the MAC-chunked mock inference exchange the M31
+      # guards adjudicate (ERR NO-KEY probe + ONE PENDING + 2 chunks of the
+      # shared deterministic mock_infer transform -- still ZERO network, ZERO
+      # secrets; the ANTHROPIC-LIVE bridge is the operator-gated stage C and
+      # NEVER runs here). Built HERE (not inside
       # the run script) because the aarch64 boot runs in a cargo-less
       # debian:trixie-slim container: the bind-mounted /work carries this
       # prebuilt runner binary (glibc forward-compatible: ubuntu-24.04 2.39 ->

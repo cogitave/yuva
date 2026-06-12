@@ -253,6 +253,15 @@ pub const M_BLOCK_UNMAP: u32 = 29;
 pub const M_BLOCK_WRITE: u32 = 30;
 /// M15: RECORD-plane read-latest on the blackboard (needs READ). `args[0]`=off.
 pub const M_BLOCK_READ: u32 = 31;
+/// M31: invoke the model session behind the handle with a BYTE prompt (needs
+/// INVOKE_MODEL -- the SAME right class as the scalar `M_MODEL_INVOKE`, the
+/// M11 chokepoint unchanged). The prompt/response byte buffers cannot ride
+/// the scalar `args` array, so the BODY rides the kernel facade
+/// [`crate::agent_model_invoke_bytes`] (the M_BLOCK_MAP / M14.1
+/// address-space-dependent-body precedent); the number is registered HERE so
+/// the right is gate-checked at the chokepoint and the method space stays
+/// closed (33+ is still `BadMethod`).
+pub const M_MODEL_INVOKE_BYTES: u32 = 32;
 
 /// Map a method number to the single right it requires, or `None` for an
 /// unknown method (-> [`SysStatus::BadMethod`]). This closes the method space.
@@ -282,6 +291,7 @@ fn required_right(method: u32) -> Option<Rights> {
         M_BLOCK_UNMAP => Rights::REVOKE,
         M_BLOCK_WRITE => Rights::WRITE,
         M_BLOCK_READ => Rights::READ,
+        M_MODEL_INVOKE_BYTES => Rights::INVOKE_MODEL,
         M_EMIT_EXTERNAL => Rights::EMIT_EXTERNAL,
         M_BUDGET_DELEGATE => Rights::DELEGATE_BUDGET,
         _ => return None,
@@ -607,6 +617,45 @@ impl HandleTable {
         match &o.chan {
             Some((c, s)) => Some((c.clone(), *s)),
             None => None,
+        }
+    }
+
+    /// M31 -- the BYTE-prompt model-invoke body the kernel facade
+    /// [`crate::agent_model_invoke_bytes`] calls (the byte buffers cannot ride
+    /// the scalar dispatch `args`, the M14.1 precedent). Applies the SAME
+    /// `INVOKE_MODEL` gate `required_right(M_MODEL_INVOKE_BYTES)` names (the
+    /// facade path does not pass through `dispatch`'s top-level gate), then
+    /// resolves the [`ObjKind::ModelSession`] payload (clone-the-`Rc`-out,
+    /// drop-the-slot-borrow discipline) and runs the M31
+    /// [`crate::infer::ModelSession::invoke_bytes`] byte path with the
+    /// kernel-owned buffers. Returns the CLOSED status (`Denied` for an
+    /// INVOKE_MODEL-less handle -- a NARROWed session still bites; `BadCap`
+    /// for a non-session; `Stale`/`BadCap` from resolve) plus the backend's
+    /// own `Result` on `Ok`.
+    #[allow(clippy::type_complexity)] // the closed status x backend-Result product, spelled once
+    pub(crate) fn model_invoke_bytes(
+        &mut self,
+        h: Handle,
+        prompt: &[u8],
+        resp_out: &mut [u8],
+    ) -> (
+        SysStatus,
+        Option<Result<(usize, crate::infer::StopReason), crate::infer::InferError>>,
+    ) {
+        let i = match self.live(h) {
+            Ok(i) => i,
+            Err(e) => return (e, None),
+        };
+        if !self.core.rights_at(i).contains(Rights::INVOKE_MODEL) {
+            return (SysStatus::Denied, None);
+        }
+        let obj = match self.core.object_at(i).clone() {
+            Some(o) => o,
+            None => return (SysStatus::Stale, None),
+        };
+        match &obj.session {
+            Some(sess) => (SysStatus::Ok, Some(sess.invoke_bytes(prompt, resp_out))),
+            None => (SysStatus::BadCap, None),
         }
     }
 
@@ -1327,8 +1376,12 @@ pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
         }
         // M_BLOCK_MAP / M_BLOCK_UNMAP are ADDRESS-SPACE-dependent; their bodies
         // ride the kernel facade `agent_block_map` (dispatch holds no
-        // AddressSpace). Reached here only via the future EL0 gate, they fall
-        // through to the rights-checked stub below.
+        // AddressSpace). M31's M_MODEL_INVOKE_BYTES is BYTE-BUFFER-dependent
+        // the same way (the scalar args cannot carry slices); its body rides
+        // the kernel facade `agent_model_invoke_bytes` ->
+        // `HandleTable::model_invoke_bytes`, which applies the same
+        // INVOKE_MODEL gate. Reached here only via the future EL0 gate, they
+        // fall through to the rights-checked stub below.
         // M_HANDLE_TRANSFER is kernel-mediated (it needs a destination table);
         // its TRANSFER right is verified above. Remaining agent-semantic methods
         // are rights-checked stubs at M11 (bodies land in later milestones).

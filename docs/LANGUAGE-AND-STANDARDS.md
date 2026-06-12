@@ -18,9 +18,10 @@ Per-layer **language allowlist** (Fuchsia's "per-language policy" model, adapted
 | **VMM supervision** (Firecracker/KVM) | **Rust** (rust-vmm crates) | Substrate is already Rust; HTTP-over-UDS control is language-independent but crate compatibility is in Rust |
 | **Protocol bridges** (`mcp:`,`a2a:`) | **Rust** (official MCP/A2A Rust SDKs) | In 2026 both have an official Rust SDK |
 | **Local inference engines** | **Isolated C/C++** (behind a llama.cpp `-sys` crate) **or** network boundary (vLLM/SGLang = Python HTTP server) | Engines do NOT enter the node image or the kernel — driver daemon or HTTP client |
+| **Remote inference bridge (HTTPS/TLS)** **[DECISION]** | **Rust HOST process only** (`rustls` + `ureq` class; `reqwest` acceptable) | TLS/HTTPS/network code NEVER enters the kernel, the guest image, or the `no_std` workspace — the bridge is a host peer on the M30 channel; the guest sees only MAC'd inferwire frames (M31 proposal §11) |
 | **Developer SDKs / CLI / tooling** | **Rust** (core) + **TypeScript/Python** (ecosystem reach) | GC'd languages allowed in the outer SDK layer |
 
-**In one sentence:** Yuva is **Rust** from kernel to protocol bridges; C is confined only in vendored llama.cpp behind a driver daemon; Python/TypeScript live only in the outermost SDK ring and in network-bounded inference engines. This is a one-to-one application of the 2024-2026 industry consensus (Google, Microsoft, AWS, ISRG, Oxide).
+**In one sentence:** Yuva is **Rust** from kernel to protocol bridges; C is confined only in vendored llama.cpp behind a driver daemon; Python/TypeScript live only in the outermost SDK ring and in network-bounded inference engines; remote-API TLS lives only in a Rust host bridge process, never the kernel. This is a one-to-one application of the 2024-2026 industry consensus (Google, Microsoft, AWS, ISRG, Oxide).
 
 ---
 
@@ -93,6 +94,7 @@ Yuva's claim that "the frozen kernel holds the evaluator" makes verification att
 | **Rust dialect** | **FLS** (Ferrocene Language Specification, transferred to the Rust Project in Mar 2025 *— correction: does not change the Reference's status, it is a supplementary spec*) + **Safety-Critical Rust Consortium** guidelines (founded 12 Jun 2024) | Pin to FLS; make the consortium guidelines the in-repo coding standard (MISRA-shaped: compliance level + documented deviation; CI-lintable) |
 | **Qualified toolchain** | **Ferrocene** (TÜV SÜD: ISO 26262 **ASIL D** + IEC 61508, since Oct 2023) | If the functional-safety market is needed later, compiler qualification can be purchased (~€240-300/seat/year); the qualification documents are free to read |
 | **Residual C** | **MISRA C:2025** (now current; 2023 superseded) + CERT C, static analysis (Coverity/Polyspace) | Only in vendored llama.cpp/VMM glue; behind a driver daemon |
+| **Remote-API host deps** **[DECISION]** | `rustls`, `ureq` (runner-up `reqwest`), `serde_json` — host-bridge-only, nested-workspace-firewalled from the kernel's zero-dep/zero-unsafe lanes | Sovereignty-ledger status: **ACCEPTED-PERMANENT (host-bridge-confined)** — the communication pillar's cost, not closable debt; the kernel never inherits it; any widening (new dep, new process) is a new ledger row (M31 proposal §11; the deps themselves land with stage C — the live bridge — and this row is the pre-landed decision) |
 | **Kernel coding discipline** | **TigerStyle** (TigerBeetle): static allocation after init, everything bounded, ≥2 assertions per function | Adapt to the ≤15 kSLOC frozen kernel (Hubris also chose static allocation) |
 | **Supply chain** | **SLSA v1.0** Build L1→L3; **in-toto** provenance | Every artifact (kernel image, node image, WASM tool bundles, SDK crates/wheels) ships with provenance from hosted CI |
 | **Best practices** | **OpenSSF Best Practices badge** (passing) | At repo launch; a published security policy with 14-day response / 60-day fix SLAs |

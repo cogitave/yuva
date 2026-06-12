@@ -93,10 +93,17 @@ pub const DOMSEP_KEY_EVOLVE: &[u8] = concat!(brand_upper!(), "-KEY-EVOLVE-V1").a
 /// `DOMSEP || peer_id || nonce || challenge || body`). Changing it shifts the
 /// xport tag both the kernel AND `tools/xport-harness` compute (they share
 /// this leaf, so the cross-process equality guard stays in lockstep).
-///
-/// NOTE: the M31 inference-ADAPTER separator (`-M31-INFER-V1`) deliberately
-/// does NOT exist yet -- it lands here together with M31, never earlier.
 pub const DOMSEP_M30_ECHO: &[u8] = concat!(brand_upper!(), "-M30-ECHO-V1").as_bytes();
+
+/// The M31 inference-ADAPTER chunk-MAC domain separator (landed together with
+/// M31, exactly as the M30 note here promised). CONSUMER:
+/// `tb-encode::inferwire::INFER_DOMAIN` (the MAC'd message is `DOMSEP ||
+/// peer_id || nonce || challenge || req_id || kind || seq || sflags ||
+/// total_len || body_digest || chunk` -- every adjudicating field INSIDE the
+/// MAC, the M28/Terrapin rule). Disjoint from [`DOMSEP_M30_ECHO`] by the
+/// distinct suffix, so an echo tag can never verify as an inference chunk tag
+/// (the `kani_infer_domain_sep` harness proves the label is load-bearing).
+pub const DOMSEP_M31_INFER: &[u8] = concat!(brand_upper!(), "-M31-INFER-V1").as_bytes();
 
 // ===========================================================================
 // The boot ELF note (tb-boot v0 entry discovery)
@@ -198,18 +205,28 @@ mod tests {
 
     #[test]
     fn domain_separators_prefixed_by_brand_and_distinct() {
-        for d in [DOMSEP_OPCMD_KDF, DOMSEP_KEY_EVOLVE, DOMSEP_M30_ECHO] {
+        let all = [
+            DOMSEP_OPCMD_KDF,
+            DOMSEP_KEY_EVOLVE,
+            DOMSEP_M30_ECHO,
+            DOMSEP_M31_INFER,
+        ];
+        for d in all {
             assert!(!d.is_empty());
             assert!(d.starts_with(BRAND.as_bytes()));
             assert_eq!(d[BRAND.len()], b'-'); // BRAND is a clean token prefix
         }
-        assert_ne!(DOMSEP_OPCMD_KDF, DOMSEP_KEY_EVOLVE);
-        assert_ne!(DOMSEP_OPCMD_KDF, DOMSEP_M30_ECHO);
-        assert_ne!(DOMSEP_KEY_EVOLVE, DOMSEP_M30_ECHO);
+        // Pairwise distinct (a shared label would collapse two keyed domains).
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
         // The exact bytes (the before->after table's "after" column, pinned).
         assert_eq!(DOMSEP_OPCMD_KDF, b"YUVA-OPCMD-KDF-V1");
         assert_eq!(DOMSEP_KEY_EVOLVE, b"YUVA-KEY-EVOLVE-V1");
         assert_eq!(DOMSEP_M30_ECHO, b"YUVA-M30-ECHO-V1");
+        assert_eq!(DOMSEP_M31_INFER, b"YUVA-M31-INFER-V1");
     }
 
     #[test]

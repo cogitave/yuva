@@ -2,9 +2,9 @@
 # scripts/demo.sh — interactive Yuva boot: WATCH the machine come up.
 #
 # This is a VIEWER, not a verifier: it boots the kernel under QEMU with the
-# full device set (virtio-rng + virtio-blk + the M30 inference channel with a
+# full device set (virtio-rng + virtio-blk + the M30/M31 inference channel with a
 # live host-side xport-harness peer) and puts the serial console on YOUR
-# terminal so you can watch the whole M0..M30 + L2.0..L2.6 marker chain print
+# terminal so you can watch the whole M0..M31 + L2.0..L2.6 marker chain print
 # in real time. It asserts NOTHING — the fail-closed verifiers with the
 # anti-hollow guard blocks are scripts/run-aarch64.sh and run-x86_64.sh; CI
 # runs those, not this.
@@ -54,7 +54,8 @@ echo "[demo] cargo kbuild (${ARCH}) — incremental, seconds when fresh…" >&2
 
 # Fresh throwaway disk for the M20 durable-persistence rung (auto-removed).
 IMG="$(mktemp)"; truncate -s 4M "${IMG}"
-# The M30 inference channel: a unix-socket chardev + the host-side harness
+# The M30/M31 inference channel: a unix-socket chardev + the host-side harness
+# (whose serve loop also answers the M31 MAC-chunked mock inference exchange)
 # peer holding a per-run key (so the REAL host-keyed echo runs, not the skip).
 XSOCK="$(mktemp -u)"; XHOUT="$(mktemp)"; XKEY="$(mktemp)"
 trap 'rm -f "${IMG}" "${XSOCK}" "${XHOUT}" "${XKEY}"' EXIT

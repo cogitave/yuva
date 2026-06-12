@@ -1097,7 +1097,8 @@ pub struct OpframeProof {
     /// A u64 WITNESS folded from the 32-byte committed `op_head` (every head byte
     /// contributes), rendered as `tx_head=<hex16>` in the boot witness line.
     pub head: u64,
-    /// The number of emitted + committed transcript frames (4: intro/marker/digest/
+    /// The number of emitted + committed transcript frames (5 since M31:
+    /// intro / marker / experience-digest / the M31 inference-digest marker /
     /// gate-verdict), rendered as `frames=<n>`.
     pub frames: u64,
 }
@@ -1108,15 +1109,19 @@ pub struct OpframeProof {
 /// `tb_encode::prov` fold) and the real `mem::MemSubstrate` M22-head + M23-experience
 /// state -- seeds the M23 memory-pressure scenario for a LIVE M22 head + forget-
 /// decisions, emits INTRO(binds the live head)/MARKER/EXPERIENCE_DIGEST(the most-
-/// borderline M23 record)/GATE_VERDICT(commits the final seq + the honest M24 verdict),
+/// borderline M23 record)/the M31 INFERENCE-DIGEST MARKER(`infer_fold_payload` =
+/// `req_id (u64 LE) || op_hash(response-bytes)` from the channel-free
+/// MOCK-DETERMINISTIC e2e -- the DIGEST, never raw model bytes, folded BEFORE the
+/// closing commit so the committed final seq covers it)/GATE_VERDICT(commits the
+/// final seq + the honest M24 verdict),
 /// and verifies the clean fold + a genuine inclusion proof + strict-monotone seq +
 /// the INTRO binding + the tail-truncation commit + a single-byte tamper rejection;
 /// touches NO device beyond the serial the kernel renders over, and NO scheduler. The
 /// fold is keyless (tamper-EVIDENCE, not authenticity) and the verifier is the OS's
 /// own plumbing, not a human (the marker's `keyed=0` / `oracle=HUMAN-DEFERRED-M26`
 /// honesty tokens).
-pub fn opframe_selftest() -> OpframeProof {
-    mem::opframe_selftest()
+pub fn opframe_selftest(infer_fold_payload: &[u8]) -> OpframeProof {
+    mem::opframe_selftest(infer_fold_payload)
 }
 
 // ===========================================================================
@@ -1349,6 +1354,12 @@ pub enum InferChanProof {
         /// `transport=` lane tokens, so the lane label is bound INSIDE the tag
         /// it just verified (the kernel mechanically cannot mint it).
         peer_id: u8,
+        /// M31: the CHANNEL-REVEALED per-run host key K (the M30 reveal
+        /// convention -- custody, never confidentiality). Carried forward so
+        /// the M31 inference-adapter wire legs can MAC their `INFER_REQ`
+        /// chunks and verify the host's `INFER_RESP`/`INFER_PENDING`/`ERR`
+        /// tags under the NEW `infer_tag` domain without a second reveal.
+        key: [u8; 32],
     },
     /// Found + driven, but the round-trip failed fail-closed. `stage`
     /// localises the failure (0x2 req-canon, 0x3 channel session/poll-cap --
@@ -1371,4 +1382,106 @@ pub enum InferChanProof {
 /// a skip (proposal §10).
 pub fn xport_selftest() -> InferChanProof {
     mem::xport_selftest()
+}
+
+// ===========================================================================
+// M31: the verified INFERENCE-ADAPTER wire self-test facade -- the first
+// MEANING on the M30 channel (still MOCK-DETERMINISTIC: a deterministic
+// transform, never a model, never a network). Mirrors the InferChanProof
+// device-facade pattern: a closed, pure-data verdict the
+// `#![forbid(unsafe_code)]` kernel matches on. ALL value computation (the
+// chunk sub-header codec, the per-chunk infer_tag MAC under the NEW
+// "YUVA-M31-INFER-V1" domain, the fail-closed InferAssembler, the closed ERR
+// enum, the shared mock_infer transform) is the Kani-proven
+// `tb_encode::inferwire` M31 extension; the channel session is the SAME
+// `arch::*::virtio::chan_*` silicon path M30 proved; the orchestration is
+// the safe `mem::infer_wire_selftest`.
+// ===========================================================================
+
+/// M31 inference-adapter WIRE self-test outcome (returned to the kernel for
+/// witness rendering). A closed, pure-data verdict -- the `Proven` variant is
+/// constructed ONLY when the keyless wire-ERR check verified, the chunked
+/// mock exchange MAC-verified + reassembled + matched the in-kernel
+/// expectation bit-exactly, AND all four in-boot negatives fired (badmac /
+/// digest-mismatch / oversize / err-taxonomy) -- the witness flags are earned
+/// per boot, fail-closed, never compiled-in defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferWireProof {
+    /// The full wire proof held. See the gate list in the enum doc.
+    Proven {
+        /// Verified `INFER_PENDING` heartbeats received (the deterministic
+        /// stage-B protocol sends EXACTLY one; pendings are budget-resets,
+        /// NEVER completions -- a pendings-only run is a hard fail).
+        pending: u64,
+        /// MAC-verified `INFER_RESP` chunks reassembled (the 1280-byte mock
+        /// body forces 2 -- the assembler does real wire work every boot).
+        chunks: u64,
+        /// The reassembled response body length in bytes.
+        resp_len: u64,
+    },
+    /// A wire leg failed fail-closed. `stage` localises it (0x1x = the
+    /// keyless ERR probe legs, 0x2x = the chunked mock-exchange legs, 0x27 =
+    /// a negative control did not fire). The kernel renders it WITHOUT an
+    /// 'infer-e2e OK' substring -- red.
+    Failed {
+        /// The pipeline stage that failed (see the variant doc).
+        stage: u32,
+    },
+}
+
+/// M31: the fixed MOCK-DETERMINISTIC response length (re-exported so the
+/// `#![forbid(unsafe_code)]` kernel -- which has no tb-encode dependency --
+/// can size its response buffer; deliberately > the 1024 payload cap, so the
+/// wire exchange always chunks).
+pub const INFER_MOCK_RESP_LEN: usize = tb_encode::inferwire::INFER_MOCK_RESP_LEN;
+
+/// M31: the deterministic correlation id for a byte prompt: the leading 8
+/// bytes (LE) of `op_hash(prompt)` -- deterministic so the SAME id appears in
+/// the M25 transcript fold (computed before M25 prints) and on the wire
+/// exchange (after M30), and the witness/transcript/wire evidence all
+/// correlate. No security claim rides on the id; freshness is the per-boot
+/// challenge inside the MAC.
+pub fn infer_req_id_for(prompt: &[u8]) -> u64 {
+    let h = tb_encode::opframe::op_hash(prompt);
+    u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]])
+}
+
+/// M31: the full 32-byte response digest (`op_hash` -- the ONE M29-C digest
+/// discipline; its leading 16 bytes equal the on-wire `body_digest`
+/// commitment, so the witness `resp-digest=` and the wire commitment can
+/// never drift).
+pub fn infer_resp_digest(resp: &[u8]) -> [u8; 32] {
+    tb_encode::opframe::op_hash(resp)
+}
+
+/// M31: the M25 transcript fold payload -- `req_id (u64 LE) || op_hash
+/// (response-bytes)` (proposal §3d: the DIGEST, never the dump -- fixed-width,
+/// injection-inert). The kernel passes this into [`opframe_selftest`] so the
+/// committed transcript covers the inference evidence BEFORE the closing
+/// GATE_VERDICT.
+pub fn infer_fold_payload(req_id: u64, resp_digest: &[u8; 32]) -> [u8; 40] {
+    let mut out = [0u8; 40];
+    out[..8].copy_from_slice(&req_id.to_le_bytes());
+    out[8..].copy_from_slice(resp_digest);
+    out
+}
+
+/// M31: run the inference-adapter WIRE legs (the keyless `ERR NO-KEY` check +
+/// the chunked PENDING-then-RESP mock exchange + the four in-boot negatives)
+/// over the M30-proven channel at `slot`, MAC'ing every frame with the
+/// channel-revealed per-run key under the NEW M31 domain separator. See
+/// [`InferWireProof`]. `prompt` is the agent-assembled M13-scalar context;
+/// `expected_resp` is the in-kernel MOCK-DETERMINISTIC `infer_bytes` output
+/// the wire body must equal bit-exactly (the cross-process determinism
+/// check). Poll-only, no scheduler; a present-then-silent peer is a hard
+/// `Failed`, never a skip.
+pub fn infer_wire_selftest(
+    slot: u32,
+    key: &[u8; 32],
+    m30_nonce: &[u8; 16],
+    req_id: u64,
+    prompt: &[u8],
+    expected_resp: &[u8],
+) -> InferWireProof {
+    mem::infer_wire_selftest(slot, key, m30_nonce, req_id, prompt, expected_resp)
 }

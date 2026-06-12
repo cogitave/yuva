@@ -29,7 +29,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${TARGET_X86}"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/${KERNEL_BIN}}"
-MARKER='M30: infer-transport OK'
+MARKER='M31: infer-e2e OK backend=MOCK-DETERMINISTIC'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -535,7 +535,78 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M30 marker/witness carries an overclaim ('network'/'TLS'/'encrypt'/'authenticated'/'secure-channel'/'remote-model'/'real-infer'/'validated'/...) -- M30 is a LOCAL host-process echo transport; claims live ONLY in the structured stripped tokens (M30 proposal §5.8)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held)" >&2
+  # M30 is no longer the top-level grep (M31 displaced it as the cumulative tail);
+  # assert it directly so the M30 -> M31 order stays fail-closed + traceable.
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M30: infer-transport OK'; then
+    echo ">> FAIL: final marker present but 'M30: infer-transport OK' missing (M30 displaced/regressed)" >&2
+    exit 1
+  fi
+  # M31 GUARDS (proposal §7 -- house order: skip-reject, positive-require,
+  # by-name rejects, lane cross-pin, inherited tripwires, leak negatives,
+  # strip-then-reject). This lane ATTACHES the chardev harness, so the
+  # mock-lane e2e (the keyless wire-ERR check + the chunked MAC'd mock
+  # exchange + the M25 fold) is REQUIRED in full. The LIVE half
+  # (backend=ANTHROPIC-LIVE) is stage C: operator-gated, NEVER on this lane.
+  #
+  # (§7.1) Skip-variant reject BY NAME: an attached lane never takes the
+  # graceful no-peer skip (the skip variant deliberately LACKS the backend
+  # token, so it can also never satisfy the top-level cumulative grep).
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M31: infer-e2e OK (no host peer, skipped)'; then
+    echo ">> FAIL: M31 ran in SKIP mode (no host peer) but this lane attaches the chardev harness -- the inference-adapter wire e2e was NOT exercised" >&2
+    exit 1
+  fi
+  # (§7.2) POSITIVE-REQUIRE the full infer witness: the proposal-§7 verbatim
+  # token set (every flag earned, every honesty token literal) + the exact
+  # deterministic wire-evidence tail (2 chunks -- the assembler provably did
+  # real wire work -- and exactly 1 verified PENDING heartbeat).
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'infer: backend=MOCK-DETERMINISTIC context=M13-SCALAR-RECALL recalls=0x[0-9a-f]+ prompt-len=0x[0-9a-f]+ resp-len=0x[0-9a-f]+ resp-digest=0x[0-9a-f]{32} req-id=0x[0-9a-f]{16} stop=END-TURN wire-err-handled=0x0*1 fold=M25-TRANSCRIPT key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE chunks=0x0*2 pending=0x0*1'; then
+    echo ">> FAIL: M31 marker present but the real e2e witness 'infer: backend=MOCK-DETERMINISTIC context=M13-SCALAR-RECALL recalls=.. prompt-len=.. resp-len=.. resp-digest=.. req-id=.. stop=END-TURN wire-err-handled=0x1 fold=M25-TRANSCRIPT key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE chunks=0x2 pending=0x1' was NOT seen (hollow M31 pass)" >&2
+    exit 1
+  fi
+  # (§7.3) By-name rejects (case-insensitive, near the M31 lines): the LIVE
+  # lane's evidence class -- and any live/real/network vocabulary -- is
+  # structurally banned from the mock lane, so a forged live claim can never
+  # enter the cumulative chain (the lane cross-pin, §7.4, is the same set).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M31:|infer:|infer-dump:)' | grep -qiE -- 'backend=ANTHROPIC-LIVE|(^|[^[:alnum:]])real|(^|[^[:alnum:]])live|network|TLS|HTTPS|cloud|api[- ]key'; then
+    echo ">> FAIL: M31 marker/witness carries a LIVE-lane token ('ANTHROPIC-LIVE'/'real'/'live'/'network'/'TLS'/'HTTPS'/'cloud'/'api-key') -- the mock lane never borrows the live lane's evidence class; the live half is stage C, operator-gated (M31 proposal §7.3/§7.4)" >&2
+    exit 1
+  fi
+  # (§7.5) Inherited tripwire: a verified INFER_PENDING is a poll-budget
+  # reset, NEVER a completion -- the witness pins pending=0x1 above and the
+  # kernel hard-FAILs a pendings-only run as xport-timeout; reject any
+  # pending-as-completion overclaim vocabulary outright.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M31:|infer:)' | grep -qiE -- 'pending[- ]complete|streamed|streaming'; then
+    echo ">> FAIL: M31 witness claims streaming/pending-completion semantics -- INFER_PENDING is liveness plumbing, chunked delivery is reassembly of a COMPLETED response (M31 proposal §2f)" >&2
+    exit 1
+  fi
+  # (§7.7) Raw-leak tripwires (the encode-before-write invariant is
+  # GUARD-CHECKED, not trusted): (a) FAIL on a raw ESC byte anywhere in guest
+  # serial (an ANSI sequence in model-derived bytes would hijack terminals
+  # rendering the log); (b) every infer-dump line must match the strict
+  # lowercase-hex grammar EXACTLY (regex-inert by construction -- it cannot
+  # forge a marker, a token, or an escape).
+  if printf '%s' "${OUTPUT}" | grep -q -- $'\x1b'; then
+    echo ">> FAIL: a raw ESC (0x1b) byte reached guest serial -- the M31 encode-before-write invariant is broken (M31 proposal §6 raw-leak tripwire)" >&2
+    exit 1
+  fi
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])infer-dump:' | grep -vE -- '^infer-dump: req-id=0x[0-9a-f]{16} seq=0x[0-9a-f]{16} resp-hex=[0-9a-f]+$' | grep -q .; then
+    echo ">> FAIL: an infer-dump line violates the strict 'infer-dump: req-id=0x<16hex> seq=0x<16hex> resp-hex=<lowercase-hex>' grammar -- model-derived bytes must cross serial ONLY hex-encoded (M31 proposal §6)" >&2
+    exit 1
+  fi
+  # (§7.8) Strip-then-reject overclaims: strip the declared M31 structured
+  # tokens FIRST, then case-insensitively reject the intelligence/semantics/
+  # security overclaim vocabulary near the M31 lines -- the mock lane proves
+  # PLUMBING, not intelligence (the M29/M30 global rejects stay in force).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M31:|infer:|infer-dump:)' \
+       | sed -e 's/MOCK-DETERMINISTIC//g' -e 's/CAPREF-HOST-CUSTODIED//g' \
+             -e 's/RESIDUAL-TCB//g' -e 's/ZERO-IN-GUEST//g' \
+             -e 's/M13-SCALAR-RECALL//g' -e 's/M25-TRANSCRIPT//g' \
+             -e 's/ASSUMED-FROM-LITERATURE//g' -e 's/END-TURN//g' \
+       | grep -qiE -- 'understood|reasoned|intelligen|knows|learned|validated|evaluated|secure|confidential|private|authenticated-human|agi'; then
+    echo ">> FAIL: M31 marker/witness carries an overclaim ('understood'/'reasoned'/'intelligen*'/'knows'/'learned'/'validated'/'evaluated'/'secure'/'confidential'/'private'/'authenticated-human'/'agi') -- M31's mock lane proves plumbing (recall -> prompt -> deterministic transform -> digest fold), never intelligence or semantics (M31 proposal §7.8)" >&2
+    exit 1
+  fi
+  echo ">> PASS: observed marker '${MARKER}' (and 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed)" >&2
   exit 0
 fi
 
