@@ -33,7 +33,8 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 // The nano-guest machine code: dual boot notes (.note.Xen PHYS32_ENTRY type 18
-// + .note.TABOS type 0x54420001) and the two entry stubs (`pvh_start` 32-bit
+// + the .note.kboot brand note, name "YUVA" type 0x59550001 -- MIRRORS
+// crates/brand, see the loud note in the .S) and the two entry stubs (`pvh_start` 32-bit
 // PVH / `tb_start` 64-bit tb-boot). Each stub emits one COM1 (0x3f8) sentinel
 // byte then parks; `tb_start` additionally latches tb-vmm's 0x510 BootReady
 // clock. Byte-identical to the file `build.sh` assembles with clang.

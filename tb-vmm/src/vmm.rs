@@ -119,8 +119,10 @@ impl Vmm {
         let loaded = loader::load_kernel(&image, ram.inner())?;
         if config.print_exit {
             eprintln!(
-                "tb-vmm: loaded kernel entry={:#x} (TABOS note), image_end={:#x}",
-                loaded.entry, loaded.image_end
+                "tb-vmm: loaded kernel entry={:#x} ({} note), image_end={:#x}",
+                loaded.entry,
+                tb_boot::TB_NOTE_NAME,
+                loaded.image_end
             );
         }
         // Spawn phase 3: kernel ELF read + PT_LOAD segments copied into RAM.

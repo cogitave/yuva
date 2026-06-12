@@ -29,7 +29,7 @@
 //! explicit `from_le_bytes`/`to_le_bytes`, so the wire format is fixed
 //! regardless of the host that happens to run the unit tests.
 //!
-//! ## The TABOS ELF note (`PT_NOTE`) — byte layout
+//! ## The brand (YUVA) ELF note (`PT_NOTE`) — byte layout
 //!
 //! So `tb-vmm` can discover the kernel's 64-bit entry point *from the ELF*
 //! (exactly as PVH does via `XEN_ELFNOTE_PHYS32_ENTRY`, see
@@ -37,24 +37,27 @@
 //! its `tb-boot` 64-bit entry address. It is a standard ELF note: three 4-byte
 //! words (`n_namesz`, `n_descsz`, `n_type`), then the name padded up to a
 //! 4-byte boundary, then the descriptor. Mirrors the in-repo PVH note's
-//! 4-byte (`.align 4`) framing.
+//! 4-byte (`.align 4`) framing. The name/type bytes derive from the
+//! [`brand`] identity crate — this crate never re-spells them.
 //!
 //! ```text
 //! off  size  field       value                       meaning
 //! ---  ----  ----------  --------------------------  ---------------------------
-//!   0    4   n_namesz    6  (= TB_NOTE_NAMESZ)        len of "TABOS\0" incl. NUL
+//!   0    4   n_namesz    5  (= TB_NOTE_NAMESZ)        len of "YUVA\0" incl. NUL
 //!   4    4   n_descsz    8  (= TB_NOTE_DESCSZ)        sizeof(u64) entry address
-//!   8    4   n_type      0x54420001 (ENTRY64)        'T''B' + 0x0001
-//!  12    6   n_name      "TABOS\0"                    name bytes (incl. NUL)
-//!  18    2   (pad)       0x00 0x00                    pad name to 4-byte boundary
+//!   8    4   n_type      0x59550001 (ENTRY64)        'Y''U' + 0x0001
+//!  12    5   n_name      "YUVA\0"                     name bytes (incl. NUL)
+//!  17    3   (pad)       0x00 0x00 0x00               pad name to 4-byte boundary
 //!  20    8   n_desc      <u64 LE>                     guest-VA of `_tb_start`
 //!  28        -- end (28 bytes total) --
 //! ```
 //!
-//! Note `n_namesz` counts the trailing NUL (so `"TABOS"` -> 6), and the *name*
-//! field is then padded to a 4-byte multiple (6 -> 8) before the descriptor;
-//! the descriptor (8 bytes) is already 4-aligned. See [`parse_entry64_note`]
-//! for the safe extractor `tb-vmm` uses while walking `PT_NOTE` segments.
+//! Note `n_namesz` counts the trailing NUL (so `"YUVA"` -> 5), and the *name*
+//! field is then padded to a 4-byte multiple (5 -> 8) before the descriptor —
+//! the SAME padded width as the TABOS-era 6 -> 8, so every offset (and the
+//! 28-byte total) is unchanged by the rename; the descriptor (8 bytes) is
+//! already 4-aligned. See [`parse_entry64_note`] for the safe extractor
+//! `tb-vmm` uses while walking `PT_NOTE` segments.
 //!
 //! ## References
 //!  * ELF note section layout (`ElfN_Nhdr` = namesz/descsz/type, then name +
@@ -83,10 +86,11 @@ pub mod aarch64;
 /// `tb-boot` handoff from anything else handed to it in `rdi`/`arg0` (e.g. a
 /// PVH `hvm_start_info` pointer whose magic is `0x336E_C578`).
 ///
-/// Value `0x3056_544F_4F42_5400`: its little-endian bytes are
-/// `00 'T' 'B' 'O' 'O' 'T' 'V' '0'`, i.e. the printable mnemonic `TBOOTV0`
-/// ("TABOS boot, version 0") with a leading NUL.
-pub const TB_BOOT_MAGIC: u64 = 0x3056_544F_4F42_5400;
+/// Value `0x3056_544F_4F42_5900`: its little-endian bytes are
+/// `00 'Y' 'B' 'O' 'O' 'T' 'V' '0'`, i.e. the printable mnemonic `YBOOTV0`
+/// ("Yuva boot, version 0") with a leading NUL. DERIVED from
+/// [`brand::BOOT_MAGIC`] (leading NUL + the brand initial + `BOOTV0`).
+pub const TB_BOOT_MAGIC: u64 = brand::BOOT_MAGIC;
 
 /// The contract version stamped in [`TbBootInfo::version`]. Bumped only on an
 /// incompatible layout change; readers reject any other value.
@@ -98,18 +102,20 @@ pub const TB_MEM_KIND_RAM: u32 = 1;
 /// [`TbMemRegion::kind`] value for reserved / unusable memory.
 pub const TB_MEM_KIND_RESERVED: u32 = 2;
 
-/// Name field of the TABOS 64-bit-entry ELF note (`n_name`, sans NUL).
-pub const TB_NOTE_NAME: &str = "TABOS";
+/// Name field of the brand 64-bit-entry ELF note (`n_name`, sans NUL) --
+/// `"YUVA"`, derived from [`brand::NOTE_NAME`].
+pub const TB_NOTE_NAME: &str = brand::NOTE_NAME;
 
-/// `n_type` of the TABOS 64-bit-entry ELF note. `0x54420001` = `'T''B'` (the
-/// high half) followed by note ordinal `0x0001`. Mirrors PVH's
-/// `XEN_ELFNOTE_PHYS32_ENTRY` (type 18) but for our 64-bit direct entry.
-pub const TB_NOTE_TYPE_ENTRY64: u32 = 0x5442_0001;
+/// `n_type` of the brand 64-bit-entry ELF note. `0x59550001` = `'Y''U'` (the
+/// brand's first two bytes in the high half) followed by note ordinal
+/// `0x0001`. Mirrors PVH's `XEN_ELFNOTE_PHYS32_ENTRY` (type 18) but for our
+/// 64-bit direct entry. Derived from [`brand::NOTE_TYPE_ENTRY64`].
+pub const TB_NOTE_TYPE_ENTRY64: u32 = brand::NOTE_TYPE_ENTRY64;
 
-/// `n_namesz` of the TABOS note: `b"TABOS\0".len()` (the NUL is counted).
-pub const TB_NOTE_NAMESZ: u32 = 6;
+/// `n_namesz` of the brand note: `b"YUVA\0".len()` (the NUL is counted) = 5.
+pub const TB_NOTE_NAMESZ: u32 = brand::NOTE_NAMESZ;
 
-/// `n_descsz` of the TABOS note: `size_of::<u64>()` (the entry address).
+/// `n_descsz` of the brand note: `size_of::<u64>()` (the entry address).
 pub const TB_NOTE_DESCSZ: u32 = 8;
 
 // ===========================================================================
@@ -304,7 +310,7 @@ pub struct TbBootInfo {
     /// Length of the cmdline buffer in bytes (no implied NUL terminator).
     pub cmdline_len: u64,
     /// The kernel 64-bit entry address `tb-vmm` actually jumped to (the value
-    /// read from the TABOS ELF note, or the ELF `e_entry` fallback).
+    /// read from the brand (YUVA) ELF note, or the ELF `e_entry` fallback).
     /// Informational; lets the kernel sanity-check the entry it booted through.
     pub kernel_entry: u64,
 }
@@ -408,10 +414,10 @@ impl TbBootInfo {
 }
 
 // ===========================================================================
-// TABOS ELF note extractor
+// The brand (YUVA) ELF note extractor
 // ===========================================================================
 
-/// Validate a candidate TABOS `PT_NOTE` entry and extract the 64-bit kernel
+/// Validate a candidate brand `PT_NOTE` entry and extract the 64-bit kernel
 /// entry address from its descriptor.
 ///
 /// `tb-vmm` walks the kernel ELF's notes and calls this with each note's raw
@@ -423,7 +429,7 @@ pub fn parse_entry64_note(name: &[u8], note_type: u32, desc: &[u8]) -> Result<u6
     if note_type != TB_NOTE_TYPE_ENTRY64 {
         return Err(TbBootError::BadNoteType { found: note_type });
     }
-    // Accept "TABOS" or "TABOS\0" (or any longer buffer NUL-terminated there).
+    // Accept "YUVA" or "YUVA\0" (or any longer buffer NUL-terminated there).
     let trimmed: &[u8] = match name.iter().position(|&b| b == 0) {
         Some(nul) => &name[..nul],
         None => name,
@@ -493,7 +499,9 @@ impl core::fmt::Display for TbBootError {
                 f,
                 "tb-boot: bad note type {found:#010x} (expected {TB_NOTE_TYPE_ENTRY64:#010x})"
             ),
-            TbBootError::BadNoteName => write!(f, "tb-boot: bad note name (expected \"TABOS\")"),
+            TbBootError::BadNoteName => {
+                write!(f, "tb-boot: bad note name (expected \"{TB_NOTE_NAME}\")")
+            }
         }
     }
 }
@@ -558,10 +566,12 @@ mod tests {
 
     #[test]
     fn magic_mnemonic_bytes() {
-        // LE bytes spell \0 T B O O T V 0  ("TBOOTV0").
+        // LE bytes spell a leading NUL + the brand initial + "BOOTV0"
+        // (DERIVED -- never re-spelled: brand::BRAND's first byte).
+        let initial = brand::BRAND.as_bytes()[0];
         assert_eq!(
             TB_BOOT_MAGIC,
-            u64::from_le_bytes([0, b'T', b'B', b'O', b'O', b'T', b'V', b'0'])
+            u64::from_le_bytes([0, initial, b'B', b'O', b'O', b'T', b'V', b'0'])
         );
     }
 
@@ -569,12 +579,17 @@ mod tests {
     fn note_constants() {
         assert_eq!(TB_NOTE_NAMESZ as usize, TB_NOTE_NAME.len() + 1); // incl NUL
         assert_eq!(TB_NOTE_DESCSZ as usize, core::mem::size_of::<u64>());
-        assert_eq!(TB_NOTE_TYPE_ENTRY64, 0x5442_0001);
-        // 'T''B' occupy the top half of the type word.
+        assert_eq!(TB_NOTE_NAME, brand::NOTE_NAME);
+        // The brand's first two bytes occupy the top half of the type word,
+        // ordinal 1 below (DERIVED from the brand const, never re-spelled).
         assert_eq!(
             (TB_NOTE_TYPE_ENTRY64 >> 16) as u16,
-            u16::from_be_bytes(*b"TB")
+            u16::from_be_bytes([brand::BRAND.as_bytes()[0], brand::BRAND.as_bytes()[1]])
         );
+        assert_eq!(TB_NOTE_TYPE_ENTRY64 & 0xFFFF, 1);
+        // The name field pads to the SAME 8-byte width as the TABOS-era name
+        // (namesz 5 -> 8 == 6 -> 8), so the 28-byte note layout is unchanged.
+        assert_eq!((TB_NOTE_NAMESZ as usize).next_multiple_of(4), 8);
     }
 
     #[test]
@@ -672,21 +687,30 @@ mod tests {
         assert_eq!(got2[0], regions[0]);
     }
 
+    /// The note name DERIVED from the const (never re-spelled), bare and in
+    /// its NUL-terminated / pad-to-4 on-wire forms.
+    fn note_name_padded(pad: usize) -> Vec<u8> {
+        let mut v = TB_NOTE_NAME.as_bytes().to_vec();
+        v.extend(core::iter::repeat_n(0u8, pad));
+        v
+    }
+
     #[test]
     fn parse_entry64_note_ok_with_and_without_nul() {
         let entry: u64 = 0x10_0000;
         let desc = entry.to_le_bytes();
         assert_eq!(
-            parse_entry64_note(b"TABOS", TB_NOTE_TYPE_ENTRY64, &desc),
+            parse_entry64_note(&note_name_padded(0), TB_NOTE_TYPE_ENTRY64, &desc),
             Ok(entry)
         );
         assert_eq!(
-            parse_entry64_note(b"TABOS\0", TB_NOTE_TYPE_ENTRY64, &desc),
+            parse_entry64_note(&note_name_padded(1), TB_NOTE_TYPE_ENTRY64, &desc),
             Ok(entry)
         );
-        // Padded name (namesz 6 padded to 8) still parses.
+        // Fully padded name (namesz 5 padded to 8) still parses.
+        let padded = note_name_padded((TB_NOTE_NAMESZ as usize).next_multiple_of(4) - TB_NOTE_NAME.len());
         assert_eq!(
-            parse_entry64_note(b"TABOS\0\0\0", TB_NOTE_TYPE_ENTRY64, &desc),
+            parse_entry64_note(&padded, TB_NOTE_TYPE_ENTRY64, &desc),
             Ok(entry)
         );
     }
@@ -698,12 +722,22 @@ mod tests {
             parse_entry64_note(b"Xen", TB_NOTE_TYPE_ENTRY64, &desc),
             Err(TbBootError::BadNoteName)
         );
+        // The retired TABOS-era name is REJECTED (the rename is total).
         assert_eq!(
-            parse_entry64_note(b"TABOS", 18, &desc),
-            Err(TbBootError::BadNoteType { found: 18 })
+            parse_entry64_note(b"TABOS\0", TB_NOTE_TYPE_ENTRY64, &desc),
+            Err(TbBootError::BadNoteName)
         );
         assert_eq!(
-            parse_entry64_note(b"TABOS", TB_NOTE_TYPE_ENTRY64, &[0u8; 4]),
+            parse_entry64_note(&note_name_padded(0), 18, &desc),
+            Err(TbBootError::BadNoteType { found: 18 })
+        );
+        // The retired TABOS-era type is REJECTED too.
+        assert_eq!(
+            parse_entry64_note(&note_name_padded(0), 0x5442_0001, &desc),
+            Err(TbBootError::BadNoteType { found: 0x5442_0001 })
+        );
+        assert_eq!(
+            parse_entry64_note(&note_name_padded(0), TB_NOTE_TYPE_ENTRY64, &[0u8; 4]),
             Err(TbBootError::ShortBuffer { need: 8, got: 4 })
         );
     }

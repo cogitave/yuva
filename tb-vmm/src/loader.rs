@@ -5,13 +5,15 @@
 //! tb-vmm carries no `unsafe` here). It:
 //!  1. copies every `PT_LOAD` segment to its `p_paddr` in guest RAM, zeroing the
 //!     `p_memsz - p_filesz` `.bss` tail;
-//!  2. locates the TABOS boot note (`PT_NOTE`, name `\"TABOS\"`,
-//!     type [`tb_boot::TB_NOTE_TYPE_ENTRY64`]) whose 8-byte descriptor is the
-//!     kernel's 64-bit `tb-boot` entry. A kernel without this note is rejected (LoaderError::MissingTbNote).
+//!  2. locates the brand boot note (`PT_NOTE`, name [`tb_boot::TB_NOTE_NAME`]
+//!     = `"YUVA"`, type [`tb_boot::TB_NOTE_TYPE_ENTRY64`]) whose 8-byte
+//!     descriptor is the kernel's 64-bit `tb-boot` entry. A kernel without
+//!     this note is rejected (LoaderError::MissingTbNote).
 //!
 //! Layout per the System V gABI / `elf.h` (`Elf64_Ehdr`/`Elf64_Phdr`/`Elf64_Nhdr`).
-//! The TABOS note mirrors the Xen `PHYS32_ENTRY` note used by the PVH path
-//! (crates/tb-hal/src/arch/x86_64/boot.rs).
+//! The brand note mirrors the Xen `PHYS32_ENTRY` note used by the PVH path
+//! (crates/tb-hal/src/arch/x86_64/boot.rs). Every name/type byte here comes
+//! from `tb_boot`'s brand-derived consts -- this file never re-spells them.
 
 use std::fmt;
 
@@ -30,10 +32,10 @@ const PHDR_SIZE: usize = 56;
 /// The 64-bit entry discovered for the kernel + the highest loaded address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadedKernel {
-    /// The guest physical address to set `rip` to. ALWAYS the TABOS note entry:
+    /// The guest physical address to set `rip` to. ALWAYS the brand note entry:
     /// tb-vmm enters the guest directly in 64-bit long mode, so the kernel's
     /// `e_entry` (a 32-bit PVH trampoline) is never a valid target. A kernel
-    /// with no TABOS note is rejected ([`LoaderError::MissingTbNote`]).
+    /// with no brand note is rejected ([`LoaderError::MissingTbNote`]).
     pub entry: u64,
     /// One past the highest `p_paddr + p_memsz` of any loaded segment.
     pub image_end: u64,
@@ -62,7 +64,7 @@ pub enum LoaderError {
     },
     /// No `PT_LOAD` segments were present.
     NoLoadSegments,
-    /// The kernel ELF carries no TABOS `tb-boot` entry note. tb-vmm enters the
+    /// The kernel ELF carries no brand (`YUVA`) `tb-boot` entry note. tb-vmm enters the
     /// guest in 64-bit long mode and refuses to fall back to `e_entry` (which,
     /// for a Yuva kernel, is the 32-bit PVH trampoline — fatal in long mode).
     MissingTbNote,
@@ -90,7 +92,11 @@ impl fmt::Display for LoaderError {
             }
             LoaderError::NoLoadSegments => write!(f, "ELF has no PT_LOAD segments"),
             LoaderError::MissingTbNote => {
-                write!(f, "kernel has no TABOS tb-boot entry note (PT_NOTE name=TABOS, type=ENTRY64); tb-vmm requires it and will not use e_entry")
+                write!(
+                    f,
+                    "kernel has no {name} tb-boot entry note (PT_NOTE name={name}, type=ENTRY64); tb-vmm requires it and will not use e_entry",
+                    name = tb_boot::TB_NOTE_NAME
+                )
             }
             LoaderError::GuestWrite { paddr, detail } => {
                 write!(f, "failed to write segment to guest paddr {paddr:#x}: {detail}")
@@ -169,7 +175,7 @@ fn parse_phdrs(image: &[u8]) -> Result<Vec<Phdr>, LoaderError> {
     Ok(phdrs)
 }
 
-/// Find the TABOS-note 64-bit entry from a `PT_NOTE` segment, if present.
+/// Find the brand-note 64-bit entry from a `PT_NOTE` segment, if present.
 fn find_tb_entry(image: &[u8], phdrs: &[Phdr]) -> Result<Option<u64>, LoaderError> {
     for ph in phdrs.iter().filter(|p| p.p_type == PT_NOTE) {
         let start = ph.p_offset as usize;
@@ -221,7 +227,7 @@ fn find_tb_entry(image: &[u8], phdrs: &[Phdr]) -> Result<Option<u64>, LoaderErro
 }
 
 /// Parse, copy every `PT_LOAD` to its `p_paddr` in guest RAM, and resolve the
-/// 64-bit entry from the mandatory TABOS note (`MissingTbNote` if absent).
+/// 64-bit entry from the mandatory brand note (`MissingTbNote` if absent).
 pub fn load_kernel(image: &[u8], mem: &GuestMemoryMmap) -> Result<LoadedKernel, LoaderError> {
     let phdrs = parse_phdrs(image)?;
 
@@ -269,7 +275,7 @@ pub fn load_kernel(image: &[u8], mem: &GuestMemoryMmap) -> Result<LoadedKernel, 
         return Err(LoaderError::NoLoadSegments);
     }
 
-    // tb-vmm enters the guest in 64-bit long mode, so the TABOS note entry is
+    // tb-vmm enters the guest in 64-bit long mode, so the brand note entry is
     // mandatory; e_entry (the 32-bit PVH trampoline) is never a valid target.
     let entry = find_tb_entry(image, &phdrs)?.ok_or(LoaderError::MissingTbNote)?;
 
@@ -292,7 +298,9 @@ mod tests {
     }
 
     /// Build a minimal ET_EXEC ELF64 with one PT_LOAD (payload \"ABCD\" at
-    /// paddr 0x100000, +4 bytes bss) and, optionally, a PT_NOTE TABOS entry.
+    /// paddr 0x100000, +4 bytes bss) and, optionally, a PT_NOTE brand entry
+    /// (every name/namesz/type byte DERIVED from tb_boot's consts -- the
+    /// fixture cannot drift from the producer/parser).
     fn build_elf(note_entry: Option<u64>, e_entry: u64) -> Vec<u8> {
         let mut buf = vec![0u8; 0x400];
         buf[0..4].copy_from_slice(b"\x7fELF");
@@ -325,11 +333,14 @@ mod tests {
             let ph1 = EHDR_SIZE + PHDR_SIZE;
             let note_off = 0x300usize;
             let mut note = Vec::new();
-            note.extend_from_slice(&6u32.to_le_bytes()); // namesz \"TABOS\0\"
-            note.extend_from_slice(&8u32.to_le_bytes()); // descsz
+            note.extend_from_slice(&tb_boot::TB_NOTE_NAMESZ.to_le_bytes()); // namesz (name + NUL)
+            note.extend_from_slice(&tb_boot::TB_NOTE_DESCSZ.to_le_bytes()); // descsz
             note.extend_from_slice(&tb_boot::TB_NOTE_TYPE_ENTRY64.to_le_bytes());
-            note.extend_from_slice(b"TABOS\0"); // 6 bytes
-            note.extend_from_slice(&[0u8, 0u8]); // pad name 6 -> 8
+            note.extend_from_slice(tb_boot::TB_NOTE_NAME.as_bytes());
+            note.push(0); // the counted trailing NUL
+            while note.len() % 4 != 0 {
+                note.push(0); // pad the name field to a 4-byte boundary
+            }
             note.extend_from_slice(&entry.to_le_bytes()); // 8-byte desc
             let nlen = note.len();
             buf[note_off..note_off + nlen].copy_from_slice(&note);
@@ -367,7 +378,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_tb_note() {
-        // No TABOS note -> hard error (NOT an e_entry fallback): jumping to the
+        // No brand note -> hard error (NOT an e_entry fallback): jumping to the
         // 32-bit PVH e_entry in long mode would instantly triple-fault.
         let elf = build_elf(None, 0x0010_0000);
         let gm = mem();

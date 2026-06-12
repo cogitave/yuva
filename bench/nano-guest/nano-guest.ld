@@ -10,9 +10,11 @@
  *
  * `pvh_start` (32-bit, .text._start) is the PVH entry Firecracker reads from the
  * Xen note; `tb_start` (64-bit, .text._tb_start) is the entry tb-vmm reads from
- * the TABOS note. ENTRY(pvh_start) sets e_entry for completeness (Firecracker
- * PVH ignores e_entry and uses the note; tb-vmm ignores e_entry entirely and
- * uses the TABOS note), so e_entry never decides the boot.
+ * the brand (YUVA) note. ENTRY(pvh_start) sets e_entry for completeness
+ * (Firecracker PVH ignores e_entry and uses the note; tb-vmm ignores e_entry
+ * entirely and uses the brand note), so e_entry never decides the boot. The
+ * `.note.kboot` SECTION name is brand-NEUTRAL build plumbing (consumers read
+ * the in-note name field), so this .ld never needs another rename.
  */
 
 ENTRY(pvh_start)
@@ -21,7 +23,7 @@ OUTPUT_ARCH(i386:x86-64)
 
 PHDRS
 {
-    note PT_NOTE FLAGS(4);          /* R   : the Xen + TABOS boot notes        */
+    note PT_NOTE FLAGS(4);          /* R   : the Xen + brand boot notes        */
     text PT_LOAD FLAGS(5);          /* R E : .note.*, .text                    */
 }
 
@@ -38,8 +40,8 @@ SECTIONS
         KEEP(*(.note.Xen))
     } :text :note
 
-    .note.TABOS : ALIGN(4) {
-        KEEP(*(.note.TABOS))
+    .note.kboot : ALIGN(4) {
+        KEEP(*(.note.kboot))
     } :text :note
 
     .text : ALIGN(16) {

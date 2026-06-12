@@ -12,10 +12,12 @@ Everything below is that home being built — and proving itself at every boot.
 > License: **PolyForm Noncommercial 1.0.0** — source-available; free for any
 > noncommercial use, commercial use requires permission. See [LICENSE](LICENSE.md).
 >
-> Name note: Yuva was developed under the code name **TABOS**. The `tb-` crate
-> prefix and the TABOS-era wire/ABI strings (ELF note names, magics, hash domain
-> separators) remain in the code and its history; they are being migrated in a
-> follow-up PR. Nothing semantic depends on them.
+> Name note: Yuva was developed under the code name **TABOS**. Every TABOS-era
+> wire/ABI string (the ELF note name/type, frame and disk magics, hash domain
+> separators) has been migrated: the bytes now derive from **`crates/brand`**,
+> the single Rust source of truth for the project identity (script-level
+> mirror: `scripts/project.env`). The `tb-` crate prefix remains as history;
+> nothing semantic depends on it.
 
 ## The boot is the proof
 

@@ -24,7 +24,7 @@ nothing:
   - `.note.Xen` — `XEN_ELFNOTE_PHYS32_ENTRY` (type **18**, name `"Xen"`,
     desc = the 32-bit PVH entry `pvh_start`). Firecracker's `linux-loader`
     auto-selects PVH **solely** from this note — no config flag needed.
-  - `.note.TABOS` — type **0x54420001**, name `"TABOS"`, desc = the 64-bit
+  - `.note.kboot` — type **0x59550001**, name `"YUVA"` (mirrors `crates/brand`), desc = the 64-bit
     entry `tb_start`. tb-vmm's loader **requires** this note (it rejects any ELF
     lacking it: `LoaderError::MissingTbNote`) and never uses `e_entry`.
   - `pvh_start` (`.code32`): Firecracker enters here in 32-bit protected mode,
@@ -80,14 +80,14 @@ kernel crate" invariant.
 ```
 Type: EXEC (ET_EXEC)   Machine: EM_X86_64   Entry: 0x100030 (= pvh_start)
 Program Headers:
-  NOTE  ... 0x100000  R    align 4   -> .note.Xen .note.TABOS
-  LOAD  ... 0x100000  R E            -> .note.Xen .note.TABOS .text
+  NOTE  ... 0x100000  R    align 4   -> .note.Xen .note.kboot
+  LOAD  ... 0x100000  R E            -> .note.Xen .note.kboot .text
 Notes:
   .note.Xen   : type 0x12 (=18)        desc = 30 00 10 00          -> pvh_start = 0x100030
-  .note.TABOS : type 0x54420001        desc = 3b 00 10 00 00 00 00 00 -> tb_start = 0x10003b
+  .note.kboot : type 0x59550001        desc = 3b 00 10 00 00 00 00 00 -> tb_start = 0x10003b
 ```
 
-So Firecracker reads `.note.Xen`/0x100030 and tb-vmm reads `.note.TABOS`/
+So Firecracker reads `.note.Xen`/0x100030 and tb-vmm reads `.note.kboot`/
 0x10003b — each from the SAME 4848-byte binary. tb-vmm accepts the path/ELF and
 proceeds to KVM (local boot needs `/dev/kvm`; the numbers come from CI).
 

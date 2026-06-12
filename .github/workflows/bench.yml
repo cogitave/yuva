@@ -45,10 +45,11 @@ concurrency:
 #
 # KERNEL_BIN / TARGET_* — build identity, MIRRORS scripts/project.env (the
 # single source of truth at the script level); a rename changes that file and
-# these env: blocks together. NOTE: the nano-guest note-grep guard below greps
-# the literal TABOS ELF-note bytes — that is the WIRE constant the binary still
-# emits (tb-boot note name), NOT a build identifier; it is deliberately not
-# routed through these vars.
+# these env: blocks together. BRAND / NOTE_TYPE_HEX — the brand WIRE constants
+# (Rust source of truth: crates/brand/src/lib.rs, mirrored via project.env):
+# the nano-guest note-grep guard below greps the built ELF's notes for them,
+# which is what pins nano-guest.S's hand-written mirror of the brand note to
+# the brand crate (the .S cannot import Rust).
 env:
   FC_VER: v1.12.1
   FC_CI_VERSION: v1.12
@@ -56,6 +57,8 @@ env:
   KERNEL_BIN: yuva-kernel
   TARGET_X86: x86_64-yuva-none
   TARGET_A64: aarch64-yuva-none
+  BRAND: YUVA
+  NOTE_TYPE_HEX: "0x59550001"
 
 jobs:
   bench:
@@ -119,13 +122,16 @@ jobs:
           bash bench/nano-guest/build.sh "$(pwd)/nano-guest.elf"
           echo "nano-guest size: $(wc -c < nano-guest.elf) bytes"
           # Well-formedness gate: both boot notes must be present (Firecracker's
-          # Xen PHYS32_ENTRY type 18 + tb-vmm's TABOS type 0x54420001), else the
-          # apples-to-apples premise is broken. Use llvm-readelf from llvm-tools.
+          # Xen PHYS32_ENTRY type 18 + tb-vmm's brand note, name $BRAND type
+          # $NOTE_TYPE_HEX — both mirroring crates/brand via project.env), else
+          # the apples-to-apples premise is broken. This grep is ALSO the
+          # lockstep guard for nano-guest.S's hand-written brand-note mirror
+          # (the .S cannot import Rust). Use llvm-readelf from llvm-tools.
           READELF=$(command -v llvm-readelf || command -v readelf)
           "$READELF" -n nano-guest.elf | tee nano-guest-notes.txt
           grep -qiE "Xen"   nano-guest-notes.txt || { echo "::error::nano-guest missing .note.Xen (PVH)"; exit 1; }
-          grep -qiE "TABOS" nano-guest-notes.txt || { echo "::error::nano-guest missing .note.TABOS (tb-boot)"; exit 1; }
-          grep -qiE "0x54420001" nano-guest-notes.txt || { echo "::error::nano-guest TABOS note type wrong"; exit 1; }
+          grep -qiE "${BRAND}" nano-guest-notes.txt || { echo "::error::nano-guest missing the ${BRAND} brand note (tb-boot)"; exit 1; }
+          grep -qiE "${NOTE_TYPE_HEX}" nano-guest-notes.txt || { echo "::error::nano-guest ${BRAND} note type wrong (want ${NOTE_TYPE_HEX})"; exit 1; }
 
       # ----------------------------------------------------------------------
       # Axis A + B: run tb-vmm --report-spawn N times. Each run emits, on the

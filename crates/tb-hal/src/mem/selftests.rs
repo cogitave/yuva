@@ -1149,7 +1149,7 @@ pub(crate) fn opcmd_selftest() -> crate::OpcmdProof {
 
     // (c) The SIMULATED enrolled verifier's two per-credential keys, derived from the
     //     compiled-in test base key via the forward evolution (M29: a domain-separated
-    //     keyed-BLAKE2s PRF call -- `khash(key, "TABOS-KEY-EVOLVE-V1")`), so the two
+    //     keyed-BLAKE2s PRF call -- `khash(key, "YUVA-KEY-EVOLVE-V1")`), so the two
     //     keys are distinct + not a single repeated byte. NOT a real enrolment.
     let key_a = key_evolve(&OPCMD_BASE_KEY);
     let key_b = key_evolve(&key_a);
@@ -1317,19 +1317,21 @@ pub(crate) fn xport_selftest() -> crate::InferChanProof {
     };
 
     // 2. The per-boot challenge + correlation id from ONE uhash over a label +
-    //    the live cycle counter (varies per run under TCG/KVM alike).
+    //    the live cycle counter (varies per run under TCG/KVM alike). The label
+    //    DERIVES from the brand identity crate (never re-spelled), and every
+    //    length below derives from LABEL.len().
+    const LABEL: &[u8] = concat!(brand::brand_upper!(), "-M30-CHALLENGE-V1").as_bytes();
     let ticks = crate::read_cycle_counter();
-    let mut seed = [0u8; 22 + 8];
-    let label: &[u8; 22] = b"TABOS-M30-CHALLENGE-V1";
+    let mut seed = [0u8; LABEL.len() + 8];
     let mut i = 0usize;
-    while i < 22 {
-        seed[i] = label[i];
+    while i < LABEL.len() {
+        seed[i] = LABEL[i];
         i += 1;
     }
     let tb = ticks.to_le_bytes();
     let mut t = 0usize;
     while t < 8 {
-        seed[22 + t] = tb[t];
+        seed[LABEL.len() + t] = tb[t];
         t += 1;
     }
     let h = uhash(&seed);

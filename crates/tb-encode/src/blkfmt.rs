@@ -16,7 +16,7 @@
 //!    `S_IOERR=1`, `S_UNSUPP=2`). Request types: `T_IN=0` (read sector),
 //!    `T_OUT=1` (write sector), `T_FLUSH=4` (the durability barrier).
 //!  * **superblock** (`superblock_encode`/`superblock_decode`): the 512-byte
-//!    LBA-0 sector -- magic `TABOSMEM`, version, checkpoint generation `gen`,
+//!    LBA-0 sector -- magic `YUVAMEM0` (from `brand`), version, checkpoint generation `gen`,
 //!    per-Region committed `log_head[3]` + `record_count[3]` watermarks, and an
 //!    FNV-1a-64 checksum over bytes `[0..504]`. The decode is TOTAL and fail-
 //!    closed: wrong magic / version / checksum -> `None` (treated by the mount
@@ -210,8 +210,10 @@ pub fn record_sector(region_tag: u8, log_head: u64) -> Option<u64> {
 // Superblock (512 bytes, LBA 0). All multi-byte fields little-endian.
 // ---------------------------------------------------------------------------
 
-/// The superblock magic (`b"TABOSMEM"`).
-pub const SB_MAGIC: [u8; 8] = *b"TABOSMEM";
+/// The superblock magic (`b"YUVAMEM0"` -- the brand + the fixed `MEM0`
+/// mnemonic). Derived in `brand::SB_MAGIC`, never re-spelled here. Disks are
+/// mktemp-fresh per run; nothing on-disk migrates across the rename.
+pub const SB_MAGIC: [u8; 8] = brand::SB_MAGIC;
 /// The on-disk format version this codec writes + accepts.
 pub const SB_VERSION: u32 = 1;
 /// The number of bytes the FNV-1a-64 checksum covers (`[0..504]`).
@@ -231,7 +233,7 @@ pub struct Superblock {
 }
 
 /// Encode a 512-byte superblock sector. Layout:
-///   `[0..8]`   magic `TABOSMEM`
+///   `[0..8]`   magic `YUVAMEM0`
 ///   `[8..12]`  version (le32)
 ///   `[12..16]` reserved zero
 ///   `[16..24]` gen (le64)

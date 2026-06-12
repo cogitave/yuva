@@ -46,8 +46,8 @@
 //! ## Wire format (canonical little-endian, fixed offsets, proposal §2)
 //!
 //! ```text
-//!   [0..2]    magic        u16 LE  (== INFER_MAGIC 0x5444, the next house magic
-//!                                   after opframe 0x5442 / opframe_rx 0x5443)
+//!   [0..2]    magic        u16 LE  (== INFER_MAGIC 0x5958, the next house magic
+//!                                   after opframe 0x5956 / opframe_rx 0x5957)
 //!   [2]       ver          u8      (== INFER_VER)
 //!   [3]       kind         u8      (ECHO_REQ=1 | ECHO_RESP=2 | ERR=3)
 //!   [4]       flags        u8      reserved-zero (fail-closed)
@@ -85,11 +85,13 @@
 
 use crate::khash::{khash, KHASH_KEY_LEN};
 
-/// The fixed inference-transport frame magic (`"DT"` little-endian: `0x44,
-/// 0x54`) -- the next house magic after the M25 opframe (`0x5442`) and the M28
-/// opframe_rx (`0x5443`), so a transport frame is never mistaken for an
-/// operator frame. [`canon`]/[`decode`] reject any other value.
-pub const INFER_MAGIC: u16 = 0x5444;
+/// The fixed inference-transport frame magic (`0x5958`) -- the next house
+/// magic after the M25 opframe (`0x5956`) and the M28 opframe_rx (`0x5957`),
+/// so a transport frame is never mistaken for an operator frame.
+/// [`canon`]/[`decode`] reject any other value. Derived in
+/// `brand::MAGIC_INFERWIRE` (the brand wire-magic family +2), never
+/// re-spelled here.
+pub const INFER_MAGIC: u16 = brand::MAGIC_INFERWIRE;
 
 /// The inference-transport frame format version. [`canon`]/[`decode`] reject
 /// any other value (fail-closed -- an unknown version is incompatible).
@@ -129,7 +131,10 @@ pub const INFER_KEY_REVEAL_LEN: usize = KHASH_KEY_LEN;
 /// the keyed-hash message, keeping the M30 echo disjoint from every other keyed
 /// use of the primitive (the M28 `KDF_DOMAIN`/`EVOLVE_DOMAIN` precedent). The
 /// MAC'd message is `ECHO_DOMAIN || peer_id || nonce || challenge || body`.
-pub const ECHO_DOMAIN: &[u8; 17] = b"TABOS-M30-ECHO-V1";
+/// The bytes (`"YUVA-M30-ECHO-V1"`) DERIVE from `brand::DOMSEP_M30_ECHO` --
+/// the kernel and `tools/xport-harness` share this one const, so the leg-2
+/// cross-process tag equality can never drift on the label.
+pub const ECHO_DOMAIN: &[u8] = brand::DOMSEP_M30_ECHO;
 
 // Width sanity (compile-time): the khash leaf is width-exact to this seam.
 const _: () = assert!(INFER_KEY_LEN == KHASH_KEY_LEN);

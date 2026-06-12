@@ -1,0 +1,27 @@
+# brand: the project IDENTITY -- the single Rust source of truth for every
+# name-bearing byte the project emits (domain separators, the boot ELF-note
+# name/type, the wire-magic family, the disk superblock magic, the boot-info
+# magic). Scripts/workflows mirror the same identity via scripts/project.env.
+#
+# POLICY: this crate is `#![no_std]` + `#![forbid(unsafe_code)]` + ZERO deps +
+# ZERO asm + consts ONLY (no functions besides one const array helper), so it
+# is trivially host-buildable, Kani-transparent (pure constant propagation),
+# and safe for tb-encode to depend on: tb-encode's "zero deps" rule means zero
+# EXTERNAL deps -- this workspace-internal, forbid-unsafe, const-only identity
+# crate is the ONE allowed workspace-internal dependency (documented in both
+# crate headers).
+#
+# TO RENAME THE PROJECT: edit src/lib.rs here + scripts/project.env (+ the
+# mirrored workflow env: blocks + package/target names); everything else
+# derives. See the PR-C rename notes.
+
+[package]
+name = "brand"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+
+[dependencies]
+# Intentionally empty: the identity is self-contained core-only Rust.

@@ -189,7 +189,7 @@ _start:
 // The project's OWN KVM VMM, `tb-vmm`, boots THIS SAME kernel ELF directly in
 // 64-bit long mode via our boot contract — it does NOT use the PVH note and
 // does NOT run the A0 32->64 trampoline above. tb-vmm finds the kernel's
-// 64-bit entry through the TABOS ELF note (below) and jumps to `_tb_start`
+// 64-bit entry through the brand (YUVA) ELF note (below) and jumps to `_tb_start`
 // with paging already on (tb-vmm's identity tables) and `rdi` already holding
 // the guest-physical `TbBootInfo*` (SysV arg0). The PVH path (QEMU/Firecracker)
 // is untouched: both notes coexist in the PT_NOTE phdr, both entries coexist in
@@ -209,33 +209,41 @@ _start:
 //    `rdi` = the first SysV INTEGER argument (System V AMD64 psABI §3.2.3:
 //    "the next available register of the sequence %rdi, %rsi, ..."), so the
 //    `extern "C" fn rust_main(boot_info)` receives the pointer directly.
-//  * tb-boot v0 ABI (crates/tb-boot): TB_NOTE_NAME = "TABOS",
-//    TB_NOTE_TYPE_ENTRY64 = 0x5442_0001, desc = u64 = the 64-bit entry addr.
+//  * tb-boot v0 ABI (crates/tb-boot): TB_NOTE_NAME = "YUVA",
+//    TB_NOTE_TYPE_ENTRY64 = 0x5955_0001, desc = u64 = the 64-bit entry addr.
 //    Mirrors XEN_ELFNOTE_PHYS32_ENTRY (type 18) but carries a 64-bit entry.
+//    DERIVED, never re-spelled: the name `.asciz` is composed from
+//    `brand_upper!()` via concat!, and namesz/type are global_asm `const`
+//    operands fed by tb-boot's brand-derived constants (the producer provably
+//    shares the parser's consts).
 global_asm!(
-r#"
+concat!(r#"
 // ---------------------------------------------------------------------------
-// TABOS ELF note: PT_NOTE name "TABOS", type 0x54420001, desc = u64 _tb_start.
-// (a) PRE: KEEP'd into the PT_NOTE phdr (kernel/linker/x86_64.ld). POST: tb-vmm
+// The brand (YUVA) ELF note: PT_NOTE name "YUVA", type 0x59550001 (both via
+// crates/brand), desc = u64 _tb_start.
+// (a) PRE: KEEP'd into the PT_NOTE phdr (kernel/linker/x86_64.ld, section
+//     .note.kboot -- a brand-NEUTRAL build-plumbing name). POST: tb-vmm
 //     reads `desc` (the kernel's 64-bit entry) and jumps there in long mode.
 //     Coexists with the Xen note in the same PT_NOTE segment: QEMU/Firecracker
-//     match the Xen note (type 18), tb-vmm matches TABOS (type 0x54420001).
+//     match the Xen note (type 18), tb-vmm matches the brand note (type
+//     TB_NOTE_TYPE_ENTRY64).
 // (b) ABI: System V ELF note, 4-byte aligned (mirrors the Xen note; loaders
 //     mis-pad notes at other alignments). Byte layout (consumer view):
-//       [ 0.. 4)  n_namesz = 6            (.long)   sizeof("TABOS\0")
+//       [ 0.. 4)  n_namesz = 5            (.long)   sizeof("YUVA\0")
 //       [ 4.. 8)  n_descsz = 8            (.long)   sizeof(u64 entry)
-//       [ 8..12)  n_type   = 0x54420001   (.long)   == TB_NOTE_TYPE_ENTRY64
-//       [12..20)  "TABOS\0" + 2 pad bytes (name field, padded to 4)
+//       [ 8..12)  n_type   = 0x59550001   (.long)   == TB_NOTE_TYPE_ENTRY64
+//       [12..20)  "YUVA\0" + 3 pad bytes  (name field, padded to 4 -- the
+//                                          SAME 8-byte width as TABOS-era 6->8)
 //       [20..28)  _tb_start as 8-byte LE  (desc field = the 64-bit entry)
 // (c) Tested by: the vmm-boot CI job (tb-vmm boots this ELF and reaches
 //     "M4: user/ring OK"); offsets cross-checked vs tb-boot's #[cfg(test)].
 // ---------------------------------------------------------------------------
-.section .note.TABOS, "a", @note
+.section .note.kboot, "a", @note
 .align 4
-.long   6                       // n_namesz = sizeof("TABOS\0")
+.long   {namesz}                // n_namesz = sizeof(brand name + NUL)
 .long   8                       // n_descsz = sizeof(u64 entry)
-.long   0x54420001              // n_type   = TB_NOTE_TYPE_ENTRY64
-.asciz  "TABOS"                 // n_name   ("TABOS\0", 6 bytes)
+.long   {ntype}                 // n_type   = TB_NOTE_TYPE_ENTRY64
+.asciz  ""#, brand::brand_upper!(), r#""  // n_name (brand + NUL)
 .align  4                       // pad the name field to a 4-byte boundary
 .quad   _tb_start               // n_desc   = 64-bit entry address (LE u64)
 
@@ -287,5 +295,7 @@ _tb_start:
     cli
     hlt
     jmp     .Ltb_halt
-"#
+"#),
+    namesz = const tb_boot::TB_NOTE_NAMESZ,
+    ntype = const tb_boot::TB_NOTE_TYPE_ENTRY64,
 );

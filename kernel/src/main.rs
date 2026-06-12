@@ -33,7 +33,7 @@
 //!
 //! MV (the L1 sovereignty rung) adds a SECOND boot path WITHOUT touching this
 //! self-test: the project's own `tb-vmm` boots this SAME kernel ELF directly in
-//! 64-bit long mode via tb-boot v0 (tb-hal's `_tb_start` + the TABOS ELF note),
+//! 64-bit long mode via tb-boot v0 (tb-hal's `_tb_start` + the brand ELF note),
 //! with `boot_info` = the guest-physical `tb_boot::TbBootInfo` pointer instead
 //! of a PVH `hvm_start_info`. `rust_main` prints "tb-boot: contract v0 OK"
 //! first IFF the magic validates (a PVH pointer is silently ignored), then runs

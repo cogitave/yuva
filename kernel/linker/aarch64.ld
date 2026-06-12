@@ -35,7 +35,7 @@ ENTRY(_start)
 
 KERNEL_LMA = 0x40080000;
 
-/* tb-boot v0: the TABOS note carrying `_tb_start` must live in a PT_NOTE phdr
+/* tb-boot v0: the brand note carrying `_tb_start` must live in a PT_NOTE phdr
  * so a (future) tb-vmm aarch64 KVM_ARM backend's PT_NOTE walk can discover the
  * kernel's EL1 entry (the consumer NEVER uses e_entry, which stays `_start`).
  * The note is file-backed in the `text` PT_LOAD AND exposed via PT_NOTE, the
@@ -44,8 +44,8 @@ KERNEL_LMA = 0x40080000;
  * phdrs leaves the x0=FDT QEMU-virt boot byte-for-byte unchanged. */
 PHDRS
 {
-    note PT_NOTE FLAGS(4);          /* R   : the TABOS _tb_start note          */
-    text PT_LOAD FLAGS(5);          /* R E : .note.TABOS, .text, .rodata       */
+    note PT_NOTE FLAGS(4);          /* R   : the brand _tb_start note          */
+    text PT_LOAD FLAGS(5);          /* R E : .note.kboot, .text, .rodata       */
     data PT_LOAD FLAGS(6);          /* R W : .data, .bss (stacks)              */
 }
 
@@ -54,12 +54,13 @@ SECTIONS
     . = KERNEL_LMA;
     __image_start = .;
 
-    /* tb-boot v0 TABOS note (name "TABOS", type 0x54420001, desc = u64
-     * _tb_start). Emitted by crates/tb-hal/src/arch/aarch64/boot.rs; KEEP()
+    /* tb-boot v0 brand note (name "YUVA", type 0x59550001 -- both derived from
+     * crates/brand; the SECTION name `.note.kboot` is brand-NEUTRAL build
+     * plumbing). Emitted by crates/tb-hal/src/arch/aarch64/boot.rs; KEEP()
      * protects it (and, transitively, `_tb_start`) from --gc-sections. 4-byte
      * aligned per the ELF note framing. */
-    .note.TABOS : ALIGN(4) {
-        KEEP(*(.note.TABOS))
+    .note.kboot : ALIGN(4) {
+        KEEP(*(.note.kboot))
     } :text :note
 
     .text : ALIGN(0x800) {
@@ -127,7 +128,7 @@ SECTIONS
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)
         *(.note.gnu.*)             /* drop GNU property/build-id notes, but    */
-                                   /* KEEP .note.TABOS (the _tb_start entry)   */
+                                   /* KEEP .note.kboot (the _tb_start entry)   */
         *(.comment)
         *(.ARM.attributes)
         *(.ARM.exidx .ARM.exidx.*)

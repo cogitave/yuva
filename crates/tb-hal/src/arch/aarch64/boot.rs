@@ -71,7 +71,7 @@ global_asm!(
     // -- _tb_start (tb-boot v0 / tb-vmm aarch64 entry) ----------------------
     // A SEPARATE entry symbol, ADDED ALONGSIDE _start (NOT replacing it): a
     // (future) tb-vmm aarch64 KVM_ARM backend resolves this address from the
-    // .note.TABOS ELF note (emitted below) and lands the vCPU here via
+    // .note.kboot brand ELF note (emitted below) and lands the vCPU here via
     // KVM_SET_ONE_REG (PC=_tb_start, X0=TbBootInfo*). Under QEMU `virt` the
     // kernel still enters at _start (= e_entry) with x0=FDT and runs the #48
     // EL2->EL1 drop -- THIS path is not reached there, so the existing
@@ -211,11 +211,12 @@ _start:
 );
 
 // ===========================================================================
-// tb-boot v0: the `.note.TABOS` ELF note carrying the `_tb_start` entry.
+// tb-boot v0: the `.note.kboot` brand ELF note carrying the `_tb_start` entry.
 // ===========================================================================
-// Mirrors the x86_64 TABOS note (crates/tb-hal/src/arch/x86_64/boot.rs): a
+// Mirrors the x86_64 brand note (crates/tb-hal/src/arch/x86_64/boot.rs): a
 // (future) tb-vmm aarch64 KVM_ARM backend walks the kernel ELF's PT_NOTE
-// segments, matches type 0x54420001 ("TABOS"), and jumps to the 8-byte LE entry
+// segments, matches type 0x59550001 (name "YUVA" -- both via crates/brand),
+// and jumps to the 8-byte LE entry
 // in the descriptor (= `_tb_start`) -- it NEVER uses `e_entry` (which stays
 // `_start`, the QEMU `virt` x0=FDT entry). Under QEMU the note is inert: QEMU
 // `-kernel` enters at `e_entry`, ignoring notes entirely.
@@ -223,6 +224,8 @@ _start:
 // kernel/linker/aarch64.ld places this note in a PT_NOTE phdr (and KEEP()s it,
 // which also anchors `_tb_start` against --gc-sections -- the note's
 // `.quad _tb_start` is the only reference to that entry from outside `.text`).
+// The SECTION name `.note.kboot` is brand-NEUTRAL build plumbing (it never
+// reaches a consumer; PT_NOTE walkers read the in-note name field).
 //
 // AArch64 assembler idioms that DIFFER from the x86 note (do not "fix" to the
 // x86 spelling):
@@ -232,24 +235,29 @@ _start:
 //     `.align 4` would (wrongly) demand 16-byte alignment; `.balign 4` is the
 //     literal 4-byte boundary the ELF note framing requires.
 //
-// Byte layout (consumer view, matches tb_boot::parse_entry64_note):
-//   [ 0.. 4)  n_namesz = 6            (.long)   sizeof("TABOS\0")
+// Byte layout (consumer view, matches tb_boot::parse_entry64_note; DERIVED --
+// the name comes from brand_upper!(), namesz/type from tb-boot's brand-derived
+// consts as global_asm const operands):
+//   [ 0.. 4)  n_namesz = 5            (.long)   sizeof("YUVA\0")
 //   [ 4.. 8)  n_descsz = 8            (.long)   sizeof(u64 entry)
-//   [ 8..12)  n_type   = 0x54420001   (.long)   == TB_NOTE_TYPE_ENTRY64
-//   [12..18)  "TABOS\0"               (.asciz)  name field
-//   [18..20)  2 pad bytes             (.balign 4) name padded to 4
+//   [ 8..12)  n_type   = 0x59550001   (.long)   == TB_NOTE_TYPE_ENTRY64
+//   [12..17)  "YUVA\0"                (.asciz)  name field
+//   [17..20)  3 pad bytes             (.balign 4) name padded to 4 (the SAME
+//                                     8-byte padded width as TABOS-era 6->8)
 //   [20..28)  _tb_start as 8-byte LE  (.quad)   desc = the EL1 entry address
 global_asm!(
-    r#"
-    .section .note.TABOS, "a", %note
+    concat!(r#"
+    .section .note.kboot, "a", %note
     .balign 4
-    .long   6                       // n_namesz = sizeof("TABOS\0")
+    .long   {namesz}                // n_namesz = sizeof(brand name + NUL)
     .long   8                       // n_descsz = sizeof(u64 entry)
-    .long   0x54420001              // n_type   = TB_NOTE_TYPE_ENTRY64
-    .asciz  "TABOS"                 // n_name   ("TABOS\0", 6 bytes)
+    .long   {ntype}                 // n_type   = TB_NOTE_TYPE_ENTRY64
+    .asciz  ""#, brand::brand_upper!(), r#""  // n_name (brand + NUL)
     .balign 4                       // pad the name field to a 4-byte boundary
     .quad   _tb_start               // n_desc   = 64-bit EL1 entry (LE u64)
-"#
+"#),
+    namesz = const tb_boot::TB_NOTE_NAMESZ,
+    ntype = const tb_boot::TB_NOTE_TYPE_ENTRY64,
 );
 
 /// Raw CurrentEL[3:2] recorded by `_start` BEFORE any EL branching. 0xFF =

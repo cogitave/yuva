@@ -27,4 +27,8 @@ publish = false
 # no_std vs std is selected inside src/lib.rs via cfg_attr(not(test), no_std).
 
 [dependencies]
-# Intentionally empty: the ABI is self-contained core/std-free Rust.
+# The ONE workspace-internal dep (PR-C): the project identity. The boot-info
+# magic + the ELF-note name/type/namesz DERIVE from it (`brand` is itself
+# no_std + forbid(unsafe) + zero-dep + consts-only), so this ABI crate never
+# re-spells the brand bytes. Otherwise self-contained core/std-free Rust.
+brand = { path = "../brand" }
