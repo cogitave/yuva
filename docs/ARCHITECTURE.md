@@ -311,10 +311,18 @@ the live-lane vocabulary by name).
   network/TLS (a LOCAL host process, reject-enforced); desync recovery is
   decoder-level, not live-ring (named deferral). **Stage C — the tb-vmm
   virtio-console device backend (`transport=TB-VMM-HOST`, `bus=VIRTIO-MMIO`,
-  tb-vmm's first `mmio_bus` device) — is SPLIT to its own follow-up landing**;
-  the chardev lanes already discharge the REQUIRED both-arches DoD on TCG,
-  accel-independent, and `run-vmm-x86_64.sh` stays at its M19 marker until
-  stage C lands.
+  tb-vmm's first `mmio_bus` device) — LANDED as its pre-authorized
+  follow-up**: `tb-vmm/src/virtio_mmio.rs` (the modern Version=2 DeviceID-3
+  register file + split-virtqueue walker at scan-slot 0, exactly the register
+  set the kernel driver touches) fronts `tb-vmm/src/infer_host.rs`, the
+  in-process host peer running the SAME `tb-encode` inferwire math as the
+  chardev harness (the keyed echo + the M31 mock serve loop);
+  `run-vmm-x86_64.sh` bumped from its M19 marker to the full cumulative M31
+  tail with the §5 guard block ported (leg-2 cross-process equality against
+  the `--xport-out` witness stream the guest cannot write, the key-leak
+  negative, both lane cross-pins) — the whole M0..M31 chain is CI-required
+  under tb-vmm/KVM whenever `/dev/kvm` is present. The chardev lanes remain
+  the REQUIRED accel-independent both-arches DoD.
 - **The verified INFERENCE ADAPTER, stages A+B (the mock lane) — M31, the NEW
   cumulative tail.** `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (printed
   after M30): the first MEANING on the M30 channel (#89). The `inferwire` leaf
@@ -463,7 +471,10 @@ M31 guards adjudicate)
 (the aarch64 boot runs **inside a `debian:trixie-slim` qemu-10 container** because
 the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, which the runner's apt qemu 8.2.2
 lacks); **vmm-boot** (`tb-vmm` boots the kernel via `tb-boot v0` on x86_64
-`/dev/kvm`, asserting M4, plus the QEMU+KVM boot-time benchmark);
+`/dev/kvm`, asserting — since M30 stage C — the full cumulative M31 tail over
+tb-vmm's own virtio-console backend with the M30/M31 guard blocks
+(`transport=TB-VMM-HOST` cross-process equality + key-leak negative), plus the
+QEMU+KVM boot-time benchmark);
 **l2-nested-vmx** (informational — the real L2.0 VMX-root verdict under nested
 KVM, checking the chain reached `M18: evolve OK`); **microvm-kvm** (required —
 QEMU microvm + KVM `-cpu host`, the #36 LAPIC config, asserting the chain reaches

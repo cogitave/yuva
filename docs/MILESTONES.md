@@ -66,7 +66,11 @@
 > host peer's OWN printed line (leg 2 — CROSS-PROCESS equality with a
 > host-custodied key is the loopback killer); `key=HOST-CUSTODIED-PER-RUN`,
 > `backend=ECHO-ONLY` (transport only — the adapter is M31), stage C (the
-> tb-vmm `TB-VMM-HOST` device backend) split to its own follow-up landing; the
+> tb-vmm `TB-VMM-HOST` device backend — tb-vmm's first `mmio_bus` device,
+> landed as its pre-authorized follow-up: the in-process host peer runs the
+> SAME inferwire math behind a modern virtio-mmio console register file, and
+> `run-vmm-x86_64.sh` asserts the full cumulative tail + the M30/M31 guard
+> blocks under `/dev/kvm`); the
 > NEW cumulative-tail marker `M30: infer-transport OK`) — every milestone
 > verified by booting under QEMU
 > (and, on x86_64, the project's own `tb-vmm`/KVM) on every change. A
@@ -602,7 +606,7 @@ Nine CI gates across eight workflow files guard the tree:
 | Gate | Workflow | What it proves |
 |---|---|---|
 | **ci** | `ci.yml` | build + boot both arches under pure QEMU-TCG; greps the cumulative serial marker (M0..M30; the aarch64 boot runs in a `debian:trixie-slim` qemu-10 container because the L2.6 SMMUv3 stage-2 rung needs qemu ≥ 9.0, with the virtio-blk disk attached + since M30 both lanes spawn the xport-harness host echo peer against a QEMU virtconsole chardev socket and CROSS-PROCESS-compare the M30 challenge/tag) |
-| **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm`, asserting M4 + the boot-time bench (allow-skip when KVM is absent) |
+| **vmm-boot** | `vmm-boot.yml` | `tb-vmm` boots the kernel via the sovereign `tb-boot v0` contract on x86_64 `/dev/kvm` and — since M30 stage C — runs the FULL cumulative chain to the M31 tail over tb-vmm's own virtio-console backend (`transport=TB-VMM-HOST`: the M30 cross-process challenge/tag equality + key-leak negative + the M31 mock-e2e guards, all in `run-vmm-x86_64.sh`) + the boot-time bench (allow-skip when KVM is absent) |
 | **l2-nested-vmx** | `l2-nested-vmx.yml` | informational/continue-on-error — the **real** L2.0 VMX-root verdict under nested KVM (`-cpu host`), checking the chain reached `M18: evolve OK` |
 | **microvm-kvm** | `microvm-kvm.yml` | boots the kernel under QEMU `-M microvm -accel kvm -cpu host` and asserts the cumulative chain reaches `M18: evolve OK` (the THIRD boot config beyond ci/TCG + vmm-boot; the #36 LAPIC/LVT regression guard); also captures the non-blocking `--release` `boot-ready-cycles` figure quoted in BENCHMARKS §3; allow-skip when `/dev/kvm` is absent |
 | **kani** | `kani.yml` | three jobs — `prove-caps` (the M11 rights-subset proof over `tb-caps-core` → `M11: caps-subset PROVEN`, 12 harnesses) and the #101 cost-balanced shard pair `prove-encode-a`/`prove-encode-b` (the `tb-encode` encoder/parser proofs → `V1-shard-a: kani-encoders OK` / `V1-shard-b: kani-encoders OK`, 46 + 44 of the 90 harnesses; lists + pinned counts in ONE place, `scripts/kani-shards.sh`, with the fail-closed disjoint+exhaustive completeness guard run in BOTH jobs; local `SHARD=all` keeps the single 90-harness pass → `V1: kani-encoders OK`); Kani runs in this lane and is also installed locally in WSL (`cargo-kani`) — measure a new/changed harness with `cargo kani -p tb-encode --harness <name>` BEFORE pushing, since the prove-encode-* lanes have hard timeouts |
