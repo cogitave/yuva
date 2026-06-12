@@ -4,8 +4,8 @@
 # the CANONICAL, PORTABLE build path: it needs NO nightly Rust / rustup /
 # -Zbuild-std, so it runs identically on a stable-only host AND on the CI runner
 # (ubuntu-latest ships clang + lld), producing a deterministic, well-formed
-# dual-note ELF (verified: PT_NOTE Xen PHYS32_ENTRY type 18 + TABOS type
-# 0x54420001, ET_EXEC at 1 MiB). The nightly Rust crate (src/main.rs +
+# dual-note ELF (verified: PT_NOTE Xen PHYS32_ENTRY type 18 + the brand note
+# name "YUVA" type 0x59550001, ET_EXEC at 1 MiB). The nightly Rust crate (src/main.rs +
 # `cargo nbuild`) embeds this SAME nano-guest.S byte-for-byte and is kept as an
 # alternative, but the bench lane builds via THIS script to avoid any
 # cargo-config linker-script inheritance from the repo-root .cargo/config.toml.

@@ -52,7 +52,7 @@ that lets `tb-vmm` discover the kernel's 64-bit entry.
 ### 2.1 Hand-off structures (`#[repr(C)]`)
 
 ```rust
-pub const TB_BOOT_MAGIC: u64 = 0x3056_544F_4F42_5400;
+pub const TB_BOOT_MAGIC: u64 = 0x3056_544F_4F42_5900; // brand::BOOT_MAGIC ("\0YBOOTV0")
 pub const TB_BOOT_VERSION: u32 = 0;
 
 #[repr(C)]
@@ -64,7 +64,7 @@ pub struct TbBootInfo {
     pub mem_regions_len: u64,  // element count
     pub cmdline_ptr: u64,      // guest-physical ptr to NUL-free cmdline bytes
     pub cmdline_len: u64,
-    pub kernel_entry: u64,     // 64-bit entry (mirrors the TABOS note desc)
+    pub kernel_entry: u64,     // 64-bit entry (mirrors the brand note desc)
 }
 
 #[repr(C)]
@@ -84,26 +84,26 @@ crucially, if the magic does **not** validate (e.g. a PVH `hvm_start_info`
 pointer arrived via the QEMU path), the kernel simply **ignores** it. A PVH
 pointer is therefore never misread as a `TbBootInfo`.
 
-### 2.2 The `TABOS` ELF note (entry discovery)
+### 2.2 The brand (`YUVA`) ELF note (entry discovery)
 
 So `tb-vmm` can find the kernel's 64-bit entry from the ELF — exactly mirroring
 how PVH advertises its 32-bit entry via `XEN_ELFNOTE_PHYS32_ENTRY` — the kernel
 emits a second `PT_NOTE`:
 
 ```rust
-pub const TB_NOTE_NAME: &str = "TABOS";
-pub const TB_NOTE_TYPE_ENTRY64: u32 = 0x5442_0001; // desc = u64 = _tb_start addr
+pub const TB_NOTE_NAME: &str = brand::NOTE_NAME;                  // "YUVA"
+pub const TB_NOTE_TYPE_ENTRY64: u32 = brand::NOTE_TYPE_ENTRY64;  // 0x5955_0001; desc = u64 = _tb_start addr
 ```
 
 **Byte layout** (standard ELF `Nhdr` + padded name + padded desc, little-endian):
 
 ```
 offset  size  field      value
-  0      4    n_namesz   6            (len("TABOS") + 1 NUL)
+  0      4    n_namesz   5            (len("YUVA") + 1 NUL)
   4      4    n_descsz   8            (one u64)
-  8      4    n_type     0x54420001   (TB_NOTE_TYPE_ENTRY64)
- 12      6    name       'T''A''B''O''S' 0x00
- 18      2    (pad)      0x00 0x00     (name padded to 4-byte multiple)
+  8      4    n_type     0x59550001   (TB_NOTE_TYPE_ENTRY64)
+ 12      5    name       'Y''U''V''A' 0x00
+ 17      3    (pad)      0x00 0x00 0x00 (name padded to 4-byte multiple)
  20      8    desc       u64 LE = guest-physical address of _tb_start
 ```
 
@@ -113,7 +113,7 @@ ELF can carry **both** notes and the right loader picks the right one:
 
 * **QEMU** (`-kernel`) selects **PVH** by the `XEN_ELFNOTE_PHYS32_ENTRY` note →
   32-bit entry → `A0` trampoline. *(unchanged; M0–M4 stay green)*
-* **`tb-vmm`** reads the **`TABOS`** note → 64-bit entry (`_tb_start`) →
+* **`tb-vmm`** reads the **brand (`YUVA`)** note → 64-bit entry (`_tb_start`) →
   long-mode entry. If the note is missing, `tb-vmm` falls back to the ELF
   `e_entry`.
 
@@ -179,7 +179,7 @@ gdt.base/limit set as in §3.2
 
 ```
 rflags = 0x2                   (Firecracker LinuxBoot value)
-rip    = the kernel's 64-bit tb-boot entry (TABOS note desc; else e_entry)
+rip    = the kernel's 64-bit tb-boot entry (brand note desc; else e_entry)
 rdi    = guest-physical TbBootInfo address   (SysV arg0)
 rsi    = 0
 rsp    = top of a reserved boot stack         (courtesy; see note)
@@ -219,7 +219,7 @@ tb-vmm/
       x86_64/
         boot.rs    GDT + identity PTs + SREGS/REGS (the §3 constants)
         layout.rs  guest-RAM layout constants (GDT/PT/bootinfo/stack offsets)
-    loader.rs      ELF64 PT_LOAD copy to p_paddr + TABOS-note entry discovery (pure, unit-tested)
+    loader.rs      ELF64 PT_LOAD copy to p_paddr + brand-note entry discovery (pure, unit-tested)
     boot_params.rs serialize TbBootInfo + TbMemRegion[] + cmdline into guest RAM (pure, unit-tested)
     devices/
       bus.rs       trait Device + PIO/MMIO registry (extensible -> virtio later)
@@ -282,7 +282,7 @@ unsafe.
 Requires a Linux host with a usable **`/dev/kvm`**.
 
 ```sh
-# 1) Build the kernel ELF (custom target; carries BOTH the PVH and TABOS notes).
+# 1) Build the kernel ELF (custom target; carries BOTH the PVH and YUVA brand notes).
 #    From the repo root (the .cargo/config.toml wires -Zbuild-std; see BUILD.md):
 cargo build -p yuva-kernel --target targets/x86_64-yuva-none.json
 #    -> target/x86_64-yuva-none/debug/yuva-kernel

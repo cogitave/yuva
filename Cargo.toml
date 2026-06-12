@@ -12,6 +12,12 @@
 [workspace]
 resolver = "2"
 members = [
+    # The project identity (PR-C): the single Rust source of truth for every
+    # name-bearing wire/witness byte (domain separators, ELF-note name/type,
+    # wire magics, disk magic). no_std + forbid(unsafe) + zero-dep + consts
+    # only; the ONE workspace-internal dep tb-encode/tb-boot/tb-hal share.
+    # Script-level mirror: scripts/project.env.
+    "crates/brand",
     "crates/tb-boot",
     # M11 proof: the host-verifiable capability core (Rights algebra + generic
     # CapTable). Listed BEFORE tb-hal, which re-exports it and wraps

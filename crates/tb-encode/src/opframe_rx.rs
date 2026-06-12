@@ -30,7 +30,7 @@
 //! * **The MAC tier is `mac=KEYED-CRYPTO` (M29 -- the M28 named successor
 //!   LANDED).** [`compute_mac`] is a DERIVE-THEN-MAC over the verified
 //!   [`crate::khash`] BLAKE2s-256 leaf (RFC 7693, native keyed mode):
-//!   `K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" || key_b)` then
+//!   `K_s = khash(key_a, "YUVA-OPCMD-KDF-V1" || key_b)` then
 //!   `tag = khash(K_s, canon)[..MAC_LEN]` -- the M28 nested-FNV envelope is
 //!   RETIRED (it existed only to compensate for an unkeyed primitive; the
 //!   native keyed mode IS the MAC, with a PRF/MAC proof under standard
@@ -54,7 +54,7 @@
 //!
 //! ## Forward-secure key evolution (M29 -- the Bellare-Yee reduction shape)
 //!
-//! [`key_evolve`] is `key_{i+1} = khash(key_i, "TABOS-KEY-EVOLVE-V1")` -- a
+//! [`key_evolve`] is `key_{i+1} = khash(key_i, "YUVA-KEY-EVOLVE-V1")` -- a
 //! domain-separated call of the SAME verified keyed primitive (the evolve label
 //! is disjoint from MAC use: `keyevolve=PRF-DOMSEP`), upgrading the M28
 //! one-way-SHAPED FNV fold to the Bellare-Yee (CT-RSA 2003) forward-security
@@ -92,15 +92,18 @@ pub use crate::prov::{prov_hash as cmd_hash, PROV_HASH_LEN};
 /// keeps the SESSION-KEY derivation disjoint from every other keyed use of the
 /// primitive (the libsodium `crypto_kdf` precedent); ORDER-SENSITIVE in
 /// `key_a`/`key_b` (dual custody preserved -- swapping custodians changes
-/// `K_s`). The witness token is `kdf=DERIVE-THEN-MAC-DOMSEP`.
-pub const KDF_DOMAIN: &[u8; 18] = b"TABOS-OPCMD-KDF-V1";
+/// `K_s`). The witness token is `kdf=DERIVE-THEN-MAC-DOMSEP`. The bytes
+/// (`"YUVA-OPCMD-KDF-V1"`) DERIVE from the `brand` identity crate -- this
+/// module never re-spells them.
+pub const KDF_DOMAIN: &[u8] = brand::DOMSEP_OPCMD_KDF;
 
 /// The key-evolution domain separator (proposal §3): `key_{i+1} = khash(key_i,
 /// EVOLVE_DOMAIN)`. Disjoint from [`KDF_DOMAIN`] and from any MAC'd canon (the
 /// canon always begins with the 2-byte [`CMD_MAGIC`]), so an evolution output
 /// can never be confused with a MAC or a derived session key. The witness
-/// token is `keyevolve=PRF-DOMSEP`.
-pub const EVOLVE_DOMAIN: &[u8; 19] = b"TABOS-KEY-EVOLVE-V1";
+/// token is `keyevolve=PRF-DOMSEP`. Bytes (`"YUVA-KEY-EVOLVE-V1"`) from
+/// `brand`, never re-spelled here.
+pub const EVOLVE_DOMAIN: &[u8] = brand::DOMSEP_KEY_EVOLVE;
 
 // Width sanity (compile-time): the khash leaf is WIDTH-EXACT to the M28 seam
 // constants -- the reason BLAKE2s-256 won the M29 candidate trade (research §3).
@@ -112,10 +115,11 @@ const _: () = assert!(MAC_LEN <= crate::khash::KHASH_TAG_LEN); // sanctioned tru
 /// reject any other value (fail-closed -- an unknown version is incompatible).
 pub const CMD_VER: u8 = 1;
 
-/// The fixed command-frame magic (`"TC"` little-endian: `0x43, 0x54` -- Tabos
-/// Command, distinct from the M25 transcript magic so a TX frame is never mistaken
+/// The fixed command-frame magic (`0x5957`, the brand wire-magic family +1 --
+/// distinct from the M25 transcript magic so a TX frame is never mistaken
 /// for an inbound command). [`canon`]/[`decode`] reject any other value.
-pub const CMD_MAGIC: u16 = 0x5443;
+/// Derived in `brand::MAGIC_OPFRAME_RX`, never re-spelled here.
+pub const CMD_MAGIC: u16 = brand::MAGIC_OPFRAME_RX;
 
 /// The length of the enrolled credential key material each verifier holds (bytes).
 /// A key is opaque secret bytes; [`key_evolve`] folds one key to the next.
@@ -818,7 +822,7 @@ mod tests {
         assert_eq!(key_evolve(&k), kh(&k, EVOLVE_DOMAIN));
         // The two domain labels are disjoint (a shared label would alias the
         // evolution with a degenerate empty-key derive).
-        assert_ne!(&KDF_DOMAIN[..], &EVOLVE_DOMAIN[..KDF_DOMAIN.len()]);
+        assert_ne!(KDF_DOMAIN, &EVOLVE_DOMAIN[..KDF_DOMAIN.len()]);
     }
 
     // ---- compute_mac: tamper-sensitive in canon AND keys --------------------

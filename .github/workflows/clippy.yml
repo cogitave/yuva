@@ -65,12 +65,12 @@ jobs:
           key: ${{ runner.os }}-clippy-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
 
       # THE HARD GATE. Clippy lints the lib AND test targets (`--all-targets`) of
-      # the three pure leaf crates; `-D warnings` turns any lint into a build
-      # error, so the job fails on the first finding. Only a clean run echoes the
-      # marker.
-      - name: Clippy gate over tb-caps-core + tb-encode + tb-boot
+      # the pure leaf crates (+ the consts-only brand identity crate, PR-C);
+      # `-D warnings` turns any lint into a build error, so the job fails on the
+      # first finding. Only a clean run echoes the marker.
+      - name: Clippy gate over brand + tb-caps-core + tb-encode + tb-boot
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: |
-          cargo clippy -p tb-caps-core -p tb-encode -p tb-boot --all-targets -- -D warnings
+          cargo clippy -p brand -p tb-caps-core -p tb-encode -p tb-boot --all-targets -- -D warnings
           echo "S0: clippy OK"

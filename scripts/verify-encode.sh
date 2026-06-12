@@ -250,7 +250,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # keyed-BLAKE2s calls; a SYMBOLIC flip index over CONCRETE keys+canon so every compression stays
 # concrete -- the #49 trap; re-measured at the M29 swap); kani_cmd_key_evolve -- key_evolve is
 # deterministic + advances (not a fixed point) + tamper-sensitive (since M29 the domain-separated
-# keyed-PRF call khash(key, "TABOS-KEY-EVOLVE-V1") -- the Bellare-Yee shape; SYMBOLIC flip index,
+# keyed-PRF call khash(key, "YUVA-KEY-EVOLVE-V1") -- the Bellare-Yee shape; SYMBOLIC flip index,
 # CONCRETE key; re-measured at the M29 swap). The MAC tier is mac=KEYED-CRYPTO (M29 --
 # assumption-conditional: implementation VERIFIED, primitive security ASSUMED-FROM-LITERATURE; the
 # retired KEYED-NONCRYPTO tier is guard-REJECTED); the oracle is a test key (oracle=SIMULATED-ENROLLED-KEY);

@@ -15,12 +15,16 @@
 //!
 //! ## Why a separate crate (mirrors `tb-boot` / `tb-caps-core`)
 //!
-//! `#![no_std]` + `#![forbid(unsafe_code)]` + ZERO deps + ZERO asm, so it builds
-//! for the HOST triple under plain `cargo` (the repo deliberately keeps
-//! `-Zbuild-std` out of the global `.cargo/config.toml`). That is what lets
-//! `cargo kani -p tb-encode` model-check the EXACT SAME encoders the kernel
-//! runs, with NO model drift and WITHOUT dragging `tb-hal`'s `target_arch`
-//! inline asm into CBMC.
+//! `#![no_std]` + `#![forbid(unsafe_code)]` + ZERO EXTERNAL deps + ZERO asm, so
+//! it builds for the HOST triple under plain `cargo` (the repo deliberately
+//! keeps `-Zbuild-std` out of the global `.cargo/config.toml`). That is what
+//! lets `cargo kani -p tb-encode` model-check the EXACT SAME encoders the
+//! kernel runs, with NO model drift and WITHOUT dragging `tb-hal`'s
+//! `target_arch` inline asm into CBMC. The ONE allowed workspace-internal
+//! dependency is `brand` -- the project-identity crate every name-bearing
+//! wire/witness byte (domain separators, wire magics, the disk magic) derives
+//! from; it is itself no_std + forbid(unsafe) + zero-dep + consts-only, so it
+//! adds nothing to the proof surface.
 //!
 //! ## Modules
 //!
@@ -35,7 +39,7 @@
 //!    [`ipc_frame::BoundedRing`] with FIFO + capacity invariants.
 //!  * [`inferwire`] -- the M30 verified INFERENCE-TRANSPORT wire codec: the
 //!    typed, fixed-header, LENGTH-PREFIXED, injective [`inferwire::InferFrame`]
-//!    (house magic `0x5444`; magic/ver/kind{ECHO_REQ,ECHO_RESP,ERR}/reserved-
+//!    (house magic `0x5958`; magic/ver/kind{ECHO_REQ,ECHO_RESP,ERR}/reserved-
 //!    zero flags/req_id correlation u64/challenge[16]/nonce[16]/peer_id/tag[16]/
 //!    payload_len u32 prefix/payload cap 1024) the kernel exchanges with a HOST
 //!    peer over the modern virtio-console channel; `inferwire::canon`/`decode`
@@ -43,7 +47,7 @@
 //!    truncation -> None, the opframe_rx discipline), `inferwire::
 //!    resp_binds_req` is the correlation iff-theorem, `inferwire::echo_tag` is
 //!    the host-keyed echo MAC -- EXACTLY ONE domain-separated [`khash`] call,
-//!    `khash(K, "TABOS-M30-ECHO-V1" || peer_id || nonce || challenge ||
+//!    `khash(K, "YUVA-M30-ECHO-V1" || peer_id || nonce || challenge ||
 //!    body)[..16]`, binding the challenge + host nonce + lane peer_id INSIDE
 //!    the MAC (the M28/Terrapin lesson) -- and `inferwire::verify_echo` is the
 //!    kernel-scope leg-1 verifier (bind + challenge-echo + body-bitexact + tag
@@ -212,10 +216,10 @@
 //!    freshness CHALLENGE and submits a DUAL-AUTHORIZED `ACTIVATE_CMD` bound to the LIVE
 //!    M22 head -- the exogenous-oracle CLOSURE of the M23->M27 learning loop.
 //!    `opframe_rx::key_evolve` is the forward key evolution (M29: the domain-
-//!    separated keyed-PRF call `khash(key, "TABOS-KEY-EVOLVE-V1")` -- the
+//!    separated keyed-PRF call `khash(key, "YUVA-KEY-EVOLVE-V1")` -- the
 //!    Bellare-Yee reduction shape, conditional on the tokened PRF assumption +
 //!    the seam-TESTED old-key erasure), `opframe_rx::compute_mac` is the KEYED
-//!    MAC (M29: the DERIVE-THEN-MAC `khash(khash(key_a, "TABOS-OPCMD-KDF-V1" ||
+//!    MAC (M29: the DERIVE-THEN-MAC `khash(khash(key_a, "YUVA-OPCMD-KDF-V1" ||
 //!    key_b), canon)[..MAC_LEN]` over the verified [`khash`] BLAKE2s-256 leaf --
 //!    the M28 nested-FNV envelope RETIRED; NO new hash math), and
 //!    `opframe_rx::decode_and_verify` returns `Accept` IFF the frame decodes, is an

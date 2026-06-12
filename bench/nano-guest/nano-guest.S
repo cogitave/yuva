@@ -23,9 +23,10 @@
 //     (type 18, name "Xen"); it enters `pvh_start` in 32-bit protected mode,
 //     paging OFF, ebx -> hvm_start_info, eax ignored (xen.org PVH ABI does NOT
 //     require the 0x336ec578 eax magic). https://xenbits.xen.org/docs/unstable/misc/pvh.html
-//   * tb-vmm requires the `.note.TABOS` note (type 0x54420001, name "TABOS",
-//     desc = u64 64-bit entry); it enters `tb_start` in 64-bit long mode with
-//     paging ALREADY on (tb-vmm's identity tables) and rdi -> TbBootInfo*.
+//   * tb-vmm requires the `.note.kboot` brand note (type 0x59550001, name
+//     "YUVA", desc = u64 64-bit entry); it enters `tb_start` in 64-bit long
+//     mode with paging ALREADY on (tb-vmm's identity tables) and
+//     rdi -> TbBootInfo*.
 //   * Both notes live in ONE PT_NOTE phdr; exactly one entry runs per boot.
 //   * Image loads at 1 MiB (== Firecracker HIMEM_START == tb-vmm load addr);
 //     ET_EXEC, vaddr == paddr.
@@ -59,18 +60,26 @@
 .long   pvh_start               // n_desc   = 32-bit physical PVH entry point
 
 // -----------------------------------------------------------------------------
-// PT_NOTE #2 — tb-boot v0: TABOS note (type 0x54420001, name "TABOS").
+// PT_NOTE #2 — tb-boot v0: the brand note (type 0x59550001, name "YUVA").
 // Byte-identical to boot.rs; sits in the SAME PT_NOTE phdr right after the Xen
 // note. desc = the 64-bit entry `tb_start`. tb-vmm rejects any ELF lacking it
 // (loader.rs LoaderError::MissingTbNote), so it MUST be present.
+//
+// !!! MIRRORS crates/brand/src/lib.rs (brand_upper!() / NOTE_NAMESZ /
+// !!! NOTE_TYPE_ENTRY64): this .S cannot import Rust, so the FOUR brand-
+// !!! bearing lines below (.long namesz / .long type / .asciz name) are the
+// !!! ONE sanctioned mirror outside crates/brand -- change them TOGETHER.
+// !!! CI guards the lockstep: bench.yml greps the built ELF's notes for the
+// !!! brand name + note type (env BRAND / NOTE_TYPE_HEX, mirroring
+// !!! scripts/project.env).
 // -----------------------------------------------------------------------------
-.section .note.TABOS, "a", @note
+.section .note.kboot, "a", @note
 .align 4
-.long   6                       // n_namesz = sizeof("TABOS\0")
+.long   5                       // n_namesz = sizeof("YUVA\0")  == brand NOTE_NAMESZ
 .long   8                       // n_descsz = sizeof(u64 entry)
-.long   0x54420001              // n_type   = TB_NOTE_TYPE_ENTRY64
-.asciz  "TABOS"                 // n_name   ("TABOS\0", 6 bytes)
-.align  4                       // pad the name field to a 4-byte boundary
+.long   0x59550001              // n_type   = TB_NOTE_TYPE_ENTRY64 (brand 'Y''U' + 0x0001)
+.asciz  "YUVA"                  // n_name   ("YUVA\0", 5 bytes) == brand_upper!()
+.align  4                       // pad the name field to a 4-byte boundary (5 -> 8)
 .quad   tb_start                // n_desc   = 64-bit entry address (LE u64)
 
 // -----------------------------------------------------------------------------

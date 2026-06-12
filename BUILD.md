@@ -70,7 +70,7 @@ with a plain `cargo build`.
 
 # x86_64 PVH image (loads at 1 MiB):
 cargo kbuild --release --target targets/x86_64-yuva-none.json
-#   -> target/x86_64-yuva-none/release/yuva-kernel  (ELF, PVH + TABOS notes)
+#   -> target/x86_64-yuva-none/release/yuva-kernel  (ELF, PVH + YUVA brand notes)
 
 # aarch64 QEMU-virt image:
 cargo kbuild --release --target targets/aarch64-yuva-none.json
@@ -155,8 +155,9 @@ Reproduced here for traceability; cite the source in each asm file's header note
 ```bash
 llvm-readobj --notes target/x86_64-yuva-none/release/yuva-kernel
 # Expect TWO notes: Owner "Xen" Type 0x12 (XEN_ELFNOTE_PHYS32_ENTRY -- the
-#   PVH/QEMU entry) and Owner "TABOS" Type 0x54420001 (the tb-boot 64-bit entry
-#   that tb-vmm jumps to; see docs/SOVEREIGNTY-ROADMAP.md).
+#   PVH/QEMU entry) and Owner "YUVA" Type 0x59550001 (the tb-boot 64-bit entry
+#   that tb-vmm jumps to; both bytes derive from crates/brand -- see
+#   docs/SOVEREIGNTY-ROADMAP.md).
 
 llvm-objdump -t target/x86_64-yuva-none/release/yuva-kernel | grep -E '_start|rust_main'
 # Expect _start near 0x100000 and rust_main present (un-mangled).

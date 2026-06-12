@@ -17,6 +17,13 @@ publish = false
 # global_asm!/_start. No_std is declared in src/lib.rs.
 
 [dependencies]
+# PR-C: the project identity (no_std, forbid(unsafe_code), zero-dep, consts
+# only). The arch boot trampolines compose their ELF-note `.asciz` name from
+# `brand_upper!()` via concat! (the namesz/type come from tb-boot's derived
+# consts via global_asm const operands), and the M30 selftest seeds its
+# challenge label from the same macro -- tb-hal never re-spells brand bytes.
+brand = { path = "../brand" }
+
 # M6: the shared boot-handoff ABI (no_std, forbid(unsafe_code)). tb-hal's
 # x86_64 frame-allocator boot-map reader parses a tb-vmm `TbBootInfo` using the
 # crate's typed `#[repr(C)]` readers + constants instead of hand-coded offsets.

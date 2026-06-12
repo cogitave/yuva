@@ -89,14 +89,16 @@ jobs:
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: cargo miri setup
 
-      # THE HARD GATE. Miri interprets the host test suites of the two pure leaf
+      # THE HARD GATE. Miri interprets the host test suites of the pure leaf
       # crates. ANY Undefined Behavior or ANY failing test makes `cargo miri test`
       # exit non-zero and FAILS the job; only a clean run reaches the marker echo.
-      # `-p tb-caps-core -p tb-encode` (never `--workspace`) keeps tb-hal's inline
-      # asm + the bare-metal kernel out of the host interpreter entirely.
-      - name: Miri UB gate over tb-caps-core + tb-encode
+      # `-p ...` (never `--workspace`) keeps tb-hal's inline asm + the bare-metal
+      # kernel out of the host interpreter entirely. `-p brand` (PR-C) also runs
+      # the brand identity crate's byte-pinning tests under the gate -- the
+      # known-answer pins that go RED if any wire/witness byte drifts.
+      - name: Miri UB gate over brand + tb-caps-core + tb-encode
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: |
-          cargo miri test -p tb-caps-core -p tb-encode
+          cargo miri test -p brand -p tb-caps-core -p tb-encode
           echo "T0: miri OK"

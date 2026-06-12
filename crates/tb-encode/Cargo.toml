@@ -9,11 +9,11 @@
 # `vmwrite`/`write_volatile` next to the value it just computed (byte-identical).
 #
 # Exactly like `tb-boot` and `tb-caps-core`: `#![no_std]` + `#![forbid(unsafe_code)]`
-# + ZERO deps + ZERO asm, so it builds for the HOST triple under plain `cargo`
-# (the repo keeps `-Zbuild-std` OUT of the global `.cargo/config.toml`, bundling
-# it only in the `kbuild` alias), which is what lets `cargo kani -p tb-encode`
-# model-check the EXACT SAME encoders the kernel runs -- zero model drift, and
-# CBMC never sees `tb-hal`'s inline asm.
+# + ZERO EXTERNAL deps + ZERO asm, so it builds for the HOST triple under plain
+# `cargo` (the repo keeps `-Zbuild-std` OUT of the global `.cargo/config.toml`,
+# bundling it only in the `kbuild` alias), which is what lets
+# `cargo kani -p tb-encode` model-check the EXACT SAME encoders the kernel runs
+# -- zero model drift, and CBMC never sees `tb-hal`'s inline asm.
 
 [package]
 name = "tb-encode"
@@ -24,7 +24,12 @@ publish = false
 [lib]
 
 [dependencies]
-# Intentionally empty: the encoders are self-contained core-only Rust.
+# The ONE allowed workspace-internal dependency (PR-C): the project identity.
+# The "zero deps" policy above means zero EXTERNAL deps; `brand` is itself
+# no_std + forbid(unsafe) + zero-dep + consts-only, so it adds nothing to the
+# proof surface (pure constant propagation under Kani/Miri) and keeps the
+# domain separators / wire magics / disk magic derived, never re-spelled.
+brand = { path = "../brand" }
 
 # Kani sets `cfg(kani)` on the target crate; the `#[cfg(kani)]` proof harnesses in
 # src/proofs.rs are inert under a normal build. Declaring the cfg keeps Rust >=

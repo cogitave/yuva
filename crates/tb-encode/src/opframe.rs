@@ -77,9 +77,11 @@ pub use crate::prov::{
 /// value (fail-closed -- an unknown version is a forward/backward-incompatible frame).
 pub const OPFRAME_VER: u8 = 1;
 
-/// The fixed frame magic (`"TB"` little-endian: `0x42, 0x54`). [`canon`] rejects any
-/// other value so a foreign byte stream is not mistaken for a transcript frame.
-pub const OPFRAME_MAGIC: u16 = 0x5442;
+/// The fixed frame magic (`0x5956`, the brand wire-magic family base).
+/// [`canon`] rejects any other value so a foreign byte stream is not mistaken
+/// for a transcript frame. Derived in `brand::MAGIC_OPFRAME`, never re-spelled
+/// here.
+pub const OPFRAME_MAGIC: u16 = brand::MAGIC_OPFRAME;
 
 /// The fixed frame KIND tags (proposal §2.1 -- the typed transcript vocabulary,
 /// mirroring an OpenTelemetry LogRecord EventName). A closed set the seam emits; the

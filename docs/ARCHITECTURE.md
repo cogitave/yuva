@@ -212,11 +212,11 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   spec-sanctioned 16-byte tag truncation == `MAC_LEN`; the keyed mode carries the
   Luykx–Mennink–Neves FSE 2016 PRF/MAC proof, so NO envelope and NO HMAC wrapper
   sit on top). `opframe_rx::compute_mac` became derive-then-MAC
-  (`K_s = khash(key_a, "TABOS-OPCMD-KDF-V1" || key_b)`;
+  (`K_s = khash(key_a, "YUVA-OPCMD-KDF-V1" || key_b)`;
   `tag = khash(K_s, canon)[..16]` — the libsodium `crypto_kdf` precedent; the
   adversarially-chosen-component case rests on a dual-PRF-style assumption,
   Backendal et al. CRYPTO 2023, named not claimed-around) and `key_evolve` became
-  `khash(key, "TABOS-KEY-EVOLVE-V1")` (Bellare–Yee forward-security shape,
+  `khash(key, "YUVA-KEY-EVOLVE-V1")` (Bellare–Yee forward-security shape,
   domain-separated from MAC use) — signatures UNCHANGED, so `seal` /
   `decode_and_verify` / the four hash-free M28 gate harnesses carry over
   verbatim. The prove/assume boundary is MACHINE-EMITTED on the `khash:` witness
@@ -243,11 +243,11 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   with the anti-hollow amendment that makes its in-kernel mock-loopback
   structurally impossible. ONE new verified codec leaf, `tb-encode::inferwire`
   (the 20th — the typed, fixed-header, length-prefixed, injective `InferFrame`,
-  house magic `0x5444`; fail-closed `canon`/`decode`; the `FrameAccum`
+  house magic `0x5958`; fail-closed `canon`/`decode`; the `FrameAccum`
   byte-stream re-framer with proven never-overflow scan-to-next-magic resync;
   the `resp_binds_req` correlation iff-theorem; and the host-keyed
   `echo_tag`/`verify_echo` — exactly ONE domain-separated khash call,
-  `khash(K, "TABOS-M30-ECHO-V1" || peer_id || nonce || challenge || body)[..16]`,
+  `khash(K, "YUVA-M30-ECHO-V1" || peer_id || nonce || challenge || body)[..16]`,
   binding the challenge + host nonce + lane label INSIDE the MAC), carried by
   the kernel's FIRST TWO-queue virtio driver — a modern (Version==2 readback)
   virtio-console (DeviceID 3), VERSION_1-only (F_MULTIPORT/F_SIZE/F_EMERG_WRITE

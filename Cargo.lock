@@ -3,8 +3,15 @@
 version = 4
 
 [[package]]
+name = "brand"
+version = "0.1.0"
+
+[[package]]
 name = "tb-boot"
 version = "0.1.0"
+dependencies = [
+ "brand",
+]
 
 [[package]]
 name = "tb-caps-core"
@@ -13,11 +20,15 @@ version = "0.1.0"
 [[package]]
 name = "tb-encode"
 version = "0.1.0"
+dependencies = [
+ "brand",
+]
 
 [[package]]
 name = "tb-hal"
 version = "0.1.0"
 dependencies = [
+ "brand",
  "tb-boot",
  "tb-caps-core",
  "tb-encode",
