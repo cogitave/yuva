@@ -57,9 +57,9 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=96
+EXPECTED_HARNESSES_TOTAL=102
 
-# Shard A (46): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (52): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -125,6 +125,15 @@ SHARD_A=(
   kani_inferwire_decode_total           # 7s
   kani_inferwire_echo_sound             # 100s
   kani_inferwire_accum_resync           # 3s
+  # aL2.4b carve map + guestlog codec x6 (measured locally at landing, WSL
+  # seconds -- all small symbolic envelopes per the #49 discipline; placed in
+  # shard A, the lighter shard after the M31 six landed in B)
+  kani_guest_carve_range_bounded
+  kani_guest_carve_injective
+  kani_guestlog_bounded
+  kani_guestlog_roundtrip_total
+  kani_guestlog_injective
+  kani_guestlog_regex_inert
 )
 
 # Shard B (50): the learning-loop codec families (M21 kancell, M22 prov canon,

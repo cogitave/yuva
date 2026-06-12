@@ -78,6 +78,10 @@ use crate::opframe_rx::{
     CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN, MAC_LEN,
 };
 use crate::khash::{kat_ok, khash, uhash, KAT_ABC_UNKEYED, KHASH_KEY_LEN, KHASH_TAG_LEN};
+use crate::guestlog::{
+    guestlog_decode, guestlog_encode, guestlog_frame_len, is_hex_lower, GUESTLOG_MAX_FRAME,
+    GUESTLOG_MAX_PAYLOAD, GUESTLOG_PREFIX,
+};
 use crate::inferwire::{
     body_digest, canon as iw_canon, decode as iw_decode, echo_tag, err_canon, err_code_known,
     err_decode, err_retryable, errcode, infer_tag, kind as iw_kind, peer as iw_peer,
@@ -100,8 +104,9 @@ use crate::paging::{
     SHIFT_2M, SHIFT_4K, SHIFT_512G,
 };
 use crate::stage2::{
-    s2_leaf_2mib, s2_leaf_4k, s2_table, vtcr, vttbr, vttbr_baddr, S2AP_RW, S2_AF, S2_DESC_BLOCK,
-    S2_DESC_PAGE, S2_DESC_TABLE, VTCR_RES1, VTTBR_VMID_SHIFT,
+    guest_carve_pa, s2_leaf_2mib, s2_leaf_4k, s2_table, vtcr, vttbr, vttbr_baddr,
+    GUEST_CARVE_PA, GUEST_CARVE_SIZE, GUEST_DOORBELL_IPA, GUEST_IPA_BASE, S2AP_RW, S2_AF,
+    S2_DESC_BLOCK, S2_DESC_PAGE, S2_DESC_TABLE, VTCR_RES1, VTTBR_VMID_SHIFT,
 };
 use crate::vmx::{adjust, clamp_fixed, decode_tss_base};
 
@@ -572,6 +577,181 @@ fn kani_vtcr_wellformed() {
     assert_eq!((v >> 14) & 0x3, tg0); // TG0   [15:14]
     assert_eq!((v >> 16) & 0x7, ps); // PS    [18:16]
     assert!(v & VTCR_RES1 != 0); // RES1  bit[31]
+}
+
+// ===========================================================================
+// aL2.4b: the guest-RAM carve map (stage2.rs) -- the FIRST non-identity
+// stage-2 geometry. Two harness extensions per proposal §4.2: the IPA->PA map
+// is INJECTIVE and RANGE-BOUNDED (the isolation flip, proven as pure math).
+// ===========================================================================
+
+/// The carve map is RANGE-BOUNDED + TOTAL: for EVERY 64-bit IPA, either the
+/// map yields `None` (the builder maps nothing -- fail-closed confinement) or
+/// the output PA falls strictly inside the carve `[GUEST_CARVE_PA,
+/// GUEST_CARVE_PA + GUEST_CARVE_SIZE)` -- NO guest IPA can ever reach a host
+/// frame outside the carve, and the doorbell IPA (the monitor's watched
+/// progress cell) is provably unmapped.
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: an off-by-one carve base
+/// (`GUEST_CARVE_PA - 1 + off`, the survey §8 mutant) aliases the guest's
+/// first page onto a host frame BELOW the carve, so the `pa >= GUEST_CARVE_PA`
+/// range-bound assert FAILS on exactly that mutant. Equally, widening the `if`
+/// to `ipa <= GUEST_IPA_BASE + GUEST_CARVE_SIZE` maps the doorbell IPA and the
+/// `guest_carve_pa(GUEST_DOORBELL_IPA) == None` assert FAILS.
+#[kani::proof]
+fn kani_guest_carve_range_bounded() {
+    let ipa: u64 = kani::any();
+    match guest_carve_pa(ipa) {
+        Some(pa) => {
+            // Every mapped PA is inside the carve window.
+            assert!(pa >= GUEST_CARVE_PA);
+            assert!(pa < GUEST_CARVE_PA + GUEST_CARVE_SIZE);
+            // And only window IPAs map at all.
+            assert!(ipa >= GUEST_IPA_BASE && ipa < GUEST_IPA_BASE + GUEST_CARVE_SIZE);
+        }
+        None => {
+            // Everything outside the window is unmapped (fail-closed).
+            assert!(ipa < GUEST_IPA_BASE || ipa >= GUEST_IPA_BASE + GUEST_CARVE_SIZE);
+        }
+    }
+    // The doorbell IPA -- the first page past the window -- is NEVER mapped.
+    assert!(guest_carve_pa(GUEST_DOORBELL_IPA).is_none());
+}
+
+/// The carve map is INJECTIVE: two DISTINCT guest IPAs can never resolve to
+/// the SAME host PA (no aliasing inside the carve -- the second half of the
+/// §2.1 confinement property; with range-boundedness it gives the full
+/// "bijection onto a carve slice" shape).
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: replacing the offset translation with
+/// a page-masked one (`GUEST_CARVE_PA + ((ipa - GUEST_IPA_BASE) & !0xFFF)`)
+/// aliases all 4096 byte-addresses of each page onto one PA, so the
+/// `pa_a != pa_b` assert FAILS for two IPAs inside one page.
+#[kani::proof]
+fn kani_guest_carve_injective() {
+    let a: u64 = kani::any();
+    let b: u64 = kani::any();
+    kani::assume(a != b);
+    if let (Some(pa_a), Some(pa_b)) = (guest_carve_pa(a), guest_carve_pa(b)) {
+        assert!(pa_a != pa_b);
+    }
+}
+
+// ===========================================================================
+// aL2.4b: the `guestlog:` frame codec (guestlog.rs) -- the injection-proofing
+// leaf (proposal §2.5/§4.1). Four harnesses: bounded length, total round-trip,
+// injectivity, and the load-bearing no-raw-leak (regex-inertness) property.
+// ===========================================================================
+
+/// Encode is TOTAL + BOUNDED: for any payload within the frame cap, encode
+/// writes EXACTLY `guestlog_frame_len(n)` bytes (prefix + 2n hex + LF) and
+/// never more; oversize payloads / short out-buffers yield 0 (fail-closed).
+/// Symbolic over the payload BYTES at a small concrete length (the #49
+/// state-explosion discipline: totality is structural over the loop).
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: dropping the LF terminator write (or
+/// emitting 1 hex digit per byte) changes the written length, so the
+/// `n == guestlog_frame_len(LEN)` / terminator asserts FAIL.
+#[kani::proof]
+fn kani_guestlog_bounded() {
+    const LEN: usize = 3; // small symbolic payload (structural totality)
+    let payload: [u8; LEN] = kani::any();
+    let mut out = [0u8; GUESTLOG_MAX_FRAME];
+    let n = guestlog_encode(&payload, &mut out);
+    assert_eq!(n, guestlog_frame_len(LEN));
+    assert!(n <= GUESTLOG_MAX_FRAME);
+    assert_eq!(out[n - 1], b'\n'); // LF-terminated
+    assert_eq!(&out[..GUESTLOG_PREFIX.len()], GUESTLOG_PREFIX);
+    // Fail-closed arm: an out-buffer too short for the frame writes NOTHING.
+    let mut tiny = [0u8; 5];
+    assert_eq!(guestlog_encode(&payload, &mut tiny), 0);
+}
+
+/// Encode -> decode is the EXACT identity (round-trip), and decode is TOTAL
+/// over the produced frame. Symbolic payload bytes, small concrete length.
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: swapping the nibble order in the
+/// encoder (`hex_digit(b & 0xF)` first) still decodes -- but to DIFFERENT
+/// bytes, so the `dec == payload` assert FAILS (the mutant is caught by
+/// round-trip equality, not by grammar).
+#[kani::proof]
+fn kani_guestlog_roundtrip_total() {
+    const LEN: usize = 2;
+    let payload: [u8; LEN] = kani::any();
+    let mut enc = [0u8; GUESTLOG_MAX_FRAME];
+    let n = guestlog_encode(&payload, &mut enc);
+    assert_eq!(n, guestlog_frame_len(LEN));
+    let mut dec = [0u8; GUESTLOG_MAX_PAYLOAD];
+    let m = guestlog_decode(&enc[..n], &mut dec);
+    assert_eq!(m, Some(LEN));
+    let mut i = 0usize;
+    while i < LEN {
+        assert_eq!(dec[i], payload[i]);
+        i += 1;
+    }
+}
+
+/// The codec is INJECTIVE over equal-length payloads: two distinct payloads
+/// encode to distinct frames (hex is a bijection per byte), so no two guest
+/// outputs can collide into one framed line.
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: a truncating encoder (masking each
+/// byte `& 0x0F` before hexing) collapses 16 payloads onto one frame, so the
+/// "frames differ" assert FAILS for payloads differing only in high nibbles.
+#[kani::proof]
+fn kani_guestlog_injective() {
+    const LEN: usize = 2;
+    let a: [u8; LEN] = kani::any();
+    let b: [u8; LEN] = kani::any();
+    kani::assume(a != b);
+    let mut ea = [0u8; GUESTLOG_MAX_FRAME];
+    let mut eb = [0u8; GUESTLOG_MAX_FRAME];
+    let na = guestlog_encode(&a, &mut ea);
+    let nb = guestlog_encode(&b, &mut eb);
+    assert_eq!(na, nb);
+    // The frames must differ in at least one byte.
+    let mut differ = false;
+    let mut i = 0usize;
+    while i < na {
+        if ea[i] != eb[i] {
+            differ = true;
+        }
+        i += 1;
+    }
+    assert!(differ);
+}
+
+/// THE LOAD-BEARING SAFETY PROPERTY (regex-inertness / no-raw-leak): for ANY
+/// payload byte values, the payload region of the encoded frame consists of
+/// lowercase-hex bytes `[0-9a-f]` ONLY -- no byte of the marker/guard
+/// alphabet (uppercase letters, ':', ' ', '(', ')', '=', '.') passes through
+/// raw, so guest bytes are inert to every unanchored host substring grep BY
+/// CONSTRUCTION (survey §5; the same property M31/M34 untrusted model bytes
+/// need).
+///
+/// NEGATIVE CONTROL / SEEDED MUTATION: the survey §8 mutant -- an
+/// identity-passthrough encoder (copying payload bytes into the hex region)
+/// leaks a forged `M20: persist OK` byte ('M' = 0x4D, ':' = 0x3A, ' ' = 0x20,
+/// all non-hex-lower), so the `is_hex_lower` assert FAILS on exactly that
+/// mutant.
+#[kani::proof]
+fn kani_guestlog_regex_inert() {
+    const LEN: usize = 2;
+    let payload: [u8; LEN] = kani::any();
+    let mut enc = [0u8; GUESTLOG_MAX_FRAME];
+    let n = guestlog_encode(&payload, &mut enc);
+    assert_eq!(n, guestlog_frame_len(LEN));
+    // Every byte of the payload (hex) region is lowercase hex -- NEVER an
+    // uppercase letter, colon, space, paren, equals or dot.
+    let p = GUESTLOG_PREFIX.len();
+    let mut i = p;
+    while i < n - 1 {
+        let b = enc[i];
+        assert!(is_hex_lower(b));
+        assert!(b != b':' && b != b' ' && b != b'(' && b != b')' && b != b'=' && b != b'.');
+        assert!(!(b.is_ascii_uppercase()));
+        i += 1;
+    }
 }
 
 /// `ESR_EL2` decoding is TOTAL: for EVERY 32-bit syndrome, EC/DFSC/WnR/S1PTW
