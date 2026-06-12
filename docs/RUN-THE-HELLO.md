@@ -30,18 +30,23 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
 
 1. answers the guest the deterministic wire exchange first (the kernel chain
    stays green — see the honest scope below),
-2. then makes **exactly one** Messages API call: the prompt envelope carries
-   the kernel's per-boot wire challenge and instructs the model to reply with
-   its character-REVERSED hex (`transform=HEX-REVERSE` — the §5 liveness
-   proof: fresh every boot, so a canned fixture or replay fails),
-3. verifies the transform, digests the response text, and prints its witness.
+2. then makes **exactly one** Messages API call: the prompt envelope asks for
+   two lines — line 1 the character-REVERSED hex of the kernel's per-boot
+   wire challenge (`transform=HEX-REVERSE` — the §5 liveness proof: fresh
+   every boot, so a canned fixture or replay fails; the reversal substring is
+   the ONLY acceptance criterion), line 2 one short sentence greeting Yuva —
+   the hello this lane exists for,
+3. verifies the transform, digests the response text, prints its witness, and
+   frames the (scrubbed, capped at 2048 bytes) response text as lowercase hex
+   on one `xport-harness-infer-body:` line.
 
 ## What the expected output looks like
 
-In the run log (and the run summary), on success:
+In the run log, on success:
 
 ```
 xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x<32 hex> transform=HEX-REVERSE transform-ok=1 http=200 reqid-hex=<hex> resp-digest=0x<32 hex> model=claude-haiku-4-5 max-tokens=64 stop=END-TURN key-custody=HOST-ENV
+xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<lowercase hex of the response text>
 M31: real-infer OK backend=ANTHROPIC-LIVE
 ```
 
@@ -50,6 +55,12 @@ plus the untouched kernel tail on the same boot:
 ```
 M31: infer-e2e OK backend=MOCK-DETERMINISTIC
 ```
+
+**Where to read the hello itself:** the run's **Summary page** (Actions → the
+run → Summary). The workflow decodes the body line's hex there — and ONLY
+there — under the heading *"The machine's first hello (UNTRUSTED MODEL
+OUTPUT, decoded from the hex-framed lane log)"*. Every log (guest serial,
+harness stream, job log) stays hex-only; the decode never appears in any log.
 
 Without the secret, the run is a **loud green skip**, never red:
 
@@ -80,10 +91,14 @@ serialized.
 - **One call, haiku-class, ≤64 output tokens.** The prompt is the kernel's
   scalar-derived M13-recall bytes (hex-encoded) plus the liveness
   instruction — plumbing and liveness, not intelligence; no semantics claim.
-- **The model's text appears nowhere.** Not in the guest, not in any log:
-  the witness carries its `resp-digest` (the same `body_digest` discipline as
-  the wire) and the hex-encoded provider request-id — fixed-width,
-  injection-inert evidence only.
+- **The model's text appears hex-framed only.** Never in the guest, never
+  raw in any log: the witness carries its `resp-digest` (the same
+  `body_digest` discipline as the wire — computed over the raw text, the
+  commitment to what the model actually said) and the hex-encoded provider
+  request-id; the body line frames the scrubbed text in the §6 inert
+  alphabet, capped at 2048 bytes with an explicit `truncated` flag. The
+  human-readable decode exists only on the run's Summary page, explicitly
+  labeled untrusted model output.
 - **The guest exchange stays deterministic.** The stage-B kernel pins the
   wire exchange to the bit-exact mock shape (`tb-hal` selftests 0x21/0x25/
   0x26), so the live response does NOT ride the channel and the response

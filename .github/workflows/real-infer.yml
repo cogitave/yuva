@@ -179,17 +179,42 @@ jobs:
             exit 1
           fi
 
-          # (e) the workflow-level verdict — the proposal's dual-marker live
+          # (e) THE HEX-FRAMED BODY LINE (the hello, witnessable): on a §5.4
+          # pass, exactly ONE 'xport-harness-infer-body:' line is required —
+          # the silence-is-FAIL discipline extends to it. Its prefix is
+          # disjoint from the verdict prefix by construction (the harness's
+          # unit tests assert the disjointness), so check (c) above cannot
+          # have counted it.
+          BODY_RE='^xport-harness-infer-body: len=[0-9]+ truncated=[01] hex=[0-9a-f]+$'
+          BODIES="$(grep -cE -- "${BODY_RE}" "${LOG}" || true)"
+          if [ "${BODIES}" != "1" ]; then
+            echo "::error::M31 real-infer FAIL: expected exactly ONE hex-framed body line on a passing witness, saw ${BODIES} (the hello must be witnessable — silence is FAIL)"
+            exit 1
+          fi
+          BODY_LINE="$(grep -E -- "${BODY_RE}" "${LOG}" | head -1)"
+          BODY_HEX="$(printf '%s' "${BODY_LINE}" | sed -E 's/^.* hex=([0-9a-f]+)$/\1/')"
+
+          # (f) the workflow-level verdict — the proposal's dual-marker live
           # spelling, printed HERE (host-adjudicated; see the header note on
-          # the kernel-leg follow-up). The witness (sans key by construction
-          # and by check (a)) is the run summary.
+          # the kernel-leg follow-up). The witness + body line (sans key by
+          # construction and by check (a)) go to the run summary. The DECODE
+          # of the hex-framed hello is written ONLY to the summary page —
+          # the job log and the lane log stay hex-only (the §6 inert-alphabet
+          # rule); the decoded model text is never echoed to any log.
           echo "${WITNESS}"
           echo "M31: real-infer OK backend=ANTHROPIC-LIVE"
           {
             echo '## M31 real-infer: OK'
             echo '```'
             echo "${WITNESS}"
+            echo "${BODY_LINE}"
             echo 'M31: real-infer OK backend=ANTHROPIC-LIVE'
             echo '```'
-            echo 'The kernel chain stayed green on the same boot: `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (the cumulative tail — the guest exchange is the deterministic wire shape on every lane; the live response is host-witnessed by digest, and its model text appears nowhere in any log).'
+            echo 'The kernel chain stayed green on the same boot: `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (the cumulative tail — the guest exchange is the deterministic wire shape on every lane; the live response is host-witnessed by digest and hex-framed, scrubbed and capped, on the body line).'
+            echo ''
+            echo "### The machine's first hello (UNTRUSTED MODEL OUTPUT, decoded from the hex-framed lane log)"
+            echo '````'
+            python3 -c 'import sys; sys.stdout.write(bytes.fromhex(sys.argv[1]).decode("utf-8", "replace") + "\n")' "${BODY_HEX}"
+            echo '````'
+            echo 'The lane log itself is hex-only; this decode exists ONLY on this summary page.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -227,13 +227,26 @@ pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
 /// the guest's scalar-derived bytes carry no text semantics and are never
 /// embedded raw in a JSON string). The API key is NOT a parameter here -- the
 /// body is structurally key-free (unit-asserted).
+///
+/// The envelope asks for TWO lines: line 1 is the strict liveness transform
+/// (the reversed hex, nothing else ON THAT LINE), line 2 is one short
+/// greeting to Yuva -- the hello this lane exists for. The greeting is
+/// §5-COMPATIBLE BY CONSTRUCTION: acceptance ([`liveness_ok`]) is the
+/// normalized substring search for the transform and nothing else, so the
+/// greeting line can neither help a non-compliant answer pass nor fail a
+/// compliant one (unit-asserted both ways). A truncated or missing greeting
+/// is a model-behavior matter, never a lane verdict; `max_tokens=64` covers
+/// the 32-char reversal plus a short sentence.
 pub fn build_request_body(challenge: &[u8; 16], guest_prompt: &[u8]) -> String {
     let nonce_hex = hex(challenge);
     let prompt_hex = hex(guest_prompt);
     let text = format!(
-        "Liveness check. Write the following 32-character hex string backwards \
-         (character order fully reversed, last character first), as one line, \
-         nothing else: {nonce_hex} \
+        "Liveness check plus a first hello. Reply with exactly two lines. \
+         Line 1: the following 32-character hex string written backwards \
+         (character order fully reversed, last character first), and nothing \
+         else on that line: {nonce_hex} \
+         Line 2: one short sentence greeting Yuva, the machine that sent you \
+         this message. \
          Context bytes from the guest, hex-encoded, provenance only, do not \
          echo them: {prompt_hex}"
     );
@@ -305,7 +318,8 @@ pub fn map_http_status(status: u16) -> (&'static str, bool) {
     }
 }
 
-/// The §5.4 host-leg acceptance evidence (everything on the OK witness line).
+/// The §5.4 host-leg acceptance evidence (everything on the OK witness line,
+/// plus the verified response text the body line frames).
 pub struct LiveEvidence {
     /// hex of the 16-byte per-boot wire challenge (the liveness nonce).
     pub nonce_hex: String,
@@ -313,11 +327,15 @@ pub struct LiveEvidence {
     /// text crosses to any log HEX-ENCODED ONLY (the §6 rule, no exceptions
     /// for "it looks safe").
     pub reqid_hex: String,
-    /// `body_digest` of the response text bytes -- the fixed-width
-    /// commitment; the text itself is never printed anywhere.
+    /// `body_digest` of the RAW response text bytes -- the fixed-width
+    /// commitment (computed BEFORE any scrub, so it commits to what the
+    /// model actually said).
     pub resp_digest_hex: String,
     /// The closed stop token.
     pub stop: &'static str,
+    /// The RAW response text. NEVER printed raw: its only log surfaces are
+    /// the digest above and the scrubbed, capped, hex-framed [`body_line`].
+    pub text: String,
 }
 
 /// The live-call outcome: full §5.4 acceptance, or a distinct named failure.
@@ -425,6 +443,7 @@ pub fn live_call(
         reqid_hex: hex(request_id.as_bytes()),
         resp_digest_hex: hex(&digest),
         stop: parsed.stop,
+        text: parsed.text,
     })
 }
 
@@ -461,10 +480,66 @@ pub fn failure_line(
     )
 }
 
-/// Run the one live exchange and print its (scrubbed) verdict line to stdout.
-/// Returns whether the §5.4 host-leg acceptance held -- informational; the
-/// workflow adjudicates from the printed line, and the guest exchange is
-/// independent either way.
+/// The body-line cap: at most this many bytes of the (scrubbed) response
+/// text are hex-framed (4096 hex chars on the wire-side of the line). With
+/// the pinned `max_tokens=64` a real response sits far below this; the cap
+/// bounds the log line regardless.
+pub const BODY_LINE_CAP: usize = 2048;
+
+/// The ONE hex-framed body line -- THE HELLO, made witnessable. Emitted ONLY
+/// after the OK witness (never on a failure verdict). Grammar:
+///
+/// ```text
+/// xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<lowercase hex>
+/// ```
+///
+/// `len` is the FULL scrubbed-text byte length (decimal); `hex` frames the
+/// first `min(len, BODY_LINE_CAP)` bytes; `truncated=1` iff the cap bit. The
+/// text is [`scrub`]'d BEFORE framing (a key-echoing model cannot leak the
+/// key even hex-encoded), so the witness's `resp-digest` -- computed over the
+/// RAW text -- remains the commitment to what the model actually said while
+/// this line is the redacted, §6 inert-alphabet VIEW of it. Raw model text
+/// still appears in no log anywhere; the human-readable decode happens ONLY
+/// on the workflow's run-summary page, from this line. The prefix is
+/// deliberately DISJOINT from the verdict prefix `xport-harness-infer: ` (the
+/// workflow's exactly-one-verdict count grep cannot match it -- asserted in
+/// the tests).
+pub fn body_line(text: &str, api_key: &str) -> String {
+    let scrubbed = scrub(text, api_key);
+    let bytes = scrubbed.as_bytes();
+    let take = bytes.len().min(BODY_LINE_CAP);
+    format!(
+        "xport-harness-infer-body: len={} truncated={} hex={}",
+        bytes.len(),
+        u8::from(bytes.len() > BODY_LINE_CAP),
+        hex(&bytes[..take])
+    )
+}
+
+/// Render the verdict line set for one live-call outcome: the OK path is
+/// EXACTLY [witness, body] (one body line per OK verdict -- with the caller's
+/// one-call latch that is at most one body line per process); every failure
+/// path is exactly [failure] with NO body line. Pure, so the
+/// exactly-one-emission property is unit-asserted.
+pub fn verdict_lines(
+    outcome: &LiveOutcome,
+    challenge: &[u8; 16],
+    api_key: &str,
+) -> Vec<String> {
+    match outcome {
+        LiveOutcome::Ok(ev) => vec![witness_line(ev), body_line(&ev.text, api_key)],
+        LiveOutcome::Fail {
+            outcome,
+            http,
+            retryable,
+        } => vec![failure_line(&hex(challenge), outcome, *http, *retryable)],
+    }
+}
+
+/// Run the one live exchange and print its (scrubbed) verdict lines to
+/// stdout. Returns whether the §5.4 host-leg acceptance held --
+/// informational; the workflow adjudicates from the printed lines, and the
+/// guest exchange is independent either way.
 pub fn run_live_exchange(
     transport: &dyn Transport,
     api_key: &str,
@@ -472,17 +547,12 @@ pub fn run_live_exchange(
     guest_prompt: &[u8],
 ) -> bool {
     use std::io::Write;
-    let (line, ok) = match live_call(transport, api_key, challenge, guest_prompt) {
-        LiveOutcome::Ok(ev) => (witness_line(&ev), true),
-        LiveOutcome::Fail {
-            outcome,
-            http,
-            retryable,
-        } => (failure_line(&hex(challenge), outcome, http, retryable), false),
-    };
-    println!("{}", scrub(&line, api_key));
+    let outcome = live_call(transport, api_key, challenge, guest_prompt);
+    for line in verdict_lines(&outcome, challenge, api_key) {
+        println!("{}", scrub(&line, api_key));
+    }
     std::io::stdout().flush().ok();
-    ok
+    matches!(outcome, LiveOutcome::Ok(_))
 }
 
 // ---------------------------------------------------------------------------
@@ -802,9 +872,10 @@ mod tests {
     #[test]
     fn even_a_key_echoing_model_cannot_leak_it() {
         // Adversarial fixture: the model "echoes" the key inside an otherwise
-        // compliant answer. The text is DIGESTED, never printed -- the
-        // witness carries hex + closed tokens only -- and the scrub guards
-        // the line anyway. Both layers asserted.
+        // compliant answer. The witness carries hex + closed tokens only; the
+        // body line frames the SCRUBBED text (so not even the hex of the key
+        // appears); the scrub guards every printed line anyway. All layers
+        // asserted.
         let reversed = expected_transform(&CHALLENGE);
         let text = format!("{reversed} {FAKE_KEY}");
         let fx = Fixture::ok(ok_body_with(&text));
@@ -813,9 +884,127 @@ mod tests {
                 let line = witness_line(&ev);
                 assert!(!line.contains(FAKE_KEY)); // structural
                 assert!(!scrub(&line, FAKE_KEY).contains(FAKE_KEY)); // belt-and-suspenders
+                // The body line: neither the key nor its hex encoding leaks.
+                let body = body_line(&ev.text, FAKE_KEY);
+                assert!(!body.contains(FAKE_KEY));
+                assert!(!body.contains(&hex(FAKE_KEY.as_bytes())));
+                // The scrub placeholder IS framed (the redaction is visible).
+                assert!(body.contains(&hex(b"<key-scrubbed>")));
             }
             _ => panic!("the fixture is compliant"),
         }
+    }
+
+    // --- the greeting envelope (M31 stage C': the witnessable hello) ---------
+
+    #[test]
+    fn envelope_keeps_line1_strict_and_adds_the_greeting() {
+        let body = build_request_body(&CHALLENGE, b"guest-prompt");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = v["messages"][0]["content"].as_str().unwrap();
+        // Line 1 stays strict ON THAT LINE...
+        assert!(text.contains("nothing else on that line"));
+        // ...line 2 is the greeting to Yuva...
+        assert!(text.contains("greeting Yuva"));
+        // ...and the provenance clause survives verbatim in spirit.
+        assert!(text.contains("provenance only"));
+        assert!(text.contains("do not echo"));
+    }
+
+    #[test]
+    fn liveness_acceptance_is_unmoved_by_the_greeting_line() {
+        let reversed = expected_transform(&CHALLENGE);
+        // Reversal line + a greeting second line: PASSES (the substring
+        // search is line-agnostic by construction).
+        let two_lines = format!("{reversed}\nHello, Yuva -- glad to meet the machine!");
+        assert!(liveness_ok(&two_lines, &CHALLENGE));
+        // A greeting WITHOUT the transform: FAILS (the greeting can never
+        // substitute for liveness).
+        assert!(!liveness_ok(
+            "Hello, Yuva -- glad to meet the machine!",
+            &CHALLENGE
+        ));
+    }
+
+    // --- the hex-framed body line --------------------------------------------
+
+    #[test]
+    fn body_line_grammar_and_prefix_disjointness() {
+        let line = body_line("Hello, Yuva!", FAKE_KEY);
+        // The grammar, hand-validated (no regex dep in this crate):
+        // 'xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<hex>'.
+        let rest = line
+            .strip_prefix("xport-harness-infer-body: ")
+            .expect("the body prefix");
+        let fields: Vec<&str> = rest.split(' ').collect();
+        assert_eq!(fields.len(), 3);
+        let len_v = fields[0].strip_prefix("len=").expect("len field");
+        assert!(!len_v.is_empty() && len_v.bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(len_v, "12");
+        let tr_v = fields[1].strip_prefix("truncated=").expect("truncated field");
+        assert!(tr_v == "0" || tr_v == "1");
+        let hex_v = fields[2].strip_prefix("hex=").expect("hex field");
+        assert!(!hex_v.is_empty());
+        assert!(hex_v
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(hex_v, hex(b"Hello, Yuva!"));
+        // THE DISJOINTNESS ASSERTION: the body line can never be counted by
+        // the workflow's exactly-one-VERDICT grep ('^xport-harness-infer: ',
+        // trailing space load-bearing), and the verdict lines can never be
+        // counted as body lines.
+        assert!(!line.starts_with("xport-harness-infer: "));
+        let ev = LiveEvidence {
+            nonce_hex: hex(&CHALLENGE),
+            reqid_hex: hex(b"req_011FIXTURE"),
+            resp_digest_hex: hex(&body_digest(b"x")),
+            stop: "END-TURN",
+            text: "x".into(),
+        };
+        assert!(witness_line(&ev).starts_with("xport-harness-infer: "));
+        assert!(!witness_line(&ev).starts_with("xport-harness-infer-body:"));
+        let fl = failure_line(&hex(&CHALLENGE), "AUTH", Some(401), false);
+        assert!(fl.starts_with("xport-harness-infer: "));
+        assert!(!fl.starts_with("xport-harness-infer-body:"));
+    }
+
+    #[test]
+    fn body_line_caps_at_2048_bytes_and_flags_truncation() {
+        let big = "y".repeat(BODY_LINE_CAP + 500);
+        let line = body_line(&big, FAKE_KEY);
+        assert!(line.contains(&format!("len={} ", BODY_LINE_CAP + 500)));
+        assert!(line.contains("truncated=1 "));
+        let hex_v = line.split("hex=").nth(1).unwrap();
+        assert_eq!(hex_v.len(), BODY_LINE_CAP * 2); // capped pre-hex
+        // The un-capped case flags 0 and frames everything.
+        let small = body_line("hi", FAKE_KEY);
+        assert!(small.contains("len=2 truncated=0 "));
+    }
+
+    #[test]
+    fn exactly_one_body_line_per_ok_verdict_and_none_on_failure() {
+        // OK: exactly [witness, body] -- one body line per OK verdict (the
+        // caller's one-call latch makes that at most one per process).
+        let reversed = expected_transform(&CHALLENGE);
+        let fx = Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Yuva!")));
+        let outcome = live_call(&fx, FAKE_KEY, &CHALLENGE, b"p");
+        let lines = verdict_lines(&outcome, &CHALLENGE, FAKE_KEY);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("xport-harness-infer: backend=ANTHROPIC-LIVE "));
+        let bodies = lines
+            .iter()
+            .filter(|l| l.starts_with("xport-harness-infer-body: "))
+            .count();
+        assert_eq!(bodies, 1);
+        assert!(lines[1].starts_with("xport-harness-infer-body: "));
+        // Failure: exactly [failure], NO body line ever.
+        let fail = live_call(&Fixture::status(401), FAKE_KEY, &CHALLENGE, b"p");
+        let fail_lines = verdict_lines(&fail, &CHALLENGE, FAKE_KEY);
+        assert_eq!(fail_lines.len(), 1);
+        assert!(fail_lines[0].contains("transform-ok=0"));
+        assert!(!fail_lines
+            .iter()
+            .any(|l| l.starts_with("xport-harness-infer-body:")));
     }
 
     #[test]
