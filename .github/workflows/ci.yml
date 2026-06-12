@@ -206,4 +206,4 @@ jobs:
             -v "$PWD":/work -w /work \
             -e QEMU_TIMEOUT="${QEMU_TIMEOUT}" \
             "${{ matrix.boot_in_container }}" \
-            bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"
+            bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} xxd >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"

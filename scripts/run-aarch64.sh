@@ -198,7 +198,26 @@ printf '%s\n' "${RAW_OUTPUT}"
 #     own serial output), judged ONLY by the NEW guest guard set further down.
 # ===========================================================================
 OUTPUT="$(printf '%s\n' "${RAW_OUTPUT}" | grep -v '^guestlog: ' || true)"
-GUEST_STREAM="$(printf '%s\n' "${RAW_OUTPUT}" | grep '^guestlog: ' | sed 's/^guestlog: //' | tr -d '\n' | xxd -r -p || true)"
+# Decode the framed guest serial: concatenate every `guestlog:` frame's hex
+# payload, then hex -> bytes. Prefer xxd (the boot container apt-installs it);
+# fall back to a portable `printf '%b'` over `\xNN` escapes so a future minimal
+# image without the xxd package still decodes (the guest stream is printable
+# ASCII + newlines -- no NULs -- so the escape form is exact).
+GUEST_HEX="$(printf '%s\n' "${RAW_OUTPUT}" | grep '^guestlog: ' | sed 's/^guestlog: //' | tr -d '\n' || true)"
+if command -v xxd >/dev/null 2>&1; then
+  GUEST_STREAM="$(printf '%s' "${GUEST_HEX}" | xxd -r -p || true)"
+else
+  # Fallback without xxd: emit one byte per hex pair via `printf '\xHH'` (the
+  # FORMAT-string escape, NOT %b -- bash's %b does NOT decode \xHH). Each format
+  # is exactly two hex digits, so no decoded byte can be mis-read as a % spec.
+  decode_hex() {
+    local h="$1" i
+    for ((i = 0; i < ${#h}; i += 2)); do
+      printf "\\x${h:i:2}"
+    done
+  }
+  GUEST_STREAM="$(decode_hex "${GUEST_HEX}" || true)"
+fi
 
 # M30: reap the echo harness (it exits on socket EOF once QEMU terminates;
 # bounded wait + a hard kill so a wedged harness can never hang the lane), then
