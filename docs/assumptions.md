@@ -426,6 +426,36 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   host is trusted ground), and the upgrade to exclusivity is the M33 signature
   primitive, tracked, not claimed.
 
+## 3b. M31 host-bridge residual (the inference-adapter trust path)
+
+- **The host peer process is trusted ground — `host=RESIDUAL-TCB`** (M31
+  proposal §5.8/§11): on the CI-required mock lanes the `xport-harness` serve
+  loop (which applies the shared deterministic `mock_infer` transform and
+  MACs every chunk with the M30 host-custodied K) is trusted ground for the
+  `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` marker, exactly as M30's
+  host peer was for the echo. On the OPERATOR-GATED live lane (stage C, not
+  yet landed), the bridge process, its TLS stack and OS trust roots, and the
+  runner's egress are trusted ground for `M31: real-infer OK
+  backend=ANTHROPIC-LIVE`; the §5 challenge-nonce liveness proof is
+  **bridge-honesty-conditional** — it defeats stale fixtures, replays,
+  reflectors, and the mock wearing the live token under an HONEST bridge; a
+  deliberately forging bridge is out of scope until the M33 signature
+  primitive upgrades host participation to host exclusivity.
+- **Zero-ambient-authority is claimed in-GUEST only — `ambient=ZERO-IN-GUEST`**
+  (M31 proposal §7): the live bridge holds ambient authority BY CONSTRUCTION
+  (the env-custodied API key + network egress); the machine-emitted token's
+  scope is the honesty mechanism — claiming system-wide zero ambient
+  authority would be the exact overclaim the tokens exist to prevent. On the
+  mock lanes no secret exists anywhere; `key=CAPREF-HOST-CUSTODIED` is the
+  standing custody rule asserted on every lane (the guest references, never
+  holds, the inference secret).
+- **No confidentiality on the guest channel** (M31 proposal §14): inferwire
+  is MAC'd, NOT encrypted — prompts and responses transit the virtio channel
+  in cleartext; TLS protects only the host↔API leg (stage C). The M13-scalar
+  context makes today's exposure trivial; this becomes a real decision before
+  sensitive context ever rides the channel — a named successor, not an M31
+  claim.
+
 ## 4. Status & review discipline
 
 These assumptions are LIVE and shrink as rungs land: A3 closes at L2.8 (SMMUv3),

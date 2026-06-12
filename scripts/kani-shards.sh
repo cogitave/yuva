@@ -57,7 +57,7 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=90
+EXPECTED_HARNESSES_TOTAL=96
 
 # Shard A (46): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
@@ -127,11 +127,14 @@ SHARD_A=(
   kani_inferwire_accum_resync           # 3s
 )
 
-# Shard B (44): the learning-loop codec families (M21 kancell, M22 prov canon,
+# Shard B (50): the learning-loop codec families (M21 kancell, M22 prov canon,
 # M23 exp, M24 explore/bakeoff, M25 opframe, M26 exittel, M27 tpsched, M28 cmd
 # -- measured ~6.5s average, NOT trivial) + the heavy iff/determinism fold
 # legs (inclusion_sound, head_deterministic, bakeoff_replay), the thinned
-# per-milestone fold leaves, key_evolve, and the M30 peer-binding legs.
+# per-milestone fold leaves, key_evolve, the M30 peer-binding legs, and the
+# M31 inference-adapter six (placed HERE per the one-touch rule -- shard B was
+# the lighter shard by measured cost, 620.0s vs A's 799.6s, and the six
+# measure light: see the inline annotations).
 SHARD_B=(
   # M21 kancell x6 (trivial)
   kani_kan_spline_eval_total_bounded
@@ -186,6 +189,16 @@ SHARD_B=(
   # M30 inferwire x2 (PR #30 measured)
   kani_inferwire_req_binding            # 2s
   kani_inferwire_peer_label_bound       # 83s
+  # M31 inferwire adapter x6 (measured locally at landing, WSL seconds -- the
+  # khash-bearing pair runs the PINNED-VECTOR one-khash-execution shape: a
+  # 90-byte M31 MAC message measured ~70s per CBMC execution, so each harness
+  # holds exactly one; ladder record in the harness docs + the M31 PR)
+  kani_inferwire_kind_ext               # 12s
+  kani_infer_subhdr_total               # 4s
+  kani_infer_assembler                  # 46s
+  kani_infer_resp_binding               # 89s
+  kani_infer_domain_sep                 # 75s
+  kani_infer_err_closed                 # 3s
 )
 
 # The fail-closed completeness/disjointness guard (#101 -- see the header).

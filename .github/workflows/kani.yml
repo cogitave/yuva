@@ -85,7 +85,7 @@ jobs:
   # inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO failures
   # AND that SUCCESSFUL == that shard's pinned count, with the two lists pinned
   # disjoint + exhaustive against the total
-  # EXPECTED_HARNESSES_TOTAL (currently 90: the 15 original + the 5 L2.1 stage-2/
+  # EXPECTED_HARNESSES_TOTAL (currently 96: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -225,7 +225,32 @@ jobs:
   # kani_inferwire_peer_label_bound (on the same (K,N,C,body) a distinct peer_id / challenge /
   # nonce each yields a DISTINCT tag -- peer+challenge+nonce provably INSIDE the MAC'd bytes,
   # so the run-script lane-token cross-pin is real; NEG: an echo_tag that dropped any of them
-  # from its MAC input fails the corresponding inequality);
+  # from its MAC input fails the corresponding inequality) + the 6 M31 inferwire
+  # INFERENCE-ADAPTER extension harnesses (the chunked byte-body framing on the SAME leaf:
+  # the new closed kinds INFER_REQ/INFER_RESP/INFER_PENDING, the 24-byte in-payload SubHdr,
+  # the per-chunk infer_tag MAC under the NEW "YUVA-M31-INFER-V1" domain separator binding
+  # peer‖nonce‖challenge‖req_id‖kind‖seq‖sflags‖total_len‖body_digest‖chunk INSIDE the MAC,
+  # the compile-time INFER_BODY_CAP=8192 reject-never-truncate bound, the CHUNK-at-a-time
+  # InferAssembler -- not a byte-push trace, the M30 CBMC-floor lesson -- and the closed ERR
+  # payload enum; mutation-tested per M31 proposal §8): kani_inferwire_kind_ext (round-trip
+  # for kinds 4/5/6; NEG: a symbolic kind outside {1..6} fail-closes at canon AND decode) /
+  # kani_infer_subhdr_total (symbolic sub-header round-trip; truncations + reserved bits +
+  # out-of-band total_len reject; NEG: the exactly-valid sub-header decodes) /
+  # kani_infer_assembler (tiny-cap in-order assembly to EXACTLY total_len at total==CAP with
+  # digest-commitment equality; out-of-order/dup/gap/drift/over-capacity/overflow ALL reject
+  # + POISON; NEG: no reject leg returns Complete, no resurrection) /
+  # kani_infer_resp_binding (THE IFF over a FULLY SYMBOLIC tag: verify_infer_resp accepts
+  # IFF the tag equals the PINNED genuine MAC -- one ~70s khash execution, the measured #49
+  # budget shape; the pin kills every construction-drift mutant incl. dropped-seq; pre-MAC
+  # binding legs reject concretely; the pin re-derives in the m31_kani_pins_rederive host
+  # test; NEG: the iff is non-vacuous both directions) /
+  # kani_infer_domain_sep (pinned-vector: on aligned inputs infer_tag == its PIN and != the
+  # ECHO pin -- a swapped label HITS the echo pin, a dropped label MISSES the infer pin;
+  # the live two-call inequality is the named host-test delegation under cargo test + Miri)
+  # / kani_infer_err_closed (err_canon encodes IFF the code
+  # is in the closed enum; the retryable binding round-trips, contradictions/reserved/length
+  # violations reject; accept-soundness over a fully-symbolic payload; NEG: a valid code
+  # decodes);
   # bump in LOCKSTEP with scripts/kani-shards.sh -- the #101 one-touch
   # procedure: the new harness name goes into exactly ONE shard list there +
   # EXPECTED_HARNESSES_TOTAL) before emitting the per-shard DoD markers
