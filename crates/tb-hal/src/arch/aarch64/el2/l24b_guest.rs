@@ -58,6 +58,7 @@ use tb_encode::el2_trap::{esr_ec, EC_IABT_LOW};
 use tb_encode::guestlog::{guestlog_encode, GUESTLOG_MAX_FRAME, GUESTLOG_MAX_PAYLOAD};
 use tb_encode::stage2::{
     GUEST_CARVE_PA, GUEST_CARVE_SIZE, GUEST_DOORBELL_IPA, GUEST_IMAGE_OFF, GUEST_IPA_BASE,
+    GUEST_PROBE_PA,
 };
 
 // ===========================================================================
@@ -267,6 +268,30 @@ fn write_sp_el1(v: u64) {
     }
 }
 
+/// `INIT_SCTLR_EL1_MMU_OFF` (Linux `el2_setup.h`): RES1 bits set, `M=C=I=0`.
+/// The guest's `_tb_start` runs its M0..M2 chain MMU-OFF and brings its OWN
+/// stage-1 up cold at M3 -- but it INHERITS the host's `SCTLR_EL1` (MMU ON)
+/// across the eret, so the monitor MUST reset it to this MMU-off value first
+/// (the arm64 boot-protocol "MMU OFF at entry" clause). The host's
+/// `SCTLR_EL1` is saved/restored by the facade, so clobbering it is safe.
+const KG_SCTLR_EL1_MMU_OFF: u64 = 0x30D0_0800;
+
+/// EL2: put the guest's `SCTLR_EL1` into the MMU-off boot state before the
+/// eret (the guest enables its own stage-1 at M3). EL2-writable.
+fn kg_guest_sctlr_mmu_off() {
+    // SAFETY: SCTLR_EL1 is EL2-accessible via MSR; we write the documented
+    // MMU-off init value (the host's SCTLR_EL1 is saved/restored by the
+    // facade). `isb` so the guest's first fetch sees MMU off.
+    unsafe {
+        asm!(
+            "msr sctlr_el1, {v}",
+            "isb",
+            v = in(reg) KG_SCTLR_EL1_MMU_OFF,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
 /// EL2: arm the kernel-guest window — program the stage-2 geometry + root,
 /// then `HCR_EL2 = RW | VM | TWI`, then flush stale translations for the
 /// guest VMID. The `arm_trap_el2` shape with TWI instead of TVM.
@@ -355,6 +380,9 @@ pub(super) fn kguest_launch(frame: *mut Frame) -> ! {
     kg_set(0, 1); // armed (LAST: the abort path keys on it)
 
     kg_arm_el2(vtcr_v, vttbr_v);
+    // The guest boots MMU-OFF (it brings its own stage-1 up at M3); reset the
+    // inherited host SCTLR_EL1 to the MMU-off init value before the eret.
+    kg_guest_sctlr_mmu_off();
 
     // SAFETY: reset SP_EL2 = &B0 (the resident host frame — every guest trap
     // stacks below it), program ELR_EL2 = `_tb_start`'s IPA + SPSR_EL2 =
@@ -546,15 +574,27 @@ pub(super) fn kguest_abort(frame: *mut Frame, esr: u64) -> ! {
 // the returned closed enum only.
 // ===========================================================================
 
-/// The host-RAM confinement-probe cell: a LIVE host `.bss`/`.data` word whose
-/// address is handed to the guest (`tb.probe=`). The guest's store to it must
-/// stage-2-fault and NEVER land — the facade writes a sentinel before launch
-/// and asserts it intact after (adversarial DoD case (a)). Host-EL1-only
-/// accessor (the monitor only compares the fault IPA).
-static KG_PROBE_CELL: AtomicU64 = AtomicU64::new(0);
-
 /// The probe sentinel value (must survive the guest run byte-identically).
+/// Written by the facade to the host-RAM probe page (`GUEST_PROBE_PA`, one
+/// page below the carve — host DRAM, pmm-reserved, OUTSIDE the guest's IPA
+/// window) before launch and re-checked after: the guest's store to that IPA
+/// stage-2-FAULTS (witnessed) and the monitor DROPS it, so the sentinel
+/// survives (adversarial DoD case (a) — the confinement breach negative).
 const KG_PROBE_SENTINEL: u64 = 0x484F_5354_5241_4D21; // "HOSTRAM!"
+
+/// EL1: write the probe sentinel into the host-RAM probe page (identity-mapped,
+/// pmm-reserved — never aliased by any allocation).
+fn probe_seed() {
+    // SAFETY: `GUEST_PROBE_PA` is identity-mapped host DRAM (the RAM gigabyte
+    // 1 GiB block) reserved from the pmm; an aligned volatile u64 store.
+    unsafe { write_volatile(GUEST_PROBE_PA as *mut u64, KG_PROBE_SENTINEL) }
+}
+
+/// EL1: read the probe page back (post-flight: must equal the sentinel).
+fn probe_read() -> u64 {
+    // SAFETY: as `probe_seed`; an aligned volatile load.
+    unsafe { read_volatile(GUEST_PROBE_PA as *const u64) }
+}
 
 unsafe extern "C" {
     /// The kernel's tb-boot EL1 entry (boot.rs `_tb_start`): its link address
@@ -660,10 +700,10 @@ pub fn el2_kernel_guest_selftest() -> crate::KernelGuestProof {
         return P::NoImage;
     }
 
-    // The launch parameters: nonce, probe cell, cmdline, boot block, stage-2.
+    // The launch parameters: nonce, probe page, cmdline, boot block, stage-2.
     let nonce = pick_nonce();
-    KG_PROBE_CELL.store(KG_PROBE_SENTINEL, Ordering::Release);
-    let probe_va = &KG_PROBE_CELL as *const _ as u64;
+    probe_seed();
+    let probe_va = GUEST_PROBE_PA;
 
     // cmdline: "tb.nonce=<16hex> tb.probe=<16hex>"
     let mut cmdline = [0u8; 51];
@@ -783,8 +823,9 @@ pub fn el2_kernel_guest_selftest() -> crate::KernelGuestProof {
     if probe != 1 {
         return P::Faulted { code: FAIL_KG_PROBE_MISS, info: probe };
     }
-    // ... and the store NEVER landed (the sentinel is byte-identical).
-    if KG_PROBE_CELL.load(Ordering::Acquire) != KG_PROBE_SENTINEL {
+    // ... and the store NEVER landed (the host-RAM probe page's sentinel is
+    // byte-identical: the monitor dropped the faulting store).
+    if probe_read() != KG_PROBE_SENTINEL {
         return P::Faulted { code: FAIL_KG_SENTINEL, info: 0 };
     }
     // Post-flight (b): the in-guest discriminator, read back from GUEST

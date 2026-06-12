@@ -190,10 +190,21 @@ pub const GUEST_IMAGE_OFF: u64 = 0x8_0000;
 /// monitor (the M27 progress-cell pattern). The monitor counts the stores and
 /// records the last stored value (the nonce echo).
 pub const GUEST_DOORBELL_IPA: u64 = GUEST_IPA_BASE + GUEST_CARVE_SIZE;
+/// The confinement-probe page: ONE host-RAM page immediately BELOW the carve
+/// (`0x45FF_F000`). It is genuine host DRAM (so the host writes/re-checks a
+/// sentinel there through its identity map), reserved from the host pmm, but
+/// it is OUTSIDE the guest's IPA window `[0x4000_0000, 0x4200_0000)` AND
+/// outside the carve PA `[0x4600_0000, 0x4800_0000)` -- so a guest store to
+/// IPA `0x45FF_F000` stage-2-FAULTS (the adversarial DoD case (a): the
+/// monitor witnesses the fault and DROPS the store; it never reaches host
+/// RAM, so the sentinel survives byte-identical post-flight).
+pub const GUEST_PROBE_PA: u64 = GUEST_CARVE_PA - 0x1000;
 
 // Geometry locks: 2 MiB-aligned base + size (the builder maps 2 MiB blocks),
-// the carve inside the 128 MiB QEMU `virt` DRAM, and the doorbell OUTSIDE the
-// mapped window (so it always faults). A drift is a build error.
+// the carve inside the 128 MiB QEMU `virt` DRAM, the doorbell OUTSIDE the
+// mapped window, and the probe page below the carve but still host DRAM AND
+// outside the guest IPA window (so a guest store to it always faults). A
+// drift is a build error.
 const _: () = assert!(GUEST_CARVE_PA & 0x1F_FFFF == 0);
 const _: () = assert!(GUEST_IPA_BASE & 0x1F_FFFF == 0);
 const _: () = assert!(GUEST_CARVE_SIZE & 0x1F_FFFF == 0);
@@ -201,6 +212,10 @@ const _: () = assert!(GUEST_CARVE_PA + GUEST_CARVE_SIZE <= 0x4800_0000); // top 
 const _: () = assert!(GUEST_CARVE_PA >= 0x4000_0000); // inside DRAM
 const _: () = assert!(GUEST_DOORBELL_IPA == 0x4200_0000);
 const _: () = assert!(GUEST_IMAGE_OFF < GUEST_CARVE_SIZE);
+const _: () = assert!(GUEST_PROBE_PA == 0x45FF_F000);
+const _: () = assert!(GUEST_PROBE_PA >= 0x4000_0000 && GUEST_PROBE_PA < GUEST_CARVE_PA); // host DRAM, below the carve
+const _: () = assert!(GUEST_PROBE_PA >= GUEST_IPA_BASE + GUEST_CARVE_SIZE); // outside the guest IPA window -> faults
+const _: () = assert!(guest_carve_pa(GUEST_PROBE_PA).is_none()); // never stage-2-mapped for the guest
 
 /// Translate one guest IPA to its host carve PA: `Some(GUEST_CARVE_PA + off)`
 /// iff `ipa` falls inside the guest's 32 MiB RAM window

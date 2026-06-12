@@ -115,7 +115,7 @@ pub fn guestlog_decode(frame: &[u8], out: &mut [u8]) -> Option<usize> {
         return None;
     }
     let hex = &frame[p..frame.len() - 1];
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let n = hex.len() / 2;

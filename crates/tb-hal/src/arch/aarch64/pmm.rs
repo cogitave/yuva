@@ -35,7 +35,7 @@
 
 use crate::pmm::RegionSink;
 use tb_boot::{TbBootInfo, TbMemRegion, TB_BOOT_MAGIC};
-use tb_encode::stage2::{GUEST_CARVE_PA, GUEST_CARVE_SIZE};
+use tb_encode::stage2::{GUEST_CARVE_PA, GUEST_CARVE_SIZE, GUEST_PROBE_PA};
 
 /// QEMU `virt` DRAM base.
 const DRAM_BASE: u64 = 0x4000_0000;
@@ -221,8 +221,12 @@ pub fn pmm_collect_regions(boot_info: usize, sink: &mut RegionSink) {
     }
 
     // (4) aL2.4b: reserve the guest-RAM carve — the top 32 MiB the EL1
-    // guest's stage-2 maps as ITS RAM. The host never allocates a frame here;
-    // the run-script `-device loader` stages the guest image inside it. The
-    // geometry comes from the Kani-locked tb-encode leaf (one source of truth).
-    sink.push_reserved(GUEST_CARVE_PA, GUEST_CARVE_SIZE);
+    // guest's stage-2 maps as ITS RAM — PLUS the one host-RAM probe page
+    // immediately below it (the adversarial confinement-probe target). The
+    // host never allocates a frame in either; the run-script `-device loader`
+    // stages the guest image inside the carve, and the launch facade writes a
+    // sentinel into the probe page. The geometry comes from the Kani-locked
+    // tb-encode leaf (one source of truth); the probe page sits directly below
+    // GUEST_CARVE_PA so the reservation is one contiguous span.
+    sink.push_reserved(GUEST_PROBE_PA, GUEST_CARVE_PA + GUEST_CARVE_SIZE - GUEST_PROBE_PA);
 }

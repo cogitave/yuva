@@ -69,7 +69,12 @@ IMG="$(mktemp)"
 XSOCK="$(mktemp -u)"  # the chardev unix socket path (QEMU creates the listener)
 XHOUT="$(mktemp)"     # the harness's stdout -- the SEPARATE leg-2 capture stream
 XKEY="$(mktemp)"      # the harness-custodied key hex (the §5.7 key-leak check input)
-trap 'rm -f "$IMG" "$XSOCK" "$XHOUT" "$XKEY"' EXIT
+# Preserve the pending exit code across the cleanup (bash <=5.1 resets the
+# script's exit status to the EXIT trap's last command -- `rm -f` always
+# succeeds -- which would mask a guard's `exit 1` locally; CI's bash 5.2
+# preserves it, but pin the behaviour here so a red guard reds the lane on
+# EVERY bash, never a silently-green local run).
+trap 'rc=$?; rm -f "$IMG" "$XSOCK" "$XHOUT" "$XKEY"; exit $rc' EXIT
 truncate -s 4M "$IMG"
 
 HARNESS_BIN="${REPO_ROOT}/tools/xport-harness/target/release/xport-harness"
@@ -88,6 +93,34 @@ fi
 "${HARNESS_BIN}" --socket "${XSOCK}" --key-out "${XKEY}" \
   --timeout-secs $((TIMEOUT_SECS + 60)) > "${XHOUT}" 2>&1 &
 XPID=$!
+
+# aL2.4b: stage the SECOND kernel image (the full-kernel EL1 guest) as a flat
+# binary for `-device loader` at the pmm-reserved carve + the canonical
+# text_offset (0x4600_0000 + 0x8_0000). The image is THIS very kernel ELF,
+# objcopy'd to raw (PT_LOAD bytes from the link base; .bss NOLOAD excluded --
+# the guest's own boot path zeroes it). loader=QEMU-DEVICE-LOADER is the
+# ledgered external-dependency decision (proposal aL2.4b SS2.2); the
+# self-loading flavor is the M36-direction successor. The bin is produced
+# next to the ELF; the cargo-less CI boot container consumes the copy the
+# runner step pre-generated (the xport-harness prebuild pattern).
+GUEST_BIN="${KERNEL}.guest.bin"
+# Locate an objcopy (PATH, then the rust-toolchain.toml llvm-tools component).
+GUEST_OBJCOPY="$(command -v llvm-objcopy || true)"
+if [[ -z "${GUEST_OBJCOPY}" ]] && command -v rustc >/dev/null 2>&1; then
+  GUEST_OBJCOPY="$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy 2>/dev/null | head -1 || true)"
+fi
+if [[ -n "${GUEST_OBJCOPY}" ]]; then
+  # objcopy available (the runner / a local dev box): (re)generate when stale.
+  if [[ ! -s "${GUEST_BIN}" || "${KERNEL}" -nt "${GUEST_BIN}" ]]; then
+    "${GUEST_OBJCOPY}" -O binary "${KERNEL}" "${GUEST_BIN}"
+  fi
+elif [[ ! -s "${GUEST_BIN}" ]]; then
+  # No objcopy AND no prebuilt image (the cargo-less CI boot container relies
+  # on the runner's pre-generate step bind-mounting ${GUEST_BIN} via /work).
+  echo "[run-aarch64] FAIL: no llvm-objcopy on PATH/sysroot and no prebuilt ${GUEST_BIN} -- the aL2.4b guest image must be pre-generated on the runner (llvm-objcopy -O binary <ELF> <ELF>.guest.bin) before a cargo-less boot" >&2
+  exit 1
+fi
+# else: no objcopy but a prebuilt image exists -> use it as-is (the container).
 
 # Print the exact QEMU build FIRST (fix_plan §B): the hosted ubuntu-24.04 runner
 # image may ship a different 8.2.x point-release than the apt snapshot tested
@@ -128,7 +161,7 @@ echo "[run-aarch64] qemu: $(${QEMU} --version | head -1)"
 # -no-reboot       : do not loop on a fatal guest event
 # -kernel <ELF>    : load PT_LOADs at p_paddr, jump to e_entry (= _start)
 set +e
-OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
+RAW_OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
     "${QEMU}" \
         -M virt,virtualization=on,gic-version=2,iommu=smmuv3 \
         -cpu cortex-a72 \
@@ -144,13 +177,28 @@ OUTPUT="$(timeout --foreground "${TIMEOUT_SECS}" \
         -chardev socket,id=xport0,path="${XSOCK}",server=on,wait=off \
         -device virtio-serial-device \
         -device virtconsole,chardev=xport0 \
+        -device loader,file="${GUEST_BIN}",addr=0x46080000,force-raw=on \
         -semihosting \
         -kernel "${KERNEL}" \
     < /dev/null 2>&1)"
 QEMU_RC=$?
 set -e
 
-printf '%s\n' "${OUTPUT}"
+printf '%s\n' "${RAW_OUTPUT}"
+
+# ===========================================================================
+# aL2.4b STRIP-THEN-ASSERT (proposal SS2.6 -- the host profile is provably NOT
+# weakened): the guest's serial leaves the trapped PL011 ONLY as framed
+# `guestlog: <hex>` lines (the Kani-proven injection-proof codec), so:
+#   * HOST  = the raw stream with the guestlog-framed lines stripped; EVERY
+#     existing guard below runs over ${OUTPUT} = HOST BYTE-IDENTICALLY (the
+#     guard block's diff against the pre-aL2.4b script is zero -- machine-
+#     checkable in review);
+#   * GUEST = the decoded guestlog payload byte-stream (the in-guest chain's
+#     own serial output), judged ONLY by the NEW guest guard set further down.
+# ===========================================================================
+OUTPUT="$(printf '%s\n' "${RAW_OUTPUT}" | grep -v '^guestlog: ' || true)"
+GUEST_STREAM="$(printf '%s\n' "${RAW_OUTPUT}" | grep '^guestlog: ' | sed 's/^guestlog: //' | tr -d '\n' | xxd -r -p || true)"
 
 # M30: reap the echo harness (it exits on socket EOF once QEMU terminates;
 # bounded wait + a hard kill so a wedged harness can never hang the lane), then
@@ -776,7 +824,179 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     if printf "%s" "${OUTPUT}" | grep -qF -- "L2.6: smmu OK (no stage-2 SMMU, skipped)"; then
         echo "::warning::aarch64 SMMUv3 rung ran in SKIP mode (no stage-2 SMMU: IDR0.S2P absent -- QEMU < 9.0, e.g. the 8.2.2 CI image, or a run without iommu=smmuv3) -- the aL2.6 table-programming Proven path was NOT exercised on this runner (the STE/command encoders remain Kani-proven)"
     fi
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed)"
+
+    # =======================================================================
+    # aL2.4b: the FULL-KERNEL EL1 GUEST gate (proposal SS2.6/SS3). This lane
+    # ATTACHES the `-device loader` second kernel image, so the full launch
+    # MUST run -- the marker is emitted by the MONITOR from witnessed evidence
+    # only; the guest's framed text is corroborating. The strip-then-assert
+    # split is already applied above: ${OUTPUT} == HOST (raw minus the
+    # guestlog-framed lines, over which EVERY guard above ran byte-identical --
+    # the diff-zero proof) and ${GUEST_STREAM} == the decoded guest serial.
+    # =======================================================================
+
+    # (1) Skip-variant reject BY NAME (the M20 anti-hollow idiom): an attached
+    # lane must never take the graceful no-image/no-EL2 skip.
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'L2.4b: el1-kernel-guest OK (no guest image, skipped)'; then
+        echo "[run-aarch64] FAIL -- aL2.4b ran in SKIP mode (no guest image) but this lane attaches '-device loader' -- the full-kernel-guest launch was NOT exercised" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'L2.4b: el1-kernel-guest OK (no EL2, skipped)'; then
+        echo "[run-aarch64] FAIL -- aL2.4b ran in the (no EL2, skipped) form but this lane boots at EL2 -- the launch was NOT exercised" >&2
+        exit 1
+    fi
+    # (2) POSITIVE-REQUIRE the MONITOR-WITNESSED evidence (non-text): the
+    # guestboot/guestprobe/guestchain witnesses with EVERY =1 flag, the
+    # doorbell count, hostram-faults=0, the confinement-probe fault witnessed +
+    # the store dropped, and the in-guest discriminator (entryel=0xff,
+    # guest-el2=0x0). A marker without these is a hollow pass.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'guestboot: launched=1 carve=0x46000000\+32M nonce=0x[0-9a-f]+ doorbell=0x[0-9a-f]+ nonce-echo=1 final-wfi=1 hostram-faults=0 traps=0x[0-9a-f]+'; then
+        echo "[run-aarch64] FAIL -- aL2.4b marker present but the monitor witness 'guestboot: launched=1 .. nonce-echo=1 final-wfi=1 hostram-faults=0 ..' was NOT seen (hollow L2.4b pass)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'guestprobe: hostram-store stage2-fault=1 store-landed=0 probes=0x0*1'; then
+        echo "[run-aarch64] FAIL -- aL2.4b adversarial case (a) NOT witnessed: 'guestprobe: hostram-store stage2-fault=1 store-landed=0 probes=0x1' absent (the confinement-probe fault / drop was not proven)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'guestchain: contract-v0=1 entryel=0xff guest-el2=0x0 chain-done=1 m31-tail=1'; then
+        echo "[run-aarch64] FAIL -- aL2.4b marker present but the chain-custody witness 'guestchain: contract-v0=1 entryel=0xff guest-el2=0x0 chain-done=1 m31-tail=1' was NOT seen" >&2
+        exit 1
+    fi
+    # (3) POSITIVE-REQUIRE the honesty-token line verbatim (proposal SS3).
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'guest: guest=FULL-KERNEL-EL1 ram=STAGE2-CONFINED-32M loader=QEMU-DEVICE-LOADER gic=PASSTHROUGH-SOLE-GUEST timer=PHYS-PASSTHROUGH uart=TRAPPED-EMULATED virtio=OPEN-BUS-ABSENT guestlog=HEX-FRAMED-UNTRUSTED exit=WFI-PARK-DOORBELL smp=UP-ONLY rootfs=NONE timing=TCG-NON-CYCLE-ACCURATE cachemodel=TCG-COHERENT-UNTESTED realtime=NOT-CLAIMED'; then
+        echo "[run-aarch64] FAIL -- aL2.4b honesty-token line absent or altered (the proposal SS3 verbatim token set is load-bearing)" >&2
+        exit 1
+    fi
+    # (4) BY-NAME overclaim rejects near the marker/witnesses: confinement is
+    # NOT yet an adversarially-proven sandbox (proposal SS5). Strip the legit
+    # structured tokens FIRST (STAGE2-CONFINED-32M carries 'confined'), then
+    # reject the forbidden vocabulary.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(L2.4b:|guest:|guestboot:|guestchain:|guestprobe:)' \
+         | sed -e 's/STAGE2-CONFINED-32M//g' -e 's/FULL-KERNEL-EL1//g' \
+               -e 's/PASSTHROUGH-SOLE-GUEST//g' -e 's/PHYS-PASSTHROUGH//g' \
+               -e 's/TRAPPED-EMULATED//g' -e 's/OPEN-BUS-ABSENT//g' \
+               -e 's/HEX-FRAMED-UNTRUSTED//g' -e 's/WFI-PARK-DOORBELL//g' \
+               -e 's/QEMU-DEVICE-LOADER//g' -e 's/smp=UP-ONLY//g' -e 's/NONE//g' \
+               -e 's/TCG-NON-CYCLE-ACCURATE//g' -e 's/TCG-COHERENT-UNTESTED//g' \
+               -e 's/NOT-CLAIMED//g' \
+         | grep -qiE -- 'isolated|verified-guest|sandboxed|KVM-class|Firecracker-replacement|(^|[^[:alnum:]])SMP|cycle-accurate'; then
+        echo "[run-aarch64] FAIL -- aL2.4b marker/witness carries an overclaim ('isolated'/'verified-guest'/'sandboxed'/'KVM-class'/'Firecracker-replacement'/'SMP'/'cycle-accurate') -- confinement is claimed only to the landed adversarial-case depth (proposal SS5)" >&2
+        exit 1
+    fi
+    # (5) v1-IMPERSONATION reject: the aL2.4 'el2-guest OK' (the ~80-instruction
+    # in-image stub) must never be able to stand in for the full-kernel guest.
+    # The real marker carries 'el1-kernel-guest'; assert it is present (the
+    # top-level grep is M31, so guard L2.4b directly).
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'L2.4b: el1-kernel-guest OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'L2.4b: el1-kernel-guest OK' missing (the full-kernel-guest launch regressed / did not reach the monitor verdict)" >&2
+        exit 1
+    fi
+    # (6) HANG-class fast-red recognizer (never a silent timeout): a storm/stall
+    # renders the named line; surface it as a hard fail if it ever appears.
+    if printf '%s' "${OUTPUT}" | grep -qE -- 'L2.4b: HANG class=(storm|stall)'; then
+        echo "[run-aarch64] FAIL -- aL2.4b guest hang: $(printf '%s' "${OUTPUT}" | grep -oE 'L2.4b: HANG class=[a-z]+.*' | head -1)" >&2
+        exit 1
+    fi
+
+    # ---- The GUEST guard set (proposal SS2.6 partition over ${GUEST_STREAM}) ----
+    # The in-guest chain's OWN serial (decoded from the injection-proof frames):
+    # the must-prove rungs prove for real, the EL2-dependent rungs MUST take
+    # their `(no EL2, skipped)` FORM, and a guest printing the REAL EL2 marker
+    # is REJECTED (it would mean it was not actually deprivileged).
+    if [[ -z "${GUEST_STREAM}" ]]; then
+        echo "[run-aarch64] FAIL -- the decoded guest stream is EMPTY (no guestlog frames) -- the confined guest produced no serial" >&2
+        exit 1
+    fi
+    # (G1) the in-guest discriminator + the positive handoff assertion.
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- 'tb-boot: contract v0 OK'; then
+        echo "[run-aarch64] FAIL -- GUEST: 'tb-boot: contract v0 OK' missing (the in-guest handoff did not validate)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qE -- 'boot: entry-el=0x0*ff el2=0x0+'; then
+        echo "[run-aarch64] FAIL -- GUEST: the 'boot: entry-el=0xff el2=0x0' discriminator missing (the guest did not enter via _tb_start deprivileged)" >&2
+        exit 1
+    fi
+    # (G2) the MUST-PROVE rungs (real, any (skipped) rejected for these).
+    for M in \
+        'M1: traps OK' 'M3: mmu OK' 'M4: user/ring OK' 'M5: alloc OK' \
+        'M6: frame alloc OK' 'M7: heap OK' 'M8: timer OK' 'M9: preempt OK' \
+        'M14.2: blocking-recv OK' 'M22: provenance OK' 'M23: experience OK' \
+        'M25: operator OK' 'M26: exit-telemetry OK' 'M28: operator-cmd OK' \
+        'M29: khash-mac OK'; do
+        if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- "${M}"; then
+            echo "[run-aarch64] FAIL -- GUEST must-prove rung '${M}' missing from the in-guest chain" >&2
+            exit 1
+        fi
+    done
+    # (G3) the MUST-SKIP rungs: require the EXACT skip FORM, and REJECT the real
+    # EL2 marker (the inverted-suspicion rule -- a deprivileged guest cannot have
+    # proven its own EL2).
+    for SK in \
+        'L2.0: el2 OK (no EL2, skipped)' \
+        'L2.1: stage2 OK (no EL2, skipped)' \
+        'L2.2: el2-exits OK (no EL2, skipped)' \
+        'L2.3: el2-trap OK (no EL2, skipped)' \
+        'L2.4: el2-guest OK (no EL2, skipped)' \
+        'L2.5: vgic OK (no EL2, skipped)' \
+        'L2.6: smmu OK (no stage-2 SMMU, skipped)' \
+        'M27: sched OK (no EL2, skipped)' \
+        'M19: virtio OK (no device, skipped)' \
+        'M20: persist OK (no disk, skipped)'; do
+        if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- "${SK}"; then
+            echo "[run-aarch64] FAIL -- GUEST must-skip rung '${SK}' not in its required skip form (the in-guest acceptance profile rejects a wrong form)" >&2
+            exit 1
+        fi
+    done
+    # Reject a guest printing the REAL EL2/SMMU/M27 markers (deprivilege breach).
+    for REAL in \
+        'L2.0: el2 OK' 'L2.1: stage2 OK' 'L2.2: el2-exits OK' \
+        'L2.3: el2-trap OK' 'L2.4: el2-guest OK' 'L2.5: vgic OK' \
+        'M27: sched OK'; do
+        # Count lines that match the marker but NOT the skip form: any such line
+        # is a REAL (overclaiming) print.
+        if printf '%s' "${GUEST_STREAM}" | grep -F -- "${REAL}" | grep -qvF -- '(no EL2, skipped)'; then
+            echo "[run-aarch64] FAIL -- GUEST printed the REAL '${REAL}' (not the skip form) -- a deprivileged guest cannot prove its own EL2 (the inverted-suspicion rule)" >&2
+            exit 1
+        fi
+    done
+    # (G4) the in-guest tail MUST reach M31's skip + the semihosting-suppression
+    # line (adversarial case (c): the guest did NOT semihost-exit the VM).
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- 'M31: infer-e2e OK (no host peer, skipped)'; then
+        echo "[run-aarch64] FAIL -- GUEST: the M31 tail '(no host peer, skipped)' missing (the in-guest chain did not complete)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- 'qemu-exit: suppressed (in-guest) -- semihosting not issued'; then
+        echo "[run-aarch64] FAIL -- GUEST: the semihosting-suppression line missing (adversarial case (c): the in-guest exit path was not the doorbell/WFI park)" >&2
+        exit 1
+    fi
+
+    # ---- ADVERSARIAL case (b): forged host markers appear ONLY hex-framed ----
+    # The guest DELIBERATELY printed 'forge-test: M31: ...' and
+    # 'forge-test: L2.4b: ...'. They MUST be present in the decoded GUEST stream
+    # but appear in HOST=clean ONLY hex-framed (so they can never satisfy a host
+    # grep). Assert both directions.
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- 'forge-test: L2.4b: el1-kernel-guest OK'; then
+        echo "[run-aarch64] FAIL -- GUEST: the adversarial forge-test line was not produced (case (b) was not exercised)" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -qF -- 'forge-test:'; then
+        echo "[run-aarch64] FAIL -- a guest 'forge-test:' line leaked RAW into the HOST stream -- the guestlog framing failed (injection-proofing breach)" >&2
+        exit 1
+    fi
+    # The guest's forged 'L2.4b: el1-kernel-guest OK' must NOT add a SECOND
+    # un-framed marker to HOST: exactly ONE real marker line (the monitor's).
+    L24B_COUNT="$(printf '%s\n' "${OUTPUT}" | grep -cE -- '(^|[^a-z-])L2.4b: el1-kernel-guest OK$' || true)"
+    if [[ "${L24B_COUNT}" != "1" ]]; then
+        echo "[run-aarch64] FAIL -- expected exactly ONE host-side 'L2.4b: el1-kernel-guest OK' (the monitor's), saw ${L24B_COUNT} -- a forged guest marker may have escaped framing" >&2
+        exit 1
+    fi
+    # ---- The diff-zero residue canary: zero raw 'guestlog:' bytes in HOST ----
+    if printf '%s' "${OUTPUT}" | grep -qE -- '^guestlog:'; then
+        echo "[run-aarch64] FAIL -- a 'guestlog:' framed line survived into the HOST stream (the strip stage did not remove it -- the diff-zero host-guard property is broken)" >&2
+        exit 1
+    fi
+
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M31 kernel as a stage-2-confined EL1 guest: monitor-witnessed doorbell/nonce/final-WFI, confinement-probe fault, in-guest skip-profile, forged-markers hex-framed]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed)"
     exit 0
 fi
 
