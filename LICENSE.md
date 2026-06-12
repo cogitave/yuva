@@ -4,7 +4,7 @@
 
 > Required Notice: Copyright 2026 cogitave (Bahadir Arda)
 
-TABOS is **source-available, noncommercial software**. You may use, study,
+Yuva is **source-available, noncommercial software**. You may use, study,
 modify, and share it for any noncommercial purpose. **Commercial use — including
 selling it, selling access to it, or using it to operate a commercial product or
 service — requires separate written permission from the licensor.** Contact the

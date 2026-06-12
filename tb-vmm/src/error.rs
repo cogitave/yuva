@@ -52,10 +52,10 @@ pub enum VmmError {
     },
     /// `KVM_EXIT_INTERNAL_ERROR`: KVM hit an internal/emulation error.
     InternalError,
-    /// `KVM_EXIT_SHUTDOWN`: the guest triple-faulted or reset. For a TABOS boot
+    /// `KVM_EXIT_SHUTDOWN`: the guest triple-faulted or reset. For a Yuva boot
     /// this means the kernel crashed before halting — a failure, not a clean stop.
     GuestShutdown,
-    /// `KVM_EXIT_SYSTEM_EVENT`: an unexpected ACPI/PSCI system event. The TABOS
+    /// `KVM_EXIT_SYSTEM_EVENT`: an unexpected ACPI/PSCI system event. The Yuva
     /// kernel stops via `HLT`, so any system event here is treated as a failure.
     /// Carries the KVM system-event type.
     SystemEvent(u32),

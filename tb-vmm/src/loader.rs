@@ -64,7 +64,7 @@ pub enum LoaderError {
     NoLoadSegments,
     /// The kernel ELF carries no TABOS `tb-boot` entry note. tb-vmm enters the
     /// guest in 64-bit long mode and refuses to fall back to `e_entry` (which,
-    /// for a TABOS kernel, is the 32-bit PVH trampoline — fatal in long mode).
+    /// for a Yuva kernel, is the 32-bit PVH trampoline — fatal in long mode).
     MissingTbNote,
     /// Writing a segment to guest RAM failed (segment out of guest range, etc.).
     GuestWrite {
@@ -169,7 +169,7 @@ fn parse_phdrs(image: &[u8]) -> Result<Vec<Phdr>, LoaderError> {
     Ok(phdrs)
 }
 
-/// Find the TABOS 64-bit entry from a `PT_NOTE` segment, if present.
+/// Find the TABOS-note 64-bit entry from a `PT_NOTE` segment, if present.
 fn find_tb_entry(image: &[u8], phdrs: &[Phdr]) -> Result<Option<u64>, LoaderError> {
     for ph in phdrs.iter().filter(|p| p.p_type == PT_NOTE) {
         let start = ph.p_offset as usize;

@@ -1,4 +1,4 @@
-# TABOS M0 — Boot Bring-Up: Build & Run (WSL2)
+# Yuva M0 — Boot Bring-Up: Build & Run (WSL2)
 
 > **Definition of Done (executable):** a `no_std` image boots under QEMU
 > (x86_64 `microvm` via PVH, aarch64 `virt` first-light), prints the **exact**

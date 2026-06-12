@@ -1,4 +1,4 @@
-# tb-hal: TABOS Hardware Abstraction Layer.
+# tb-hal: Yuva Hardware Abstraction Layer.
 #
 # Framekernel rule (ARCHITECTURE.md / KERNEL-FOUNDATION-SPEC.md §1): this is the
 # ONLY crate permitted to contain `unsafe`, `asm!`, `naked_asm!` or

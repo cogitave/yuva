@@ -1,4 +1,4 @@
-# TABOS Architecture Draft
+# Yuva Architecture Draft
 
 > Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M30 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
@@ -140,7 +140,7 @@ M30, ALSO string-compare the kernel-witnessed challenge/tag against the
   tamper-caught=1 signal=OBSERVATIONAL-NONCAUSAL` — the token machine-forbids claiming
   a causal state-signal.
 - **The sovereign time-partition scheduler (§5 scheduling) — M27.** `M27: sched OK`
-  is the sovereignty pillar's "TABOS owns time for two guests" rung, printed in the
+  is the sovereignty pillar's "Yuva owns time for two guests" rung, printed in the
   L2-track position (after L2.6, before M19): the EL2 (nVHE) monitor arms TWO
   distinct stage-2 roots (VMID 0 + 1) and alternates two EL1 guest stubs in a fixed
   two-slot major frame, each bumping a DISTINCT per-VMID MMIO forward-progress cell
@@ -381,7 +381,7 @@ discriminator (it changes `.bss` symbol ordering and has exposed layout-sensitiv
 bugs); every local boot-verify must set it on the `cargo kbuild` invocation to
 match CI.
 
-**Sovereignty-L2 (§1.2 host substrate).** The L2 track — TABOS as its own minimal
+**Sovereignty-L2 (§1.2 host substrate).** The L2 track — Yuva as its own minimal
 Type-1 microhypervisor, replacing `/dev/kvm` with `tb-core` — now runs an
 **L2.0→L2.6 aarch64 sovereignty chain inside every boot** (`L2.0: el2 OK` EL2
 nVHE world-switch → `L2.1: stage2 OK` stage-2 demand-translation → `L2.2:
@@ -425,13 +425,13 @@ targets this document sets.
 
 ### 1.2 **[DECISION] Hybrid: "Capability core + unikernel body + exokernel spirit"**
 
-TABOS layers the three approaches — they are not rivals but answers for different layers:
+Yuva layers the three approaches — they are not rivals but answers for different layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  HOST: hypervisor (KVM / Firecracker-class VMM)                 │ ← production-proven substrate
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │ TABOS NODE IMAGE (single image booting as a unikernel)     │  │ ← Unikraft-style modular build
+│  │ Yuva NODE IMAGE (single image booting as a unikernel)     │  │ ← Unikraft-style modular build
 │  │  ┌──────────────────────────────────────────────────────┐ │  │
 │  │  │ TB-CORE (frozen capability core, target ≤15kSLOC)    │ │  │ ← seL4/Zircon lessons
 │  │  │  handle+rights · scheme dispatch · task machine ·     │ │  │
@@ -459,7 +459,7 @@ From the kernel to the protocol bridges, **Rust** (frozen kernel `no_std` + fram
 
 ### 1.4 Kernel Foundation and Assembly **[DECISION — detail: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md)]**
 
-The kernel boots as a Firecracker/KVM guest (not bare-metal) → large amounts of boot asm are eliminated. ALL `unsafe`+asm in a single `tb-hal` foundation crate (`#[unsafe(naked)]`+`naked_asm!`/`global_asm!`, Rust ≥1.88); `#![forbid(unsafe_code)]` above it. x86_64 **LinuxBoot** (enters 64-bit, no trampoline), aarch64 **PE-Image** (MMU cold, bring-up required). Single-vCPU (Mirage) → AP/SMP asm not in v1. Assembly work items split into 13 units (A1-A13), the build into 5 milestones (M0 boot → M1 trap → M2 context-switch → M3 MMU → M4 v2-user); each unit has an executable DoD (Firecracker+QEMU CI, both arches). Kernel-verification decision: pure-Rust + tiered-assurance (Miri+Kani mandatory, Verus selective). **Sovereignty:** TABOS inherits zero Linux code/design; canonical boot = our own `tb-boot`/`tb-vmm`, Firecracker is only the bootstrap loader (detail + the 'we don't carry old bugs' ledger: [SOVEREIGNTY](SOVEREIGNTY.md)).
+The kernel boots as a Firecracker/KVM guest (not bare-metal) → large amounts of boot asm are eliminated. ALL `unsafe`+asm in a single `tb-hal` foundation crate (`#[unsafe(naked)]`+`naked_asm!`/`global_asm!`, Rust ≥1.88); `#![forbid(unsafe_code)]` above it. x86_64 **LinuxBoot** (enters 64-bit, no trampoline), aarch64 **PE-Image** (MMU cold, bring-up required). Single-vCPU (Mirage) → AP/SMP asm not in v1. Assembly work items split into 13 units (A1-A13), the build into 5 milestones (M0 boot → M1 trap → M2 context-switch → M3 MMU → M4 v2-user); each unit has an executable DoD (Firecracker+QEMU CI, both arches). Kernel-verification decision: pure-Rust + tiered-assurance (Miri+Kani mandatory, Verus selective). **Sovereignty:** Yuva inherits zero Linux code/design; canonical boot = our own `tb-boot`/`tb-vmm`, Firecracker is only the bootstrap loader (detail + the 'we don't carry old bugs' ledger: [SOVEREIGNTY](SOVEREIGNTY.md)).
 
 ## 2. Kernel Object Model **[PROPOSAL]**
 

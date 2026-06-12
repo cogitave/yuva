@@ -1,6 +1,6 @@
-//! `tb-boot` — the TABOS boot-handoff ABI (contract **v0**).
+//! `tb-boot` — the Yuva boot-handoff ABI (contract **v0**).
 //!
-//! This crate is the single, shared definition of how a TABOS VMM hands a
+//! This crate is the single, shared definition of how a Yuva VMM hands a
 //! freshly-loaded kernel image its boot environment. It is depended on by BOTH
 //! sides of the contract:
 //!

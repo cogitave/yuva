@@ -2,7 +2,7 @@
 //! EL2-monitor install, then the shared EL1 continuation (stack, `.bss`, the
 //! initial `VBAR_EL1` arm, and the FDT handoff into `rust_main`).
 //!
-//! All assembly in TABOS is confined to `tb-hal`; this module is the aarch64
+//! All assembly in Yuva is confined to `tb-hal`; this module is the aarch64
 //! half of unit **A1/A2** in KERNEL-FOUNDATION-SPEC SS3, extended at **L2.0**
 //! with the EL2->EL1 drop. It is compiled purely for its `global_asm!` side
 //! effects -- nothing here is referenced from Rust; the linker keeps `_start`

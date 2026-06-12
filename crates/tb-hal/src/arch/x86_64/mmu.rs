@@ -187,7 +187,7 @@ static FRAME_B: Cell4K = Cell4K::new();
 
 /// Read CR3 — physical base of the live PML4 plus the PWT/PCD control bits.
 ///
-/// (a) PRE: long mode, ring 0 (TABOS never leaves it). POST: returns the
+/// (a) PRE: long mode, ring 0 (Yuva never leaves it). POST: returns the
 ///     live CR3 value; no architectural state changes.
 /// (b) ABI: `mov {out}, cr3` — one GPR written; MOV-from-CR raises no flags;
 ///     nomem/nostack/preserves_flags.

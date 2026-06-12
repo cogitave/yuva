@@ -1,4 +1,4 @@
-//! `tb-hal` — TABOS Hardware Abstraction Layer (M0 serial + M1 traps + M2
+//! `tb-hal` — Yuva Hardware Abstraction Layer (M0 serial + M1 traps + M2
 //! tasks + M3 MMU + M4 user/ring boundary).
 //!
 //! Single crate where `unsafe`/asm is allowed (framekernel rule,
@@ -1143,7 +1143,7 @@ pub(crate) fn sched_wake_task(slot: u32) {
 /// M14.2: deschedule the CURRENT task (mark it BLOCKED) and hand the CPU to a
 /// RUNNABLE peer. Round-robins the run queue from this task's position for a
 /// RUNNABLE task != self and [`yield_to`]s it. If NONE exists it is a genuine
-/// single-core deadlock (TABOS has no idle task yet), reported fail-closed --
+/// single-core deadlock (Yuva has no idle task yet), reported fail-closed --
 /// the minimal idle-task/WFI path is the documented forward item.
 ///
 /// Called ONLY from [`agent_chan_recv_blocking`] with interrupts MASKED, so the
@@ -1583,7 +1583,7 @@ pub struct CapGrant {
     pub rights: caps::Rights,
 }
 
-/// The MINIMAL static declaration [`agent_spawn`] consumes -- the TABOS analogue
+/// The MINIMAL static declaration [`agent_spawn`] consumes -- the Yuva analogue
 /// of seL4's initial-thread CNode contents / Zircon's processargs: the exhaustive
 /// list of authority an agent is born holding, nothing ambient. `const`-
 /// constructible, so the kernel declares `static MANIFEST: AgentManifest = ...`

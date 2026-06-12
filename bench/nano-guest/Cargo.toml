@@ -4,7 +4,7 @@
 # VMM-spawn overhead (docs/BENCHMARKS.md axis A).
 #
 # This is its OWN nested workspace (like tb-vmm), DELIBERATELY excluded from the
-# root TABOS workspace, so:
+# root Yuva workspace, so:
 #   * the root no_std kernel workspace and this bench artifact keep separate
 #     Cargo.lock files and never cross-contaminate build-std settings;
 #   * this crate may use hand assembly + a custom linker script freely — it is

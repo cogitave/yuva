@@ -1,4 +1,4 @@
-# TABOS M11 capability proof gate (Kani).
+# Yuva M11 capability proof gate (Kani).
 #
 # Machine-proves the rights-subset / no-confused-deputy invariant over the
 # host-verifiable `tb-caps-core` crate -- the SAME Rights algebra + CapTable<O>

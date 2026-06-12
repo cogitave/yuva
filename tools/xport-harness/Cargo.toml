@@ -21,7 +21,7 @@ name = "xport-harness"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "TABOS M30 host echo peer: answers inferwire ECHO_REQ over a QEMU chardev unix socket with a host-keyed khash echo."
+description = "Yuva M30 host echo peer: answers inferwire ECHO_REQ over a QEMU chardev unix socket with a host-keyed khash echo."
 license = "Apache-2.0"
 
 # An independent nested workspace (the tb-vmm precedent): cargo auto-excludes

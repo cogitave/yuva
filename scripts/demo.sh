@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/demo.sh — interactive TABOS boot: WATCH the machine come up.
+# scripts/demo.sh — interactive Yuva boot: WATCH the machine come up.
 #
 # This is a VIEWER, not a verifier: it boots the kernel under QEMU with the
 # full device set (virtio-rng + virtio-blk + the M30 inference channel with a
@@ -9,7 +9,7 @@
 # anti-hollow guard blocks are scripts/run-aarch64.sh and run-x86_64.sh; CI
 # runs those, not this.
 #
-# TABOS is a Firecracker-class DIRECT-KERNEL-BOOT guest: there is no .iso, no
+# Yuva is a Firecracker-class DIRECT-KERNEL-BOOT guest: there is no .iso, no
 # bootloader, no installer — the hypervisor (QEMU here, tb-vmm/KVM on the vmm
 # lane) loads the kernel image straight into guest RAM and jumps to it. That
 # is the design, not a gap (see docs/TRY-IT.md).
@@ -70,7 +70,7 @@ else
   echo "[demo] no cargo/harness — the M30 line will print its loud '(no host peer, skipped)'" >&2
 fi
 
-echo "[demo] booting TABOS (${ARCH}) — serial console below. Ctrl-A X quits QEMU." >&2
+echo "[demo] booting Yuva (${ARCH}) — serial console below. Ctrl-A X quits QEMU." >&2
 echo "------------------------------------------------------------------------" >&2
 
 if [[ "${ARCH}" == "aarch64" ]]; then

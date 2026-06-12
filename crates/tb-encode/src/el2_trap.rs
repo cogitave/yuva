@@ -330,7 +330,7 @@ pub const SYS_CONTEXTIDR_EL1: u64 = sysreg_iss_sys_val(3, 0, 1, 13, 0);
 //   [7] S1PTW (via `esr_s1ptw`), [6] WnR (via `esr_wnr`), [5:0] DFSC.
 
 /// `ESR.ISS.ISV` -- syndrome-valid, bit `[24]` (`1` => SAS/SSE/SRT/SF/AR are
-/// meaningful). `0` for complex/SIMD/pair/writeback accesses TABOS cannot decode.
+/// meaningful). `0` for complex/SIMD/pair/writeback accesses Yuva cannot decode.
 #[inline]
 pub const fn dabt_iss_isv(esr: u64) -> u64 {
     (esr >> 24) & 1
@@ -374,9 +374,9 @@ pub const fn dabt_access_size_bytes(esr: u64) -> u64 {
 }
 
 /// Whether a Data Abort is EMULATABLE by the MMIO seam: `ISV == 1` (a single-GP
-/// load/store TABOS can decode) AND `S1PTW == 0` (the access itself faulted, not
+/// load/store Yuva can decode) AND `S1PTW == 0` (the access itself faulted, not
 /// the stage-1 walk). Fail-closed otherwise -- mirrors KVM `io_mem_abort`'s
-/// `!kvm_vcpu_dabt_isvalid -> KVM_EXIT_ARM_NISV` early-out (TABOS has no
+/// `!kvm_vcpu_dabt_isvalid -> KVM_EXIT_ARM_NISV` early-out (Yuva has no
 /// instruction decoder, so an ISV=0 abort must FAIL, never blind-decode).
 #[inline]
 pub const fn dabt_is_emulatable(esr: u64) -> bool {

@@ -304,7 +304,7 @@ fn setup_sregs(vcpu: &VcpuFd) -> Result<(), VmmError> {
 /// TbBootInfo (SysV arg0), `rsi` = 0, `rflags` = 0x2.
 ///
 /// (Firecracker's LinuxBoot also sets rsp/rbp/rsi for the Linux zero-page ABI;
-/// the TABOS kernel's `_tb_start` instead sets its own RSP and reads `rdi`, so
+/// the Yuva kernel's `_tb_start` instead sets its own RSP and reads `rdi`, so
 /// we leave rsp/rbp at 0 and place our info pointer in rdi.)
 fn setup_regs(vcpu: &VcpuFd, entry: u64, boot_info_addr: u64) -> Result<(), VmmError> {
     let regs = kvm_regs {
@@ -319,7 +319,7 @@ fn setup_regs(vcpu: &VcpuFd, entry: u64, boot_info_addr: u64) -> Result<(), VmmE
 }
 
 /// Present the host's supported CPUID to the guest (`KVM_SET_CPUID2`). The
-/// soft-float TABOS kernel does not enable advertised SIMD features, but this
+/// soft-float Yuva kernel does not enable advertised SIMD features, but this
 /// keeps any `cpuid` the guest issues well-defined rather than all-zero.
 fn configure_cpuid(kvm: &Kvm, vcpu: &VcpuFd) -> Result<(), VmmError> {
     let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES as usize)?;

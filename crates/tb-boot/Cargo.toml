@@ -1,6 +1,6 @@
-# tb-boot: the TABOS boot-handoff ABI (contract v0).
+# tb-boot: the Yuva boot-handoff ABI (contract v0).
 #
-# The SINGLE shared definition of how a TABOS VMM hands a freshly-loaded kernel
+# The SINGLE shared definition of how a Yuva VMM hands a freshly-loaded kernel
 # its boot environment. Depended on by BOTH sides of the contract:
 #   - tb-vmm : a std Linux /dev/kvm binary (OUTSIDE the framekernel
 #              forbid(unsafe) boundary) that PRODUCES a TbBootInfo into guest

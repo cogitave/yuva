@@ -109,7 +109,7 @@ fn l2_nested_guest_vectors_addr() -> u64 {
 }
 
 // ===========================================================================
-// aL2.4: the EL1 nested guest -- a REAL minimal TABOS guest that, UNDER our EL2
+// aL2.4: the EL1 nested guest -- a REAL minimal Yuva guest that, UNDER our EL2
 // stage-2 (HCR_EL2.VM=1), BUILDS its OWN stage-1 in the frame_alloc'd frames
 // handed in x4(L1)/x5(L2)/x6(L3)/x7(scratch IPA), ENABLES it (SCTLR_EL1.M=1),
 // and stores+reads back a sentinel through a VA that has NO flat meaning -- a

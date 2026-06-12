@@ -1,0 +1,5 @@
+# advisory only — the codebase predates this config and is NOT enforced
+# rustfmt-clean (no CI gate; do not bulk-reformat existing files in unrelated
+# PRs). Matches the prevailing hand style: edition 2021, 100-column width.
+edition = "2021"
+max_width = 100

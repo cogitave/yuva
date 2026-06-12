@@ -205,7 +205,7 @@ impl Vmm {
                     VcpuExit::MmioRead(addr, data) => self.mmio_bus.read(addr, data),
                     VcpuExit::MmioWrite(addr, data) => self.mmio_bus.write(addr, data),
                     VcpuExit::Hlt => break Outcome::Stop(StopReason::Halted),
-                    // A TABOS kernel reaches the end of its boot self-test and
+                    // A Yuva kernel reaches the end of its boot self-test and
                     // halts (HLT). KVM_EXIT_SHUTDOWN means a triple fault / reset
                     // instead — i.e. the guest crashed — so it is a failure.
                     VcpuExit::Shutdown => break Outcome::Shutdown,

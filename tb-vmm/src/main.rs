@@ -1,6 +1,6 @@
-//! tb-vmm — TABOS sovereign userspace VMM (the **L1** sovereignty rung).
+//! tb-vmm — Yuva sovereign userspace VMM (the **L1** sovereignty rung).
 //!
-//! tb-vmm boots the unmodified TABOS kernel ELF through TABOS's OWN boot
+//! tb-vmm boots the unmodified Yuva kernel ELF through Yuva's OWN boot
 //! contract (`tb-boot v0`), entering the guest **directly in 64-bit long mode**
 //! over `/dev/kvm` — deleting the PVH ELF note + the A0 32->64 trampoline from
 //! the boot path (docs/SOVEREIGNTY-ROADMAP.md §7). It is a `std`, Linux-hosted

@@ -1,4 +1,4 @@
-# TABOS continuous integration.
+# Yuva continuous integration.
 #
 # What this proves on every push / PR: the from-scratch kernel still BUILDS and
 # BOOTS on both supported architectures, and the cumulative milestone self-test

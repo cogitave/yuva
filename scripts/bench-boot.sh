@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/bench-boot.sh — TABOS boot-time benchmark harness.
+# scripts/bench-boot.sh — Yuva boot-time benchmark harness.
 #
 # Measures the wall-clock from "VMM/QEMU process spawn" to two serial events,
 # the same start->end convention microVM/unikernel boot-time figures use

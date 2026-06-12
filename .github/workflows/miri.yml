@@ -1,4 +1,4 @@
-# TABOS Tier-0 dynamic Undefined-Behavior gate (Miri).
+# Yuva Tier-0 dynamic Undefined-Behavior gate (Miri).
 #
 # Runs the Rust Project's OWN MIR interpreter over the PURE, host-runnable,
 # `#![forbid(unsafe_code)]` leaf crates -- `tb-caps-core` (the Rights algebra +

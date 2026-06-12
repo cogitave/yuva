@@ -1,4 +1,4 @@
-# TABOS Agent Specification (Single/Multi-Agent, Scheduling, IPC)
+# Yuva Agent Specification (Single/Multi-Agent, Scheduling, IPC)
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.
 > Basis: [RESEARCH-REPORT §5-6-8](RESEARCH-REPORT.md) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md)
@@ -7,7 +7,7 @@
 
 ## 1. Agent Process Object **[DECISION]**
 
-TABOS's schedulable, checkpointable, migratable unit:
+Yuva's schedulable, checkpointable, migratable unit:
 
 ```
 AgentProcess = {
@@ -27,7 +27,7 @@ AgentProcess = {
 
 ## 2. Lifecycle **[PROPOSAL]**
 
-The A2A 9-state machine is adopted scheduler-native, with two TABOS extensions:
+The A2A 9-state machine is adopted scheduler-native, with two Yuva extensions:
 
 ```
 SUBMITTED → WORKING ⇄ {INPUT_REQUIRED, AUTH_REQUIRED}   # "blocked on human/credential"
@@ -41,7 +41,7 @@ WORKING → {COMPLETED, FAILED, CANCELED, REJECTED}        # REJECTED: agent ref
 
 ## 3. Agent Image Format **[PROPOSAL — ".taf", the kernel-completed version of Letta's .af inventory]**
 
-| Taken from .af | TABOS correction |
+| Taken from .af | Yuva correction |
 |---|---|
 | model config, message history + in_context flags, system prompt, memory blocks, tool rules + source + JSON schemas, env | in_context flags belong to the kernel context-manager, not serialized application data |
 | — | **All memory tiers included** (including archival): checkpoint = full state |

@@ -1,6 +1,6 @@
 //! Shared typed page-table layer for M3 (`mmu_init` / `mmu_selftest`).
 //!
-//! Both TABOS architectures use the SAME radix-512 translation-table shape: a
+//! Both Yuva architectures use the SAME radix-512 translation-table shape: a
 //! table is 4 KiB = 512 × 8-byte entries and each level consumes a 9-bit
 //! slice of the virtual address (Intel SDM Vol 3A §4.5 "4-Level Paging",
 //! Table 4-15 entry formats; Arm ARM DDI 0487, VMSAv8-64 with the 4 KiB

@@ -1,4 +1,4 @@
-# TABOS Research Report
+# Yuva Research Report
 
 **Turkiye's Agent Based Operating System — Planning Phase Deep Research**
 
@@ -9,13 +9,13 @@
 
 ## 0. Executive Summary
 
-This report is the synthesis of the multi-wave deep research conducted for the planning phase of **an operating system (TABOS) designed from scratch in which AI agents are first-class citizens**. The research question was: *how should one design a kernel/unikernel in which everything — including the syscall ABI — is designed for agents, carries no human-desktop legacy, is LLM-agnostic, memory-centric, self-improving, and supports single/multi-agent sessions?*
+This report is the synthesis of the multi-wave deep research conducted for the planning phase of **an operating system (Yuva) designed from scratch in which AI agents are first-class citizens**. The research question was: *how should one design a kernel/unikernel in which everything — including the syscall ABI — is designed for agents, carries no human-desktop legacy, is LLM-agnostic, memory-centric, self-improving, and supports single/multi-agent sessions?*
 
 **Five main conclusions:**
 
 1. **The "LLM as OS" paradigm is now an established research framework** [arXiv:2312.03815]: the mapping LLM ↔ kernel, context window ↔ main memory, external storage ↔ file system, tools ↔ devices/libraries, prompts ↔ commands gives a greenfield kernel a principled answer to the question "what is a resource?" The syscall interface should be structured calls with natural-language payloads (structured calls with NL payloads).
 2. **Portable, validated mechanisms exist in the real OS literature**: seL4's capability + MCS budget/period model, the exokernel's secure bindings, Unikraft's ~1 MB images that boot in ~1 ms, Zircon's handle+rights object layer, and the Plan 9 / Fuchsia namespace synthesis — all translate directly to agent semantics.
-3. **There is a strong literature convergence in the memory domain, but "default OS memory" is still an empty field**: MemGPT/MemOS/CoALA/HippoRAG/A-MEM/Mem0/Zep are all partial solutions; none offers multi-agent shared memory, principled forgetting, and kernel-guaranteed consistency. This is TABOS's biggest differentiation area.
+3. **There is a strong literature convergence in the memory domain, but "default OS memory" is still an empty field**: MemGPT/MemOS/CoALA/HippoRAG/A-MEM/Mem0/Zep are all partial solutions; none offers multi-agent shared memory, principled forgetting, and kernel-guaranteed consistency. This is Yuva's biggest differentiation area.
 4. **There are published templates for designing self-improvement as an OS service**: the Darwin Gödel Machine's frozen meta-layer / evolving agent distinction, Voyager's verification-before-commit skill library, Letta's measured ~5x-gain sleep-time compute, and Soar/ACT-R's 40-year chunking/utility mechanisms can be combined.
 5. **None of the existing systems can manage "an agent + its computer" as a single object**: E2B snapshots the computer but does not know the agent's mind; Letta serializes the agent's mind but has no execution sandbox; AIOS does scheduling but as a Python daemon. The reason for a greenfield kernel to exist is to own this union.
 
@@ -29,7 +29,7 @@ The research was conducted in three workflow waves (total **147 subagents**, ~3.
 |---|---|---|
 | 1. Deep-research | 5 search axes → 23 primary sources → 115 claim extractions → 3-vote adversarial verification of 25 claims | 3 claims confirmed; 22 verifications cut short by API error |
 | 2. Verify + Expand | Source-grouped re-verification of the 22 claims (9 groups × 3 votes) + research across 8 missing areas | **20/22 confirmed, 2/22 corrected-and-confirmed**; 100 findings from 8 areas |
-| 3. Naming | registry/domain/web vetting of 7 alternative candidates (on top of the 24 candidates from wave 1) | 7/7 eliminated; name decision: **TABOS** |
+| 3. Naming | registry/domain/web vetting of 7 alternative candidates (on top of the 24 candidates from wave 1) | 7/7 eliminated; code-name decision: **TABOS** (the final name **Yuva** was decided 2026-06) |
 
 **Verification transparency:** In the sections below, every numeric/structural claim is cited with its source. Two claims were corrected during verification and are used in their corrected forms:
 - *Firecracker is not "from-scratch"* — it started from Google's crosvm and replaced QEMU (the components later diverged substantially) [NSDI'20 Agache et al.].
@@ -49,7 +49,7 @@ Ge et al., *"LLM as OS, Agents as Apps: Envisioning AIOS, Agents and the AIOS-Ag
 
 It proposes a four-layer architecture: **LLM (system-level) → Agents (application-level) → Natural Language (programming interface) → Tools (devices/libraries)**. The paper's §2.1.2 is explicit about the nature of syscalls: *"the system calls can be formulated as natural language prompts to instruct the LLM for task execution."*
 
-**TABOS implication:** The agent OS's "syscall interface" is not a binary trap but a structured call carrying natural language. However, the same group's subsequent implementation (AIOS, [arXiv:2403.16971]) moved to *structured* "LLM syscalls" at the SDK level — the right shape for the practical ABI: **structured calls with NL payloads**. Resources (context windows, storage tiers, tools) are not an application concern but first-class, schedulable OS objects.
+**Yuva implication:** The agent OS's "syscall interface" is not a binary trap but a structured call carrying natural language. However, the same group's subsequent implementation (AIOS, [arXiv:2403.16971]) moved to *structured* "LLM syscalls" at the SDK level — the right shape for the practical ABI: **structured calls with NL payloads**. Resources (context windows, storage tiers, tools) are not an application concern but first-class, schedulable OS objects.
 
 ---
 
@@ -61,33 +61,33 @@ It proposes a four-layer architecture: **LLM (system-level) → Agents (applicat
 - **Capability monopoly:** *"Invoking a capability is the one and only way of performing an operation on a system object."* Every syscall is a capability invocation; rights are encoded inside the capability; unlike what Linux calls "capabilities" (syscall-granular ACLs), this is a true object capability. There are **exactly ten kernel object types**, all referenced via capabilities [seL4 whitepaper].
 - **The MCS model — time itself is a capability:** scheduling-context capabilities encode budget+period; a component can receive CPU time only if it holds such a capability. The whitepaper's example: with a 3μs budget / 10μs period, an untrusted driver is pinned to 30% CPU. **Caveat:** the MCS extensions are in mainline but their formal verification is not complete [seL4 whitepaper; docs.sel4.systems/Tutorials/mcs].
 
-**TABOS implication:** Production-grade proof that compute can be measured with a capability. Direct analogy for token/inference budgets: **per-agent "token-context capabilities" (budget+period)**, kernel-enforced limits on spawned untrusted agents, deadline guarantees for critical agent sessions — without the kernel having to trust the agent.
+**Yuva implication:** Production-grade proof that compute can be measured with a capability. Direct analogy for token/inference budgets: **per-agent "token-context capabilities" (budget+period)**, kernel-enforced limits on spawned untrusted agents, deadline guarantees for critical agent sessions — without the kernel having to trust the agent.
 
 ### 3.2 Unikernel: Unikraft and MirageOS (verified: 3-0 × 5)
 
 - **Unikraft** [arXiv:2104.12721, EuroSys'21]: a micro-library OS that fully modularizes OS primitives; the unikernel is compiled only with the components the application actually needs. Measurements: for nginx/SQLite/Redis-class applications, images are **~1 MB**, RAM **<10 MB**, boot **~1 ms** (on top of VMM time; total 3–40 ms), and **1.7–2.7× performance** versus Linux guests.
 - **MirageOS** [ASPLOS'13]: the entire software stack (system libraries + runtime + application) is compiled into a single-purpose, single bootable VM image; OS services (network stack, drivers) are libraries linked into the application. Instead of multi-user access control, **the hypervisor is the sole isolation unit**; single address space, no userspace processes; internal protection comes from language type-safety (OCaml). Multikernel philosophy: a single-vCPU VM per core; parallelism via message-passing unikernels.
 
-**TABOS implication:** The architectural counterpart of the principle "every subsystem must justify itself" (an OS without excess) is library-OS modularity; a 1 ms boot shows that `tb_agent_spawn()` can beat E2B's <200 ms microVM target. Mirage's "isolation = hypervisor, internal security = language" model is a valid template for single-agent unikernel images.
+**Yuva implication:** The architectural counterpart of the principle "every subsystem must justify itself" (an OS without excess) is library-OS modularity; a 1 ms boot shows that `tb_agent_spawn()` can beat E2B's <200 ms microVM target. Mirage's "isolation = hypervisor, internal security = language" model is a valid template for single-agent unikernel images.
 
 ### 3.3 Exokernel (verified: 3-0 × 4)
 
 Engler et al. [SOSP'95]: traditional OS abstractions (VM, IPC) are realized **in untrusted library OSes, at the application level**; the minimal kernel only securely multiplexes the hardware. Three techniques: **secure bindings** (authorization at bind time, use at access time — the kernel can protect a resource *without understanding its semantics*), **visible revocation**, **abort protocol**. Philosophical basis: the end-to-end argument — the application, not the OS, knows the resource-management goals.
 
-**TABOS implication:** The theoretical assurance of the LLM-agnosticism constraint: the kernel can protect and revoke token, GPU, memory-tier, and tool grants without understanding memory/LLM semantics (stripping context/tool quota from a runaway agent) — exactly the separation the exokernel proved. The recall/forgetting/scheduling *policy* belongs to the agent (its libOS), the *protection* to the kernel.
+**Yuva implication:** The theoretical assurance of the LLM-agnosticism constraint: the kernel can protect and revoke token, GPU, memory-tier, and tool grants without understanding memory/LLM semantics (stripping context/tool quota from a runaway agent) — exactly the separation the exokernel proved. The recall/forgetting/scheduling *policy* belongs to the agent (its libOS), the *protection* to the kernel.
 
 ### 3.4 MicroVM: Firecracker (1 correction + 1 confirmation)
 
 - **Corrected claim:** Firecracker is not from-scratch but derived from Google's crosvm (later diverged substantially), an open-source VMM that replaces QEMU and specializes in serverless/container workloads; in production in AWS Lambda (and Fargate) since 2018 [NSDI'20].
 - The dilemma of "strong-security/high-cost VM" versus "weak-security/low-cost container" is a **false dilemma**; it is overcome by workload specialization (verified: 3-0).
 
-**TABOS implication:** Proof that purpose-built minimal virtualization stacks work in production — a precedent for the thesis of "an agent-specific OS with no human-desktop legacy." Also a lesson: *divergence from an existing solid component instead of a "from-scratch" claim* (crosvm→Firecracker) is a legitimate greenfield strategy.
+**Yuva implication:** Proof that purpose-built minimal virtualization stacks work in production — a precedent for the thesis of "an agent-specific OS with no human-desktop legacy." Also a lesson: *divergence from an existing solid component instead of a "from-scratch" claim* (crosvm→Firecracker) is a legitimate greenfield strategy.
 
 ### 3.5 Isolation foundations: Plan 9, KeyKOS/EROS, Capsicum, Zircon/Fuchsia, Redox, WASM, gVisor
 
 The densest section of the 8-area expansion research ([`expand-isolation-foundations.json`](../research/raw/expand-isolation-foundations.json)):
 
-| System | Portable mechanism | Translation to TABOS |
+| System | Portable mechanism | Translation to Yuva |
 |---|---|---|
 | **Plan 9** [doc.cat-v.org/plan_9] | Every resource a file hierarchy; a single protocol (9P, 17 message types); per-process namespace; union directory; synthetic files (`/proc`, `/net`); 25 kSLOC kernel | The synthetic tree `/agent/<id>/{status,ctl,context,memory/…,inbox,trace,budget}`; `cat` = universal introspection; text-based `ctl` files are LLMs' natural ABI; iostats-style interposition = audit/budget proxies |
 | **Where Plan 9 stops** | Process creation and shared memory are *deliberately* not files — the "intricate constructor" semantics stay in the syscall | `tb_agent_spawn(manifest)` typed syscall + the `/agent/<id>/` representation; KV/embedding sharing is a local-only mmap primitive |
@@ -121,7 +121,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 ### 4.3 Cognitive architectures: 40 years of validated constants ([`expand-cognitive-arch.json`](../research/raw/expand-cognitive-arch.json))
 
 - **Soar** [soar.eecs.umich.edu]: A 5-phase decision cycle (parallel knowledge retrieval → selection of a single operator → application) — *"Decisions are never precompiled into uninterruptible sequences"*; working memory = a state-rooted graph, **unreachable objects automatically GC'd by the architecture**; the distinction between i-support (a derived belief whose justification is automatically retracted when the reasoning disappears) and o-support (persistent); **impasse → automatic substate** (tie/conflict/constraint-failure/no-change = an architectural trap, like a page fault); **chunking**: a new production is compiled from the trace of an impasse resolution (dependency-traced, generalizable; tunable in Soar 9.6.5).
-- **Soar SMem/EpMem**: A SQLite-embedded semantic store, **sub-ms retrieval over millions of nodes, <1 KB per fact**; episodic memory an automatic flight-recorder (without agent intervention), cue-based time-travel + replay cursors; *known gaps: no forgetting, worst-case linear scan* — places TABOS must close.
+- **Soar SMem/EpMem**: A SQLite-embedded semantic store, **sub-ms retrieval over millions of nodes, <1 KB per fact**; episodic memory an automatic flight-recorder (without agent intervention), cue-based time-travel + replay cursors; *known gaps: no forgetting, worst-case linear scan* — places Yuva must close.
 - **ACT-R** [act-r.psy.cmu.edu]: Modules talk only through **buffers** (bounded context registers each holding a single chunk) — the principled answer to LLM context management: the prompt is materialized from a declared/inspectable/bounded register set, no unbounded blob append. **Base-level activation**: `Bi = ln(Σ t_j^-d)`, **d=0.5** — the best-validated constant of 50 years of cognitive modeling (Soar adopted it identically; at LRU cost with an O(1) approximation) → the default eviction/ranking policy. Spreading activation (fan effect: `Sji = S − ln(fan)` — fat hub nodes spoil retrieval precision), partial match, and noise are **off by default** (copy the conservative stance). **Utility learning**: `Ui += α(Ri − Ui)`, α=0.2, time-discounted reward; **production compilation**: adjacent production pairs are speculatively compiled but **utility starts at 0** — it cannot beat the deliberative path without proving itself (shadow-mode/canary discipline built-in). **Declarative finsts** (default 4 / 3 s): "exclude what was just retrieved" — the 40-year-old form of the RAG loop-breaker.
 - **84-architecture survey** [arXiv:1610.08602]: The field has **converged on a fivefold split**: working + sensory short-term; semantic + episodic + procedural long-term. The proven structure for multi-agent sessions: the **blackboard** (a shared cognitive state accessed by parallel modules/agents).
 
@@ -134,7 +134,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 ### 5.1 AIOS (implementation) [arXiv:2403.16971, COLM 2025]
 
 - Syscall taxonomy: **LLM / memory / storage / tool** — the right shape; but each syscall is a Python thread (SysCall extends Thread), and the kernel is a FastAPI process under uvicorn. Scheduler: central FIFO/RR; **2.1× throughput** (Reflexion/HumanEval, single RTX A5000); ~linear scaling at 250→2000 concurrent agents.
-- **Context manager: preemptible inference via snapshot-and-restore** — two modes, text-based (API models) and logits-based (local models); this is what makes RR possible. For TABOS: the agent-native counterpart of the context switch must be a kernel primitive; **billing-aware preemption** (on a remote API, resume = the cost of re-sending the prompt — AIOS does not measure this).
+- **Context manager: preemptible inference via snapshot-and-restore** — two modes, text-based (API models) and logits-based (local models); this is what makes RR possible. For Yuva: the agent-native counterpart of the context switch must be a kernel primitive; **billing-aware preemption** (on a remote API, resume = the cost of re-sending the prompt — AIOS does not measure this).
 - Memory: LRU-K eviction (80% threshold), RAM→disk; storage: vector DB (chromadb) + versioning (rollback, max 20) + `sto_mount/sto_retrieve/sto_rollback/sto_share`.
 - **The weakest spot: the access manager** — a privilege-group hashmap + manual human approval; no capability, no sandbox, no quota; the access syscalls bypass the scheduler. The number-one rationale for greenfield.
 - Roadmap confession: Mode 3/4 (personal persistent kernel, multi-user virtualized kernel) "ongoing"; the Rust rewrite "early experimental". **Their roadmap is our product.**
@@ -143,13 +143,13 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 - **Memory blocks**: labeled, character-quota'd, always in context, **shareable** (in the context of N agents simultaneously) — the strongest existing design for the pinned tier. The documented failure mode: under concurrent writes, **last-write-wins** — the kernel can solve this with CAS/CRDT, a library cannot.
 - Three-tier default: blocks (pinned) + conversation search (automatic) + archival (agent-curated vector DB; 30k+ passages in production).
-- **AgentFile (.af)**: the best-documented inventory of agent state (model config, message history + in_context flags, memory blocks, tool rules + source code, env). Its gaps: archival passages not included (checkpoint ≠ full state), secrets nulled out → the TABOS image format must fix these at the kernel level (a secret = a load-time-resolved capability reference).
+- **AgentFile (.af)**: the best-documented inventory of agent state (model config, message history + in_context flags, memory blocks, tool rules + source code, env). Its gaps: archival passages not included (checkpoint ≠ full state), secrets nulled out → the Yuva image format must fix these at the kernel level (a secret = a load-time-resolved capability reference).
 - **Sleep-time compute** [arXiv:2504.13171]: a background agent over shared memory blocks; **~5× reduction in test-time compute** (at equal accuracy), +13-18% accuracy, 2.5× cost reduction when related queries are amortized → measured proof that the self-improvement service finances itself; mechanism: an **idle-time scheduler class**.
 
 ### 5.3 E2B [e2b.dev]
 
 - Firecracker microVM sandboxes: **<200 ms** start (80 ms on one page), pause = FS+RAM (4 s/GiB), **resume ~1 s**, indefinitely retained paused sandboxes, tens of thousands concurrent (HF Open R1).
-- **The gap: it snapshots the computer, not the agent** — the LLM loop, context, and memory live in the host application. Letta does the opposite (has the mind, not the computer). AIOS holds the third piece (scheduling). **None can suspend/resume/migrate {context + memory tiers + in-flight inference + sandbox processes + FS} as a single atomic unit. TABOS's reason for existing is to own this join.**
+- **The gap: it snapshots the computer, not the agent** — the LLM loop, context, and memory live in the host application. Letta does the opposite (has the mind, not the computer). AIOS holds the third piece (scheduling). **None can suspend/resume/migrate {context + memory tiers + in-flight inference + sandbox processes + FS} as a single atomic unit. Yuva's reason for existing is to own this join.**
 
 ---
 
@@ -157,7 +157,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ([`expand-protocols.json`](../research/raw/expand-protocols.json) · Survey: [arXiv:2505.02279]; protocol taxonomy: [arXiv:2504.16736])
 
-- **MCP** [spec 2025-06-18/2025-11-25]: host/client/server; the host's role (connection permission, consent, context gathering, cross-server isolation: *"servers should not be able to read the whole conversation"*) **is exactly the kernel's role**. The six primitives = a ready-made syscall taxonomy: tools (model authority), resources (application), prompts (user), **sampling** (delegated inference — modelPreferences: a cost/speed/intelligence 0-1 vector; the template for the LLM-agnostic inference syscall), roots (sandbox boundary), elicitation (human approval; constrained schema + accept/decline/cancel). 2025-11-25: durable **tasks** (experimental), tool calls within sampling (the kernel inference path must be re-entrant), error philosophy: *validation errors are returned as tool-execution errors so the model can self-correct* → TABOS's global error philosophy: **kernel errors are structured and model-readable**.
+- **MCP** [spec 2025-06-18/2025-11-25]: host/client/server; the host's role (connection permission, consent, context gathering, cross-server isolation: *"servers should not be able to read the whole conversation"*) **is exactly the kernel's role**. The six primitives = a ready-made syscall taxonomy: tools (model authority), resources (application), prompts (user), **sampling** (delegated inference — modelPreferences: a cost/speed/intelligence 0-1 vector; the template for the LLM-agnostic inference syscall), roots (sandbox boundary), elicitation (human approval; constrained schema + accept/decline/cancel). 2025-11-25: durable **tasks** (experimental), tool calls within sampling (the kernel inference path must be re-entrant), error philosophy: *validation errors are returned as tool-execution errors so the model can self-correct* → Yuva's global error philosophy: **kernel errors are structured and model-readable**.
 - **A2A** [a2a-protocol.org, Linux Foundation v1.0]: A layered spec (canonical proto data model + abstract ops + 3 equivalent bindings) → the kernel ABI must be a single schema-defined source, bindings a userspace shim. **9-state task machine**: SUBMITTED/WORKING/COMPLETED/FAILED/CANCELED/REJECTED/INPUT_REQUIRED/AUTH_REQUIRED(+UNSPECIFIED) — `REJECTED` (agent refusal) is a first-class result specific to an agent-native scheduler; INPUT_REQUIRED/AUTH_REQUIRED = "blocked on human/credential". The rule of ordered event emission over multiple streams = the foundation of multi-agent sessions with N observers. **Agent Card**: a JWS-signed capability manifest; the "undeclared capability → typed error" pattern becomes "→ EPERM-equivalent" in the kernel. The *"opaque execution"* principle must be a kernel guarantee: working memory/plan is kernel-protected private memory.
 - **ACP** [IBM/BeeAI → Linux Foundation]: REST-native, MIME-typed multipart (multi-modality is not a protocol revision but a content-type matter), **offline discovery** (a package-embedded manifest — for scale-to-zero agent scheduling), await/resume. (The mid-2025 A2A consolidation news could not be confirmed from a primary source — open question.)
 - **ANP** [agent-network-protocol.com]: A W3C DID (did:wba) identity layer; **humanAuthorization**: low-risk ops with the agent's key, high-risk ops (money, privacy) with human approval — in the kernel, a consent gate on a labeled syscall set (a two-keyring model); a multi-DID strategy → per-task derived least-privileged sub-identities; the meta-protocol layer (protocol negotiation in natural language + code generation) is firmly userspace, but the negotiation cache is a natural customer of memory/self-improvement.
@@ -189,7 +189,11 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ---
 
-## 9. Naming Process and the TABOS Decision
+## 9. Naming Process and the TABOS Code-Name Decision
+
+> Historical record. TABOS was the development code name; the final name
+> **Yuva** *(Turkish: "nest, home")* was decided in 2026-06 (no acronym, no
+> backronym).
 
 Two vetting rounds ([`expand-naming.json`](../research/raw/expand-naming.json), [`naming-round2.json`](../research/raw/naming-round2.json)) screened a total of **31 candidates** (GitHub repos/orgs, npm, PyPI, crates.io, RDAP .com/.org, web):
 

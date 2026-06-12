@@ -1,9 +1,9 @@
-# TABOS Sovereignty Roadmap
+# Yuva Sovereignty Roadmap
 
 > Status: v1.0 — all items are **[DECISION]** (no open "should we"); resolved from
 > a 7-area research wave whose 18 hard facts each passed 2-vote adversarial
 > verification.
-> Answers the question: *what does "full sovereignty" concretely mean for TABOS,
+> Answers the question: *what does "full sovereignty" concretely mean for Yuva,
 > where does it land, and in what order do we get there?*
 > Source data: [`sovereignty-research.json`](../research/raw/sovereignty-research.json) ·
 > [`sovereignty-verified.json`](../research/raw/sovereignty-verified.json) ·
@@ -13,7 +13,7 @@
 
 ## 0. The headline decision
 
-**Full sovereignty lands at L2 — TABOS as its own minimal Type-1 hypervisor — not
+**Full sovereignty lands at L2 — Yuva as its own minimal Type-1 hypervisor — not
 at L3 (owning every device driver).** The real sovereignty win is *removing the
 host kernel from the trusted computing base*: owning the CPU-virtualization layer
 (VMX / SVM / EL2), second-stage memory translation (EPT / NPT / stage-2), the
@@ -23,14 +23,14 @@ extensions, with **no host kernel underneath**. That is fully achieved at L2.
 Owning real drivers (L3) is a *separate, optional, and largely infeasible*
 burden, and — decisively — **even the canonical Type-1 hypervisor (Xen) refuses to
 own drivers**: it keeps them in a `dom0` driver domain. We copy that. Sovereignty
-is therefore **OWN + CONFINE, not reimplement**: TABOS owns the machine, the
+is therefore **OWN + CONFINE, not reimplement**: Yuva owns the machine, the
 hypervisor, scheduling, memory, agents, and policy; the unavoidable proprietary
 GPU/CUDA stack and the unstable mass of device drivers are *confined* to a
-least-privileged, disposable Linux driver VM that TABOS controls.
+least-privileged, disposable Linux driver VM that Yuva controls.
 
 ## 1. The sovereignty ladder (L0 → L3)
 
-| Rung | What it is | TABOS owns | Still depends on | Real cost |
+| Rung | What it is | Yuva owns | Still depends on | Real cost |
 |---|---|---|---|---|
 | **L0** *(today)* | Guest on a stock third-party VMM (Firecracker/QEMU) | nothing below the guest boundary | host Linux + KVM + VMM + firmware (all in TCB) | none — but zero sovereignty |
 | **L1** *(MV milestone)* | Own thin **userspace** VMM (`tb-vmm`) on the host's `/dev/kvm` | boot contract + machine model + device model | host Linux still owns hardware + KVM (still in TCB) | low — proven path |
@@ -67,7 +67,7 @@ everything else.
 ## 3. The split-VMM architecture [DECISION]
 
 Every minimal-TCB precedent **splits** the tiny privileged core from an untrusted
-userspace device model. TABOS does the same at every rung:
+userspace device model. Yuva does the same at every rung:
 
 ```
             ┌─────────────────────────────────────────────┐
@@ -85,10 +85,10 @@ userspace device model. TABOS does the same at every rung:
   OUTSIDE** the framekernel's `#![forbid(unsafe_code)]` boundary. Do not conflate
   it with the sovereign kernel.
 - **`tb-core`** (the L2 privileged core) keeps the pKVM-style tiny root but —
-  unlike pKVM/KVM — **retains TABOS-sovereign scheduling and memory ownership**
+  unlike pKVM/KVM — **retains Yuva-sovereign scheduling and memory ownership**
   (Xen-like), because owning scheduling is part of being the agent OS.
 - **TCB budget [DECISION]:** target **< ~10K LOC of privileged code** (all of
-  TABOS's unsafe+asm surface, kernel + hypervisor core). Exceeding it is proof the
+  Yuva's unsafe+asm surface, kernel + hypervisor core). Exceeding it is proof the
   split is wrong. **Do not formally verify `tb-vmm`** (seL4's own lesson: verifying
   a VMM over a large guest ABI is impractical); treat `forbid(unsafe)` Rust
   memory-safety as the realistic assurance ceiling, and reserve any future
@@ -107,16 +107,16 @@ parity (Hedron itself dropped AMD support "due to lack of testing").
 
 ## 5. The IOMMU is now a hard requirement [DECISION — was a gap]
 
-Absent from all prior TABOS research, and **non-negotiable** for L2/L3: a hardware
+Absent from all prior Yuva research, and **non-negotiable** for L2/L3: a hardware
 IOMMU (Intel **VT-d** with interrupt remapping / AMD **AMD-Vi** / ARM **SMMU**).
 Xen states it plainly: *"Without IOMMU support, there's nothing to stop the driver
 domain from using the network card's DMA engine to read and write any system
 memory."* Decisions:
 
-- TABOS L2 **owns IOMMU programming**; a passed-through device's DMA is confined by
-  VT-d/AMD-Vi/SMMU or it can read/write all TABOS+agent memory.
+- Yuva L2 **owns IOMMU programming**; a passed-through device's DMA is confined by
+  VT-d/AMD-Vi/SMMU or it can read/write all Yuva+agent memory.
 - The **IOMMU group** (not the individual device) is the unit of assignment;
-  require **ACS-clean** platforms on a TABOS "certified hardware" list, since
+  require **ACS-clean** platforms on a Yuva "certified hardware" list, since
   `tb-hal` PCIe code must enumerate IOMMU groups.
 - Device assignment uses the **VFIO** model (*"IOMMU/device agnostic framework for
   exposing direct device access to userspace"*): unbind from the host driver, bind
@@ -132,13 +132,13 @@ The honest center of the whole roadmap:
   non-Linux kernel and **cannot be reimplemented**.
 - The only path above L1 is **VFIO GPU passthrough into a confined Linux "driver/
   inference VM"** that hosts the NVIDIA modules + CUDA + vLLM (the Qubes/Xen-style
-  driver-domain). TABOS owns the machine and the hypervisor; the GPU stack is
+  driver-domain). Yuva owns the machine and the hypervisor; the GPU stack is
   sandboxed, least-privileged, and disposable.
-- TABOS-native agents reach inference through a **narrow vsock/virtio control+data
+- Yuva-native agents reach inference through a **narrow vsock/virtio control+data
   channel** (an OpenAI-compatible / gRPC API over vsock, qrexec-style) — never by
   linking CUDA. This is exactly the LLM-agnostic seam: the driver VM is one
   pluggable backend behind the `model:` contract.
-- The **trusted display/console stays owned by TABOS** on a simple framebuffer
+- The **trusted display/console stays owned by Yuva** on a simple framebuffer
   (UEFI GOP / `simple-framebuffer`); the passed-through GPU is **headless, compute
   only** — no display path runs on the proprietary stack.
 - **Brutal honesty:** the driver/inference VM *is a Linux*, and the proprietary GPU
@@ -185,7 +185,7 @@ The MV milestone is L1 and is fully specified by verified facts:
 
 ## 8. The firmware floor (honesty about "bare metal")
 
-Even L3 is **not truly bare**: TABOS would still run atop closed, un-displaceable
+Even L3 is **not truly bare**: Yuva would still run atop closed, un-displaceable
 firmware — **UEFI/SMM, Intel ME / AMD PSP, and GPU firmware**. A correct Type-1
 (ring −1 / EL2) still sits *below* firmware SMM (ring −2). "Sovereignty" is
 therefore always *relative to the firmware floor* — state it plainly and do not
@@ -220,7 +220,7 @@ L0 (done) ──► L1: MV = tb-vmm (own userspace VMM + tb-boot v0; deletes PVH
                  │   tb-vmm becomes the untrusted userspace device model
                  ▼
             Driver-domain: confined Linux inference VM (VFIO GPU), vsock model: API
-                 │   permanent GPU tax quarantined here; TABOS owns everything else
+                 │   permanent GPU tax quarantined here; Yuva owns everything else
                  ▼
             L3 (gated): native Rust drivers only for stable sovereignty-critical
                         devices (NVMe, one NIC, xHCI) — only if owning silicon is the product

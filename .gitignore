@@ -20,5 +20,11 @@ Thumbs.db
 # NOTE: Cargo.lock is committed on purpose — this workspace builds binaries and
 # we want reproducible boot images.
 
-# The M30 xport-harness host tool (its own nested workspace) has its own target dir.
+# The M30 xport-harness host tool (its own nested workspace) has its own target
+# dir; the generalization covers any future nested-workspace tool the same way.
 /tools/xport-harness/target
+/tools/*/target
+
+# Scratch files from the PR workflow (never commit these)
+*.pr-body.md
+*.scratch.md

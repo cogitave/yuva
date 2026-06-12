@@ -1,6 +1,6 @@
-# Try it — booting TABOS yourself (and why there is no .iso)
+# Try it — booting Yuva yourself (and why there is no .iso)
 
-> TL;DR: **two commands in WSL and you are watching it boot.** TABOS is a
+> TL;DR: **two commands in WSL and you are watching it boot.** Yuva is a
 > Firecracker-class, direct-kernel-boot guest by design — the hypervisor loads
 > the kernel image straight into guest RAM and jumps to it. There is no BIOS/
 > UEFI/bootloader path, therefore no .iso and no "installer" — and that is the
@@ -44,9 +44,9 @@ greps, anti-hollow witness guards, overclaim rejects) live in
 `scripts/run-aarch64.sh` / `run-x86_64.sh` — run those when you want a
 PASS/FAIL instead of a show.
 
-## 2. What "running TABOS" means today
+## 2. What "running Yuva" means today
 
-TABOS boots the way Firecracker/cloud-hypervisor guests boot:
+Yuva boots the way Firecracker/cloud-hypervisor guests boot:
 
 | Lane | Hypervisor | How the kernel gets in |
 |---|---|---|
@@ -64,7 +64,7 @@ proof-of-life (the cumulative self-test chain with its witness lines).
 ## 3. Why no .iso (honestly)
 
 An .iso implies the El Torito BIOS/UEFI path: firmware → bootloader → kernel.
-TABOS deliberately has no such path — PVH/direct-kernel boot is the
+Yuva deliberately has no such path — PVH/direct-kernel boot is the
 sovereignty design (the kernel trusts a hypervisor handoff, not firmware), and
 everything from the A/B-slot rollback plan (M35) to the champion/challenger
 gate (M34) assumes hypervisor-loaded images. Burning an .iso today would mean
@@ -72,7 +72,7 @@ adopting a bootloader (GRUB/Limine) purely for ceremony, with zero CI value.
 
 Where a bootable medium WILL matter: **VirtualBox/VMware/Hyper-V demos** (they
 cannot direct-kernel-boot a PVH image) and the eventual **bare-metal host
-track** (TABOS as the hypervisor under its own guests — the hardware shopping
+track** (Yuva as the hypervisor under its own guests — the hardware shopping
 list's nested-VMX/IOMMU machines). That work is a real, separate packaging
 milestone: most likely a tiny UEFI stub (or Limine protocol support) that
 loads the ELF and reproduces the PVH/Image handoff — at which point a USB/ISO

@@ -1,4 +1,4 @@
-# TABOS Cargo workspace root.
+# Yuva Cargo workspace root.
 #
 # Two members only at M0 (boot bring-up):
 #   - crates/tb-hal : the ONLY crate allowed to contain `unsafe` + assembly.

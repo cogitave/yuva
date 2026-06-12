@@ -1,8 +1,8 @@
 //! L2.0 — VMX-root + 1-instruction nested guest + caught VM-exit.
 //!
 //! The first rung of the L2 sovereignty track (`tb-core`, the from-scratch
-//! Type-1 microhypervisor): the smallest step that proves TABOS *is* the
-//! hypervisor. Running inside the already-booted TABOS guest, this subtree does
+//! Type-1 microhypervisor): the smallest step that proves Yuva *is* the
+//! hypervisor. Running inside the already-booted Yuva guest, this subtree does
 //! the full Intel VMX-root bring-up — VMXON, a minimal VMCS, an EPT identity
 //! map, a one-instruction (`CPUID`) long-mode guest, the host<->guest world
 //! switch, catching the guest's VM-exit, and VMXOFF — then reports the outcome

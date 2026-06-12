@@ -1,4 +1,4 @@
-# TABOS Language and Industry Standards Decision
+# Yuva Language and Industry Standards Decision
 
 > Status: v1.0 · Question: *"What language do you write an agent-native kernel from scratch in; what are serious organizations actually doing in 2026?"*
 > Method: 7-area research (32 subagents) + 2-vote adversarial verification of 12 decision-critical claims.
@@ -8,7 +8,7 @@
 
 ## 0. Decision Summary **[DECISION]**
 
-Per-layer **language allowlist** (Fuchsia's "per-language policy" model, adapted to TABOS):
+Per-layer **language allowlist** (Fuchsia's "per-language policy" model, adapted to Yuva):
 
 | Layer | Language | Rationale (one line) |
 |---|---|---|
@@ -20,7 +20,7 @@ Per-layer **language allowlist** (Fuchsia's "per-language policy" model, adapted
 | **Local inference engines** | **Isolated C/C++** (behind a llama.cpp `-sys` crate) **or** network boundary (vLLM/SGLang = Python HTTP server) | Engines do NOT enter the node image or the kernel — driver daemon or HTTP client |
 | **Developer SDKs / CLI / tooling** | **Rust** (core) + **TypeScript/Python** (ecosystem reach) | GC'd languages allowed in the outer SDK layer |
 
-**In one sentence:** TABOS is **Rust** from kernel to protocol bridges; C is confined only in vendored llama.cpp behind a driver daemon; Python/TypeScript live only in the outermost SDK ring and in network-bounded inference engines. This is a one-to-one application of the 2024-2026 industry consensus (Google, Microsoft, AWS, ISRG, Oxide).
+**In one sentence:** Yuva is **Rust** from kernel to protocol bridges; C is confined only in vendored llama.cpp behind a driver daemon; Python/TypeScript live only in the outermost SDK ring and in network-bounded inference engines. This is a one-to-one application of the 2024-2026 industry consensus (Google, Microsoft, AWS, ISRG, Oxide).
 
 ---
 
@@ -32,23 +32,23 @@ This is not "Rust hype"; it is measured production data:
 - **Rust in production in hyperscaler kernels:**
   - *Linux*: Rust merged in v6.1 (Dec 2022); the Android **Binder** driver was rewritten in Rust and landed in v6.18-rc1; the **Nova** GPU driver is mainline [rust-for-linux.com] *(verified: 2-0)*. Greg Kroah-Hartman: *"A lot of the bugs caused by those stupid little corner cases in C are completely gone in Rust — use-after-free, error-path cleanup, forgetting to check a return value."*
   - *Windows*: the GDI REGION type was ported to Rust (`win32kbase_rs.sys`, in production in Win11 24H2); DWriteCore is ~152k lines of Rust, glyph shaping 5-15% faster. Azure CTO Russinovich (2022): *"It's time to halt starting any new projects in C/C++ and use Rust."*
-  - *AWS Firecracker + Google crosvm*: TABOS's **exact target substrate** — both are Rust VMMs; Firecracker handles "trillions of requests per month" on AWS Lambda/Fargate.
+  - *AWS Firecracker + Google crosvm*: Yuva's **exact target substrate** — both are Rust VMMs; Firecracker handles "trillions of requests per month" on AWS Lambda/Fargate.
 
-**An important engineering caveat** (from the Windows GDI finding): a bounds-check `panic` in Rust deliberately produced a BSOD; MSRC called this "correct behavior" but Check Point objected that "a failing security check should not crash the system." → **TABOS standard:** the evaluator-holding microkernel MUST NOT have panic-on-violation as its default availability story; design fallible APIs that return `Result` on attacker-reachable input + graceful capability-denial paths.
+**An important engineering caveat** (from the Windows GDI finding): a bounds-check `panic` in Rust deliberately produced a BSOD; MSRC called this "correct behavior" but Check Point objected that "a failing security check should not crash the system." → **Yuva standard:** the evaluator-holding microkernel MUST NOT have panic-on-violation as its default availability story; design fallible APIs that return `Result` on attacker-reachable input + graceful capability-denial paths.
 
 ## 2. For the Frozen Kernel: the Framekernel Pattern **[verified: 2-0]**
 
-The single most decision-critical source for TABOS's ≤15 kSLOC frozen kernel is **Asterinas** [arXiv:2506.03876, USENIX ATC'25]:
+The single most decision-critical source for Yuva's ≤15 kSLOC frozen kernel is **Asterinas** [arXiv:2506.03876, USENIX ATC'25]:
 
 - A Linux-ABI-compatible **"framekernel"**: all `unsafe` Rust is confined to a small **OSTD foundation crate** (~15 kLOC order); the rest of the kernel is safe Rust → a sound, small memory-safety TCB.
-- It was independently demonstrated that **15 kLOC is sufficient for a sound memory-safety TCB under a full-featured kernel** — the quantitative anchor for TABOS's ≤15 kSLOC target.
+- It was independently demonstrated that **15 kLOC is sufficient for a sound memory-safety TCB under a full-featured kernel** — the quantitative anchor for Yuva's ≤15 kSLOC target.
 - **Mechanical policy [DECISION]:** `unsafe` only in the kernel-foundation crate; `#![forbid(unsafe_code)]` in all upper layers; the count of `unsafe` blocks is budgeted and reviewed like VeriSMo's "31 lines" discipline.
 
-Supporting Rust-OS lineage: **Redox** (10-year Rust microkernel + scheme daemons — TABOS's exact shape, proof it can work), **Theseus** (compiler-enforced invariants), **Tock** (compile-time driver isolation, 10M devices), **Hermit** (pure-Rust unikernel, boots on Firecracker), **Google KataOS/Sparrow** (Rust userspace on top of seL4 — TABOS's exact split).
+Supporting Rust-OS lineage: **Redox** (10-year Rust microkernel + scheme daemons — Yuva's exact shape, proof it can work), **Theseus** (compiler-enforced invariants), **Tock** (compile-time driver isolation, 10M devices), **Hermit** (pure-Rust unikernel, boots on Firecracker), **Google KataOS/Sparrow** (Rust userspace on top of seL4 — Yuva's exact split).
 
 ## 3. Alternatives and Why They Were Eliminated **[verified: 2-0 / 1-1*]**
 
-| Language | Strongest real precedent | Why not the TABOS kernel |
+| Language | Strongest real precedent | Why not the Yuva kernel |
 |---|---|---|
 | **Verified C** | seL4: ~10 kSLOC, Isabelle/HOL proof **down to the binary**, 0 functional bugs in 15 years | The only binary-level-proven production kernel. But: the proof is ~20 person-years, ~$362/SLOC (§5) — unrealistic for a small team; C itself gives zero safety |
 | **C++** | Fuchsia/Zircon kernel | Fuchsia policy approves C++ in the kernel *(correction: the policy approves both C "including in the kernel" and C++ "across the whole tree"; it does not say "kernel C++ only")*; but Google is memory-unsafe even in NEW code; for greenfield, CISA "bad practice #1" |
@@ -57,24 +57,24 @@ Supporting Rust-OS lineage: **Redox** (10-year Rust microkernel + scheme daemons
 | **OCaml** | MirageOS (in production in Docker Desktop VPNKit!) | Memory-safe unikernel proof but GC + ecosystem narrowness; impedance with the agent/skill ecosystem |
 | **Ada/SPARK** | NVIDIA (dropped C/C++, SPARK in firmware) | Strong "prove absence of runtime errors" story; but ecosystem/hiring narrowness, no WASM/agent tooling |
 
-**Industry pattern** *(verified, cross-cutting):* serious greenfield-OS efforts converge on a **stable split**: the kernel CORE in a "production-track-record or proven" language (seL4=verified C, Zircon=C++, KataOS=seL4+Rust), GC/HLL allowed in userspace, LLM engines (Python/C++/CUDA) kept outside at the network boundary. **TABOS's architecture is already aligned with this best practice.**
+**Industry pattern** *(verified, cross-cutting):* serious greenfield-OS efforts converge on a **stable split**: the kernel CORE in a "production-track-record or proven" language (seL4=verified C, Zircon=C++, KataOS=seL4+Rust), GC/HLL allowed in userspace, LLM engines (Python/C++/CUDA) kept outside at the network boundary. **Yuva's architecture is already aligned with this best practice.**
 
 ## 4. Government/Industry Pressure — "Industry Standard" **[verified: 2-0, with corrections]**
 
 The regulatory ground a greenfield OS will be measured against:
 
 - **NSA "Software Memory Safety" CSI** (doc U/OO/219936-22, 10 Nov 2022, Ver1.1 Apr 2023): *"NSA recommends using a memory safe language when possible"*; *(correction: the exact quote is "little or no inherent memory **protection**" — not "safety")*. Of the 9 approved MSLs, **only Rust** is non-GC and suitable for a ≤15 kSLOC frozen microkernel (Go/Java/C#/Python/Swift/Ada-GC carry a runtime/GC).
-- **CISA/FBI "Product Security Bad Practices"** (v1.0 Oct 2024, v2.0 Jan 2025) *(verified: 2-0)*: **a memory-unsafe language in a greenfield product = the number-one bad practice.** Since TABOS is greenfield, writing the kernel/core in Rust lets it claim **full compliance** with the strongest clause.
+- **CISA/FBI "Product Security Bad Practices"** (v1.0 Oct 2024, v2.0 Jan 2025) *(verified: 2-0)*: **a memory-unsafe language in a greenfield product = the number-one bad practice.** Since Yuva is greenfield, writing the kernel/core in Rust lets it claim **full compliance** with the strongest clause.
 - **White House ONCD "Back to the Building Blocks"** (Feb 2024): of all MSLs, **only Rust** delivers the triple of "close-to-the-kernel + deterministic + GC-free" → disqualifies Go/Java/C#/Python for the microkernel.
 - **DARPA TRACTOR**: targets specifically **Rust**, not a generic "an MSL," for converting all legacy C — the systems-programming target the government is pointing at.
-- **EU Cyber Resilience Act** (Reg. (EU) 2024/2847, in force 10 Dec 2024) *(verified: 2-0)*: TABOS is Annex III; the VMM + WASM runtime are in the "hypervisor/container runtime" class. The 24h/72h/14d reporting line by **September 2026**, CE + Annex I compliance by **December 2027** — falls within TABOS's development window. → a machine-readable SBOM + memory-safe roadmap must be adopted **now**.
-- **CISA "The Case for Memory Safe Roadmaps"** (6 Dec 2023): as a product artifact, TABOS should publish a **public memory-safe roadmap** (new-code-Rust-only date + C/C++ engine plan + CVE/CWE program).
+- **EU Cyber Resilience Act** (Reg. (EU) 2024/2847, in force 10 Dec 2024) *(verified: 2-0)*: Yuva is Annex III; the VMM + WASM runtime are in the "hypervisor/container runtime" class. The 24h/72h/14d reporting line by **September 2026**, CE + Annex I compliance by **December 2027** — falls within Yuva's development window. → a machine-readable SBOM + memory-safe roadmap must be adopted **now**.
+- **CISA "The Case for Memory Safe Roadmaps"** (6 Dec 2023): as a product artifact, Yuva should publish a **public memory-safe roadmap** (new-code-Rust-only date + C/C++ engine plan + CVE/CWE program).
 
 ## 5. Formal Verification — What Is Realistic? **[verified: 2-0]**
 
-TABOS's claim that "the frozen kernel holds the evaluator" makes verification attractive; the realistic level:
+Yuva's claim that "the frozen kernel holds the evaluator" makes verification attractive; the realistic level:
 
-- **seL4 full functional verification cost** [Klein et al., ACM TOCS 32(1), 2014]: kernel development **2.2 py**, proof **~20 py** (~$362/SLOC). → a full C+Isabelle proof of a ~15 kSLOC TABOS kernel is a **10-20 py, multi-million-dollar, 3-5 calendar-year** program. Unrealistic for a small team.
+- **seL4 full functional verification cost** [Klein et al., ACM TOCS 32(1), 2014]: kernel development **2.2 py**, proof **~20 py** (~$362/SLOC). → a full C+Isabelle proof of a ~15 kSLOC Yuva kernel is a **10-20 py, multi-million-dollar, 3-5 calendar-year** program. Unrealistic for a small team.
 - **The Rust+Verus collapse** — VeriSMo [Microsoft, OSDI'24] *(verified: 2-0, with correction)*: the first verified confidential-VM security module (AMD SEV-SNP), Rust+Verus; functional correctness + secure information flow + confidentiality/integrity under an adversarial hypervisor; **only 31 lines of trusted unsafe Rust, ~2:1 proof:code ratio, ~6-minute CI verification** (32-core). *(correction: the source does not say "collapses the cost versus C+Isabelle"; it never mentions Isabelle — we present the comparison as a measured inference.)*
 - **Early-assurance vs retrofit** *(verified: 2-0)*: design-for-assurance from day 1 (small frozen kernel, spec alongside code, a "no merge that breaks the spec" CI gate) is **~3-8× cheaper/SLOC** than retrofitting certification.
 
@@ -88,7 +88,7 @@ TABOS's claim that "the frozen kernel holds the evaluator" makes verification at
 
 "Industry standard" is not only the language; an auditable list to adopt from day 1:
 
-| Axis | Standard | TABOS action |
+| Axis | Standard | Yuva action |
 |---|---|---|
 | **Rust dialect** | **FLS** (Ferrocene Language Specification, transferred to the Rust Project in Mar 2025 *— correction: does not change the Reference's status, it is a supplementary spec*) + **Safety-Critical Rust Consortium** guidelines (founded 12 Jun 2024) | Pin to FLS; make the consortium guidelines the in-repo coding standard (MISRA-shaped: compliance level + documented deviation; CI-lintable) |
 | **Qualified toolchain** | **Ferrocene** (TÜV SÜD: ISO 26262 **ASIL D** + IEC 61508, since Oct 2023) | If the functional-safety market is needed later, compiler qualification can be purchased (~€240-300/seat/year); the qualification documents are free to read |
@@ -106,12 +106,12 @@ TABOS's claim that "the frozen kernel holds the evaluator" makes verification at
 ## 7. Stack-Fit Notes (impedance) **[verified: 2-0 stack-fit]**
 
 - **WASM host:** the Component Model is de facto **Wasmtime/Rust-first**; WIT host bindings (`bindgen!`) are only in Rust. WAMR (C)/WasmEdge (C++) do not offer a Component Model host → conflicts with the typed-nanoprocess-interface plan. (WAMR only for a future TEE/MCU profile.)
-- **cap-std** (Bytecode Alliance, in production in Wasmtime): capability-oriented std — can reuse TABOS's capability microkernel + scheme-daemon handle/Dir/Pool model **one-to-one**; thanks to WASI alignment the same capability semantics flow into the nanoprocess layer with ~zero translation. **No equivalent outside Rust.**
+- **cap-std** (Bytecode Alliance, in production in Wasmtime): capability-oriented std — can reuse Yuva's capability microkernel + scheme-daemon handle/Dir/Pool model **one-to-one**; thanks to WASI alignment the same capability semantics flow into the nanoprocess layer with ~zero translation. **No equivalent outside Rust.**
 - **tokio** LTS-class (a safe industrial default for scheme daemons; `tonic/prost` gRPC IPC). **io_uring crates are not yet mature** → do not hard-couple the IPC layer to io_uring, abstract it.
 - **Native-Rust inference** (candle, mistral.rs): production-credible for single-node/edge/dense models → a fully-Rust node image **without a C++ engine** is possible if desired. For datacenter MoE throughput, vLLM/SGLang remain necessary (Python HTTP server, not FFI — verified).
 - **llama.cpp**: plain C ABI → low impedance from Rust via a `-sys` crate (the unsafe surface is confined in -sys), or supervise `llama-server` over HTTP.
 - **MCP & A2A**: in 2026 **both have an official Rust SDK** (`rmcp` tokio-based) → protocol bridges are pure Rust. The TS/Python SDKs only in the developer-SDK layer.
-- **The AIOS `aios-rs` lesson:** the previous agent-OS chose Python for speed; the Rust port collapsed into placeholder traits because all the value was in Python-ecosystem integration. → **TABOS lesson:** language-lock the kernel/daemons to Rust from day 1, architecturally exile Python outside the node image.
+- **The AIOS `aios-rs` lesson:** the previous agent-OS chose Python for speed; the Rust port collapsed into placeholder traits because all the value was in Python-ecosystem integration. → **Yuva lesson:** language-lock the kernel/daemons to Rust from day 1, architecturally exile Python outside the node image.
 
 ## 8. Open Topics → [OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)
 

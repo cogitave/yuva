@@ -1,4 +1,4 @@
-# bench — TABOS-vs-Firecracker boot benchmark (the FAIR, self-certifying lane).
+# bench — Yuva-vs-Firecracker boot benchmark (the FAIR, self-certifying lane).
 #
 # NON-BLOCKING (informational): this is a benchmark, not a gate. It boots
 # tb-vmm and Firecracker on the SAME GitHub KVM runner and emits an HONEST,
@@ -14,14 +14,14 @@
 #       cross-system claim. tb-vmm's native 0x510 clock is an informational
 #       cross-check, never the ratio source.
 #   A' = different-guests (SUPPLEMENTARY, kept for context, NOT apples-to-apples):
-#       tb-vmm spawn->guest-ready booting the FULL TABOS kernel (0x510) vs FC
+#       tb-vmm spawn->guest-ready booting the FULL Yuva kernel (0x510) vs FC
 #       spawn->first-byte booting a REAL Linux kernel. Two different guests.
-#   B = guest-only boot: TABOS in-guest `boot-ready-cycles` (rust_main entry ->
+#   B = guest-only boot: Yuva in-guest `boot-ready-cycles` (rust_main entry ->
 #       serial-ready, BEFORE the self-test) / its MEASURED `tsc-base-hz` base.
 #       VMM-independent; the unikernel-class figure. NOT comparable to FC's
 #       end-to-end ms (different metric class).
 #   C = end-to-end: FC spawn->first serial byte (a real Linux kernel boots),
-#       reported WITH the different-guest-OS caveat. NOT a TABOS-kernel number.
+#       reported WITH the different-guest-OS caveat. NOT a Yuva-kernel number.
 #
 # Runner caveat: absolute ms on a nested-virt shared GitHub runner are
 # runner-relative; only the tb-vmm/FC RATIO on the SAME runner is the fair claim.
@@ -438,17 +438,17 @@ jobs:
           # the plain run log), so the result is visible from `gh run view --log`.
           echo "BENCH-RESULT | axisA tb-vmm-median=$(ms $TV_MED)ms p99=$(ms $TV_P99)ms fc-median=$(ms $FC_MED)ms p99=$(ms $FC_P99)ms ratio=$RATIO (n=$TV_N) | axisB boot-ready-cycles=$BRC_DEC tsc-base-hz=$TSC_DEC B_MS=$B_MS"
           {
-            echo "## TABOS vs Firecracker boot bench (same KVM runner) — supplementary axes"
+            echo "## Yuva vs Firecracker boot bench (same KVM runner) — supplementary axes"
             echo ""
-            echo "> The TRUE apples-to-apples VMM-spawn comparison is **Axis-A (common nano-guest)** in the table ABOVE (one binary, both VMMs). The rows here are SUPPLEMENTARY: the old \"Axis-A′\" compares DIFFERENT guests (tb-vmm boots the full TABOS kernel vs Firecracker boots a real Linux kernel) and is kept only as the end-to-end / guest-only context — it is NOT the apples-to-apples VMM-spawn number."
+            echo "> The TRUE apples-to-apples VMM-spawn comparison is **Axis-A (common nano-guest)** in the table ABOVE (one binary, both VMMs). The rows here are SUPPLEMENTARY: the old \"Axis-A′\" compares DIFFERENT guests (tb-vmm boots the full Yuva kernel vs Firecracker boots a real Linux kernel) and is kept only as the end-to-end / guest-only context — it is NOT the apples-to-apples VMM-spawn number."
             echo ""
             echo "Runner CPU: \`$CPU\` · Firecracker \`$FC_VER\` (CI guest \`$FC_CI_VERSION\`) · iters/axis: \`$BENCH_ITERS\`"
             echo ""
             echo "| Axis | What it measures | System | median | p99 | min | n |"
             echo "|---|---|---|---:|---:|---:|---:|"
-            echo "| **A′** different-guests | host spawn → guest-ready, booting the FULL TABOS kernel (0x510) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
+            echo "| **A′** different-guests | host spawn → guest-ready, booting the FULL Yuva kernel (0x510) | tb-vmm | $(ms $TV_MED) ms | $(ms $TV_P99) ms | $(ms $TV_MIN) ms | $TV_N |"
             echo "| **A′** different-guests | host spawn → first serial byte, booting a REAL Linux kernel (= Axis C) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
-            echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | TABOS | ${B_CELL} | — | — | 1 |"
+            echo "| **B** guest-only | in-guest rust_main → serial-ready (÷ measured TSC base) | Yuva | ${B_CELL} | — | — | 1 |"
             echo "| **C** end-to-end | spawn → first serial byte (REAL Linux kernel boots) | Firecracker | $(ms $FC_MED) ms | $(ms $FC_P99) ms | $(ms $FC_MIN) ms | $FC_N |"
             echo ""
             echo "**A′ note (NOT apples-to-apples):** these two rows boot DIFFERENT guests, so their ratio (${RATIO}) is a full-stack/end-to-end contrast, not VMM spawn. For the fair VMM-spawn ratio on ONE common binary see the Axis-A table above."
@@ -457,7 +457,7 @@ jobs:
             echo ""
             echo "### Honesty guardrails"
             echo "- **Absolute ms are runner-relative.** This is a nested-virt shared GitHub runner; a faster box can yield a LARGER number (VMM/host-spawn-dominated). Only the **tb-vmm/FC ratio on the same runner** (axis A) is the fair claim."
-            echo "- **Never a \"0.5 ms vs 125 ms\" headline.** Firecracker's full-stack ~125 ms (NSDI'20) is mostly a real Linux kernel boot — that is axis C, a DIFFERENT guest OS, not the TABOS kernel. The 0.5 ms guest-only figure is axis B and is **not** comparable to it."
+            echo "- **Never a \"0.5 ms vs 125 ms\" headline.** Firecracker's full-stack ~125 ms (NSDI'20) is mostly a real Linux kernel boot — that is axis C, a DIFFERENT guest OS, not the Yuva kernel. The 0.5 ms guest-only figure is axis B and is **not** comparable to it."
             echo "- **We do not claim to beat the shared VMM floor** (FC/Solo5 fork + KVM setup + vCPU bring-up is VMM-bound; any guest inherits it)."
             echo "- See docs/BENCHMARKS.md §1-§6 for the full metric-class discipline."
           } >> "$GITHUB_STEP_SUMMARY"

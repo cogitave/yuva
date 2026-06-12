@@ -1,4 +1,4 @@
-# tb-encode: the host-verifiable PURE bit-level encoder/validator leaf for TABOS.
+# tb-encode: the host-verifiable PURE bit-level encoder/validator leaf for Yuva.
 #
 # Single source of truth for the SILICON-UNSAFE-ADJACENT *value computation* that
 # feeds the VMX/EPT/MMU assembly and the IPC wire format -- but WITHOUT any of the
