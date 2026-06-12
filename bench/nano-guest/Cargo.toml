@@ -14,7 +14,7 @@
 # Built by CI with the SAME nightly toolchain the kernel uses:
 #   cargo +nightly build --release \
 #     -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem \
-#     -Zjson-target-spec --target ../../targets/x86_64-tabos-none.json
+#     -Zjson-target-spec --target ../../targets/x86_64-yuva-none.json
 # The machine code is bench/nano-guest/nano-guest.S (the single source of truth),
 # embedded via global_asm!(include_str!()). The local clang/ld.lld path
 # (build.sh) assembles that SAME file for well-formedness checks + Strategy B.

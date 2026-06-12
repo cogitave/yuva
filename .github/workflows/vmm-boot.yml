@@ -20,6 +20,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Build identity — MIRRORS scripts/project.env (the single source of truth at
+# the script level); a rename changes that file and these env: blocks together.
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+  TARGET_A64: aarch64-yuva-none
+
 jobs:
   vmm-boot:
     name: tb-vmm boot (x86_64, /dev/kvm)
@@ -58,7 +65,7 @@ jobs:
           key: ${{ runner.os }}-cargo-vmm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (custom target)
-        run: cargo kbuild --target targets/x86_64-tabos-none.json
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
 
       - name: Boot via tb-vmm and assert marker
         if: env.KVM_OK == '1'

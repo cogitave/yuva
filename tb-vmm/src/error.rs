@@ -101,7 +101,7 @@ impl fmt::Display for VmmError {
             VmmError::SystemEvent(ev) => write!(
                 f,
                 "KVM_EXIT_SYSTEM_EVENT type={ev}: unexpected system event \
-                 (a TABOS kernel is expected to stop via HLT)"
+                 (a Yuva kernel is expected to stop via HLT)"
             ),
         }
     }

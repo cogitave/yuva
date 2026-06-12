@@ -31,7 +31,7 @@
 //!     "Context Switching" (Brendan) and phil-opp's kernel-threads material.
 //!
 //! No FP/SIMD state is saved or restored: the target is soft-float
-//! (targets/x86_64-tabos-none.json: `"features": "-mmx,-sse,+soft-float"`),
+//! (targets/x86_64-yuva-none.json: `"features": "-mmx,-sse,+soft-float"`),
 //! so the compiler can never hold live state in x87/MMX/SSE registers.
 
 use core::arch::naked_asm;

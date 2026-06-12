@@ -4,7 +4,7 @@
 //! This crate is a thin Rust shell around the single-source-of-truth assembly
 //! in `bench/nano-guest/nano-guest.S`: it embeds that file verbatim via
 //! `global_asm!(include_str!())` so the nightly build (`cargo nbuild --release`,
-//! -Zbuild-std against ../../targets/x86_64-tabos-none.json) and the canonical
+//! -Zbuild-std against ../../targets/x86_64-yuva-none.json) and the canonical
 //! `clang`/`ld.lld` build (`build.sh`) produce the SAME machine code. The two
 //! ELF entries (`pvh_start`, `tb_start`) and the two boot notes live entirely
 //! in the assembly; the linker script `nano-guest.ld` lays them out at 1 MiB.

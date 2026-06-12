@@ -24,6 +24,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Build identity — MIRRORS scripts/project.env (the single source of truth at
+# the script level); a rename changes that file and these env: blocks together.
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+  TARGET_A64: aarch64-yuva-none
+
 jobs:
   microvm-kvm-boot:
     name: boot M0-M18 under QEMU microvm + KVM (x86_64)
@@ -61,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-cargo-microvmkvm-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (custom target)
-        run: cargo kbuild --target targets/x86_64-tabos-none.json
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
 
       - name: Install QEMU
         if: env.KVM_OK == '1'
@@ -71,7 +78,7 @@ jobs:
         if: env.KVM_OK == '1'
         run: |
           set -o pipefail
-          K=target/x86_64-tabos-none/debug/tabos-kernel
+          K="target/${TARGET_X86}/debug/${KERNEL_BIN}"
           # -M microvm,rtc=off -accel kvm -cpu host = the exact config that
           # surfaced #36. PVH entry; LAPIC is the only interrupt controller.
           # M20: attach a fresh 4 MiB raw disk so the virtio-blk durable-
@@ -121,8 +128,8 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          cargo kbuild --release --target targets/x86_64-tabos-none.json
-          K=target/x86_64-tabos-none/release/tabos-kernel
+          cargo kbuild --release --target "targets/${TARGET_X86}.json"
+          K="target/${TARGET_X86}/release/${KERNEL_BIN}"
           timeout 60 qemu-system-x86_64 -M microvm,rtc=off -accel kvm -cpu host \
             -m 256M -smp 1 -kernel "$K" -no-reboot -nic none \
             -global virtio-mmio.force-legacy=false -device virtio-rng-device \

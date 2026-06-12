@@ -8,7 +8,7 @@
 # switch). M0's hello, M1's trap round-trip, M2's ping-pong, "M3: mmu OK",
 # "M4: user/ring OK", "M5: alloc OK", "M6: frame alloc OK", "M7: heap OK",
 # "M8: timer OK" and "M9: preempt OK" all print earlier in the same boot.
-# Doubles as the cargo runner for target aarch64-tabos-none (cargo passes the
+# Doubles as the cargo runner for target aarch64-yuva-none (cargo passes the
 # freshly built ELF as $1) and is runnable by hand on WSL2.
 #
 # Invocation sources:
@@ -22,8 +22,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Build identifiers (KERNEL_BIN, TARGET_A64, ...) — the single source of truth.
+. "${REPO_ROOT}/scripts/project.env"
 PROFILE="${PROFILE:-debug}"
-KERNEL="${1:-${REPO_ROOT}/target/aarch64-tabos-none/${PROFILE}/tabos-kernel}"
+KERNEL="${1:-${REPO_ROOT}/target/${TARGET_A64}/${PROFILE}/${KERNEL_BIN}}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
 MARKER="M30: infer-transport OK"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended

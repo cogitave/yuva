@@ -8,14 +8,14 @@ use std::path::PathBuf;
 
 /// Usage / help text. Printed for `--help` and on any parse error.
 pub const USAGE: &str = "\
-tb-vmm — TABOS sovereign userspace VMM (L1)\n\
+tb-vmm — Yuva sovereign userspace VMM (L1)\n\
 \n\
 USAGE:\n\
     tb-vmm [OPTIONS]\n\
 \n\
 OPTIONS:\n\
-    --kernel <PATH>         Path to the TABOS kernel ELF to boot.\n\
-                            [default: target/x86_64-tabos-none/debug/tabos-kernel]\n\
+    --kernel <PATH>         Path to the Yuva kernel ELF to boot.\n\
+                            [default: target/x86_64-yuva-none/debug/yuva-kernel]\n\
     --mem-mb <N>            Guest RAM in MiB. [default: 256]\n\
     --cmdline <STRING>      Kernel command line passed via tb-boot. [default: \"\"]\n\
     --timeout-secs <N>      Wall-clock guard; the run aborts if the guest does\n\
@@ -28,7 +28,7 @@ OPTIONS:\n\
     -h, --help              Print this help.\n";
 
 /// The default kernel image path (the debug build of the custom target).
-pub const DEFAULT_KERNEL: &str = "target/x86_64-tabos-none/debug/tabos-kernel";
+pub const DEFAULT_KERNEL: &str = "target/x86_64-yuva-none/debug/yuva-kernel";
 /// Default guest RAM, in MiB.
 pub const DEFAULT_MEM_MB: u64 = 256;
 /// Default wall-clock run guard, in seconds.

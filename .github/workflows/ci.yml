@@ -37,6 +37,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Build identity — MIRRORS scripts/project.env (the single source of truth at
+# the script level). Workflows cannot cheaply source an env file in `${{ }}`
+# expressions, so the same values are defined ONCE per workflow in this env:
+# block; a rename changes scripts/project.env and these env: blocks together.
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+  TARGET_A64: aarch64-yuva-none
+
 jobs:
   build-and-boot:
     name: build & boot (${{ matrix.arch }})
@@ -45,13 +54,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `target_var` names the top-level env: var holding the target stem
+          # (GitHub does not expose the env context inside strategy.matrix, so
+          # the matrix carries the var NAME and the build step dereferences it
+          # at the shell level — the stem itself stays in the ONE env block).
           - arch: x86_64
-            target: targets/x86_64-tabos-none.json
+            target_var: TARGET_X86
             qemu_pkg: qemu-system-x86
             run: scripts/run-x86_64.sh
             qemu_timeout: 40
           - arch: aarch64
-            target: targets/aarch64-tabos-none.json
+            target_var: TARGET_A64
             qemu_pkg: qemu-system-arm
             run: scripts/run-aarch64.sh
             # aarch64 lane is pure TCG + single-threaded (-accel tcg,thread=single
@@ -106,7 +119,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build kernel (${{ matrix.arch }})
-        run: cargo kbuild --target ${{ matrix.target }}
+        run: |
+          TV='${{ matrix.target_var }}'
+          cargo kbuild --target "targets/${!TV}.json"
 
       # M30: build the HOST echo peer (tools/xport-harness -- its own nested
       # workspace, host triple, plain cargo) BEFORE the boot step. Both lanes'
@@ -153,7 +168,7 @@ jobs:
       # take. The kernel was already BUILT on the runner by the step above; the
       # checkout (which includes target/) is bind-mounted read/write at /work and
       # run-aarch64.sh resolves its REPO_ROOT to /work, so the freshly built ELF
-      # at target/aarch64-tabos-none/debug/tabos-kernel is exactly what boots.
+      # at target/$TARGET_A64/debug/$KERNEL_BIN is exactly what boots.
       # qemu-system-arm in trixie provides qemu-system-aarch64 (the binary the run
       # script invokes); -semihosting works headless in the container. `docker run`
       # exits with the container command's status, so a FAIL inside run-aarch64.sh

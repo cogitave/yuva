@@ -1,4 +1,4 @@
-# TABOS L2 Residual Assumptions — the EL2 trusted base the proofs do NOT discharge
+# Yuva L2 Residual Assumptions — the EL2 trusted base the proofs do NOT discharge
 
 > An EXPLICIT assumption set, in the seL4 / SeKVM tradition: a formally-verified
 > kernel is only as trustworthy as the things its proofs *assume away*, so those
@@ -6,10 +6,10 @@
 > of what is NOT proven (the boot code, the hand-written assembly, the hardware
 > model, and DMA) [1]; SeKVM and its Arm-relaxed-memory follow-on do the same,
 > and indeed their headline research contribution is *narrowing* that list one
-> assumption at a time [2][3]. This document is TABOS's version of that list for
+> assumption at a time [2][3]. This document is Yuva's version of that list for
 > the L2 sovereignty rungs that have landed — **L2.0 `el2 OK`** (the EL1↔EL2
 > world-switch) and **L2.1 `stage2 OK`** (stage-2 demand-translation, the ARM
-> analog of x86 EPT-violation handling). It states, bluntly, what the TABOS
+> analog of x86 EPT-violation handling). It states, bluntly, what the Yuva
 > Kani/Miri proofs DO discharge and what they leave as a residual trusted base
 > that only a real Arm board (or a future relaxed-memory proof) can close.
 > Companion: [SOVEREIGNTY-L2-ROADMAP.md](SOVEREIGNTY-L2-ROADMAP.md) (the L2 plan)
@@ -19,7 +19,7 @@
 
 ## 1. What IS proven (the discharged base)
 
-The TABOS verification posture is deliberate and NARROW, following the
+The Yuva verification posture is deliberate and NARROW, following the
 pKVM / SeKVM / seL4 / CCA-RMM precedent: prove the *isolation* properties (the
 descriptor/syndrome bit-algebra and the rights-subset attenuation), NOT full
 functional correctness of the privileged glue. Three machine-checked lanes carry
@@ -180,7 +180,7 @@ the load, all on a stock `ubuntu-latest` runner with NO Arm silicon:
 - **The rights-subset / attenuation induction (Kani, `tb-caps-core`).** The
   pKVM-style "stage-2 only ever maps frames the guest owns or has been granted"
   property is NOT a new proof obligation — it reduces to the no-confused-deputy
-  invariant TABOS already machine-proves at M11: `Rights::intersect` is bitwise-AND,
+  invariant Yuva already machine-proves at M11: `Rights::intersect` is bitwise-AND,
   so every derived capability is a subset of its parent, and
   `kani_step_preserves_attenuation` shows a single capability-space step preserves
   that subset relation inductively. The `prove-caps` lane pins
@@ -224,7 +224,7 @@ multiprocessor Arm core, (i) the EL1 builder's stage-2 descriptor stores against
 and (iii) the `HCR_EL2.VM=1` arm against the first stage-2-translated guest
 access. The architectural rules for these sequences live in the Arm ARM
 (DDI 0487) D-section on barriers, TLB maintenance, and stage-2 Break-Before-Make
-[4]; TABOS encodes them by hand in the glue.
+[4]; Yuva encodes them by hand in the glue.
 
 **Sound under TCG now because** QEMU's TCG is a sequentially-stronger executor
 than real silicon and models no store buffer, no out-of-order completion, and no
@@ -257,7 +257,7 @@ cacheable.
 
 **Sound under TCG now because** TCG models no caches at all, so the EL2 walker and
 handler observe the EL1 stores immediately with only the `dsb ishst; isb` the
-builder issues [5]. TABOS also sidesteps the hazard structurally: the result of
+builder issues [5]. Yuva also sidesteps the hazard structurally: the result of
 the round-trip is delivered EL2→EL1 in a register (`x0`), never read back by EL1
 from EL2-mapped memory; the EL2 self-context cells (`S2_CTX`) are a 64-byte-aligned
 single-accessor region the EL1 kernel never touches; and `BOOTED_AT_EL2` is the
@@ -276,7 +276,7 @@ This is the same residual L2.0 already carries for its shared monitor state.
 **Partly discharged (table-programming), residual narrowed.** The L2.1 CPU-side
 stage-2 confines every EL1&0 *CPU* access (including the guest's own stage-1
 walk), but a DMA-capable device bypasses the CPU MMU and stage-2 entirely — so a
-passed-through device's DMA could read or write all of TABOS+agent memory. Rung
+passed-through device's DMA could read or write all of Yuva+agent memory. Rung
 **aL2.6 `smmu OK`** now discharges the *table-programming* half of this obligation:
 the EL1 kernel probes `SMMU_IDR0.S2P`, builds a 1-entry linear stream table + one
 **stage-2-only** Stream Table Entry (`Config==0b110`) whose `S2TTB`/`S2VMID`/`VTCR`
@@ -323,7 +323,7 @@ Roadmap rung **L2.8** is the x86 VT-d sibling of this same split.
 
 **Assumed.** That the EL2 monitor image that `boot.rs::_start` installs (the
 resident nVHE monitor at `VBAR_EL2`, `HCR_EL2.RW`, `SCTLR_EL2=0x30C50830`) is the
-authentic, unmodified TABOS binary. The proofs reason about the *source* of the
+authentic, unmodified Yuva binary. The proofs reason about the *source* of the
 monitor; they assume the bytes actually executing at EL2 are that source, loaded
 by a trustworthy boot chain. Today QEMU loads the kernel image directly — there is
 no signature check, no measured boot, no chain of trust below the monitor.
@@ -336,14 +336,14 @@ loop to subvert it).
 **Path to narrowing.** A real deployment must (1) verify the EL2 image against a
 hardware root of trust (Arm Trusted Firmware / a signed-boot or measured-boot
 chain) before transferring to EL2, and (2) account for the firmware floor below
-EL2 (EL3/Secure-EL2, the SoC boot ROM) which TABOS does NOT and cannot verify —
+EL2 (EL3/Secure-EL2, the SoC boot ROM) which Yuva does NOT and cannot verify —
 sovereignty at EL2 is always RELATIVE to that floor, exactly as the x86 track is
 relative to SMM/ME. This mirrors seL4's explicit "the initial boot loader is
 trusted" assumption [1] and CCA's reliance on a measured-boot RMM launch [7].
 
 ### A5. The assembly / naked world-switch + the QEMU machine interface
 
-**Assumed.** The seL4 line, verbatim for TABOS: *the hand-written assembly and the
+**Assumed.** The seL4 line, verbatim for Yuva: *the hand-written assembly and the
 hardware are an assumption* [1]. Specifically — (i) the `#[unsafe(naked)]`
 world-switch and abort-retry stubs (`el2.rs`, `el2_vectors.rs`), which save/restore
 the 0x110-byte exception frame, program `ELR_EL2`/`SPSR_EL2`, and `eret`, are
@@ -400,10 +400,10 @@ mistaken for verified.
 | A5 asm + hardware | **assumed (explicit)** | assumed | assumed | assumed | assumed |
 | A6 source→binary | closed (binary verification) | Spoq closes it [9] | C, not binary | Coq, source | **closes the buddy allocator** |
 
-TABOS sits where pKVM/CCA sit today: the *isolation bit-algebra* and *attenuation*
+Yuva sits where pKVM/CCA sit today: the *isolation bit-algebra* and *attenuation*
 are machine-proven, the relaxed-memory / TLBI / DMA / boot / asm base is honestly
 assumed, and the published narrowing path is "a real board + the SeKVM relaxed-memory
-model." The deliberate TABOS divergence from pKVM (documented in the roadmap): TABOS
+model." The deliberate Yuva divergence from pKVM (documented in the roadmap): Yuva
 RETAINS sovereign scheduling inside the trusted core, so availability/DoS is
 explicitly scoped OUT of the proven set while memory isolation stays in it.
 

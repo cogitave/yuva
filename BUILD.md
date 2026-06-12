@@ -41,7 +41,7 @@ Why these components:
 
 * **`rust-src`** — required by Cargo's `-Zbuild-std`, which recompiles `core` +
   `compiler_builtins` for our none-class targets (there is no precompiled `std`
-  for `x86_64-tabos-none` / `aarch64-tabos-none`).
+  for `x86_64-yuva-none` / `aarch64-yuva-none`).
   Source: <https://os.phil-opp.com/minimal-rust-kernel/> (“The build-std Option”);
   <https://docs.rust-embedded.org/embedonomicon/custom-target.html>.
 * **`llvm-tools`** — gives `llvm-objdump` / `llvm-readobj` to verify the ELF (see
@@ -69,12 +69,12 @@ with a plain `cargo build`.
 # From the repo root:
 
 # x86_64 PVH image (loads at 1 MiB):
-cargo kbuild --release --target targets/x86_64-tabos-none.json
-#   -> target/x86_64-tabos-none/release/tabos-kernel  (ELF, PVH + TABOS notes)
+cargo kbuild --release --target targets/x86_64-yuva-none.json
+#   -> target/x86_64-yuva-none/release/yuva-kernel  (ELF, PVH + TABOS notes)
 
 # aarch64 QEMU-virt image:
-cargo kbuild --release --target targets/aarch64-tabos-none.json
-#   -> target/aarch64-tabos-none/release/tabos-kernel  (ELF)
+cargo kbuild --release --target targets/aarch64-yuva-none.json
+#   -> target/aarch64-yuva-none/release/yuva-kernel  (ELF)
 ```
 
 `--release` is recommended for the DoD (smaller, deterministic); `cargo kbuild`
@@ -153,12 +153,12 @@ Reproduced here for traceability; cite the source in each asm file's header note
 ## 5. Verify the x86_64 ELF actually carries the PVH note
 
 ```bash
-llvm-readobj --notes target/x86_64-tabos-none/release/tabos-kernel
+llvm-readobj --notes target/x86_64-yuva-none/release/yuva-kernel
 # Expect TWO notes: Owner "Xen" Type 0x12 (XEN_ELFNOTE_PHYS32_ENTRY -- the
 #   PVH/QEMU entry) and Owner "TABOS" Type 0x54420001 (the tb-boot 64-bit entry
 #   that tb-vmm jumps to; see docs/SOVEREIGNTY-ROADMAP.md).
 
-llvm-objdump -t target/x86_64-tabos-none/release/tabos-kernel | grep -E '_start|rust_main'
+llvm-objdump -t target/x86_64-yuva-none/release/yuva-kernel | grep -E '_start|rust_main'
 # Expect _start near 0x100000 and rust_main present (un-mangled).
 ```
 
@@ -206,7 +206,7 @@ file under a wall-clock `timeout`, let `timeout` kill QEMU, then grep the log.
 ### x86_64 (QEMU `microvm`, PVH via `-kernel`)
 
 ```bash
-KIMG=target/x86_64-tabos-none/release/tabos-kernel
+KIMG=target/x86_64-yuva-none/release/yuva-kernel
 timeout --foreground 30 qemu-system-x86_64 \
     -M microvm -cpu max -m 128M \
     -kernel "$KIMG" \
@@ -228,7 +228,7 @@ with `-serial stdio`.
 ### aarch64 (QEMU `virt`, PL011 UART0 @ `0x0900_0000`)
 
 ```bash
-KIMG=target/aarch64-tabos-none/release/tabos-kernel
+KIMG=target/aarch64-yuva-none/release/yuva-kernel
 timeout --foreground 30 qemu-system-aarch64 \
     -M virt -cpu max -m 128M \
     -kernel "$KIMG" \
@@ -247,8 +247,8 @@ grep -q 'hello from rust_main' serial-arm.log \
 ### Both at once
 
 ```bash
-cargo kbuild --release --target targets/x86_64-tabos-none.json
-cargo kbuild --release --target targets/aarch64-tabos-none.json
+cargo kbuild --release --target targets/x86_64-yuva-none.json
+cargo kbuild --release --target targets/aarch64-yuva-none.json
 # then run the two assert blocks above. CI requires BOTH to print PASS.
 ```
 

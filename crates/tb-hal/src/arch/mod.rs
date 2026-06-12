@@ -96,6 +96,6 @@ pub use self::aarch64::{
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!(
     "tb-hal supports only x86_64 and aarch64 (the two Firecracker-class arches); \
-     build with --target targets/x86_64-tabos-none.json or \
-     targets/aarch64-tabos-none.json"
+     build with --target targets/x86_64-yuva-none.json or \
+     targets/aarch64-yuva-none.json"
 );

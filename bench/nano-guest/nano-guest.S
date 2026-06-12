@@ -8,7 +8,7 @@
 //   * CI / nightly: `bench/nano-guest/src/main.rs` includes this file via
 //     `global_asm!(include_str!("../nano-guest.S"))` and is linked with
 //     `nano-guest.ld` by `cargo +nightly build -Zbuild-std` against
-//     `targets/x86_64-tabos-none.json` (reuses the kernel toolchain exactly).
+//     `targets/x86_64-yuva-none.json` (reuses the kernel toolchain exactly).
 //   * Local / stable: `bench/nano-guest/build.sh` assembles+links this same
 //     file with `clang`/`ld.lld` (no nightly/rustup needed) for well-formedness
 //     checks and the Strategy-B fallback.

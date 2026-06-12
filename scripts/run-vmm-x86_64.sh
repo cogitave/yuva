@@ -17,9 +17,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="x86_64-tabos-none"
+# Build identifiers (KERNEL_BIN, TARGET_X86, ...) — the single source of truth.
+. "${REPO_ROOT}/scripts/project.env"
+TARGET="${TARGET_X86}"
 PROFILE="${PROFILE:-debug}"
-KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
+KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/${KERNEL_BIN}}"
 # M19: the tb-vmm boot has NO `-device virtio-rng`, so the x86 virtio scanner
 # maps the UC window over 0xFEB00000 and reads open-bus 0xFFFFFFFF != magic ->
 # VirtioProof::Absent -> the kernel prints "M19: virtio OK (no device, skipped)",

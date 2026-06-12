@@ -1,7 +1,7 @@
 # tb-vmm — Yuva sovereign userspace VMM (the L1 rung)
 
 > **What this is.** `tb-vmm` is Yuva's own thin **userspace** virtual-machine
-> monitor. It boots the **same** `tabos-kernel` ELF that QEMU boots — but over
+> monitor. It boots the **same** `yuva-kernel` ELF that QEMU boots — but over
 > the host's `/dev/kvm`, through Yuva's **own** boot contract (`tb-boot v0`),
 > entering the guest **directly in 64-bit long mode**. On this path there is
 > **no PVH ELF note** and **no `A0` 32→64 trampoline**: the bootstrap-OS boot
@@ -284,8 +284,8 @@ Requires a Linux host with a usable **`/dev/kvm`**.
 ```sh
 # 1) Build the kernel ELF (custom target; carries BOTH the PVH and TABOS notes).
 #    From the repo root (the .cargo/config.toml wires -Zbuild-std; see BUILD.md):
-cargo build -p tabos-kernel --target targets/x86_64-tabos-none.json
-#    -> target/x86_64-tabos-none/debug/tabos-kernel
+cargo build -p yuva-kernel --target targets/x86_64-yuva-none.json
+#    -> target/x86_64-yuva-none/debug/yuva-kernel
 
 # 2) Build tb-vmm for the HOST. It is a std binary and must be insulated from the
 #    kernel's tree-wide -Zbuild-std; an empty CARGO_UNSTABLE_BUILD_STD overrides it:
@@ -298,7 +298,7 @@ CARGO_UNSTABLE_BUILD_STD= cargo build -p tb-vmm --target x86_64-unknown-linux-gn
 
 # 4) Boot the kernel through tb-vmm via tb-boot v0 (NO PVH, NO A0 trampoline):
 ./target/x86_64-unknown-linux-gnu/debug/tb-vmm \
-    --kernel target/x86_64-tabos-none/debug/tabos-kernel \
+    --kernel target/x86_64-yuva-none/debug/yuva-kernel \
     --mem-mb 256 --print-exit
 # Expect the full M0..M4 serial output, ending in:  M4: user/ring OK
 ```
@@ -307,7 +307,7 @@ CARGO_UNSTABLE_BUILD_STD= cargo build -p tb-vmm --target x86_64-unknown-linux-gn
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--kernel <path>` | `target/x86_64-tabos-none/debug/tabos-kernel` | kernel ELF to boot (required in practice) |
+| `--kernel <path>` | `target/x86_64-yuva-none/debug/yuva-kernel` | kernel ELF to boot (required in practice) |
 | `--mem-mb <N>` | `256` | guest RAM in MiB |
 | `--print-exit` | off | print the final VM-exit reason (`rip`/`sregs` on failure) |
 

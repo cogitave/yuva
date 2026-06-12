@@ -12,8 +12,10 @@ checklist; follow it in order and do not skip the proposal, the anti-hollow-pass
 guards, the documentation, or the PR loop.
 
 Repo: `/c/Users/Arda/workspaces/@cogitave/tabos` (build/run/git via Git-Bash;
-edits via Windows paths). Build: `cargo kbuild --target targets/<arch>-tabos-none.json`
-(the `.cargo/config.toml` alias = `build -p tabos-kernel -Zbuild-std=… -Zjson-target-spec`;
+edits via Windows paths; the LOCAL folder keeps the old `tabos` name — the
+project/build identifiers are Yuva, single-sourced in `scripts/project.env`).
+Build: `cargo kbuild --target targets/<arch>-yuva-none.json`
+(the `.cargo/config.toml` alias = `build -p yuva-kernel -Zbuild-std=… -Zjson-target-spec`;
 never hand-write the `-Z` flags). Kani IS installed locally in WSL (`cargo-kani`,
 run via `wsl.exe -d Ubuntu-22.04`) — ALWAYS measure a new/changed harness with
 `cargo kani -p tb-encode --harness <name>` BEFORE pushing (Step 4); the

@@ -24,9 +24,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="x86_64-tabos-none"
+# Build identifiers (KERNEL_BIN, TARGET_X86, ...) — the single source of truth.
+. "${REPO_ROOT}/scripts/project.env"
+TARGET="${TARGET_X86}"
 PROFILE="${PROFILE:-debug}"
-KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/tabos-kernel}"
+KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/${KERNEL_BIN}}"
 MARKER='M30: infer-transport OK'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
