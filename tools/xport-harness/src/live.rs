@@ -24,17 +24,22 @@
 //!   [`LIVE_MAX_TOKENS`] = 64; the caller's `live_done` latch makes a second
 //!   call per process impossible; no retries -- a retryable outcome is
 //!   REPORTED retryable, never retried into a pass).
-//! * **Liveness** (§5, host leg): the prompt envelope instructs the model to
-//!   reply with the character-REVERSED hex of the kernel's per-boot wire
-//!   challenge (`transform=HEX-REVERSE`; the challenge is minted in-guest from
-//!   the cycle counter every boot -- a canned fixture or replayed transcript
-//!   carries a stale nonce and fails). A prompt echo cannot pass: the
-//!   acceptance substring is `reverse(hex(N))`, not `hex(N)`.
+//! * **Liveness** (§5, host leg): the prompt envelope renders the kernel's
+//!   per-boot wire challenge as 4 pre-grouped hex groups and instructs the
+//!   model to reply with the groups in REVERSE ORDER
+//!   (`transform=HEX-GROUP-REVERSE` -- v2; v1's character-level reversal was
+//!   a tokenization-unrealistic CAPABILITY test, see [`expected_transform`];
+//!   the challenge is minted in-guest from the cycle counter every boot -- a
+//!   canned fixture or replayed transcript carries a stale nonce and fails).
+//!   A prompt echo cannot pass: the acceptance substring is the REVERSED
+//!   group concatenation, never the forward one.
 //! * **The closed taxonomy** (§2e/§12): provider errors map to the closed
 //!   outcome set below; raw provider JSON/text is NEVER printed and NEVER
-//!   crosses toward the guest -- the response text's only trace is its
-//!   [`tb_encode::inferwire::body_digest`] on the witness line (the same
-//!   digest discipline as the wire).
+//!   crosses toward the guest -- the response text's traces are its
+//!   [`tb_encode::inferwire::body_digest`] on the verdict line (the same
+//!   digest discipline as the wire) and the scrubbed hex-framed
+//!   [`body_line`] (emitted on OK and on the 200-class failures
+//!   TRANSFORM-MISS/REFUSAL, so a failed hello is still witnessable).
 //!
 //! WHAT THE LIVE LEG IS **NOT** (the stage-C landing notes -- honest scope):
 //!
@@ -76,7 +81,7 @@ pub const LIVE_MODEL: &str = "claude-haiku-4-5";
 
 /// The pinned per-call output ceiling (M31 proposal §5.3: `max_tokens` <= 64
 /// for the liveness call). 64 tokens comfortably covers the 32-character
-/// reversed hex string and bounds the worst-case response bytes far below
+/// reversed-groups line and bounds the worst-case response bytes far below
 /// [`INFER_BODY_CAP`].
 pub const LIVE_MAX_TOKENS: u32 = 64;
 
@@ -200,13 +205,39 @@ pub fn scrub(text: &str, api_key: &str) -> String {
     text.replace(api_key, "<key-scrubbed>")
 }
 
-/// The HEX-REVERSE liveness transform (proposal §5.2): the character-order
-/// reversal of the lowercase hex of the 16-byte per-boot wire challenge.
-/// Non-identity by construction -- a verbatim prompt echo contains `hex(N)`,
-/// never `reverse(hex(N))` (palindrome probability over a 128-bit random
-/// challenge: negligible).
+/// The 32-hex-char challenge rendered as 4 groups of 8, FORWARD order --
+/// exactly how the prompt presents it (pre-grouped, so the model never has
+/// to segment a 32-char blob itself).
+pub fn challenge_groups(challenge: &[u8; 16]) -> [String; 4] {
+    let h = hex(challenge);
+    [
+        h[0..8].to_string(),
+        h[8..16].to_string(),
+        h[16..24].to_string(),
+        h[24..32].to_string(),
+    ]
+}
+
+/// The HEX-GROUP-REVERSE liveness transform (v2): the 4 pre-grouped 8-char
+/// hex groups in REVERSE GROUP ORDER, concatenated (the acceptance
+/// normalization strips the model's separators, so spacing never matters).
+///
+/// WHY v2 (the `transform=HEX-REVERSE` retrospective): character-level
+/// string reversal is a KNOWN LLM tokenization weakness -- the first live
+/// dispatch (run 27408247558) returned a REAL 200 whose text missed the
+/// char-reversal (`outcome=TRANSFORM-MISS`, fail-closed as designed): v1
+/// tested model CAPABILITY, not liveness. Group-ORDER reversal is a trivial
+/// sequence task for any model, and every liveness property is preserved:
+/// the expected substring derives from THIS boot's kernel-minted challenge
+/// (fresh per boot), and a verbatim prompt echo normalizes to the FORWARD
+/// concatenation, never the reversed one. Non-identity degrades only if all
+/// four groups are equal (~2^-72 over a 128-bit random challenge); the
+/// challenge cannot be re-minted here (it is the kernel's), so in that
+/// astronomically unlikely case the lane fails HONESTLY -- assert-and-
+/// proceed, never re-mint, never widen acceptance.
 pub fn expected_transform(challenge: &[u8; 16]) -> String {
-    hex(challenge).chars().rev().collect()
+    let g = challenge_groups(challenge);
+    format!("{}{}{}{}", g[3], g[2], g[1], g[0])
 }
 
 /// The host-leg liveness check (§5.4): the expected transform must appear in
@@ -229,22 +260,24 @@ pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
 /// body is structurally key-free (unit-asserted).
 ///
 /// The envelope asks for TWO lines: line 1 is the strict liveness transform
-/// (the reversed hex, nothing else ON THAT LINE), line 2 is one short
-/// greeting to Yuva -- the hello this lane exists for. The greeting is
-/// §5-COMPATIBLE BY CONSTRUCTION: acceptance ([`liveness_ok`]) is the
-/// normalized substring search for the transform and nothing else, so the
-/// greeting line can neither help a non-compliant answer pass nor fail a
-/// compliant one (unit-asserted both ways). A truncated or missing greeting
-/// is a model-behavior matter, never a lane verdict; `max_tokens=64` covers
-/// the 32-char reversal plus a short sentence.
+/// (the four pre-grouped hex groups in reverse order, nothing else ON THAT
+/// LINE), line 2 is one short greeting to Yuva -- the hello this lane exists
+/// for. The greeting is §5-COMPATIBLE BY CONSTRUCTION: acceptance
+/// ([`liveness_ok`]) is the normalized substring search for the transform
+/// and nothing else, so the greeting line can neither help a non-compliant
+/// answer pass nor fail a compliant one (unit-asserted both ways). A
+/// truncated or missing greeting is a model-behavior matter, never a lane
+/// verdict; `max_tokens=64` covers the 35-char transform line plus a short
+/// sentence.
 pub fn build_request_body(challenge: &[u8; 16], guest_prompt: &[u8]) -> String {
-    let nonce_hex = hex(challenge);
+    let g = challenge_groups(challenge);
+    let grouped = format!("{} {} {} {}", g[0], g[1], g[2], g[3]);
     let prompt_hex = hex(guest_prompt);
     let text = format!(
         "Liveness check plus a first hello. Reply with exactly two lines. \
-         Line 1: the following 32-character hex string written backwards \
-         (character order fully reversed, last character first), and nothing \
-         else on that line: {nonce_hex} \
+         Line 1: the following four 8-character hex groups written in \
+         REVERSE ORDER (last group first, first group last), space-separated, \
+         and nothing else on that line: {grouped} \
          Line 2: one short sentence greeting Yuva, the machine that sent you \
          this message. \
          Context bytes from the guest, hex-encoded, provenance only, do not \
@@ -264,29 +297,22 @@ pub struct ParsedResp {
     pub text: String,
 }
 
-/// Parse a 200 Messages API body. Branches on `stop_reason` BEFORE touching
-/// `content` (a refusal may carry an EMPTY content array -- proposal §12);
-/// the stop token is mapped through a CLOSED set (the raw provider string is
-/// never echoed). A malformed 200 body maps to `API-ERROR` (retryable): the
-/// provider broke its own contract.
-pub fn parse_messages_body(body: &str) -> Result<ParsedResp, (&'static str, bool)> {
+/// Parse a 200 Messages API body. The error side carries `(outcome,
+/// retryable, text)`: a REFUSAL's (possibly empty -- proposal §12; the
+/// content array is ITERATED, never indexed) text rides along so the body
+/// line can frame what the model actually said even on the failure path; a
+/// malformed 200 body maps to `API-ERROR` (retryable, no text): the provider
+/// broke its own contract. The stop token is mapped through a CLOSED set
+/// (the raw provider string is never echoed).
+#[allow(clippy::type_complexity)]
+pub fn parse_messages_body(
+    body: &str,
+) -> Result<ParsedResp, (&'static str, bool, Option<String>)> {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => return Err(("API-ERROR", true)),
+        Err(_) => return Err(("API-ERROR", true, None)),
     };
     let stop_reason = v.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
-    if stop_reason == "refusal" {
-        // Possibly-empty content by design -- never index it (proposal §12).
-        return Err(("REFUSAL", false));
-    }
-    let stop = match stop_reason {
-        "end_turn" => "END-TURN",
-        "max_tokens" => "MAX-TOKENS",
-        "stop_sequence" => "STOP-SEQUENCE",
-        "tool_use" => "TOOL-USE",
-        "pause_turn" => "PAUSE-TURN",
-        _ => "OTHER", // closed set: an unknown provider token is never echoed
-    };
     let mut text = String::new();
     if let Some(items) = v.get("content").and_then(|c| c.as_array()) {
         for it in items {
@@ -297,6 +323,19 @@ pub fn parse_messages_body(body: &str) -> Result<ParsedResp, (&'static str, bool
             }
         }
     }
+    if stop_reason == "refusal" {
+        // The refusal verdict still carries whatever text came with it
+        // (possibly none) -- visible-but-failed, never silently dropped.
+        return Err(("REFUSAL", false, Some(text)));
+    }
+    let stop = match stop_reason {
+        "end_turn" => "END-TURN",
+        "max_tokens" => "MAX-TOKENS",
+        "stop_sequence" => "STOP-SEQUENCE",
+        "tool_use" => "TOOL-USE",
+        "pause_turn" => "PAUSE-TURN",
+        _ => "OTHER", // closed set: an unknown provider token is never echoed
+    };
     Ok(ParsedResp { stop, text })
 }
 
@@ -338,17 +377,32 @@ pub struct LiveEvidence {
     pub text: String,
 }
 
+/// The model-said-something evidence a 200-class FAILURE carries: the lane
+/// failed, but what the model actually said must still be witnessable
+/// (the run-27408247558 lesson: a real 200 whose text we could not see).
+pub struct RespBody {
+    /// `body_digest` of the RAW text (the commitment exists -- print it).
+    pub resp_digest_hex: String,
+    /// The RAW text; same rules as [`LiveEvidence::text`] -- never printed
+    /// raw, framed only through [`body_line`].
+    pub text: String,
+}
+
 /// The live-call outcome: full §5.4 acceptance, or a distinct named failure.
 /// The failure outcomes are DISTINCT BY DESIGN (proposal §5.7/§12):
 /// `TRANSFORM-MISS` (200 + request-id, transform absent) is not
 /// `LIVENESS-FAIL` (no fresh round-trip evidence) is not a retryable provider
-/// fault -- and none of them is ever a pass.
+/// fault -- and none of them is ever a pass. `resp` is `Some` for exactly
+/// the outcomes that carry a 200 response text -- `TRANSFORM-MISS` and
+/// `REFUSAL` -- and `None` for every other outcome (transport/auth/status
+/// faults, LIVENESS-FAIL, TOO-LARGE's reject-never-truncate, malformed-200).
 pub enum LiveOutcome {
     Ok(LiveEvidence),
     Fail {
         outcome: &'static str,
         http: Option<u16>,
         retryable: bool,
+        resp: Option<RespBody>,
     },
 }
 
@@ -370,6 +424,7 @@ pub fn live_call(
                 outcome: "TIMEOUT",
                 http: None,
                 retryable: true,
+                resp: None,
             }
         }
         // A non-timeout transport fault (DNS/refused/TLS) is also a
@@ -386,6 +441,7 @@ pub fn live_call(
                 outcome: "TIMEOUT",
                 http: None,
                 retryable: true,
+                resp: None,
             };
         }
     };
@@ -395,6 +451,7 @@ pub fn live_call(
             outcome,
             http: Some(reply.status),
             retryable,
+            resp: None,
         };
     }
     // §5.4: the request-id header is part of the acceptance (third-party-
@@ -406,35 +463,52 @@ pub fn live_call(
                 outcome: "LIVENESS-FAIL",
                 http: Some(200),
                 retryable: false,
+                resp: None,
             }
         }
     };
     let parsed = match parse_messages_body(&reply.body) {
         Ok(p) => p,
-        Err((outcome, retryable)) => {
+        Err((outcome, retryable, text)) => {
+            // A REFUSAL's (possibly empty) text rides along: the lane fails,
+            // but what the model said stays witnessable.
+            let resp = text.map(|t| RespBody {
+                resp_digest_hex: hex(&body_digest(t.as_bytes())),
+                text: t,
+            });
             return LiveOutcome::Fail {
                 outcome,
                 http: Some(200),
                 retryable,
-            }
+                resp,
+            };
         }
     };
     // Reject-never-truncate (the 413 mirror): unreachable with the pinned
-    // max_tokens, asserted anyway.
+    // max_tokens, asserted anyway (no body framed -- framing a capped view
+    // of an oversize body would soften the reject).
     if parsed.text.len() > INFER_BODY_CAP {
         return LiveOutcome::Fail {
             outcome: "TOO-LARGE",
             http: Some(200),
             retryable: false,
+            resp: None,
         };
     }
     if !liveness_ok(&parsed.text, challenge) {
         // Compliant-but-wrong model answer: distinct, reported, NEVER
-        // silently retried into a pass (proposal §5.7).
+        // silently retried into a pass (proposal §5.7) -- and since run
+        // 27408247558, WITNESSABLE: the digest + hex-framed body ride the
+        // failure verdict.
+        let digest = body_digest(parsed.text.as_bytes());
         return LiveOutcome::Fail {
             outcome: "TRANSFORM-MISS",
             http: Some(200),
             retryable: false,
+            resp: Some(RespBody {
+                resp_digest_hex: hex(&digest),
+                text: parsed.text,
+            }),
         };
     }
     let digest = body_digest(parsed.text.as_bytes());
@@ -453,7 +527,7 @@ pub fn live_call(
 /// tokens ONLY -- structurally key-free and injection-inert.
 pub fn witness_line(ev: &LiveEvidence) -> String {
     format!(
-        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{} transform=HEX-REVERSE \
+        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{} transform=HEX-GROUP-REVERSE \
          transform-ok=1 http=200 reqid-hex={} resp-digest=0x{} model={} max-tokens={} \
          stop={} key-custody=HOST-ENV",
         ev.nonce_hex, ev.reqid_hex, ev.resp_digest_hex, LIVE_MODEL, LIVE_MAX_TOKENS, ev.stop
@@ -462,20 +536,27 @@ pub fn witness_line(ev: &LiveEvidence) -> String {
 
 /// The failure line: always `transform-ok=0` + the distinct closed outcome
 /// token, so it can never satisfy the workflow's OK grep (which requires
-/// `transform-ok=1 http=200`).
+/// `transform-ok=1 http=200`). A 200-class failure that carries a response
+/// (TRANSFORM-MISS/REFUSAL) also prints its `resp-digest=` -- the commitment
+/// exists, so it is printed.
 pub fn failure_line(
     nonce_hex: &str,
     outcome: &str,
     http: Option<u16>,
     retryable: bool,
+    resp_digest_hex: Option<&str>,
 ) -> String {
     let http_s = match http {
         Some(h) => h.to_string(),
         None => "none".to_string(),
     };
+    let digest_s = match resp_digest_hex {
+        Some(d) => format!(" resp-digest=0x{d}"),
+        None => String::new(),
+    };
     format!(
-        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{nonce_hex} transform=HEX-REVERSE \
-         transform-ok=0 outcome={outcome} http={http_s} retryable={} key-custody=HOST-ENV",
+        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{nonce_hex} transform=HEX-GROUP-REVERSE \
+         transform-ok=0 outcome={outcome} http={http_s} retryable={}{digest_s} key-custody=HOST-ENV",
         u8::from(retryable)
     )
 }
@@ -494,13 +575,15 @@ pub const BODY_LINE_CAP: usize = 2048;
 /// ```
 ///
 /// `len` is the FULL scrubbed-text byte length (decimal); `hex` frames the
-/// first `min(len, BODY_LINE_CAP)` bytes; `truncated=1` iff the cap bit. The
-/// text is [`scrub`]'d BEFORE framing (a key-echoing model cannot leak the
-/// key even hex-encoded), so the witness's `resp-digest` -- computed over the
-/// RAW text -- remains the commitment to what the model actually said while
-/// this line is the redacted, §6 inert-alphabet VIEW of it. Raw model text
-/// still appears in no log anywhere; the human-readable decode happens ONLY
-/// on the workflow's run-summary page, from this line. The prefix is
+/// first `min(len, BODY_LINE_CAP)` bytes (EMPTY `hex=` for an empty text --
+/// e.g. an empty-content refusal: the line still prints, so silence stays
+/// distinguishable from emptiness); `truncated=1` iff the cap bit. The text
+/// is [`scrub`]'d BEFORE framing (a key-echoing model cannot leak the key
+/// even hex-encoded), so the verdict line's `resp-digest` -- computed over
+/// the RAW text -- remains the commitment to what the model actually said
+/// while this line is the redacted, §6 inert-alphabet VIEW of it. Raw model
+/// text still appears in no log anywhere; the human-readable decode happens
+/// ONLY on the workflow's run-summary page, from this line. The prefix is
 /// deliberately DISJOINT from the verdict prefix `xport-harness-infer: ` (the
 /// workflow's exactly-one-verdict count grep cannot match it -- asserted in
 /// the tests).
@@ -516,11 +599,17 @@ pub fn body_line(text: &str, api_key: &str) -> String {
     )
 }
 
-/// Render the verdict line set for one live-call outcome: the OK path is
-/// EXACTLY [witness, body] (one body line per OK verdict -- with the caller's
-/// one-call latch that is at most one body line per process); every failure
-/// path is exactly [failure] with NO body line. Pure, so the
-/// exactly-one-emission property is unit-asserted.
+/// Render the verdict line set for one live-call outcome:
+///
+/// * OK -> EXACTLY `[witness, body]`;
+/// * a 200-class failure carrying a response (TRANSFORM-MISS / REFUSAL,
+///   `resp: Some`) -> EXACTLY `[failure-with-digest, body]` -- the lane
+///   fails, but what the model said is witnessable (the run-27408247558
+///   lesson);
+/// * every other failure -> EXACTLY `[failure]`, no body line.
+///
+/// With the caller's one-call latch that is at most one body line per
+/// process. Pure, so the per-outcome emission matrix is unit-asserted.
 pub fn verdict_lines(
     outcome: &LiveOutcome,
     challenge: &[u8; 16],
@@ -532,7 +621,20 @@ pub fn verdict_lines(
             outcome,
             http,
             retryable,
-        } => vec![failure_line(&hex(challenge), outcome, *http, *retryable)],
+            resp,
+        } => {
+            let mut lines = vec![failure_line(
+                &hex(challenge),
+                outcome,
+                *http,
+                *retryable,
+                resp.as_ref().map(|r| r.resp_digest_hex.as_str()),
+            )];
+            if let Some(r) = resp {
+                lines.push(body_line(&r.text, api_key));
+            }
+            lines
+        }
     }
 }
 
@@ -643,8 +745,10 @@ mod tests {
         assert_eq!(v["max_tokens"], 64);
         assert_eq!(v["messages"].as_array().unwrap().len(), 1); // ONE message
         let text = v["messages"][0]["content"].as_str().unwrap();
-        // The challenge hex (the thing to reverse) is in the envelope...
-        assert!(text.contains(&hex(&CHALLENGE)));
+        // The challenge is in the envelope PRE-GROUPED (4 space-separated
+        // groups of 8, forward order -- the model never segments a blob)...
+        let g = challenge_groups(&CHALLENGE);
+        assert!(text.contains(&format!("{} {} {} {}", g[0], g[1], g[2], g[3])));
         // ...and the guest prompt crosses HEX-ENCODED only, never raw.
         assert!(text.contains(&hex(b"guest-prompt")));
         assert!(!text.contains("guest-prompt"));
@@ -664,26 +768,49 @@ mod tests {
     // --- the liveness checker ----------------------------------------------
 
     #[test]
-    fn transform_is_the_character_reversal() {
-        let h = hex(&CHALLENGE);
+    fn transform_is_the_group_reversal() {
+        // CHALLENGE hex = "0123456789abcdef1032547698badcfe"; groups forward:
+        // 01234567 89abcdef 10325476 98badcfe; v2 expected = the groups in
+        // reverse ORDER, concatenated (chars inside each group stay forward).
+        let g = challenge_groups(&CHALLENGE);
+        assert_eq!(g[0], "01234567");
+        assert_eq!(g[3], "98badcfe");
         let t = expected_transform(&CHALLENGE);
         assert_eq!(t.len(), 32);
-        assert_eq!(t, h.chars().rev().collect::<String>());
-        assert_ne!(t, h); // non-identity on this (non-palindromic) challenge
+        assert_eq!(t, "98badcfe1032547689abcdef01234567");
+        assert_eq!(t, format!("{}{}{}{}", g[3], g[2], g[1], g[0]));
+        // Non-identity: the forward concatenation differs (the four groups
+        // are not all equal on this -- and on any realistic -- challenge).
+        assert_ne!(t, hex(&CHALLENGE));
+        // And v2 is NOT the old v1 char-reversal (group-internal order is
+        // preserved): the tokenization-unrealistic transform is retired.
+        let v1: String = hex(&CHALLENGE).chars().rev().collect();
+        assert_ne!(t, v1);
     }
 
     #[test]
-    fn liveness_accepts_the_reversal_and_rejects_the_echo() {
-        let reversed = expected_transform(&CHALLENGE);
-        assert!(liveness_ok(&format!("Sure: {reversed}"), &CHALLENGE));
-        // Tolerances: case + whitespace noise (order-preserving only).
-        let spaced: String = reversed
+    fn liveness_accepts_the_group_reversal_and_rejects_the_echo() {
+        let g = challenge_groups(&CHALLENGE);
+        // The natural model answer: reversed groups, space-separated, plus
+        // arbitrary spacing/case noise -- the normalization absorbs it.
+        let natural = format!("{} {} {} {}", g[3], g[2], g[1], g[0]);
+        assert!(liveness_ok(&natural, &CHALLENGE));
+        assert!(liveness_ok(&format!("Sure: {natural}"), &CHALLENGE));
+        assert!(liveness_ok(&natural.to_ascii_uppercase(), &CHALLENGE));
+        let noisy: String = expected_transform(&CHALLENGE)
             .chars()
             .flat_map(|c| [c.to_ascii_uppercase(), ' '])
             .collect();
-        assert!(liveness_ok(&spaced, &CHALLENGE));
-        // A verbatim PROMPT ECHO must not pass (hex(N) != reverse(hex(N))).
+        assert!(liveness_ok(&noisy, &CHALLENGE));
+        // A verbatim PROMPT ECHO (forward groups, spaced or not) must not
+        // pass -- it normalizes to the FORWARD concatenation.
+        let echo = format!("{} {} {} {}", g[0], g[1], g[2], g[3]);
+        assert!(!liveness_ok(&echo, &CHALLENGE));
         assert!(!liveness_ok(&hex(&CHALLENGE), &CHALLENGE));
+        // The OLD v1 char-reversal is NOT the v2 expected -- a model still
+        // answering v1 is correctly rejected under v2.
+        let v1: String = hex(&CHALLENGE).chars().rev().collect();
+        assert!(!liveness_ok(&v1, &CHALLENGE));
         assert!(!liveness_ok("no transform here", &CHALLENGE));
     }
 
@@ -697,11 +824,20 @@ mod tests {
     }
 
     #[test]
-    fn parser_branches_on_refusal_before_reading_content() {
+    fn parser_carries_refusal_text_and_never_indexes_content() {
         // A refusal may carry an EMPTY content array (proposal §12) -- the
-        // parser must never index it.
+        // parser ITERATES, never indexes; the (empty) text rides the verdict.
         let body = r#"{"stop_reason":"refusal","content":[]}"#;
-        assert!(matches!(parse_messages_body(body), Err(("REFUSAL", false))));
+        match parse_messages_body(body) {
+            Err(("REFUSAL", false, Some(text))) => assert_eq!(text, ""),
+            _ => panic!("an empty-content refusal must map to REFUSAL with empty text"),
+        }
+        // And a refusal WITH text carries it (visible-but-failed).
+        let body = r#"{"stop_reason":"refusal","content":[{"type":"text","text":"no."}]}"#;
+        match parse_messages_body(body) {
+            Err(("REFUSAL", false, Some(text))) => assert_eq!(text, "no."),
+            _ => panic!("a refusal with text must carry it"),
+        }
     }
 
     #[test]
@@ -715,7 +851,7 @@ mod tests {
     fn parser_maps_a_malformed_200_body_to_api_error() {
         assert!(matches!(
             parse_messages_body("this is not json"),
-            Err(("API-ERROR", true))
+            Err(("API-ERROR", true, None))
         ));
     }
 
@@ -744,14 +880,17 @@ mod tests {
                 outcome,
                 http,
                 retryable,
+                resp,
             } => {
                 assert_eq!(outcome, "AUTH");
                 assert_eq!(http, Some(401));
                 assert!(!retryable);
-                let line = failure_line(&hex(&CHALLENGE), outcome, http, retryable);
+                assert!(resp.is_none()); // no 200 body to witness
+                let line = failure_line(&hex(&CHALLENGE), outcome, http, retryable, None);
                 assert!(line.contains("transform-ok=0"));
                 assert!(line.contains("outcome=AUTH"));
                 assert!(line.contains("http=401"));
+                assert!(!line.contains("resp-digest=")); // body-less verdict
                 assert!(!line.contains(FAKE_KEY));
             }
             _ => panic!("a 401 must map to AUTH"),
@@ -786,10 +925,12 @@ mod tests {
                     outcome,
                     http,
                     retryable,
+                    resp,
                 } => {
                     assert_eq!(outcome, "TIMEOUT");
                     assert_eq!(http, None);
                     assert!(retryable);
+                    assert!(resp.is_none());
                 }
                 _ => panic!("a transport fault must be a Fail"),
             }
@@ -801,7 +942,7 @@ mod tests {
     #[test]
     fn happy_path_yields_the_full_witness() {
         let reversed = expected_transform(&CHALLENGE);
-        let text = format!("The reversed string is: {reversed}");
+        let text = format!("The reversed groups are: {reversed}");
         let fx = Fixture::ok(ok_body_with(&text));
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"prompt-bytes") {
             LiveOutcome::Ok(ev) => {
@@ -811,7 +952,7 @@ mod tests {
                 assert_eq!(ev.stop, "END-TURN");
                 let line = witness_line(&ev);
                 assert!(line.starts_with("xport-harness-infer: backend=ANTHROPIC-LIVE "));
-                assert!(line.contains("transform=HEX-REVERSE transform-ok=1 http=200"));
+                assert!(line.contains("transform=HEX-GROUP-REVERSE transform-ok=1 http=200"));
                 assert!(line.contains("model=claude-haiku-4-5 max-tokens=64"));
                 assert!(line.contains("key-custody=HOST-ENV"));
                 assert!(!line.contains(FAKE_KEY));
@@ -821,38 +962,90 @@ mod tests {
     }
 
     #[test]
-    fn transform_miss_is_distinct_from_liveness_fail() {
-        // 200 + request-id + a NON-compliant answer: TRANSFORM-MISS.
-        let fx = Fixture::ok(ok_body_with("I refuse to reverse strings today."));
+    fn transform_miss_is_distinct_from_liveness_fail_and_carries_the_body() {
+        // 200 + request-id + a NON-compliant answer: TRANSFORM-MISS, WITH the
+        // response evidence (digest + text) riding the verdict -- the
+        // run-27408247558 fix: the lane fails but the words are witnessable.
+        let said = "I refuse to reverse anything today.";
+        let fx = Fixture::ok(ok_body_with(said));
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
             LiveOutcome::Fail {
                 outcome,
                 http,
                 retryable,
+                resp,
             } => {
                 assert_eq!(outcome, "TRANSFORM-MISS");
                 assert_eq!(http, Some(200));
                 assert!(!retryable);
+                let r = resp.expect("a TRANSFORM-MISS carries the body");
+                assert_eq!(r.text, said);
+                assert_eq!(r.resp_digest_hex, hex(&body_digest(said.as_bytes())));
+                // The failure line prints the commitment.
+                let line = failure_line(
+                    &hex(&CHALLENGE),
+                    outcome,
+                    http,
+                    retryable,
+                    Some(&r.resp_digest_hex),
+                );
+                assert!(line.contains(&format!(" resp-digest=0x{}", r.resp_digest_hex)));
+                assert!(line.contains("transform-ok=0"));
             }
             _ => panic!("a transform-less 200 must be TRANSFORM-MISS"),
         }
         // 200 WITHOUT a request-id: LIVENESS-FAIL (no fresh round-trip
-        // evidence), a DIFFERENT token by design.
+        // evidence), a DIFFERENT token by design -- and body-less (the §5.4
+        // evidence chain broke before the text was adjudicated).
         let mut fx = Fixture::ok(ok_body_with(&expected_transform(&CHALLENGE)));
         fx.request_id = None;
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
-            LiveOutcome::Fail { outcome, .. } => assert_eq!(outcome, "LIVENESS-FAIL"),
+            LiveOutcome::Fail { outcome, resp, .. } => {
+                assert_eq!(outcome, "LIVENESS-FAIL");
+                assert!(resp.is_none());
+            }
             _ => panic!("200 sans request-id must be LIVENESS-FAIL"),
         }
     }
 
     #[test]
+    fn refusal_carries_its_possibly_empty_body() {
+        // A refusal WITH text: the verdict carries it.
+        let body = r#"{"stop_reason":"refusal","content":[{"type":"text","text":"I cannot help."}]}"#;
+        let fx = Fixture::ok(body.to_string());
+        match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
+            LiveOutcome::Fail { outcome, resp, .. } => {
+                assert_eq!(outcome, "REFUSAL");
+                let r = resp.expect("a refusal carries its (possibly empty) body");
+                assert_eq!(r.text, "I cannot help.");
+            }
+            _ => panic!("a refusal must map to REFUSAL"),
+        }
+        // An EMPTY-content refusal still carries Some("") -- the body line
+        // prints len=0 (emptiness, not silence).
+        let body = r#"{"stop_reason":"refusal","content":[]}"#;
+        let fx = Fixture::ok(body.to_string());
+        match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
+            LiveOutcome::Fail { outcome, resp, .. } => {
+                assert_eq!(outcome, "REFUSAL");
+                assert_eq!(resp.expect("Some even when empty").text, "");
+            }
+            _ => panic!("an empty refusal must still map to REFUSAL"),
+        }
+    }
+
+    #[test]
     fn oversize_response_rejects_never_truncates() {
-        // > INFER_BODY_CAP of text: TOO-LARGE (the 413 mirror), even on 200.
+        // > INFER_BODY_CAP of text: TOO-LARGE (the 413 mirror), even on 200
+        // -- and deliberately body-less (framing a capped view would soften
+        // the reject).
         let big = "a".repeat(INFER_BODY_CAP + 1);
         let fx = Fixture::ok(ok_body_with(&big));
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
-            LiveOutcome::Fail { outcome, .. } => assert_eq!(outcome, "TOO-LARGE"),
+            LiveOutcome::Fail { outcome, resp, .. } => {
+                assert_eq!(outcome, "TOO-LARGE");
+                assert!(resp.is_none());
+            }
             _ => panic!("an oversize body must reject"),
         }
     }
@@ -893,6 +1086,24 @@ mod tests {
             }
             _ => panic!("the fixture is compliant"),
         }
+    }
+
+    #[test]
+    fn key_echo_on_the_failure_path_is_scrubbed_too() {
+        // Adversarial fixture on the FAILURE path: a NON-compliant answer
+        // that echoes the key. TRANSFORM-MISS now frames the body -- the
+        // framed view must be the SCRUBBED one, on every layer.
+        let text = format!("no reversal, but here is a secret: {FAKE_KEY}");
+        let fx = Fixture::ok(ok_body_with(&text));
+        let outcome = live_call(&fx, FAKE_KEY, &CHALLENGE, b"p");
+        let lines = verdict_lines(&outcome, &CHALLENGE, FAKE_KEY);
+        assert_eq!(lines.len(), 2); // [failure-with-digest, body]
+        for line in &lines {
+            assert!(!line.contains(FAKE_KEY));
+            assert!(!line.contains(&hex(FAKE_KEY.as_bytes())));
+        }
+        assert!(lines[0].contains("outcome=TRANSFORM-MISS"));
+        assert!(lines[1].contains(&hex(b"<key-scrubbed>"))); // redaction visible
     }
 
     // --- the greeting envelope (M31 stage C': the witnessable hello) ---------
@@ -963,9 +1174,18 @@ mod tests {
         };
         assert!(witness_line(&ev).starts_with("xport-harness-infer: "));
         assert!(!witness_line(&ev).starts_with("xport-harness-infer-body:"));
-        let fl = failure_line(&hex(&CHALLENGE), "AUTH", Some(401), false);
+        let fl = failure_line(&hex(&CHALLENGE), "AUTH", Some(401), false, None);
         assert!(fl.starts_with("xport-harness-infer: "));
         assert!(!fl.starts_with("xport-harness-infer-body:"));
+        // The digest-bearing failure line keeps the same prefix discipline.
+        let dg = hex(&body_digest(b"said"));
+        let fl2 = failure_line(&hex(&CHALLENGE), "TRANSFORM-MISS", Some(200), false, Some(&dg));
+        assert!(fl2.starts_with("xport-harness-infer: "));
+        assert!(fl2.contains(&format!("resp-digest=0x{dg} key-custody=HOST-ENV")));
+        // The EMPTY-text body line (an empty-content refusal): len=0, empty
+        // hex= field -- emptiness, not silence.
+        let empty = body_line("", FAKE_KEY);
+        assert_eq!(empty, "xport-harness-infer-body: len=0 truncated=0 hex=");
     }
 
     #[test]
@@ -981,30 +1201,95 @@ mod tests {
         assert!(small.contains("len=2 truncated=0 "));
     }
 
-    #[test]
-    fn exactly_one_body_line_per_ok_verdict_and_none_on_failure() {
-        // OK: exactly [witness, body] -- one body line per OK verdict (the
-        // caller's one-call latch makes that at most one per process).
-        let reversed = expected_transform(&CHALLENGE);
-        let fx = Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Yuva!")));
-        let outcome = live_call(&fx, FAKE_KEY, &CHALLENGE, b"p");
-        let lines = verdict_lines(&outcome, &CHALLENGE, FAKE_KEY);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("xport-harness-infer: backend=ANTHROPIC-LIVE "));
-        let bodies = lines
+    /// Count the body lines in a verdict set.
+    fn body_count(lines: &[String]) -> usize {
+        lines
             .iter()
             .filter(|l| l.starts_with("xport-harness-infer-body: "))
-            .count();
-        assert_eq!(bodies, 1);
+            .count()
+    }
+
+    #[test]
+    fn body_line_emission_matrix_per_outcome() {
+        // OK -> exactly [witness, body] (one body line per OK verdict; the
+        // caller's one-call latch makes that at most one per process).
+        let reversed = expected_transform(&CHALLENGE);
+        let ok = live_call(
+            &Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Yuva!"))),
+            FAKE_KEY,
+            &CHALLENGE,
+            b"p",
+        );
+        let lines = verdict_lines(&ok, &CHALLENGE, FAKE_KEY);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("xport-harness-infer: backend=ANTHROPIC-LIVE "));
+        assert_eq!(body_count(&lines), 1);
         assert!(lines[1].starts_with("xport-harness-infer-body: "));
-        // Failure: exactly [failure], NO body line ever.
-        let fail = live_call(&Fixture::status(401), FAKE_KEY, &CHALLENGE, b"p");
-        let fail_lines = verdict_lines(&fail, &CHALLENGE, FAKE_KEY);
-        assert_eq!(fail_lines.len(), 1);
-        assert!(fail_lines[0].contains("transform-ok=0"));
-        assert!(!fail_lines
-            .iter()
-            .any(|l| l.starts_with("xport-harness-infer-body:")));
+
+        // TRANSFORM-MISS -> exactly [failure-with-digest, body]: 1 body line.
+        let miss = live_call(
+            &Fixture::ok(ok_body_with("not the transform")),
+            FAKE_KEY,
+            &CHALLENGE,
+            b"p",
+        );
+        let lines = verdict_lines(&miss, &CHALLENGE, FAKE_KEY);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("outcome=TRANSFORM-MISS"));
+        assert!(lines[0].contains(" resp-digest=0x"));
+        assert_eq!(body_count(&lines), 1);
+
+        // REFUSAL (even empty-content) -> exactly [failure-with-digest, body].
+        let refusal = live_call(
+            &Fixture::ok(r#"{"stop_reason":"refusal","content":[]}"#.to_string()),
+            FAKE_KEY,
+            &CHALLENGE,
+            b"p",
+        );
+        let lines = verdict_lines(&refusal, &CHALLENGE, FAKE_KEY);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("outcome=REFUSAL"));
+        assert_eq!(body_count(&lines), 1);
+        assert!(lines[1].ends_with("len=0 truncated=0 hex="));
+
+        // Every body-less outcome -> exactly [failure], ZERO body lines:
+        // AUTH (401 status), TIMEOUT (transport), LIVENESS-FAIL (no
+        // request-id), TOO-LARGE (oversize 200), API-ERROR (malformed 200).
+        let bodiless: Vec<LiveOutcome> = vec![
+            live_call(&Fixture::status(401), FAKE_KEY, &CHALLENGE, b"p"),
+            live_call(
+                &Fixture {
+                    fault: Some("timeout"),
+                    ..Fixture::ok(String::new())
+                },
+                FAKE_KEY,
+                &CHALLENGE,
+                b"p",
+            ),
+            live_call(
+                &{
+                    let mut f = Fixture::ok(ok_body_with(&expected_transform(&CHALLENGE)));
+                    f.request_id = None;
+                    f
+                },
+                FAKE_KEY,
+                &CHALLENGE,
+                b"p",
+            ),
+            live_call(
+                &Fixture::ok(ok_body_with(&"a".repeat(INFER_BODY_CAP + 1))),
+                FAKE_KEY,
+                &CHALLENGE,
+                b"p",
+            ),
+            live_call(&Fixture::ok("not json".to_string()), FAKE_KEY, &CHALLENGE, b"p"),
+        ];
+        for outcome in &bodiless {
+            let lines = verdict_lines(outcome, &CHALLENGE, FAKE_KEY);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].contains("transform-ok=0"));
+            assert_eq!(body_count(&lines), 0);
+        }
     }
 
     #[test]
