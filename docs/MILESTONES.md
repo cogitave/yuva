@@ -1,6 +1,6 @@
 # Yuva Milestones & Development Pipeline
 
-> Status: the agent-native milestone chain **M0 → M31 is complete and CI-green on
+> Status: the agent-native milestone chain **M0 → M38 is complete and CI-green on
 > both architectures** (x86_64 + aarch64), extended since the M18 capstone by a
 > tail of follow-on markers — **M14.1** (byte-payload IPC), **M14.2**
 > (blocking-recv), **M15.1** (block unmap + frame reclamation), **M18.1**
@@ -71,7 +71,24 @@
 > SAME inferwire math behind a modern virtio-mmio console register file, and
 > `run-vmm-x86_64.sh` asserts the full cumulative tail + the M30/M31 guard
 > blocks under `/dev/kvm`); the
-> NEW cumulative-tail marker `M30: infer-transport OK`) — every milestone
+> NEW cumulative-tail marker `M30: infer-transport OK`) — then **M31** (the
+> MOCK-DETERMINISTIC inference e2e over the M30 channel — recall -> prompt ->
+> deterministic transform -> digest fold; `M31: infer-e2e OK
+> backend=MOCK-DETERMINISTIC`) — and finally **M38** (TRINITY ADOPT-1: the
+> kernel-integrated CONDUCTOR — the in-kernel selftest agent drives a Kani-verified
+> discrete organ-scheduler loop FROM THE GUEST through the cap chokepoint
+> (`M_MEM_RECALL` -> the discrete Worker score -> `M_MODEL_INVOKE_BYTES` mock
+> through the `INVOKE_MODEL` gate -> the `tb_encode::conductor` discrete Verifier
+> verdict, looping select-organ->assign-role->until-ACCEPT, `MAX_TURNS=5` bounded),
+> folding each orchestration DECISION into a `conduct_head` via the M22 prov fold
+> REUSED verbatim; the guest emits the `conduct:` witness + per-step `conduct-step:`
+> trace + the marker, and the HOST independently re-folds the guest's OWN trace in
+> a SEPARATE process (`conductor-host --recompute-from-trace`) and string-equals the
+> heads — the cross-process anti-hollow leg, now guest->host. HAND-WRITTEN not
+> learned, the Verifier is the discrete CI verdict (not a human gate, which is
+> admission-only + inert in the all-mock chain), all organs are mocks (the real M32
+> organ is the #90 follow-up); the NEW cumulative-tail marker `M38: conductor OK
+> turns=N organs=K verdict=ACCEPT`, M31 demoted-not-deleted) — every milestone
 > verified by booting under QEMU
 > (and, on x86_64, the project's own `tb-vmm`/KVM) on every change. A
 > **formally-verified core** now backs the chain: M11's capability rights-subset

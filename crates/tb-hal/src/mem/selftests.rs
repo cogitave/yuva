@@ -1071,6 +1071,201 @@ pub(crate) fn exittel_selftest() -> crate::ExitTelemetryProof {
     }
 }
 
+// --- M38 (stage B): the verified CONDUCTOR self-test (the marker body) --------
+
+/// The fixed score FLOOR the Verifier gates against (the heuristic baseline the
+/// Worker output must beat by [`tb_encode::conductor::VERDICT_MARGIN`]). Pinned to
+/// the SAME constant the stage-A host transcript uses, so the in-kernel loop folds
+/// a byte-identical lineage to the host's independent recompute (cross-process).
+const CONDUCTOR_SCORE_FLOOR: i64 = 100;
+
+/// M38 (stage B): run the verified `tb_encode::conductor` policy over the kernel-
+/// supplied per-turn Worker scores (the REAL organ-execution results -- the
+/// M_MEM_RECALL context strength + the M_MODEL_INVOKE_BYTES mock-response refinement
+/// the kernel block computes through the cap chokepoint), fold each
+/// `ConductDecision` into a `conduct_head` via the M22 prov fold REUSED verbatim,
+/// independently re-fold the trace, inject a single-byte tamper, and report the
+/// outcome as a pure-data [`crate::ConductorProof`]. See [`crate::conductor_selftest`].
+///
+/// The organ-selection schedule is the stage-A host transcript VERBATIM (a measured
+/// 2-hop+ task: Thinker proposes over RetrievalOverMemory, Worker executes over
+/// LocalM32 then ExternalMock on the retry, the Verifier adjudicates) so the
+/// in-kernel fold and the host's independent fold over the SAME emitted trace match
+/// byte-for-byte. The loop is BOUNDED by `MAX_TURNS` -- no unbounded wait (the #1
+/// boot-hang risk is structurally excluded by the verified bounded transition).
+pub(crate) fn conductor_selftest(worker_scores: &[i64]) -> crate::ConductorProof {
+    use tb_encode::conductor::{
+        assign_role, canon as conduct_canon, conduct_chain_mix, conduct_hash,
+        conduct_head_witness, conduct_recompute, conduct_verify_inclusion, select_organ, step,
+        Action, ConductDecision, Role, Verdict, CONDUCT_CANON_LEN, PROV_HASH_LEN, VERDICT_MARGIN,
+    };
+
+    let mut steps_arr = [crate::ConductorTraceStep::default(); crate::CONDUCTOR_MAX_STEPS];
+    let mut ids: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = alloc::vec::Vec::new();
+    let mut rows: alloc::vec::Vec<[u8; CONDUCT_CANON_LEN]> = alloc::vec::Vec::new();
+    let mut policy_head = [0u8; PROV_HASH_LEN]; // genesis (all-zero) head
+    let mut scratch = [0u8; CONDUCT_CANON_LEN + 8];
+
+    let mut turn: u8 = 0;
+    let mut organ_calls: u16 = 0;
+    let mut round: u8 = 0; // the Verifier retry round (REVISE -> retry)
+    let mut n_steps: usize = 0;
+    let mut seen = [false; tb_encode::conductor::N_ORGANS];
+    let mut revise_cycles: u64 = 0;
+    let mut accept_at: u64 = 0;
+    let mut accepted = false;
+
+    loop {
+        if n_steps >= crate::CONDUCTOR_MAX_STEPS {
+            // Belt-and-braces cap (the policy already bounds to MAX_TURNS+1 steps):
+            // never overrun the fixed trace buffer -- bound EVERYTHING (#65 / the
+            // boot-hang discipline).
+            break;
+        }
+        let role = assign_role(turn);
+
+        // ORGAN SELECTION (the verified policy): the honest 2-hop+ task -- Thinker
+        // proposes over RetrievalOverMemory, Worker/Verifier act over LocalM32 then
+        // ExternalMock on the retry round. The schedule is the stage-A host
+        // transcript VERBATIM so the cross-process folds match byte-for-byte.
+        let organ = match role {
+            Role::Thinker => select_organ(0),                 // RetrievalOverMemory
+            Role::Worker => select_organ(1 + round as usize), // LocalM32 -> ExternalMock
+            Role::Verifier => select_organ(1 + round as usize),
+        };
+
+        // ORGAN EXECUTION cost (the kernel side did the real recall/invoke): the
+        // Worker invokes the engine (a real organ call -> cost increments); the
+        // Verifier adjudicates the Worker's last output.
+        if role == Role::Worker {
+            organ_calls = organ_calls.saturating_add(1);
+        }
+        // The Worker's output score for THIS retry round, supplied by the kernel's
+        // REAL organ execution (M_MEM_RECALL context + the M_MODEL_INVOKE_BYTES mock
+        // refinement). Out-of-range rounds fail closed to a below-floor score (a
+        // REVISE), never a panic -- total over any worker_scores length.
+        let worker_score = worker_scores
+            .get(round as usize)
+            .copied()
+            .unwrap_or(i64::MIN / 2);
+
+        // THE VERIFIED VERDICT + the bounded transition (the policy leaf).
+        let (verdict, action) = step(turn, worker_score, CONDUCTOR_SCORE_FLOOR, VERDICT_MARGIN);
+
+        let idx = organ.tag() as usize;
+        if idx < seen.len() {
+            seen[idx] = true;
+        }
+        if role == Role::Verifier && verdict == Verdict::Revise {
+            revise_cycles += 1;
+        }
+        if verdict == Verdict::Accept {
+            accepted = true;
+            accept_at = turn as u64;
+        }
+
+        // CAPTURE the step into the SEPARATE trace (what the host re-folds).
+        steps_arr[n_steps] = crate::ConductorTraceStep {
+            turn,
+            role: role.tag(),
+            organ: organ.tag(),
+            verdict: verdict.tag(),
+            organ_calls,
+            t_logical: turn as u64,
+        };
+
+        // FOLD the decision into the policy head via the REUSED M22 prov fold
+        // (the SAME way the host re-folds the emitted trace -> honest run MATCHES).
+        let rec = ConductDecision {
+            turn,
+            role: role.tag(),
+            organ: organ.tag(),
+            verdict: verdict.tag(),
+            organ_calls,
+            t_logical: turn as u64,
+        };
+        let n = conduct_canon(&rec, &mut scratch);
+        if n == 0 {
+            // fail-closed: a too-small scratch can never happen (scratch is sized)
+            // but never partial-write / panic.
+            break;
+        }
+        let id = conduct_hash(&scratch[..n]);
+        policy_head = conduct_chain_mix(policy_head, id);
+        let mut row = [0u8; CONDUCT_CANON_LEN];
+        row.copy_from_slice(&scratch[..n]);
+        rows.push(row);
+        ids.push(id);
+        n_steps += 1;
+
+        match action {
+            Action::Terminate(_) => break,
+            Action::Continue { turn: next_turn, .. } => {
+                // A Verifier REVISE advances the retry round (the refine-then-retry
+                // cycle that brings the ExternalMock organ into the sequence).
+                if role == Role::Verifier && verdict == Verdict::Revise {
+                    round = round.saturating_add(1);
+                }
+                turn = next_turn;
+            }
+        }
+    }
+
+    let records = ids.len() as u64;
+    let organs = seen.iter().filter(|&&b| b).count() as u64;
+    let turns = steps_arr
+        .get(n_steps.wrapping_sub(1))
+        .map(|s| s.turn as u64 + 1)
+        .unwrap_or(0);
+
+    // CLEAN + INCLUSION: independently re-fold the committed ids -> the running head.
+    let (clean_ok, inclusion_ok) = if ids.is_empty() {
+        (false, false)
+    } else {
+        let leaf = ids[0];
+        let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+        (
+            conduct_recompute(leaf, &siblings) == policy_head,
+            conduct_verify_inclusion(leaf, &siblings, policy_head),
+        )
+    };
+
+    // TAMPER: flip one byte of the FIRST committed decision's canonical bytes; the
+    // re-hash must differ AND both the head recompute and the inclusion proof must
+    // REJECT (the M22 tamper-evidence leg).
+    let tamper_caught = if rows.is_empty() {
+        false
+    } else {
+        let leaf0 = conduct_hash(&rows[0]);
+        let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+        if leaf0 == ids[0] {
+            let mut tampered = rows[0];
+            tampered[3] ^= 0x01; // OFF_VERDICT (a real field)
+            let bad = conduct_hash(&tampered);
+            bad != ids[0]
+                && conduct_recompute(bad, &siblings) != policy_head
+                && !conduct_verify_inclusion(bad, &siblings, policy_head)
+        } else {
+            false
+        }
+    };
+
+    crate::ConductorProof {
+        clean_ok,
+        inclusion_ok,
+        tamper_caught,
+        accepted,
+        organs,
+        revise_cycles,
+        turns,
+        accept_at,
+        organ_calls: organ_calls as u64,
+        head: conduct_head_witness(policy_head),
+        records,
+        steps: steps_arr,
+    }
+}
+
 // --- M28: the verified operator-inbound command self-test (the marker body) ---
 
 /// The compiled-in SIMULATED enrolled verifier's base key (a TEST key, NOT a real

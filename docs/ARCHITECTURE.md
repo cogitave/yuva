@@ -1,6 +1,6 @@
 # Yuva Architecture Draft
 
-> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M31 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
+> Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M38 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.
 > Basis: [RESEARCH-REPORT](RESEARCH-REPORT.md) · Related: [VISION](VISION.md) · [MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md) · [SOVEREIGNTY-L2-ROADMAP](SOVEREIGNTY-L2-ROADMAP.md) · [MEMORY-SPEC](MEMORY-SPEC.md) · [AGENTS-SPEC](AGENTS-SPEC.md) · [SELF-IMPROVEMENT-SPEC](SELF-IMPROVEMENT-SPEC.md) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
@@ -8,17 +8,21 @@
 ## Implementation status (as built)
 
 This document is the design north-star; the honest design→reality map as of the
-M31 cumulative tail is below. The authoritative, executable record is the
+M38 cumulative tail is below. The authoritative, executable record is the
 cumulative serial-marker chain the kernel prints on every boot
 ([MILESTONES](MILESTONES.md) · [ROADMAP-V2](ROADMAP-V2.md)); the markers cited
 below are exactly those strings. Both run scripts grep for the final
-`M31: infer-e2e OK backend=MOCK-DETERMINISTIC` marker, then assert each
+`M38: conductor OK turns=N organs=K verdict=ACCEPT` marker (the M38 stage-B
+kernel-integrated conductor — M31 is demoted-not-deleted), then assert each
 milestone directly and reject
 the skip/dormant variant while positively requiring its witness line (and, for
 M30, ALSO string-compare the kernel-witnessed challenge/tag against the
 `xport-harness` host peer's own line -- the cross-process anti-hollow leg; for
 M31, ALSO pin the injection-proofed dump grammar + the ESC tripwire and reject
-the live-lane vocabulary by name).
+the live-lane vocabulary by name; for M38, ALSO feed the guest's OWN emitted
+`conduct-step:` trace to `conductor-host --recompute-from-trace` and string-equal
+the independently re-folded head against the guest's `conduct: head=..` — the
+cross-process anti-hollow leg now guest->host).
 
 **Built and CI-green on both architectures (x86_64 + aarch64):**
 
@@ -373,6 +377,37 @@ the live-lane vocabulary by name).
   `M31: real-infer OK backend=ANTHROPIC-LIVE` — is the OPERATOR'S lane:
   secret-gated, never a required check, never unattended, its marker banned
   from the cumulative chain by name.**
+- **The kernel-integrated CONDUCTOR, stage B (TRINITY ADOPT-1) — M38, the NEW
+  cumulative tail.** `M38: conductor OK turns=N organs=K verdict=ACCEPT` (printed
+  after M31; #105): a tiny Kani-verified discrete scheduler that ORCHESTRATES the
+  landed organs under a HAND-WRITTEN (not learned) policy. EVERY BOOT, the in-kernel
+  selftest agent drives the Verifier-gated organ loop FROM THE GUEST through the cap
+  chokepoint — `M_MEM_RECALL` (the M13/M20 BM25 lexical recall, the
+  RetrievalOverMemory organ; `retrieval=LEXICAL-NOT-SEMANTIC`) -> the discrete Worker
+  score over that context -> `M_MODEL_INVOKE_BYTES` (the MOCK organ through the
+  landed `INVOKE_MODEL` possession gate, the LocalM32/ExternalMock organs;
+  `local-organ=M38-AUTHORED-MOCK`, `external-organ=MOCK-IN-CI`) -> the
+  `tb_encode::conductor` discrete Verifier verdict (`verifier=CI-DISCRETE-VERDICT`,
+  the `bakeoff::gate_clears` shape, NEVER a learned classifier), looping
+  select-organ->assign-role->until-ACCEPT, `MAX_TURNS=5` BOUNDED (no unbounded wait).
+  The honest 2-hop task measures a >=2-organ sequence with a >=1 REVISE->ACCEPT
+  cycle; each orchestration DECISION folds into a `conduct_head` via the M22 prov
+  fold REUSED verbatim (under the new `prov::kind::CONDUCT_DECISION` tag), SEPARATE
+  from every other fold head (M22/M23/M25/M26/M27 stay byte-identical — the conductor
+  folds on its OWN lane). The guest emits the `conduct:` witness + per-step
+  `conduct-step:` trace (hex-only, injection-proof) + the marker; the HOST feeds the
+  guest's OWN emitted trace to `conductor-host --recompute-from-trace`, which
+  INDEPENDENTLY re-folds the lineage via the SAME verified leaf in a SEPARATE process,
+  and the run script string-equals the two heads — the cross-process anti-hollow leg
+  (now guest->host; a forged summary or doctored trace diverges). HONEST: the policy
+  is `policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED`, `learning=DORMANT`, the M18.1
+  human-approval gate is `m18-gate=ADMISSION-ONLY-INERT-IN-MOCK` (no high-impact organ
+  -> its fail-closed branch is never reached), the cost record is the LOGICAL
+  surrogate (`cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK`), `novelty=VERIFIED-
+  PROVENANCE-SOVEREIGN-WRAPPER` (not a new learning paradigm), `benchmark=NOT-CLAIMED`.
+  The real M32 local engine as a conductor organ is the #90 follow-up; the live
+  external organ in-loop is dispatch-only/operator-gated (the `conductor-live.yml`
+  successor). M31 is demoted-not-deleted (asserted directly beneath the M38 tail).
 
 **Verification posture.** Two complementary machine-checked seams guard the
 silicon-adjacent value computation, both verifying the **exact same code the

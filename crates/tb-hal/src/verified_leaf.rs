@@ -1277,6 +1277,127 @@ pub fn exittel_selftest() -> ExitTelemetryProof {
 }
 
 // ===========================================================================
+// M38 (stage B): the verified CONDUCTOR self-test facade -- TRINITY ADOPT-1
+// wired into the kernel boot. The in-kernel selftest agent drives the verified
+// `tb_encode::conductor` policy over a multi-organ loop (select-organ ->
+// assign-role -> the discrete Verifier verdict, loop until ACCEPT, MAX_TURNS=5);
+// the kernel-side organ EXECUTION (the real M_MEM_RECALL context + the
+// M_MODEL_INVOKE_BYTES mock through the INVOKE_MODEL gate) supplies the per-turn
+// Worker scores, and THIS facade runs the verified policy + folds each
+// `ConductDecision` into a `conduct_head` via the M22 prov fold REUSED verbatim,
+// then independently re-folds the trace + injects a single-byte tamper. The
+// verdict is a closed pure-data struct the `#![forbid(unsafe_code)]` kernel
+// matches on. The boundary is the proposal §2.2 one: the DISCRETE policy + the
+// discrete Verifier verdict + the provenance fold are IN `tb_encode`; the
+// organ EXECUTION (the cap-chokepoint recall/invoke) is the kernel block.
+//
+// HONEST (proposal §1/§10): the policy is HAND-WRITTEN, NOT learned
+// (`policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED`); the Verifier that bites is the
+// discrete `gate_clears`-shaped verdict (`verifier=CI-DISCRETE-VERDICT`), NOT a
+// learned classifier (`learning=DORMANT`); the M18.1 human-approval gate is
+// admission-only + provably inert in the all-mock chain
+// (`m18-gate=ADMISSION-ONLY-INERT-IN-MOCK`); the LocalM32 organ is an
+// M38-AUTHORED-MOCK in CI (`local-organ=M38-AUTHORED-MOCK`); the cost record is
+// the LOGICAL surrogate (`cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK`).
+// ===========================================================================
+
+/// The number of registered organs the conductor selects over (mirrors
+/// [`tb_encode::conductor::N_ORGANS`]), used to size the kernel-side trace cap.
+pub const CONDUCTOR_MAX_STEPS: usize = 8;
+
+/// One captured conductor loop STEP -- the SEPARATE trace stream the kernel emits
+/// (hex-framed) so the HOST can INDEPENDENTLY re-fold the lineage from the
+/// guest's OWN emitted trace (the cross-process anti-hollow leg, proposal §8.6).
+/// Each field is the per-turn canonical `ConductDecision` field; the host rebuilds
+/// the SAME record + folds it, and the recomputed head must string-equal the
+/// guest-emitted head. A forged guest summary cannot match an independent fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ConductorTraceStep {
+    /// The turn number (`0..=MAX_TURNS`) of this step.
+    pub turn: u8,
+    /// The role assigned this turn (`Role::tag`): 0 Thinker / 1 Worker / 2 Verifier.
+    pub role: u8,
+    /// The organ selected this turn (`Organ::tag`): 0 Retrieval / 1 LocalM32 / 2 External.
+    pub organ: u8,
+    /// The Verifier verdict at this turn (`Verdict::tag`): 0 Accept / 1 Revise / 2 HaltBudget.
+    pub verdict: u8,
+    /// The accumulated organ-call count at this step (the ADOPT-4 cost token).
+    pub organ_calls: u16,
+    /// The logical (boot/session-relative) clock at this step.
+    pub t_logical: u64,
+}
+
+/// M38 conductor self-test outcome (returned to the kernel for marker rendering).
+/// A closed, pure-data verdict -- mirroring [`ExitTelemetryProof`]. The witness
+/// fields are POSITIVELY required on the boot witness line so the marker
+/// mechanically cannot overclaim. The `steps` array carries the SEPARATE trace the
+/// kernel emits hex-framed for the host's INDEPENDENT cross-process recompute.
+#[derive(Clone, Copy, Debug)]
+pub struct ConductorProof {
+    /// CLEAN: independently re-folding the committed `ConductDecision` ids equals
+    /// the running `conduct_head`. The kernel requires this (folded into
+    /// `fold-verified=1`).
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for the first committed decision verified against
+    /// the clean `conduct_head`. The kernel requires this (folded into
+    /// `fold-verified=1`).
+    pub inclusion_ok: bool,
+    /// A single-byte tamper of a committed decision's canonical bytes was caught on
+    /// BOTH legs (head-mismatch AND inclusion-fail) -- the tamper-evidence claim
+    /// (cryptographic since M29-C). The kernel requires this (rendered
+    /// `tamper-caught=1`).
+    pub tamper_caught: bool,
+    /// The loop reached a real Verifier-ACCEPT terminal (not HaltBudget). The
+    /// kernel requires this (rendered `verdict=ACCEPT`).
+    pub accepted: bool,
+    /// The number of DISTINCT organs in the measured sequence (the anti-hollow
+    /// `organs>=2` requirement -- a single-organ stub has 1). Rendered `organs=<m>`.
+    pub organs: u64,
+    /// The number of Verifier REVISE steps in the measured trace (the anti-hollow
+    /// `revise-cycles>=1` requirement -- an always-accept stub has 0). Rendered
+    /// `revise-cycles=<m>`.
+    pub revise_cycles: u64,
+    /// The turn count (the last turn + 1; `<=MAX_TURNS+1`). Rendered `turns=<n>`.
+    pub turns: u64,
+    /// The turn at which the Verifier ACCEPTed. Rendered `accept-at=<k>`.
+    pub accept_at: u64,
+    /// The accumulated organ-call count (the ADOPT-4 cost token). Rendered
+    /// `organ-calls=<c>`.
+    pub organ_calls: u64,
+    /// A u64 WITNESS folded from the 32-byte committed `conduct_head` (every head
+    /// byte contributes), rendered `head=<hex16>`.
+    pub head: u64,
+    /// The number of committed conductor decisions (== the captured trace length).
+    pub records: u64,
+    /// The SEPARATE captured trace (the kernel emits each step hex-framed for the
+    /// host's INDEPENDENT cross-process re-fold). Valid entries are `0..records`.
+    pub steps: [ConductorTraceStep; CONDUCTOR_MAX_STEPS],
+}
+
+/// M38 (stage B): run the verified `tb_encode::conductor` policy over the kernel-
+/// supplied per-turn Worker scores (the REAL organ-execution results: the
+/// M_MEM_RECALL context strength + the M_MODEL_INVOKE_BYTES mock-response refinement
+/// the kernel block computes through the cap chokepoint), fold each
+/// `ConductDecision` into a `conduct_head` via the M22 prov fold REUSED verbatim,
+/// independently re-fold the trace, inject a single-byte tamper, and report the
+/// outcome as a pure-data [`ConductorProof`]. See proposal §8 (stage B). Pure value
+/// computation over the Kani-proven `tb_encode::conductor` leaf; touches NO device,
+/// NO scheduler -- the kernel block does the cap-chokepoint organ execution and
+/// passes the scores in. The `conduct_head` is SEPARATE from every other fold head
+/// (M22/M23/M25/M26/...) so the cumulative chain stays byte-identical (the
+/// conductor folds on its OWN lane).
+///
+/// `worker_scores[round]` is the Worker organ's output score on retry `round` (the
+/// kernel derives it from the real recall context + the mock invoke); a round-0
+/// below-margin score forces a Verifier REVISE, a later round clears -- so the
+/// honest run measures a >=2-organ sequence with a >=1 REVISE->ACCEPT cycle. The
+/// loop is bounded by `MAX_TURNS` (no unbounded wait -- the #1 boot-hang risk is
+/// structurally excluded).
+pub fn conductor_selftest(worker_scores: &[i64]) -> ConductorProof {
+    mem::conductor_selftest(worker_scores)
+}
+
+// ===========================================================================
 // M28: the verified OPERATOR-INBOUND command self-test facade -- the CAPSTONE
 // that closes the M23->M24->M25->M26->M27 learning loop. The RX dual of the M25
 // transcript: a SIMULATED enrolled verifier (a compiled-in test key, two creds)
