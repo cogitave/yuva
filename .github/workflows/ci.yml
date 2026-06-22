@@ -142,6 +142,15 @@ jobs:
       - name: Build xport-harness (M30 host echo peer)
         run: cargo build --release --manifest-path tools/xport-harness/Cargo.toml
 
+      # M38 (stage B): pre-build the host conductor binary on the runner so the
+      # cargo-less aarch64 boot container has it for the §8.6 CROSS-PROCESS
+      # recompute leg (the run script feeds the guest's emitted conduct-step trace
+      # to `conductor-host --recompute-from-trace` and string-equals the heads).
+      # The x86_64 runner-native lane builds it on demand inside run-x86_64.sh; the
+      # aarch64 container relies on this prebuilt copy (the xport-harness pattern).
+      - name: Build conductor-host (M38 stage-B cross-process recompute peer)
+        run: cargo build --release --manifest-path tools/conductor-host/Cargo.toml
+
       # aL2.4b: pre-generate the full-kernel EL1 guest image (the flat binary
       # the aarch64 boot's `-device loader` stages at the carve). Produced HERE
       # on the runner (which has rustup's llvm-tools llvm-objcopy) because the
