@@ -1,0 +1,354 @@
+# Yuva M32 stage A — the local-inference daemon lane (the FIRST machine-tokened
+# sovereignty debt; transport=LOCAL-ENGINE).
+#
+# WHAT THIS IS (M32 proposal §2/§8/§10/§14): a CPU-only, zero-network-at-runtime,
+# zero-secret, autonomously-buildable lane that proves the machine RUNS a model
+# itself — vendored llama.cpp behind a keyless, env-cleared, seccomp+Landlock-
+# self-sandboxed engine WORKER, supervised by a memory-safe Rust daemon that
+# holds ALL witness emission. The debt is machine-tokened on every witness line
+# (engine=VENDORED-C-LLAMACPP debt=SOVEREIGNTY-OPEN-B3
+# memsafety=UNSAFE-C-PROCESS-CONFINED weights=UNTRUSTED-INPUT-NAMED) and
+# grep-locked BIDIRECTIONALLY to the dependency (the debt-lockstep job below).
+#
+# Determinism is EARNED per run inside the §4 pinned envelope (single slot, no
+# prompt cache, pinned source build, n_threads=1, greedy top_k=1, BASELINE ISA
+# — no AVX dispatch, for cross-runner bit-exactness): a fresh-process 2-run
+# compare + a frozen second-prompt negative control + a per-run nonce-freshness
+# leg, each adjudicated against repo-pinned golden digests AT THE WORKFLOW LEVEL
+# (the independent stream — repo constant vs daemon stdout).
+#
+# THE MARKER `M32: local-infer OK backend=LOCAL-ENGINE` is printed ONLY in this
+# workflow's adjudication summary (the real-infer.yml precedent) — structurally
+# outside every guest-serial grep, so it can NEVER enter the cumulative chain.
+# The CI-required cumulative tail stays `M31: infer-e2e OK
+# backend=MOCK-DETERMINISTIC` permanently; this lane displaces nothing.
+#
+# STAGE SCOPE (binding, §8/§14): stage A is HOST-ADJUDICATED
+# (guestpath=MOCK-PINNED-HOST-ADJUDICATED) — no local-engine byte reaches the
+# guest. The kernel receive path is stage B, a named follow-up; #90 closes at
+# stage B, NEVER at stage A.
+#
+# DEVIATION (noted in the stage-A report): this lane does NOT substitute the
+# daemon as the boot's chardev peer; it adjudicates the daemon's separate
+# `--local-measure` witness (the M31-stage-C decoupled-witness precedent), so the
+# cumulative chain + run scripts stay byte-identical. The daemon's chardev-peer
+# capability (xport-core) is built+tested and exercised at stage B.
+
+name: m32-local-infer
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# The §4 lane pins, surfaced for the cache key. A bump here is a reviewed PR that
+# re-measures the goldens.
+env:
+  LLAMA_BTAG: b9756
+  LLAMA_COMMIT: d0f9d2e5ac5d4f51763755958b8f353fed01aaa2
+  # The Q8_0 cache artifact (NOT committed in-repo; the §5.5 setup-step re-fetch
+  # on miss). The 260K is in-repo (the network-independent smoke).
+  Q8_URL: https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q8_0.gguf
+  Q8_SHA256: 2eda49203f2f044f3dddf29a7dd7cc861ef5a0340f518a19613d73ba6d9c06b6
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # DEBT-LOCKSTEP — bidirectional, fail-closed; runs WITHOUT building the daemon
+  # so a token-drop/dep-rot commit is caught at the source level (the bench.yml
+  # BRAND lockstep precedent, §7). The CC=/bin/false poison probe (Rule 3) DOES
+  # build the worker against a pristine target dir.
+  # ---------------------------------------------------------------------------
+  debt-lockstep:
+    name: DEBT-LOCKSTEP (bidirectional token<->dependency grep, §7)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe A — dependency presence (source side)
+        id: depA
+        run: |
+          set -euo pipefail
+          DEP_LIVE=0
+          if grep -RqiE 'llama[-_.]?cpp|llama_cpp_sys|llama-engine-sys|ggml' \
+               tools/infer-daemon/Cargo.toml tools/infer-daemon/Cargo.lock \
+               tools/infer-daemon/llama-engine-sys/Cargo.toml \
+               tools/infer-daemon/llama-engine-sys/build.rs; then
+            DEP_LIVE=1
+          fi
+          if [ -d tools/infer-daemon/llama-engine-sys/vendor/llama.cpp ]; then
+            DEP_LIVE=1
+          fi
+          echo "DEP_LIVE=${DEP_LIVE}" >> "$GITHUB_OUTPUT"
+          echo "DEP_LIVE=${DEP_LIVE}"
+
+      # The open-debt token set must be present in the daemon's witness source
+      # (the witness.rs literals) IFF the dependency is live. We grep the SOURCE
+      # for the token spellings (a witness that cannot emit them is a dropped
+      # token regardless of whether the lane ran).
+      - name: Rule 1 / 1b / 2 — token<->dependency coupling
+        env:
+          DEP_LIVE: ${{ steps.depA.outputs.DEP_LIVE }}
+        run: |
+          set -euo pipefail
+          WIT=tools/infer-daemon/src/witness.rs
+          # Grep the CONST DEFINITIONS specifically (not comments/tests) — a
+          # dropped const value is a dropped token even if the literal survives
+          # in prose. Each open-debt token must be the VALUE of its named const.
+          has_open=0
+          if grep -qE 'pub const ENGINE: *&str *= *"VENDORED-C-LLAMACPP"' "$WIT" \
+             && grep -qE 'pub const DEBT: *&str *= *"SOVEREIGNTY-OPEN-B3"' "$WIT" \
+             && grep -qE 'pub const MEMSAFETY: *&str *= *"UNSAFE-C-PROCESS-CONFINED"' "$WIT" \
+             && grep -qE 'pub const WEIGHTS: *&str *= *"UNTRUSTED-INPUT-NAMED"' "$WIT"; then
+            has_open=1
+          fi
+          has_pure=0
+          if grep -qE 'pub const ENGINE: *&str *= *"PURE-RUST"' "$WIT"; then has_pure=1; fi
+
+          if [ "$DEP_LIVE" = "1" ] && [ "$has_open" = "0" ]; then
+            echo "::error::DEBT-LOCKSTEP Rule 1 FAIL: the dependency (llama.cpp/llama-engine-sys) is live but an open-debt token is missing from $WIT (debt token dropped while the dependency remains)"
+            exit 1
+          fi
+          if [ "$DEP_LIVE" = "1" ] && [ "$has_pure" = "1" ]; then
+            # 1b: closure claimed (engine const = PURE-RUST) while the C remains.
+            echo "::error::DEBT-LOCKSTEP Rule 1b FAIL: engine=PURE-RUST asserted while llama.cpp is in the build graph (closure claimed early)"
+            exit 1
+          fi
+          if [ "$DEP_LIVE" = "0" ]; then
+            if grep -qE 'pub const (ENGINE|DEBT): *&str *= *"(VENDORED-C-LLAMACPP|SOVEREIGNTY-OPEN-B3)"' "$WIT"; then
+              echo "::error::DEBT-LOCKSTEP Rule 2 FAIL: stale open-debt token const with no dependency (the C is gone but the token remains)"
+              exit 1
+            fi
+          fi
+          echo ">> DEBT-LOCKSTEP Rules 1/1b/2 OK (DEP_LIVE=${DEP_LIVE} has_open=${has_open})"
+
+      - name: Rule 4 — "local means local" (zero network deps in the daemon lockfile)
+        run: |
+          set -euo pipefail
+          if grep -iE 'ureq|reqwest|hyper|tokio|rustls' tools/infer-daemon/Cargo.lock; then
+            echo "::error::DEBT-LOCKSTEP Rule 4 FAIL: a network dependency is in tools/infer-daemon/Cargo.lock — the local engine must be zero-network (the shared plumbing lives in the dep-clean xport-core for exactly this reason)"
+            exit 1
+          fi
+          echo ">> DEBT-LOCKSTEP Rule 4 OK (no ureq/reqwest/hyper/tokio/rustls in the daemon lockfile)"
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install build deps (cmake, curl)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake
+
+      # Rule 3 (anti-hollow for the debt token ITSELF, §7/§17.8): pre-closure the
+      # worker build MUST FAIL under CC=/bin/false against a PRISTINE target dir
+      # (a forced -sys rebuild, never a warm cache) — proving the C is genuinely
+      # in the build graph.
+      - name: Rule 3 — CC=/bin/false poison probe (the C MUST be in the build graph)
+        run: |
+          set -uo pipefail
+          export CARGO_TARGET_DIR="$(mktemp -d)/poison-target"
+          export CARGO_INCREMENTAL=0
+          set +e
+          CC=/bin/false CXX=/bin/false \
+            cargo build --features engine --manifest-path tools/infer-daemon/Cargo.toml \
+            > poison.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::DEBT-LOCKSTEP Rule 3 FAIL: the worker BUILT under CC=/bin/false — the C is NOT in the build graph (a debt token over secretly C-free code is also a lie)"
+            tail -20 poison.log || true
+            exit 1
+          fi
+          echo ">> DEBT-LOCKSTEP Rule 3 OK: worker build FAILED under CC=/bin/false (the C is genuinely in the build graph; rc=${rc})"
+
+  # ---------------------------------------------------------------------------
+  # The cumulative-chain boot — the M32 lane proves the FULL M0..M31 chain still
+  # boots green (M32 displaces nothing). Uses the UNTOUCHED run scripts + the
+  # real xport-harness on both arches (the byte-for-byte mock lane).
+  # ---------------------------------------------------------------------------
+  cumulative-chain:
+    name: cumulative chain still green (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-yuva-none
+            qemu_pkg: qemu-system-x86
+            run: scripts/run-x86_64.sh
+            qemu_timeout: 40
+          - arch: aarch64
+            target: aarch64-yuva-none
+            qemu_pkg: qemu-system-arm
+            run: scripts/run-aarch64.sh
+            qemu_timeout: 240
+            boot_in_container: debian:trixie-slim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+      - name: Install QEMU (${{ matrix.arch }})
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }}
+      - name: Build kernel (${{ matrix.arch }})
+        run: cargo kbuild --target "targets/${{ matrix.target }}.json"
+      - name: Build xport-harness (the mock chardev peer)
+        run: cargo build --release --manifest-path tools/xport-harness/Cargo.toml
+      - name: Boot the cumulative chain (mock lane — M32 displaces nothing)
+        env:
+          QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          BOOT_IN_CONTAINER: ${{ matrix.boot_in_container }}
+        run: |
+          set -o pipefail
+          bash ${{ matrix.run }} 2>&1 | tee boot-${{ matrix.arch }}.log
+      - name: Assert the cumulative tail (and reject M32 tokens near it)
+        run: |
+          set -euo pipefail
+          LOG=boot-${{ matrix.arch }}.log
+          if ! grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' "$LOG"; then
+            echo "::error::the cumulative tail is missing — M32 must displace nothing"
+            exit 1
+          fi
+          # Lane cross-pin (§8.4): the cumulative-chain boot must NOT carry any
+          # M32 LOCAL-ENGINE token near its markers (no lane borrows another's
+          # evidence class).
+          if grep -E -- '(^|[^[:alnum:]])(M31:|M30:|infer:)' "$LOG" \
+               | grep -qiE -- 'backend=LOCAL-ENGINE|VENDORED-C-LLAMACPP|linfer:|infer-daemon:'; then
+            echo "::error::the cumulative-chain boot carries an M32 LOCAL-ENGINE token near its markers (lane cross-pin violated)"
+            exit 1
+          fi
+          echo ">> cumulative chain green on ${{ matrix.arch }}; no M32 token leaked into it"
+
+  # ---------------------------------------------------------------------------
+  # The LOCAL-ENGINE measurement + adjudication — the heart of the lane.
+  # ---------------------------------------------------------------------------
+  local-infer:
+    name: M32 stage A — the local inference daemon (LOCAL-ENGINE)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      # §8.7 — the env-ABSENCE assertion (the zero-secret lane's leak negative):
+      # ANTHROPIC_API_KEY must not be defined on this lane at all.
+      - name: Env-absence assertion (zero-secret lane)
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is defined on the zero-secret local-infer lane (it must be absent — §8.7)"
+            exit 1
+          fi
+          echo ">> env-absence OK: no ANTHROPIC_API_KEY on this lane"
+
+      - name: Install build deps (cmake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake
+
+      # §5.5 — the in-repo 260K is the network-independent smoke; the 26.7 MB
+      # Q8_0 rides actions/cache keyed by its hash, with a setup-step pinned
+      # re-fetch on miss (network confined to setup — the toolchain-install
+      # class). Hard-FAIL is reserved for hash MISMATCH.
+      - name: Restore the Q8_0 artifact cache
+        id: q8cache
+        uses: actions/cache@v4
+        with:
+          path: tools/infer-daemon/models/stories15M-q8_0.gguf
+          key: m32-q8-${{ env.Q8_SHA256 }}
+
+      - name: Fetch the Q8_0 on cache miss (hash-pinned setup step)
+        if: steps.q8cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p tools/infer-daemon/models
+          curl -sSL --fail -o tools/infer-daemon/models/stories15M-q8_0.gguf "${Q8_URL}"
+
+      - name: Re-verify the Q8_0 sha256 (hard-FAIL only on MISMATCH)
+        run: |
+          set -euo pipefail
+          GOT="$(sha256sum tools/infer-daemon/models/stories15M-q8_0.gguf | cut -d' ' -f1)"
+          if [ "$GOT" != "${Q8_SHA256}" ]; then
+            echo "::error::Q8_0 sha256 MISMATCH (pinned ${Q8_SHA256}, got ${GOT}) — hard FAIL, never a fallback fetch"
+            exit 1
+          fi
+          echo ">> Q8_0 sha256 verified"
+
+      # Cache the heavy llama.cpp build keyed by the pinned commit + a build-flag
+      # hash (the §10 build cache). The Rule 3 poison probe in the debt-lockstep
+      # job uses a PRISTINE dir, so this warm cache never makes it vacuous.
+      - name: Cache the llama.cpp build + cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            tools/infer-daemon/target
+          key: m32-build-${{ runner.os }}-${{ env.LLAMA_COMMIT }}-${{ hashFiles('tools/infer-daemon/llama-engine-sys/build.rs', 'tools/infer-daemon/llama-engine-sys/shim/engine_shim.cpp') }}
+
+      - name: Build the daemon + worker (with the C engine)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release --features engine --manifest-path tools/infer-daemon/Cargo.toml
+
+      # Measure the substrate fields for the witness (§4).
+      - name: Measure runner-image + glibc
+        id: substrate
+        run: |
+          set -euo pipefail
+          IMG="$(. /etc/os-release; echo "${ID}${VERSION_ID}")"
+          GLIBC="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "glibc=${GLIBC}" >> "$GITHUB_OUTPUT"
+
+      # The workflow samples the per-run nonce (§4 leg 4 — the canned-table
+      # killer; an INDEPENDENT stream from the daemon).
+      - name: Sample the per-run nonce
+        id: nonce
+        run: echo "hex=$(head -c16 /dev/urandom | xxd -p -c16)" >> "$GITHUB_OUTPUT"
+
+      - name: Run the LOCAL-ENGINE measurement (the §4 four legs)
+        id: measure
+        env:
+          XPORT_LOCAL_LLAMA: "1"
+          M32_NONCE_HEX: ${{ steps.nonce.outputs.hex }}
+          M32_RUNNER_IMAGE: ${{ steps.substrate.outputs.image }}
+          M32_GLIBC: ${{ steps.substrate.outputs.glibc }}
+          M32_Q8_PATH: tools/infer-daemon/models/stories15M-q8_0.gguf
+        run: |
+          set -o pipefail
+          tools/infer-daemon/target/release/infer-daemon --local-measure 2>measure.err | tee witness.log
+          echo "rc=$?"
+          tail -8 measure.err || true
+
+      - name: Adjudicate the witness (the §8 guards — the independent-stream golden compare)
+        env:
+          NONCE_HEX: ${{ steps.nonce.outputs.hex }}
+        run: |
+          set -euo pipefail
+          LOG=witness.log
+          bash scripts/m32-adjudicate.sh "$LOG" "$NONCE_HEX"
+
+      - name: Print the workflow-only marker + summary
+        run: |
+          set -euo pipefail
+          echo "M32: local-infer OK backend=LOCAL-ENGINE"
+          {
+            echo '## M32 local-infer: OK'
+            echo 'backend=LOCAL-ENGINE — the machine ran a model it owns the bytes of (vendored llama.cpp, keyless sandboxed worker; the SOVEREIGNTY-OPEN-B3 debt is machine-tokened on every line below).'
+            echo '```'
+            cat witness.log
+            echo 'M32: local-infer OK backend=LOCAL-ENGINE'
+            echo '```'
+            echo 'The cumulative tail stays `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (the M32 marker lives ONLY here, never in the guest-serial chain). Stage A is host-adjudicated (`guestpath=MOCK-PINNED-HOST-ADJUDICATED`); the kernel receive path is stage B (#90 closes there).'
+          } >> "$GITHUB_STEP_SUMMARY"

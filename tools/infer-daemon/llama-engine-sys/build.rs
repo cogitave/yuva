@@ -35,6 +35,8 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
+    println!("cargo:warning=llama-engine-sys: pinned llama.cpp {LLAMA_BTAG} @ {LLAMA_COMMIT}");
+
     // 1. Locate the vendored source: an explicit dir (CI cache / in-repo vendor)
     //    or fetch-on-miss into OUT_DIR, hash-pinned.
     let src = locate_or_fetch_source(&out_dir);

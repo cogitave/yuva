@@ -5,7 +5,7 @@
 //! builds the §8 witness line. The C is one process away, holding no key, no
 //! env, no network.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 use tb_encode::inferwire::body_digest;
@@ -22,8 +22,11 @@ pub struct WorkerRun {
 }
 
 /// A typed failure for the local-engine lane (the daemon's exit-3 refusal / the
-/// closed ENGINE-FAULT mapping).
+/// closed ENGINE-FAULT mapping). The variant fields are read via the `{:?}`
+/// Debug rendering in the refusal `eprintln!` (the dead-code lint does not see
+/// Debug-only reads).
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum EngineLaneError {
     ArtifactMissing(String),
     HashMismatch { path: String, want: String, got: String },

@@ -20,11 +20,17 @@
 //! here — it is workflow-adjudicated from the witness (the real-infer.yml
 //! summary-only precedent), so it can never enter the cumulative chain.
 
-mod pins;
+// witness is ALWAYS compiled so its unit tests run WITHOUT the C toolchain (the
+// brief's "unit-test the Rust paths, no llama.cpp" rule); its render is only
+// CALLED by the engine path, so allow dead_code when the feature is off.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
 mod witness;
 
+// pins/engine/worker are the engine-feature paths.
 #[cfg(feature = "engine")]
 mod engine;
+#[cfg(feature = "engine")]
+mod pins;
 #[cfg(feature = "engine")]
 mod worker;
 
@@ -36,6 +42,7 @@ use xport_core::{hex, ChardevPeer};
 /// The exit-3 LOUD refusal (the M31 NO_KEY_REFUSAL precedent): opted into the
 /// local engine but the artifacts/sandbox/determinism legs did not hold. NEVER
 /// a mock fallback wearing the local token.
+#[cfg(feature = "engine")]
 const LOCAL_REFUSAL_EXIT: i32 = 3;
 
 fn main() {
