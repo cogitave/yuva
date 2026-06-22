@@ -27,7 +27,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET_A64}/${PROFILE}/${KERNEL_BIN}}"
 QEMU="${QEMU_AARCH64:-qemu-system-aarch64}"
-MARKER="M31: infer-e2e OK backend=MOCK-DETERMINISTIC"
+# M38 (stage B) DISPLACED M31 as the cumulative tail: the kernel-integrated
+# conductor loop is the newest milestone. M31 is demoted-not-deleted (asserted
+# directly below per the displacement discipline); the M38 marker is the new
+# top-level grep. DECIMAL grammar (turns=N organs=K), now guest-serial.
+MARKER="M38: conductor OK turns=6 organs=3 verdict=ACCEPT"
 # DETERMINISM (fix_plan §A.1): the aarch64 lane is PURE TCG and, on a contended
 # hosted GitHub runner, TCG can spend ~15s just reaching rust_main before the
 # whole M0..M19 chain prints in a fraction of a second and parks in wfi. A tight
@@ -93,6 +97,23 @@ fi
 "${HARNESS_BIN}" --socket "${XSOCK}" --key-out "${XKEY}" \
   --timeout-secs $((TIMEOUT_SECS + 60)) > "${XHOUT}" 2>&1 &
 XPID=$!
+
+# M38 (stage B): the host conductor binary -- used ONLY for the §8.6 CROSS-PROCESS
+# recompute leg (--recompute-from-trace re-folds the GUEST's OWN emitted conduct-step
+# trace INDEPENDENTLY, host-side; the M38 guard string-equals its head against the
+# guest-emitted `conduct: head=..`). The cargo-less CI boot container consumes the
+# copy the runner step pre-built (the xport-harness prebuild pattern).
+CONDUCTOR_HOST_BIN="${REPO_ROOT}/tools/conductor-host/target/release/conductor-host"
+if [[ ! -x "${CONDUCTOR_HOST_BIN}" ]]; then
+  if command -v cargo >/dev/null 2>&1; then
+    echo "[run-aarch64] building conductor-host (host, release)" >&2
+    ( cd "${REPO_ROOT}/tools/conductor-host" && cargo build --release >&2 )
+  else
+    echo "[run-aarch64] FAIL: ${CONDUCTOR_HOST_BIN} missing and cargo unavailable -- build it first:" >&2
+    echo "[run-aarch64]   cargo build --release --manifest-path tools/conductor-host/Cargo.toml" >&2
+    exit 1
+  fi
+fi
 
 # aL2.4b: stage the SECOND kernel image (the full-kernel EL1 guest) as a flat
 # binary for `-device loader` at the pmm-reserved carve + the canonical
@@ -681,6 +702,85 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- M31 marker/witness carries an overclaim ('understood'/'reasoned'/'intelligen*'/'knows'/'learned'/'validated'/'evaluated'/'secure'/'confidential'/'private'/'authenticated-human'/'agi') -- M31's mock lane proves plumbing (recall -> prompt -> deterministic transform -> digest fold), never intelligence or semantics (M31 proposal §7.8)" >&2
         exit 1
     fi
+    # M31 is no longer the top-level grep (M38 displaced it as the cumulative tail);
+    # assert it directly so the M31 -> M38 order stays fail-closed + traceable (the
+    # demote-not-delete displacement discipline).
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' missing (M31 displaced/regressed)" >&2
+        exit 1
+    fi
+    # M38 (stage B) GUARDS (proposal §8 -- house order, mirroring the x86_64 lane):
+    # the guest drives the verified organ-loop over the cap chokepoint; the marker
+    # is the NEW cumulative tail. M38 displaces NOTHING below it (every prior fold
+    # head byte-identical -- the conductor folds on its OWN lane). The HOST-leg
+    # conduct lines are the un-framed ones in ${OUTPUT}; the in-guest leg's are
+    # hex-framed (asserted in the GUEST guard set below).
+    #
+    # (§8.1) Skip-reject: honest-skip-is-FAILURE, never green-by-omission.
+    if printf '%s' "${OUTPUT}" | grep -qiE -- 'M38: conductor OK \(.*(skip|single organ|always-accept)'; then
+        echo "[run-aarch64] FAIL -- M38 ran in a skipped/degenerate variant -- honest-skip-is-FAILURE (proposal §8.1)" >&2
+        exit 1
+    fi
+    # (§8.2) Positive-require the FULL one-line conductor witness (every honest
+    # token + flag), AND organs>=0x2 AND revise-cycles>=0x1. NECESSARY-not-
+    # sufficient; the load-bearing check is the §8.6 cross-process recompute below.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'conduct: head=0x[0-9a-f]{16} turns=0x[0-9a-f]+ organs=0x[0-9a-f]+ roles=[TWV]+ organ-seq=0x[0-9a-f]+ verdict=ACCEPT accept-at=0x[0-9a-f]+ revise-cycles=0x[0-9a-f]+ fold-verified=0x0*1 tamper-caught=0x0*1 organ-calls=0x[0-9a-f]+ logical-ticks=0x[0-9a-f]+ attested=0x0*1 prov-tag=0x4 policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED learning=DORMANT retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI local-organ=M38-AUTHORED-MOCK verifier=CI-DISCRETE-VERDICT m18-gate=ADMISSION-ONLY-INERT-IN-MOCK cost=HONEST-ACCOUNTED-TOKENED cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK orchestration=RAG-AGENTS-NOT-NEW-PARADIGM live[+]web=DISPATCH-ONLY novelty=VERIFIED-PROVENANCE-SOVEREIGN-WRAPPER generativity=OPEN-FRONTIER realtime=NOT-CLAIMED benchmark=NOT-CLAIMED stub-resistance=HOST-RECOMPUTE-FROM-INDEPENDENT-TRACE host=RESIDUAL-TCB sec=ASSUMED-FROM-LITERATURE'; then
+        echo "[run-aarch64] FAIL -- M38 marker present but the full one-line 'conduct: head=.. ..' witness (every honest token + flag) was NOT seen (hollow M38 pass)" >&2
+        exit 1
+    fi
+    CONDUCT_LINE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^conduct: head=0x' | head -1)"
+    M38_ORG_HEX="$(printf '%s' "${CONDUCT_LINE}" | sed -E 's/.* organs=0x0*([0-9a-f]+) .*/\1/')"
+    if [[ -z "${M38_ORG_HEX}" ]] || (( 16#${M38_ORG_HEX} < 2 )); then
+        echo "[run-aarch64] FAIL -- M38 organs=0x${M38_ORG_HEX} < 0x2 (a degenerate single-organ stub; the witness requires a measured >=2-organ sequence)" >&2
+        exit 1
+    fi
+    M38_RC_HEX="$(printf '%s' "${CONDUCT_LINE}" | sed -E 's/.* revise-cycles=0x0*([0-9a-f]+) .*/\1/')"
+    if [[ -z "${M38_RC_HEX}" ]] || (( 16#${M38_RC_HEX} < 1 )); then
+        echo "[run-aarch64] FAIL -- M38 revise-cycles=0x${M38_RC_HEX} < 0x1 (an always-accept stub; the witness requires a measured REVISE->ACCEPT cycle)" >&2
+        exit 1
+    fi
+    # (§8.6) THE LOAD-BEARING CROSS-PROCESS INDEPENDENT-RECOMPUTE LEG (the loopback/
+    # fixture killer): feed the GUEST's OWN emitted host-leg `conduct-step:` trace
+    # into the host conductor binary (--recompute-from-trace), which INDEPENDENTLY
+    # re-folds the M22 lineage via the SAME verified leaf in a SEPARATE process, and
+    # string-equal the host-recomputed head against the guest-emitted conduct: head.
+    GUEST_HEAD="$(printf '%s' "${CONDUCT_LINE}" | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+    if [[ -z "${GUEST_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- could not extract the guest-emitted 'conduct: head=0x<hex16>' (the conductor produced no head)" >&2
+        exit 1
+    fi
+    CONDUCT_TRACE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^conduct-step: ')"
+    if [[ -z "${CONDUCT_TRACE}" ]]; then
+        echo "[run-aarch64] FAIL -- the host-leg emitted NO 'conduct-step:' trace lines -- the §8.6 independent host-recompute has no input" >&2
+        exit 1
+    fi
+    RECOMPUTE_OUT="$(printf '%s\n' "${CONDUCT_TRACE}" | "${CONDUCTOR_HOST_BIN}" --recompute-from-trace 2>/dev/null || true)"
+    HOST_HEAD="$(printf '%s' "${RECOMPUTE_OUT}" | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+    if [[ -z "${HOST_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- the host conductor recompute produced no head from the guest trace (the §8.6 cross-process leg failed to run): ${RECOMPUTE_OUT}" >&2
+        exit 1
+    fi
+    if [[ "${GUEST_HEAD}" != "${HOST_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- CROSS-PROCESS mismatch -- guest-emitted conduct head (${GUEST_HEAD}) != host independent-recompute head (${HOST_HEAD}) from the guest's OWN trace; the lineage is forged/fixtured (proposal §8.6 -- the loopback killer)" >&2
+        exit 1
+    fi
+    # (§8.3) By-name rejects near the M38 lines.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(conduct:|conduct-step:|M38:)' | grep -qiE -- 'policy=LEARNED|policy=ES|policy=CMA|KAN_ACTIVE=true|backend=ANTHROPIC-LIVE|verifier=LEARNED|verifier=CLASSIFIER|embedding|cosine|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-infer'; then
+        echo "[run-aarch64] FAIL -- M38 marker/witness carries a by-name reject token (learned/ES/CMA/live/embedding/cosine/loopback/fixture/replay) -- the policy is HAND-WRITTEN + the verifier is the discrete CI verdict (proposal §8.3)" >&2
+        exit 1
+    fi
+    # (§8.5) Inherited tripwire: every host-leg conduct-step line is lowercase-hex ONLY.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])conduct-step:' | grep -vE -- '^conduct-step: turn=0x[0-9a-f]+ role=0x[0-9a-f]+ organ=0x[0-9a-f]+ verdict=0x[0-9a-f]+ organ-calls=0x[0-9a-f]+ t-logical=0x[0-9a-f]+$' | grep -q .; then
+        echo "[run-aarch64] FAIL -- a conduct-step line violates the strict lowercase-hex grammar -- the conductor trace must cross serial ONLY hex-encoded (proposal §8.5)" >&2
+        exit 1
+    fi
+    # (§8.7) Strip-then-reject: strip token VALUES, then reject residual claim words.
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(conduct:|M38:)' \
+         | sed -E 's/[a-z+-]+=[A-Za-z0-9+/.:_-]+//g' \
+         | grep -qiE -- 'learned|trained|intelligen|understood|generaliz|benchmark|SOTA|real-time|semantic|cosine|float|embedding'; then
+        echo "[run-aarch64] FAIL -- a residual claim word (learned/trained/intelligen/understood/generaliz/benchmark/SOTA/real-time/semantic/float/embedding) survives token-stripping near the M38 lines (proposal §8.7 razor)" >&2
+        exit 1
+    fi
     # L2.0: the REAL EL2 world-switch proof must print BEFORE the M19 tail on
     # aarch64 (virtualization=on enters at EL2 and drives the closed round-trip);
     # assert it directly so the el2->virtio order is fail-closed + traceable.
@@ -941,7 +1041,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         'M6: frame alloc OK' 'M7: heap OK' 'M8: timer OK' 'M9: preempt OK' \
         'M14.2: blocking-recv OK' 'M22: provenance OK' 'M23: experience OK' \
         'M25: operator OK' 'M26: exit-telemetry OK' 'M28: operator-cmd OK' \
-        'M29: khash-mac OK'; do
+        'M29: khash-mac OK' 'M38: conductor OK'; do
         if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- "${M}"; then
             echo "[run-aarch64] FAIL -- GUEST must-prove rung '${M}' missing from the in-guest chain" >&2
             exit 1
@@ -998,6 +1098,14 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- GUEST: the adversarial forge-test line was not produced (case (b) was not exercised)" >&2
         exit 1
     fi
+    # M38 (stage B) guest-side anti-hollow negative: the guest DELIBERATELY printed
+    # 'forge-test: M38: conductor OK ...'. It MUST be present in the decoded GUEST
+    # stream but appear in HOST ONLY hex-framed -- a deprivileged guest cannot forge
+    # a host-trusted M38 conductor marker (mirroring the M31/L2.4b forge-test cases).
+    if ! printf '%s' "${GUEST_STREAM}" | grep -qF -- 'forge-test: M38: conductor OK'; then
+        echo "[run-aarch64] FAIL -- GUEST: the adversarial 'forge-test: M38:' line was not produced (the M38 guest-side forgery negative was not exercised)" >&2
+        exit 1
+    fi
     if printf '%s' "${OUTPUT}" | grep -qF -- 'forge-test:'; then
         echo "[run-aarch64] FAIL -- a guest 'forge-test:' line leaked RAW into the HOST stream -- the guestlog framing failed (injection-proofing breach)" >&2
         exit 1
@@ -1009,13 +1117,21 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- expected exactly ONE host-side 'L2.4b: el1-kernel-guest OK' (the monitor's), saw ${L24B_COUNT} -- a forged guest marker may have escaped framing" >&2
         exit 1
     fi
+    # The guest's real in-guest M38 marker + its forged 'forge-test: M38:' must NOT
+    # add a SECOND un-framed M38 marker to HOST: exactly ONE real marker line (the
+    # host leg's). A forged/escaped guest M38 would push this above 1 and is caught.
+    M38_COUNT="$(printf '%s\n' "${OUTPUT}" | grep -cE -- '^M38: conductor OK turns=[0-9]+ organs=[0-9]+ verdict=ACCEPT$' || true)"
+    if [[ "${M38_COUNT}" != "1" ]]; then
+        echo "[run-aarch64] FAIL -- expected exactly ONE host-side 'M38: conductor OK ...' (the host leg's), saw ${M38_COUNT} -- a forged/escaped guest M38 marker may have escaped framing" >&2
+        exit 1
+    fi
     # ---- The diff-zero residue canary: zero raw 'guestlog:' bytes in HOST ----
     if printf '%s' "${OUTPUT}" | grep -qE -- '^guestlog:'; then
         echo "[run-aarch64] FAIL -- a 'guestlog:' framed line survived into the HOST stream (the strip stage did not remove it -- the diff-zero host-guard property is broken)" >&2
         exit 1
     fi
 
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M31 kernel as a stage-2-confined EL1 guest: monitor-witnessed doorbell/nonce/final-WFI, confinement-probe fault, in-guest skip-profile, forged-markers hex-framed]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed)"
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M38 kernel as a stage-2-confined EL1 guest: monitor-witnessed doorbell/nonce/final-WFI, confinement-probe fault, in-guest skip-profile, forged-markers hex-framed]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))"
     exit 0
 fi
 

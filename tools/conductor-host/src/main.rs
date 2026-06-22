@@ -20,6 +20,7 @@
 //!                        independent recompute DIVERGES from the policy head —
 //!                        the equality FAILS (the loopback/fixture killer).
 
+use std::io::Read as _;
 use std::process::exit;
 
 use tb_encode::conductor::{
@@ -232,8 +233,93 @@ fn revise_cycles(trace: &[TraceStep]) -> usize {
         .count()
 }
 
+/// STAGE B (proposal §8.6): the CROSS-PROCESS independent-recompute leg, host-side.
+/// Read the GUEST's OWN emitted `conduct-step:` trace lines from stdin, rebuild each
+/// `ConductDecision` from THOSE fields, INDEPENDENTLY re-fold the M22 lineage via the
+/// REUSED prov fold, and print `conductor-recompute: head=0x<hex16> steps=0x<n>`. The
+/// run-script string-equals this host-recomputed `head` against the guest-emitted
+/// `conduct: head=..` -- a forged guest summary cannot match the independent fold over
+/// the guest's own real trace. This is the SAME verified `tb_encode::conductor` leaf,
+/// in a SEPARATE host process, folding the guest's emitted trace -- the anti-hollow
+/// leg now guest -> host. Zero network, zero secret, deterministic.
+fn recompute_from_trace() -> ! {
+    // Parse `conduct-step: turn=0x.. role=0x.. organ=0x.. verdict=0x.. organ-calls=0x..
+    // t-logical=0x..` lines (the kernel's injection-proof hex-only trace). Any other
+    // line is ignored (the trace lines are self-delimiting). Hex fields are 0x-prefixed.
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("conductor-recompute: FAIL -- could not read the guest trace from stdin");
+        exit(1);
+    }
+    fn field_hex(line: &str, key: &str) -> Option<u64> {
+        // Find " key=0x<hex>" (or "key=" at line start after the prefix).
+        let needle = format!("{key}=0x");
+        let idx = line.find(&needle)? + needle.len();
+        let rest = &line[idx..];
+        let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+        u64::from_str_radix(&rest[..end], 16).ok()
+    }
+
+    let mut head = [0u8; PROV_HASH_LEN]; // genesis (all-zero) head
+    let mut scratch = [0u8; CONDUCT_CANON_LEN + 8];
+    let mut steps: u64 = 0;
+    for line in input.lines() {
+        let line = line.trim();
+        if !line.starts_with("conduct-step:") {
+            continue;
+        }
+        let (turn, role, organ, verdict, organ_calls, t_logical) = match (
+            field_hex(line, "turn"),
+            field_hex(line, "role"),
+            field_hex(line, "organ"),
+            field_hex(line, "verdict"),
+            field_hex(line, "organ-calls"),
+            field_hex(line, "t-logical"),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)) => (a, b, c, d, e, f),
+            _ => {
+                eprintln!("conductor-recompute: FAIL -- malformed conduct-step line: {line}");
+                exit(1);
+            }
+        };
+        // Rebuild the SAME ConductDecision the guest folded; fold it INDEPENDENTLY.
+        let rec = ConductDecision {
+            turn: turn as u8,
+            role: role as u8,
+            organ: organ as u8,
+            verdict: verdict as u8,
+            organ_calls: organ_calls as u16,
+            t_logical,
+        };
+        let n = canon(&rec, &mut scratch);
+        if n == 0 {
+            eprintln!("conductor-recompute: FAIL -- canon failed (impossible)");
+            exit(1);
+        }
+        let id = conduct_hash(&scratch[..n]);
+        head = conduct_chain_mix(head, id);
+        steps += 1;
+    }
+    if steps == 0 {
+        eprintln!("conductor-recompute: FAIL -- no conduct-step lines on stdin (the guest emitted no trace)");
+        exit(1);
+    }
+    // The u64 witness the guest also prints (head_witness over the 32-byte head) --
+    // the run-script string-equals THIS against the guest's `conduct: head=..`.
+    println!(
+        "conductor-recompute: head=0x{:016x} steps=0x{:x} recompute=INDEPENDENT trace=GUEST-EMITTED",
+        conduct_head_witness(head),
+        steps,
+    );
+    exit(0);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // STAGE B: the run-script cross-process recompute leg (reads the guest trace).
+    if args.iter().any(|a| a == "--recompute-from-trace") {
+        recompute_from_trace();
+    }
     let forge_single_organ = args.iter().any(|a| a == "--forge-single-organ");
     let forge_lineage = args.iter().any(|a| a == "--forge-lineage");
 

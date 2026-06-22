@@ -172,6 +172,14 @@ pub fn guest_exit_park(success: bool) -> ! {
         // appear in the decoded GUEST stream and ONLY hex-framed in HOST.
         crate::serial_write_str("forge-test: M31: infer-e2e OK backend=MOCK-DETERMINISTIC\n");
         crate::serial_write_str("forge-test: L2.4b: el1-kernel-guest OK\n");
+        // M38 (stage B): a DELIBERATELY forged conductor marker. A deprivileged
+        // guest cannot forge a host-trusted M38 marker -- these bytes leave ONLY
+        // hex-framed via the trapped PL011 `guestlog:` lines, so a forged `M38:`
+        // can NEVER satisfy a host grep nor enter the cumulative chain (the
+        // run-script asserts it appears in the decoded GUEST stream and ONLY
+        // hex-framed in HOST -- the guest-side anti-hollow negative, mirroring
+        // the M31 forge-test case above).
+        crate::serial_write_str("forge-test: M38: conductor OK turns=6 organs=3 verdict=ACCEPT\n");
         // Adversarial DoD case (a): EXACTLY ONE confinement-probe store to a
         // host-RAM IPA outside the carve. It must stage-2-fault (witnessed by
         // the monitor) and never land (the host re-checks its sentinel).
