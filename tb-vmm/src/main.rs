@@ -8,24 +8,31 @@
 //! `#![forbid(unsafe_code)]` boundary.
 //!
 //! Architecture (one module per concern, arch behind a seam):
-//! * [`cli`]     — argument parsing + the [`cli::Config`].
-//! * [`error`]   — the single [`error::VmmError`] type (no `unwrap` on the boot path).
-//! * [`memory`]  — guest RAM (`GuestMemoryMmap`) + `KVM_SET_USER_MEMORY_REGION`.
-//! * [`loader`]  — ELF64 `PT_LOAD` loader + brand-note 64-bit entry discovery.
-//! * [`device`]  — a PIO/MMIO [`device::Bus`] registry (extensible to virtio).
-//! * [`serial`]  — a minimal 16550A UART carrying guest output to stdout.
-//! * [`vmm`]     — the VM lifecycle + the `KVM_RUN` exit loop.
-//! * [`arch`]    — the arch seam; `arch::x86_64::boot` holds the verified
-//!                 Firecracker long-mode `KVM_SET_SREGS`/`KVM_SET_REGS` setup.
+//! * [`cli`] — argument parsing + the [`cli::Config`].
+//! * [`error`] — the single [`error::VmmError`] type (no `unwrap` on the boot path).
+//! * [`memory`] — guest RAM (`GuestMemoryMmap`) + `KVM_SET_USER_MEMORY_REGION`.
+//! * [`loader`] — ELF64 `PT_LOAD` loader + brand-note 64-bit entry discovery.
+//! * [`device`] — a PIO/MMIO [`device::Bus`] registry (extensible to virtio).
+//! * [`serial`] — a minimal 16550A UART carrying guest output to stdout.
+//! * [`virtio_mmio`] — M30 stage C: the modern virtio-mmio **virtio-console**
+//!   transport (tb-vmm's FIRST `mmio_bus` device).
+//! * [`infer_host`] — M30 stage C: the in-process host peer behind it (the
+//!   SAME `tb-encode` inferwire math as the QEMU-lane `xport-harness`;
+//!   `transport=TB-VMM-HOST`).
+//! * [`vmm`] — the VM lifecycle + the `KVM_RUN` exit loop.
+//! * [`arch`] — the arch seam; `arch::x86_64::boot` holds the verified
+//!   Firecracker long-mode `KVM_SET_SREGS`/`KVM_SET_REGS` setup.
 
 mod arch;
 mod cli;
 mod device;
 mod error;
+mod infer_host;
 mod loader;
 mod memory;
 mod report;
 mod serial;
+mod virtio_mmio;
 mod vmm;
 
 use std::process::ExitCode;

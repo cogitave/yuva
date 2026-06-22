@@ -1,7 +1,12 @@
 # vmm-boot CI — the L1 (tb-vmm) Definition-of-Done.
 #
 # Proves: tb-vmm boots the from-scratch kernel via tb-boot v0 (direct 64-bit
-# long mode, NO PVH note, NO A0 trampoline) and reaches "M4: user/ring OK".
+# long mode, NO PVH note, NO A0 trampoline) and — since M30 stage C — runs the
+# FULL cumulative chain to the M31 tail over tb-vmm's own virtio-console
+# backend (`transport=TB-VMM-HOST`, `bus=VIRTIO-MMIO`): run-vmm-x86_64.sh
+# enforces the M30 §5 guard block (positive witness, cross-process
+# challenge/tag equality against the in-process host peer's --xport-out
+# stream, key-leak negative, lane cross-pins) + the M31 §7 mock-e2e guards.
 # Requires hardware /dev/kvm. GitHub-hosted ubuntu runners expose /dev/kvm but
 # typically need a udev rule / chmod to grant access to the non-root runner user
 # (the same pattern android-emulator-runner uses):

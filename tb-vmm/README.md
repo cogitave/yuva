@@ -253,22 +253,34 @@ tb-vmm/
 | others | logged; loop continues or stops per policy |
 
 A **wall-clock guard** bounds the run so a hung guest cannot loop forever (CI
-adds an outer `timeout` as well). PASS is judged by the serial marker
-`M4: user/ring OK`, exactly like `scripts/run-x86_64.sh`.
+adds an outer `timeout` as well). PASS is judged by the cumulative serial
+marker tail asserted by `scripts/run-vmm-x86_64.sh` (since M30 stage C: the
+full M0..M31 chain + the M30/M31 guard blocks), exactly like
+`scripts/run-x86_64.sh`.
 
 ---
 
 ## 6. Devices
 
 A `DeviceBus` exposes a `trait Device { fn read(..); fn write(..) }` registered
-over **PIO** and **MMIO** address ranges — the extension point for virtio later
-(per the roadmap we deliberately do **not** pull in rust-vmm's virtio stack for
-L1; one console is enough for M0–M4 parity).
+over **PIO** and **MMIO** address ranges — the seam M30 stage C landed virtio
+on (per the roadmap we deliberately do **not** pull in rust-vmm's virtio stack;
+the device model stays hand-rolled and minimal).
 
-The one device today is a **16550A UART at I/O port `0x3F8`** (COM1): guest
-writes to THR are streamed to `tb-vmm`'s **stdout** (so CI can `grep` the marker),
-and host stdin is fed to the UART RX. It can be the minimal hand-rolled 16550 or
-`vm-superio`'s `Serial`.
+PIO devices: a **16550A UART at I/O port `0x3F8`** (COM1) — guest writes to THR
+stream to `tb-vmm`'s **stdout** (so CI can `grep` the markers) — and the
+BootReady (`0x510`) spawn-report device.
+
+MMIO device (M30 stage C — tb-vmm's FIRST `mmio_bus` device): a minimal
+**modern virtio-mmio virtio-console** (Version=2, DeviceID 3, `VERSION_1`-only,
+poll-only) at scan-slot 0 (`0xFEB0_0000`, `src/virtio_mmio.rs`), fronting the
+in-process M30/M31 host peer (`src/infer_host.rs`): per-run OS-RNG K+N custody,
+the host-keyed inferwire echo + cleartext key reveal, and the M31
+MOCK-DETERMINISTIC serve loop — the SAME Kani-proven `tb-encode` leaf the
+kernel and the QEMU-lane `xport-harness` compile (`transport=TB-VMM-HOST`).
+Its leg-2 witness lines go to `--xport-out` (a stream the guest cannot write);
+the per-run key hex goes to `--xport-key-out` for the run script's key-leak
+negative.
 
 ---
 

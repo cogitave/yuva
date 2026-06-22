@@ -82,12 +82,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tb-encode"
+version = "0.1.0"
+dependencies = [
+ "brand",
+]
+
+[[package]]
 name = "tb-vmm"
 version = "0.1.0"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "tb-boot",
+ "tb-encode",
  "vm-memory",
 ]
 
