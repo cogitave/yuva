@@ -73,6 +73,11 @@ use crate::tpsched::{
     canon as tp_canon, decode as tp_decode, frame_total, next_slot, slot_deadline_delta,
     FramePlan, SchedDecision, MIN_SLOT_TICKS, N_SLOTS, SCHED_CANON_LEN,
 };
+use crate::conductor::{
+    assign_role, canon as cd_canon, conduct_hash, decode as cd_decode, next as conduct_next,
+    select_organ, verifier_verdict, Action, ConductDecision, Organ, Role, Verdict,
+    CONDUCT_CANON_LEN, MAX_TURNS, N_ORGANS, VERDICT_MARGIN,
+};
 use crate::opframe_rx::{
     canon as cmd_canon, compute_mac, decode as cmd_decode, key_evolve, verify_decoded,
     CmdFrame, CmdVerdict, CMD_HEADER_LEN, KEY_LEN, MAC_LEN,
@@ -3486,6 +3491,357 @@ fn kani_tpsched_fold_tamper() {
     // NEG (flip-back): restoring the SAME byte restores the genuine leaf id.
     tampered[idx] ^= 0x01;
     assert!(prov_hash(&tampered) == leaf);
+}
+
+// ===========================================================================
+// M38 conductor: the verified VERIFIER-GATED ORGAN SCHEDULER. Ten harnesses
+// (per proposal §6 budget table), each with a NEGATIVE CONTROL. The decision
+// ALGEBRA proofs (totality / determinism / bounded-turns / Verifier-gates-
+// termination / no-fixed-point / verdict / canon) are CHEAP -- closed small
+// sets, no khash. Only kani_conduct_fold_tamper is a budget event: it rides
+// the EXISTING prov/khash pinned-vector shape (concrete-key/concrete-bytes,
+// SYMBOLIC FLIP INDEX only -- NEVER a fresh MAC shape; the #49 discipline),
+// exactly like kani_tpsched_fold_tamper above. The conductor writes NO fold
+// math (it REUSES the M22 prov fold verbatim under the CONDUCT_DECISION tag).
+// ===========================================================================
+
+/// (1) NEXT TOTALITY + DETERMINISM: `conduct_next` is total + panic-free over ALL
+/// `(turn, role, verdict)`, and DETERMINISTIC (same input -> same Action). A
+/// Verifier-ACCEPT terminates with Accept; everything else either Continues (under
+/// the budget) or Terminates with HaltBudget (at the budget).
+///
+/// NEGATIVE CONTROL: a non-exhaustive `next` match (e.g. omitting the budget
+/// branch) would leave a reachable input with no defined Action -> a panic the
+/// totality assert would hit; here every symbolic input yields a well-formed Action.
+#[kani::proof]
+fn kani_conduct_next_total_deterministic() {
+    let turn: u8 = kani::any();
+    let rt: u8 = kani::any();
+    kani::assume(rt <= 2);
+    let role = match Role::from_tag(rt) {
+        Some(r) => r,
+        None => return,
+    };
+    let vt: u8 = kani::any();
+    kani::assume(vt <= 2);
+    let verdict = match Verdict::from_tag(vt) {
+        Some(v) => v,
+        None => return,
+    };
+    // Total + panic-free over ALL inputs, and DETERMINISTIC.
+    let a = conduct_next(turn, role, verdict);
+    let b = conduct_next(turn, role, verdict);
+    assert!(a == b);
+    // The result is always a well-formed Action (a Continue stays within the
+    // budget, a Terminate carries a closed verdict).
+    match a {
+        Action::Continue { turn: nt, .. } => assert!(nt <= MAX_TURNS),
+        Action::Terminate(v) => assert!(
+            v as u8 == Verdict::Accept as u8 || v as u8 == Verdict::HaltBudget as u8
+        ),
+    }
+}
+
+/// (2) BOUNDED TURNS: the turn counter `conduct_next` emits is MONOTONE and never
+/// exceeds `MAX_TURNS` -- a Continue advances strictly under the budget, so no
+/// input drives the turn past the bound (no infinite loop, the liveness analog of
+/// `tpsched`'s frame conservation).
+///
+/// NEGATIVE CONTROL: an off-by-one bound (`<= MAX_TURNS` instead of `< MAX_TURNS`
+/// in the advance guard) would let a Continue emit `turn == MAX_TURNS` and then
+/// one more -> turn `MAX_TURNS+1` would be reachable -> the `< MAX_TURNS` assert
+/// on the next turn FAILS.
+#[kani::proof]
+fn kani_conduct_bounded_turns() {
+    let turn: u8 = kani::any();
+    let rt: u8 = kani::any();
+    kani::assume(rt <= 2);
+    let role = Role::from_tag(rt).unwrap();
+    let vt: u8 = kani::any();
+    kani::assume(vt <= 2);
+    let verdict = Verdict::from_tag(vt).unwrap();
+    if let Action::Continue { turn: nt, .. } = conduct_next(turn, role, verdict) {
+        // A Continue is emitted ONLY strictly under the budget, and the next turn
+        // is monotone (one greater than the current, saturating).
+        assert!(nt < MAX_TURNS);
+        assert!(nt == turn.saturating_add(1));
+    }
+}
+
+/// (3) VERIFIER GATES TERMINATION: the ONLY `Accept`-terminal transition has
+/// `role = Verifier`. A non-Verifier role can NEVER drive `conduct_next` to
+/// `Terminate(Accept)` -- so a Worker/Thinker "ACCEPT" cannot forge loop success.
+///
+/// NEGATIVE CONTROL: dropping the `role == Verifier` guard in `next` (terminating
+/// on ANY Accept) would make a Worker-ACCEPT terminate -> the
+/// `role != Verifier => not Terminate(Accept)` assert FAILS.
+#[kani::proof]
+fn kani_conduct_verifier_gates_termination() {
+    let turn: u8 = kani::any();
+    let rt: u8 = kani::any();
+    kani::assume(rt <= 2);
+    let role = Role::from_tag(rt).unwrap();
+    let vt: u8 = kani::any();
+    kani::assume(vt <= 2);
+    let verdict = Verdict::from_tag(vt).unwrap();
+    let action = conduct_next(turn, role, verdict);
+    let accept_terminal = matches!(action, Action::Terminate(v) if v as u8 == Verdict::Accept as u8);
+    if accept_terminal {
+        // The ONLY way to an Accept-terminal is a Verifier that Accepted.
+        assert!(role as u8 == Role::Verifier as u8);
+        assert!(verdict as u8 == Verdict::Accept as u8);
+    }
+    // And conversely: a non-Verifier role NEVER yields an Accept-terminal.
+    if role as u8 != Role::Verifier as u8 {
+        assert!(!accept_terminal);
+    }
+}
+
+/// (4) HALT-BUDGET FAIL-CLOSED: at the budget (`turn + 1 >= MAX_TURNS`) WITHOUT a
+/// Verifier-ACCEPT the transition is `Terminate(HaltBudget)` -- never a silent
+/// fall-through into success, never a silent loop.
+///
+/// NEGATIVE CONTROL: a silent fall-through at the budget (returning a Continue, or
+/// Terminate(Accept)) would make the budget-exhausted Verifier-REVISE NOT halt ->
+/// the `Terminate(HaltBudget)` assert FAILS.
+#[kani::proof]
+fn kani_conduct_halt_budget_failclosed() {
+    let turn: u8 = kani::any();
+    let rt: u8 = kani::any();
+    kani::assume(rt <= 2);
+    let role = Role::from_tag(rt).unwrap();
+    let vt: u8 = kani::any();
+    kani::assume(vt <= 2);
+    let verdict = Verdict::from_tag(vt).unwrap();
+    // At-or-past the budget AND not a Verifier-ACCEPT -> fail closed.
+    let is_verifier_accept =
+        role as u8 == Role::Verifier as u8 && verdict as u8 == Verdict::Accept as u8;
+    kani::assume(turn.saturating_add(1) >= MAX_TURNS);
+    kani::assume(!is_verifier_accept);
+    assert!(conduct_next(turn, role, verdict) == Action::Terminate(Verdict::HaltBudget));
+}
+
+/// (5) NO STARVING FIXED POINT (liveness, the `next_slot_roundrobin` analog): the
+/// role assignment cycles through all three roles, so no role is a fixed point
+/// that starves the Verifier -- a Verifier turn is reachable within every window
+/// of 3 consecutive turns over the loop's REACHABLE turn range. Concretely:
+/// `assign_role` is total, and over any three consecutive (non-wrapping) turns the
+/// Verifier role appears exactly once and all three roles are distinct (a true
+/// 3-cycle), so progress toward an ACCEPT is always reachable (no `(role, organ)`
+/// deadlock). The window is constrained so `turn + 2` does not wrap the `u8` --
+/// the loop only ever runs turns `0..MAX_TURNS`, never the wrap boundary, so the
+/// period-3 cover is the exact reachable property (the modular-arithmetic wrap at
+/// `255 -> 0` is NOT a reachable loop state and is correctly excluded).
+///
+/// NEGATIVE CONTROL: an `assign_role` that returned a constant role (e.g. always
+/// Thinker) would make the Verifier unreachable -> the "Verifier appears in the
+/// window" assert FAILS (the loop could never ACCEPT -> starvation).
+#[kani::proof]
+fn kani_conduct_no_fixed_point() {
+    let turn: u8 = kani::any();
+    // The reachable window: `turn + 2` must not wrap the u8 (the loop runs turns
+    // 0..MAX_TURNS, far below the wrap). This is the exact non-degenerate range.
+    kani::assume(turn <= 253);
+    let r0 = assign_role(turn);
+    let r1 = assign_role(turn + 1);
+    let r2 = assign_role(turn + 2);
+    // Over any 3 consecutive turns the Verifier role appears (period-3 cover).
+    let verifier_in_window = r0 as u8 == Role::Verifier as u8
+        || r1 as u8 == Role::Verifier as u8
+        || r2 as u8 == Role::Verifier as u8;
+    assert!(verifier_in_window);
+    // The three roles in the window are all distinct (a true 3-cycle, never a
+    // 2-role or 1-role degenerate that could starve a role).
+    assert!(r0 as u8 != r1 as u8);
+    assert!(r1 as u8 != r2 as u8);
+    assert!(r0 as u8 != r2 as u8);
+}
+
+/// (6) ORGAN-SELECT TOTALITY + DETERMINISM: `select_organ` is total + panic-free
+/// over ALL `usize` (it reduces into the registry range and looks up), DETERMINISTIC
+/// (same input -> same organ), and always returns a REGISTERED organ.
+///
+/// NEGATIVE CONTROL: a tie-break nondeterminism (or an out-of-range index without
+/// the `% N_ORGANS` reduction) would let `select_organ` panic or return an
+/// unregistered organ -> the determinism/registered assert FAILS.
+#[kani::proof]
+fn kani_conduct_organ_select_total() {
+    let pref: usize = kani::any();
+    let a = select_organ(pref);
+    let b = select_organ(pref);
+    // Deterministic.
+    assert!(a as u8 == b as u8);
+    // Always one of the registered organs (the closed set).
+    assert!((a as u8) < N_ORGANS as u8);
+    assert!(
+        a as u8 == Organ::RetrievalOverMemory as u8
+            || a as u8 == Organ::LocalM32 as u8
+            || a as u8 == Organ::ExternalMock as u8
+    );
+}
+
+/// (7) VERDICT MATCHES THE GATE_CLEARS CONJUNCTION: the discrete Verifier verdict
+/// is exactly the `bakeoff::gate_clears`-shaped conjunction -- a Verifier ACCEPTs
+/// iff `score - floor >= margin`, else REVISEs; and a NON-Verifier role NEVER
+/// ACCEPTs regardless of score (the structural gate). Proven over symbolic
+/// `score`/`floor`/`role`.
+///
+/// NEGATIVE CONTROL: an off-margin verdict (using `>` instead of `>=`, or dropping
+/// the role check) would flip a boundary ACCEPT or let a Worker ACCEPT -> the
+/// margin/role equivalence assert FAILS.
+#[kani::proof]
+fn kani_conduct_verdict_gate_clears() {
+    let score: i64 = kani::any();
+    let floor: i64 = kani::any();
+    let rt: u8 = kani::any();
+    kani::assume(rt <= 2);
+    let role = Role::from_tag(rt).unwrap();
+    let v = verifier_verdict(role, score, floor, VERDICT_MARGIN);
+    let clears = (score as i128).saturating_sub(floor as i128) >= VERDICT_MARGIN as i128;
+    if role as u8 == Role::Verifier as u8 {
+        // The Verifier verdict is EXACTLY the gate conjunction.
+        if clears {
+            assert!(v as u8 == Verdict::Accept as u8);
+        } else {
+            assert!(v as u8 == Verdict::Revise as u8);
+        }
+    } else {
+        // A non-Verifier role NEVER accepts (structural), even when the gate clears.
+        assert!(v as u8 == Verdict::Revise as u8);
+    }
+}
+
+/// (8) CANON INJECTIVITY + TOTALITY: `conductor::canon` is TOTAL (fails closed to 0
+/// on a too-small buffer) AND INJECTIVE -- two decisions differing in ANY field
+/// encode to different bytes (every field at a fixed offset).
+///
+/// NEGATIVE CONTROL: writing `verdict` at the `organ` offset (a dropped/overlapping
+/// field) would let two decisions differing only in those fields alias -> a
+/// field-difference assert FAILS.
+#[kani::proof]
+fn kani_conduct_canon_injective() {
+    let base = ConductDecision {
+        turn: kani::any(),
+        role: kani::any(),
+        organ: kani::any(),
+        verdict: kani::any(),
+        organ_calls: kani::any(),
+        t_logical: kani::any(),
+    };
+    let mut a = [0u8; CONDUCT_CANON_LEN];
+    let na = cd_canon(&base, &mut a);
+    assert_eq!(na, CONDUCT_CANON_LEN);
+    let mut small = [0u8; CONDUCT_CANON_LEN - 1];
+    assert_eq!(cd_canon(&base, &mut small), 0);
+
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; CONDUCT_CANON_LEN];
+            let nb = cd_canon(&$e, &mut b);
+            assert_eq!(nb, na);
+            let mut any = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any = true;
+                }
+                i += 1;
+            }
+            any
+        }};
+    }
+    let t2: u8 = kani::any();
+    kani::assume(t2 != base.turn);
+    assert!(differs!(ConductDecision { turn: t2, ..base }));
+    let r2: u8 = kani::any();
+    kani::assume(r2 != base.role);
+    assert!(differs!(ConductDecision { role: r2, ..base }));
+    let o2: u8 = kani::any();
+    kani::assume(o2 != base.organ);
+    assert!(differs!(ConductDecision { organ: o2, ..base }));
+    let v2: u8 = kani::any();
+    kani::assume(v2 != base.verdict);
+    assert!(differs!(ConductDecision { verdict: v2, ..base }));
+    let oc2: u16 = kani::any();
+    kani::assume(oc2 != base.organ_calls);
+    assert!(differs!(ConductDecision { organ_calls: oc2, ..base }));
+    let tl2: u64 = kani::any();
+    kani::assume(tl2 != base.t_logical);
+    assert!(differs!(ConductDecision { t_logical: tl2, ..base }));
+}
+
+/// (9) CANON ROUND-TRIP: `conductor::decode(conductor::canon(rec)) == rec` for a
+/// symbolic decision (the fixed-width bijection; every field read back from its
+/// fixed offset).
+///
+/// NEGATIVE CONTROL: a layout swap (turn at the t_logical offset) transposes the
+/// fields -> the equality FAILS.
+#[kani::proof]
+fn kani_conduct_canon_roundtrip() {
+    let rec = ConductDecision {
+        turn: kani::any(),
+        role: kani::any(),
+        organ: kani::any(),
+        verdict: kani::any(),
+        organ_calls: kani::any(),
+        t_logical: kani::any(),
+    };
+    let mut buf = [0u8; CONDUCT_CANON_LEN];
+    let n = cd_canon(&rec, &mut buf);
+    assert_eq!(n, CONDUCT_CANON_LEN);
+    assert!(cd_decode(&buf) == Some(rec));
+}
+
+/// (10) FOLD-TAMPER (the ONLY budget event; M29-C-thinned): a single-byte flip at
+/// a SYMBOLIC index of a committed decision's CANONICAL bytes changes its
+/// `conduct_hash` LEAF id (the 14-byte buffer is one hash invocation per call).
+/// The record is CONCRETE; the flip INDEX stays symbolic over ALL canonical byte
+/// positions -- the #49 pinned-vector / concrete-key / symbolic-flip-index shape
+/// the M22/M27 suites document, NEVER a fresh MAC shape.
+///
+/// M29-C COMPOSITION (the one documented stage-C concession, identical to
+/// `kani_tpsched_fold_tamper`): this harness machine-proves the LEAF claim only;
+/// the chain-level rejection of a tampered decision (recomputed `conduct_head`
+/// mismatch + inclusion failure) is the COMPOSITION of three separately
+/// machine-proven conjuncts -- (leaf != leaf' [THIS harness]) AND (`chain_mix`
+/// tamper-sensitive at every byte [`kani_prov_chain_mix_tamper`]) AND (inclusion
+/// iff [`kani_prov_inclusion_sound`]). The conductor writes NO fold math: the fold
+/// IS the M22 `prov` fold those harnesses drive (reused verbatim under the
+/// CONDUCT_DECISION tag).
+/// fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound)
+///
+/// NEGATIVE CONTROLS: a constant/identity hash would make the flipped-vs-original
+/// ids EQUAL -> the `!=` assert FAILS; the flip-back leg (re-flip the SAME index
+/// -> the genuine leaf id returns) proves the mutation reaches the hash.
+#[kani::proof]
+fn kani_conduct_fold_tamper() {
+    let rec = ConductDecision {
+        turn: 2,
+        role: Role::Verifier as u8,
+        organ: Organ::LocalM32 as u8,
+        verdict: Verdict::Accept as u8,
+        organ_calls: 3,
+        t_logical: 0xCAFE,
+    };
+    let mut bytes = [0u8; CONDUCT_CANON_LEN];
+    let n = cd_canon(&rec, &mut bytes);
+    assert_eq!(n, CONDUCT_CANON_LEN);
+
+    // The genuine committed LEAF id.
+    let leaf = conduct_hash(&bytes);
+
+    // TAMPER: a symbolic-index flip -> a different leaf id (-> a different head +
+    // a failing inclusion proof, BY COMPOSITION -- the fold-claim marker).
+    let idx: usize = kani::any();
+    kani::assume(idx < CONDUCT_CANON_LEN);
+    let mut tampered = bytes;
+    tampered[idx] ^= 0x01;
+    let bad = conduct_hash(&tampered);
+    assert!(bad != leaf);
+
+    // NEG (flip-back): restoring the SAME byte restores the genuine leaf id.
+    tampered[idx] ^= 0x01;
+    assert!(conduct_hash(&tampered) == leaf);
 }
 
 // ===========================================================================

@@ -83,6 +83,13 @@ pub mod kind {
     pub const FORGET: u8 = 2;
     /// A T4 skill admission (`skill_add_class`) -- a learned-skill provenance edge.
     pub const SKILL_ADMIT: u8 = 3;
+    /// An M38 CONDUCTOR decision ([`crate::conductor::ConductDecision`]) -- one
+    /// orchestration step (select-organ / assign-role / Verifier verdict)
+    /// folded into the per-session `conduct_head` via the REUSED fold. The
+    /// conductor leaf writes NO new fold math; it stamps this tag and reuses
+    /// `append`/`chain_mix`/`recompute`/`verify_inclusion` verbatim (the
+    /// M23/M25/M26/M27 prov-reuse discipline).
+    pub const CONDUCT_DECISION: u8 = 4;
 }
 
 /// A fixed, canonical provenance entry (proposal §3). Field order + an explicit
