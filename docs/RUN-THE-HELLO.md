@@ -31,21 +31,27 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
 1. answers the guest the deterministic wire exchange first (the kernel chain
    stays green — see the honest scope below),
 2. then makes **exactly one** Messages API call: the prompt envelope asks for
-   two lines — line 1 the character-REVERSED hex of the kernel's per-boot
-   wire challenge (`transform=HEX-REVERSE` — the §5 liveness proof: fresh
-   every boot, so a canned fixture or replay fails; the reversal substring is
-   the ONLY acceptance criterion), line 2 one short sentence greeting Yuva —
-   the hello this lane exists for,
-3. verifies the transform, digests the response text, prints its witness, and
+   two lines — line 1 the kernel's per-boot wire challenge, rendered as four
+   pre-grouped 8-char hex groups, written back in REVERSE GROUP ORDER
+   (`transform=HEX-GROUP-REVERSE` — the §5 liveness proof: fresh every boot,
+   so a canned fixture or replay fails, and a prompt echo normalizes to the
+   FORWARD order, never the reversed one; the reversed-group substring is the
+   ONLY acceptance criterion. This is transform v2: v1 asked for
+   character-level reversal — a known LLM tokenization weakness — and the
+   first live dispatch, run 27408247558, was a real 200 that missed it),
+   line 2 one short sentence greeting Yuva — the hello this lane exists for,
+3. verifies the transform, digests the response text, prints its verdict, and
    frames the (scrubbed, capped at 2048 bytes) response text as lowercase hex
-   on one `xport-harness-infer-body:` line.
+   on one `xport-harness-infer-body:` line — **also on the 200-class
+   failures** `TRANSFORM-MISS` and `REFUSAL`, so even a failed hello stays
+   readable.
 
 ## What the expected output looks like
 
 In the run log, on success:
 
 ```
-xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x<32 hex> transform=HEX-REVERSE transform-ok=1 http=200 reqid-hex=<hex> resp-digest=0x<32 hex> model=claude-haiku-4-5 max-tokens=64 stop=END-TURN key-custody=HOST-ENV
+xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x<32 hex> transform=HEX-GROUP-REVERSE transform-ok=1 http=200 reqid-hex=<hex> resp-digest=0x<32 hex> model=claude-haiku-4-5 max-tokens=64 stop=END-TURN key-custody=HOST-ENV
 xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<lowercase hex of the response text>
 M31: real-infer OK backend=ANTHROPIC-LIVE
 ```
@@ -71,15 +77,21 @@ M31-live: SKIP reason=ANTHROPIC_API_KEY-absent
 
 On failure the verdict line carries a distinct closed outcome (proposal §12,
 never conflated): `TRANSFORM-MISS` (the model answered but missed the
-reversal — reported, never silently retried into a pass) ≠ `REFUSAL` ≠
+group reversal — reported, never silently retried into a pass) ≠ `REFUSAL` ≠
 `LIVENESS-FAIL` (no fresh round-trip evidence) ≠ the retryables
 `RATE-LIMITED`/`OVERLOADED`/`API-ERROR`/`TIMEOUT` (re-dispatch when the
 provider recovers) ≠ `AUTH` (the provisioned key is invalid).
 
+**Failed hellos are visible too:** on the 200-class failures
+(`TRANSFORM-MISS`, `REFUSAL`) the verdict line additionally carries the
+response's `resp-digest=`, the hex-framed body line still prints, and the
+Summary page decodes it under *"What the model actually said (UNTRUSTED MODEL
+OUTPUT — the lane still FAILED)"* — you read the words; the lane stays red.
+
 ## What it costs — the spend pin
 
 **One call per dispatch**, model **`claude-haiku-4-5`** (haiku-class — the
-cheapest adequate model for a 32-character reversal), **`max_tokens=64`**.
+cheapest adequate model for a group-order reversal), **`max_tokens=64`**.
 Both are compile-time consts in `tools/xport-harness/src/live.rs`
 (`LIVE_MODEL`, `LIVE_MAX_TOKENS`) — no env var or flag can raise the spend;
 changing it is a reviewed code change. The harness latches at most one call

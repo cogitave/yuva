@@ -7,7 +7,10 @@
 # on the M30 channel, the bridge makes EXACTLY ONE pinned Messages API call
 # (model claude-haiku-4-5, max_tokens 64 — both compile-time consts in
 # tools/xport-harness/src/live.rs, the operator's spend pin), verifies the
-# §5 HEX-REVERSE liveness transform of the kernel's per-boot wire challenge,
+# §5 HEX-GROUP-REVERSE liveness transform (v2 — group-order reversal of the
+# pre-grouped challenge hex; v1's char-level reversal was a tokenization-
+# unrealistic capability test, observed as TRANSFORM-MISS on run 27408247558)
+# of the kernel's per-boot wire challenge,
 # and prints its host-leg witness. This job adjudicates that witness and
 # prints the workflow-level verdict `M31: real-infer OK backend=ANTHROPIC-LIVE`
 # (the M31 proposal's dual-marker live spelling).
@@ -160,39 +163,68 @@ jobs:
             exit 1
           fi
 
+          # The body-line grammar (shared by the OK and failure paths; the
+          # empty hex= case is an empty-content refusal -- emptiness, not
+          # silence). Its prefix is disjoint from the verdict prefix by
+          # construction (the harness's unit tests assert it), so check (c)
+          # above cannot have counted it.
+          BODY_RE='^xport-harness-infer-body: len=[0-9]+ truncated=[01] hex=[0-9a-f]*$'
+
           # (d) the §5.4 host-leg acceptance: 200 + request-id evidence +
           # transform-ok=1, on the exact witness grammar (hex + closed tokens
           # only — the model text itself appears nowhere; its digest is the
-          # commitment).
-          WITNESS_RE='^xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x[0-9a-f]{32} transform=HEX-REVERSE transform-ok=1 http=200 reqid-hex=[0-9a-f]+ resp-digest=0x[0-9a-f]{32} model=claude-haiku-4-5 max-tokens=64 stop=[A-Z-]+ key-custody=HOST-ENV$'
+          # commitment). transform=HEX-GROUP-REVERSE is v2: v1's char-level
+          # reversal was a tokenization-unrealistic capability test (the
+          # observed TRANSFORM-MISS on run 27408247558).
+          WITNESS_RE='^xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x[0-9a-f]{32} transform=HEX-GROUP-REVERSE transform-ok=1 http=200 reqid-hex=[0-9a-f]+ resp-digest=0x[0-9a-f]{32} model=claude-haiku-4-5 max-tokens=64 stop=[A-Z-]+ key-custody=HOST-ENV$'
           WITNESS="$(grep -E -- "${WITNESS_RE}" "${LOG}" | head -1 || true)"
           if [ -z "${WITNESS}" ]; then
             FAILLINE="$(grep -E -- '^xport-harness-infer: backend=ANTHROPIC-LIVE .*transform-ok=0' "${LOG}" | head -1 || true)"
             echo "::error::M31 real-infer FAIL: no §5.4 witness; verdict line: ${FAILLINE:-<absent — silence is FAIL>}"
+            # A 200-class failure (TRANSFORM-MISS/REFUSAL) carries exactly ONE
+            # hex-framed body line: the lane failed, but what the model
+            # actually said is still witnessable on the summary page (the
+            # run-27408247558 lesson). Other outcomes carry none.
+            FBODY="$(grep -E -- "${BODY_RE}" "${LOG}" | head -1 || true)"
+            case "${FAILLINE}" in
+              *"outcome=TRANSFORM-MISS"*|*"outcome=REFUSAL"*) WANT_BODY=1 ;;
+              *) WANT_BODY=0 ;;
+            esac
+            FBODIES="$(grep -cE -- "${BODY_RE}" "${LOG}" || true)"
+            if [ "${FBODIES}" != "${WANT_BODY}" ]; then
+              echo "::error::M31 real-infer FAIL (additional): body-line count ${FBODIES} != expected ${WANT_BODY} for this outcome class"
+            fi
             {
               echo '## M31 real-infer: FAIL'
               echo '```'
               echo "${FAILLINE:-no live verdict line at all (silence is FAIL)}"
+              if [ -n "${FBODY}" ]; then
+                echo "${FBODY}"
+              fi
               echo '```'
               echo 'Distinct outcomes (proposal §12, never conflated): `TRANSFORM-MISS` / `REFUSAL` are model-behavior verdicts (reported, never retried into a pass); `RATE-LIMITED` / `OVERLOADED` / `API-ERROR` / `TIMEOUT` are FAIL-RETRYABLE — re-dispatch when the provider recovers; `AUTH` means the provisioned key is invalid.'
+              if [ -n "${FBODY}" ]; then
+                echo ''
+                echo '### What the model actually said (UNTRUSTED MODEL OUTPUT — the lane still FAILED)'
+                echo '````'
+                python3 -c 'import sys; sys.stdout.write(bytes.fromhex(sys.argv[1]).decode("utf-8", "replace") + "\n")' "$(printf '%s' "${FBODY}" | sed -E 's/^.* hex=([0-9a-f]*)$/\1/')"
+                echo '````'
+                echo 'The lane log itself is hex-only; this decode exists ONLY on this summary page.'
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
           # (e) THE HEX-FRAMED BODY LINE (the hello, witnessable): on a §5.4
           # pass, exactly ONE 'xport-harness-infer-body:' line is required —
-          # the silence-is-FAIL discipline extends to it. Its prefix is
-          # disjoint from the verdict prefix by construction (the harness's
-          # unit tests assert the disjointness), so check (c) above cannot
-          # have counted it.
-          BODY_RE='^xport-harness-infer-body: len=[0-9]+ truncated=[01] hex=[0-9a-f]+$'
+          # the silence-is-FAIL discipline extends to it.
           BODIES="$(grep -cE -- "${BODY_RE}" "${LOG}" || true)"
           if [ "${BODIES}" != "1" ]; then
             echo "::error::M31 real-infer FAIL: expected exactly ONE hex-framed body line on a passing witness, saw ${BODIES} (the hello must be witnessable — silence is FAIL)"
             exit 1
           fi
           BODY_LINE="$(grep -E -- "${BODY_RE}" "${LOG}" | head -1)"
-          BODY_HEX="$(printf '%s' "${BODY_LINE}" | sed -E 's/^.* hex=([0-9a-f]+)$/\1/')"
+          BODY_HEX="$(printf '%s' "${BODY_LINE}" | sed -E 's/^.* hex=([0-9a-f]*)$/\1/')"
 
           # (f) the workflow-level verdict — the proposal's dual-marker live
           # spelling, printed HERE (host-adjudicated; see the header note on
