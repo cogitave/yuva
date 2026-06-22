@@ -1,0 +1,194 @@
+# Yuva M38 stage A — the conductor host-adjudication lane (TRINITY ADOPT-1).
+#
+# WHAT THIS IS (M38 proposal §2.2/§8/§11A): a CPU-only, zero-network-at-runtime,
+# zero-secret, autonomously-buildable lane that proves the machine ORCHESTRATES
+# its own organs under a Kani-verified discrete policy and MEASURES the result.
+# The conductor-host binary runs the verified tb-encode::conductor policy over a
+# FIXED OFFLINE transcript of three M38-authored deterministic mock organs
+# ({RetrievalOverMemory, LocalM32-mock, ExternalMock} — NO real M31/M32 calls, NO
+# network), CAPTURES the organ-call trace as a SEPARATE stream, and INDEPENDENTLY
+# recomputes the M22-folded decision lineage from THAT trace. The LOAD-BEARING
+# stub-killer is the cross-process equality policy-head == host-independent-recompute
+# head (§8.6) — a fabricated trace yields a different head and the lane goes RED.
+#
+# THE MARKER `M38: conductor OK turns=N organs=K verdict=ACCEPT` is printed ONLY in
+# this workflow's adjudication summary (the real-infer.yml / m32-local-infer.yml
+# precedent) — structurally outside every guest-serial grep, so it can NEVER enter
+# the cumulative chain. The CI-required cumulative tail stays
+# `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` permanently; this lane displaces
+# nothing (proposal §8 marker discipline).
+#
+# STAGE SCOPE (binding, §8/§11): stage A is HOST-ADJUDICATED
+# (guestpath=MOCK-PINNED-HOST-ADJUDICATED) — no conductor byte reaches the guest;
+# the kernel-integrated organ-execution loop is stage B (#105 closes there, NEVER
+# at stage A). This lane adjudicates the conductor-host witness; the cumulative
+# chain + run scripts stay byte-identical.
+#
+# ANTI-HOLLOW (§8): the lane ALSO runs the two negative modes (--forge-single-organ
+# and --forge-lineage) and asserts they go RED — a stub that always picks one organ
+# or forges the lineage MUST be caught (the measured >=2-organ sequence + the real
+# Verifier verdict + the cross-process lineage equality are all load-bearing).
+
+name: conductor-host
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The cumulative-tail INVARIANT + lane cross-pin (source-level). The full
+  # M0..M31 chain boot is ci.yml's job (it runs on the SAME push); re-booting it
+  # here would duplicate ci.yml for zero added evidence. Stage A's witness is
+  # DECOUPLED (the conductor-host is not the boot's chardev peer), so the M38
+  # lane's chain obligation is exactly: the cumulative-tail spelling is UNCHANGED
+  # and no run script secretly emits an M38 conductor token (the lane cross-pin,
+  # §8.4, at the source). Stage B re-introduces the on-boot proof.
+  # ---------------------------------------------------------------------------
+  cumulative-tail-invariant:
+    name: cumulative tail unchanged + lane cross-pin (source)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: The cumulative tail spelling is unchanged (ci.yml boots it)
+        run: |
+          set -euo pipefail
+          if ! grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' scripts/run-x86_64.sh; then
+            echo "::error::the cumulative-tail marker spelling moved in run-x86_64.sh — M38 must displace nothing at stage A"
+            exit 1
+          fi
+          echo ">> cumulative tail 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' intact"
+      - name: Lane cross-pin (§8.4) — no M38 conductor token in the run scripts
+        run: |
+          set -euo pipefail
+          if grep -RqiE '(^|[^[:alnum:]])(conduct:|conductor-host:|M38:)|M38: conductor OK' scripts/run-x86_64.sh scripts/run-aarch64.sh; then
+            echo "::error::a run script carries an M38 conductor token near the cumulative chain (lane cross-pin violated — no lane borrows another's evidence class)"
+            exit 1
+          fi
+          echo ">> lane cross-pin OK: the run scripts carry no M38 conductor evidence"
+
+  # ---------------------------------------------------------------------------
+  # The conductor measurement + adjudication — the heart of the lane.
+  # ---------------------------------------------------------------------------
+  conductor:
+    name: M38 stage A — the host conductor (host-adjudicated)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      # §8.7 — the env-ABSENCE assertion (the zero-secret lane's leak negative):
+      # ANTHROPIC_API_KEY must not be defined on this lane at all.
+      - name: Env-absence assertion (zero-secret lane)
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is defined on the zero-secret conductor lane (it must be absent — §8.7)"
+            exit 1
+          fi
+          echo ">> env-absence OK: no ANTHROPIC_API_KEY on this lane"
+
+      # The lockfile-cleanliness rule (proposal §2.2): conductor-host path-deps
+      # tb-encode ALONE — zero network deps, zero unlanded-crate dep.
+      - name: Dep-clean assertion (zero network deps in the conductor-host lockfile)
+        run: |
+          set -euo pipefail
+          if grep -iE 'ureq|reqwest|hyper|tokio|rustls|serde_json' tools/conductor-host/Cargo.lock; then
+            echo "::error::a network/serde dependency is in tools/conductor-host/Cargo.lock — stage A must be zero-network, tb-encode-only"
+            exit 1
+          fi
+          echo ">> dep-clean OK: conductor-host links tb-encode alone (no network deps)"
+
+      - name: Build the conductor-host (release)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release --manifest-path tools/conductor-host/Cargo.toml
+
+      # (1) THE HONEST RUN — the verified policy + the independent recompute MATCH.
+      - name: Run the conductor (honest) and capture the witness
+        run: |
+          set -o pipefail
+          tools/conductor-host/target/release/conductor-host 2>conductor.err | tee witness.log
+          echo "rc=${PIPESTATUS[0]}"
+          tail -4 conductor.err || true
+
+      - name: Adjudicate the witness (the §8 guards — independent host-recompute)
+        run: |
+          set -euo pipefail
+          bash scripts/conductor-adjudicate.sh witness.log
+
+      # (2) THE ANTI-HOLLOW NEGATIVES — both MUST go RED (exit 1). A stub that
+      #     always picks one organ / forges the lineage cannot pass.
+      - name: Negative — --forge-single-organ MUST be caught (lane RED)
+        run: |
+          set -uo pipefail
+          set +e
+          tools/conductor-host/target/release/conductor-host --forge-single-organ > forge-single.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the --forge-single-organ degenerate stub PASSED (organs<2 / revise<1 must fail the witness — anti-hollow hole)"
+            cat forge-single.log || true
+            exit 1
+          fi
+          # And the adjudicator must ALSO reject its witness.
+          set +e
+          bash scripts/conductor-adjudicate.sh forge-single.log >/dev/null 2>&1
+          adj=$?
+          set -e
+          if [ "$adj" -eq 0 ]; then
+            echo "::error::the adjudicator ACCEPTED a single-organ stub witness (the measured-sequence guard is hollow)"
+            exit 1
+          fi
+          echo ">> --forge-single-organ correctly REJECTED (binary rc=${rc}, adjudicator rc=${adj})"
+
+      - name: Negative — --forge-lineage MUST be caught (lane RED)
+        run: |
+          set -uo pipefail
+          set +e
+          tools/conductor-host/target/release/conductor-host --forge-lineage > forge-lineage.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the --forge-lineage tamper PASSED (the independent host-recompute must diverge from the policy head — the loopback/fixture killer is hollow)"
+            cat forge-lineage.log || true
+            exit 1
+          fi
+          set +e
+          bash scripts/conductor-adjudicate.sh forge-lineage.log >/dev/null 2>&1
+          adj=$?
+          set -e
+          if [ "$adj" -eq 0 ]; then
+            echo "::error::the adjudicator ACCEPTED a forged-lineage witness (the cross-process recompute leg is hollow)"
+            exit 1
+          fi
+          # Positively confirm the heads DIVERGED in the forged witness.
+          if ! grep -qE 'lineage-equal=0x0( |$)' forge-lineage.log; then
+            echo "::error::the forged-lineage witness did not declare lineage-equal=0x0 (the divergence was not surfaced)"
+            exit 1
+          fi
+          echo ">> --forge-lineage correctly REJECTED (binary rc=${rc}, adjudicator rc=${adj}, lineage-equal=0x0)"
+
+      - name: Print the workflow-only marker + summary
+        run: |
+          set -euo pipefail
+          MARKER="$(grep -E '^M38: conductor OK ' witness.log | head -1)"
+          echo "${MARKER}"
+          {
+            echo '## M38 conductor (stage A): OK'
+            echo 'TRINITY ADOPT-1 — a Kani-verified discrete policy orchestrated three organs over a fixed offline transcript; the host INDEPENDENTLY recomputed the M22 decision lineage from a SEPARATE trace capture (the cross-process anti-hollow leg). The novelty is the verified+attested+sovereign WRAPPER, NOT a new learning paradigm.'
+            echo '```'
+            cat witness.log
+            echo '```'
+            echo 'The cumulative tail stays `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` (the M38 marker lives ONLY here, never in the guest-serial chain). Stage A is host-adjudicated (`guestpath=MOCK-PINNED-HOST-ADJUDICATED`); the kernel-integrated loop is stage B (#105 closes there). The two anti-hollow negatives (`--forge-single-organ`, `--forge-lineage`) were both REJECTED.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,113 @@
+# Yuva M38 stage A — the M18.1 admission-gate negative lane (the inert-in-mainline
+# M18 leg, EXERCISED so it is not merely ASSERTED — proposal §3/§7).
+#
+# WHY THIS LANE (M38 proposal §3-C / §Adversarial-review must-fix-1): in the
+# required all-mock conductor chain NO organ is high-impact, so the M18.1
+# `harness_merge` human-approval gate's fail-closed `Denied` branch (taken ONLY
+# when `high == true`, caps.rs:1004-1010) is NEVER reached — it reduces to the
+# `high==false -> skip` no-op every boot. Because gate (C) is provably inert in
+# the mainline, M38 adds this DEDICATED negative lane that proves the M18 leg
+# STILL BITES when a high-impact organ/skill ADMISSION is attempted WITHOUT
+# approval: `harness_merge -> SysStatus::Denied`. The Verifier that bites in the
+# REQUIRED chain is the discrete bakeoff::gate_clears-shaped verdict
+# (`verifier=CI-DISCRETE-VERDICT`); the M18.1 gate is admission-only
+# (`m18-gate=ADMISSION-ONLY-INERT-IN-MOCK`) and bites only at the operator-gated
+# high-impact ADMISSION stage.
+#
+# WHAT IT PROVES (autonomous, zero-network, zero-secret): the landed kernel ALREADY
+# exercises this exact negative every boot (kernel/src/main.rs:3066-3077 —
+# (A1) high-impact merge with Handle::NULL approval -> Denied, stays PROPOSED,
+# admitted-count unchanged; (A2) with a cap lacking APPROVE_HIGH_IMPACT -> Denied),
+# emitting `M18.1: approval-gate OK`. This lane pins, at the SOURCE, that:
+#   (1) the fail-closed `high==true -> Denied` branch EXISTS in caps.rs (a deletion
+#       fails the lane),
+#   (2) the kernel selftest ASSERTS the (A1)/(A2) Denied negatives (a weakening to
+#       a non-Denied expectation fails the lane),
+#   (3) the M38 conductor leaf carries the honest m18-gate=ADMISSION-ONLY token
+#       spelling (so the witness can never silently reclassify the gate).
+# The leg is thus EXERCISED (the boot runs the Denied path) AND source-pinned here.
+
+name: conductor-m18neg
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  m18-admission-gate-negative:
+    name: M18.1 admission-gate fail-closed (high-impact WITHOUT approval -> Denied)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # (1) The fail-closed Denied branch (the `high==true` arm) must EXIST in the
+      #     landed gate — a deletion of the mandatory gate fails the lane.
+      - name: Pin the fail-closed Denied branch in harness_merge (caps.rs)
+        run: |
+          set -euo pipefail
+          CAPS=crates/tb-hal/src/caps.rs
+          # The high-impact arm that demands an approval capability, fail-closed.
+          if ! grep -qE 'if high' "$CAPS"; then
+            echo "::error::the high-impact gate arm 'if high' is missing from harness_merge ($CAPS) — the M18.1 admission gate was removed/weakened"
+            exit 1
+          fi
+          # The fail-closed Denied on a missing approval (Ok(false) -> Denied).
+          if ! grep -qE 'Ok\(false\) *=> *return *\(SysStatus::Denied' "$CAPS"; then
+            echo "::error::the fail-closed 'Ok(false) => return (SysStatus::Denied, false)' branch is missing from harness_merge ($CAPS) — the mandatory human-approval gate no longer fails closed"
+            exit 1
+          fi
+          echo ">> caps.rs harness_merge fail-closed Denied branch (high-impact WITHOUT approval) present"
+
+      # (2) The kernel selftest must ASSERT the (A1)/(A2) Denied negatives — a
+      #     weakening to a non-Denied expectation fails the lane. This is the leg
+      #     being EXERCISED (the boot runs the Denied path), source-pinned here.
+      - name: Pin the kernel M18.1 negative selftest (Denied without approval)
+        run: |
+          set -euo pipefail
+          M=kernel/src/main.rs
+          # (A1) merge with NO approval capability -> the selftest fails closed
+          # UNLESS the status is Denied (so the assertion is the Denied negative).
+          if ! grep -qE 'st != caps::SysStatus::Denied \|\| adm' "$M"; then
+            echo "::error::the kernel M18.1 negative selftest no longer asserts 'st != Denied || adm' (the high-impact-WITHOUT-approval Denied negative was weakened) — $M"
+            exit 1
+          fi
+          # The marker the negative leg gates.
+          if ! grep -qF -- 'M18.1: approval-gate OK' "$M"; then
+            echo "::error::the 'M18.1: approval-gate OK' marker (the exercised-negative gate) is missing from $M"
+            exit 1
+          fi
+          echo ">> kernel M18.1 selftest asserts the high-impact-WITHOUT-approval Denied negatives (exercised every boot, gated by 'M18.1: approval-gate OK')"
+
+      # (3) The conductor leaf must carry the honest m18-gate token spelling, so
+      #     the witness can never silently reclassify the admission-only gate as a
+      #     per-step invocation gate (the §3/§10 honesty token).
+      - name: Pin the conductor m18-gate honesty token
+        run: |
+          set -euo pipefail
+          H=tools/conductor-host/src/main.rs
+          if ! grep -qF -- 'm18-gate=ADMISSION-ONLY-INERT-IN-MOCK' "$H"; then
+            echo "::error::the conductor witness no longer carries 'm18-gate=ADMISSION-ONLY-INERT-IN-MOCK' ($H) — the gate could silently be reclassified as per-step invocation approval"
+            exit 1
+          fi
+          # And the verifier-that-bites token must stay the discrete verdict.
+          if ! grep -qF -- 'verifier=CI-DISCRETE-VERDICT' "$H"; then
+            echo "::error::the conductor witness no longer carries 'verifier=CI-DISCRETE-VERDICT' ($H) — the CI-biting Verifier was reclassified"
+            exit 1
+          fi
+          echo ">> conductor honesty tokens intact: m18-gate=ADMISSION-ONLY-INERT-IN-MOCK + verifier=CI-DISCRETE-VERDICT"
+
+      - name: Summary
+        run: |
+          {
+            echo '## M38 conductor-m18neg: OK'
+            echo 'The M18.1 admission gate (`harness_merge`) is provably INERT in the all-mock conductor chain (no organ is high-impact -> the fail-closed `Denied` branch is never reached), so this dedicated lane EXERCISES it: the landed kernel runs the high-impact-WITHOUT-approval `Denied` negative every boot (gated by `M18.1: approval-gate OK`), and this lane source-pins (1) the fail-closed branch in `caps.rs`, (2) the kernel `Denied` assertion, (3) the honest `m18-gate=ADMISSION-ONLY-INERT-IN-MOCK` + `verifier=CI-DISCRETE-VERDICT` tokens. The Verifier that bites in the required chain is the discrete `gate_clears`-shaped verdict, NOT a human-approval gate.'
+          } >> "$GITHUB_STEP_SUMMARY"

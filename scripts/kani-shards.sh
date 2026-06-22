@@ -57,7 +57,7 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=102
+EXPECTED_HARNESSES_TOTAL=112
 
 # Shard A (52): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
@@ -136,14 +136,17 @@ SHARD_A=(
   kani_guestlog_regex_inert
 )
 
-# Shard B (50): the learning-loop codec families (M21 kancell, M22 prov canon,
+# Shard B (60): the learning-loop codec families (M21 kancell, M22 prov canon,
 # M23 exp, M24 explore/bakeoff, M25 opframe, M26 exittel, M27 tpsched, M28 cmd
 # -- measured ~6.5s average, NOT trivial) + the heavy iff/determinism fold
 # legs (inclusion_sound, head_deterministic, bakeoff_replay), the thinned
-# per-milestone fold leaves, key_evolve, the M30 peer-binding legs, and the
-# M31 inference-adapter six (placed HERE per the one-touch rule -- shard B was
-# the lighter shard by measured cost, 620.0s vs A's 799.6s, and the six
-# measure light: see the inline annotations).
+# per-milestone fold leaves, key_evolve, the M30 peer-binding legs, the
+# M31 inference-adapter six, and the M38 conductor TEN (placed HERE per the
+# one-touch rule -- shard B was the lighter shard by measured cost, 620.0s vs
+# A's 799.6s, and the conductor ten measure light: nine ALGEBRA harnesses are
+# cheap closed-set proofs (~1-2s each) and only kani_conduct_fold_tamper is a
+# budget event (~28.5s local WSL, the prov/khash pinned-vector one-execution
+# shape -- the kani_tpsched_fold_tamper sibling cost ~25.6s)).
 SHARD_B=(
   # M21 kancell x6 (trivial)
   kani_kan_spline_eval_total_bounded
@@ -208,6 +211,21 @@ SHARD_B=(
   kani_infer_resp_binding               # 89s
   kani_infer_domain_sep                 # 75s
   kani_infer_err_closed                 # 3s
+  # M38 conductor x10 (measured locally at landing, WSL seconds -- nine cheap
+  # closed-set ALGEBRA proofs run as a group in ~7.9s wall; the ONE budget event
+  # kani_conduct_fold_tamper is the prov/khash pinned-vector one-execution shape
+  # ~28.5s, the kani_tpsched_fold_tamper sibling at ~25.6s. The conductor writes
+  # NO new fold math -- it REUSES the M22 prov fold under the CONDUCT_DECISION tag.)
+  kani_conduct_next_total_deterministic
+  kani_conduct_bounded_turns
+  kani_conduct_verifier_gates_termination
+  kani_conduct_halt_budget_failclosed
+  kani_conduct_no_fixed_point
+  kani_conduct_organ_select_total
+  kani_conduct_verdict_gate_clears
+  kani_conduct_canon_injective
+  kani_conduct_canon_roundtrip
+  kani_conduct_fold_tamper              # 28.5s
 )
 
 # The fail-closed completeness/disjointness guard (#101 -- see the header).

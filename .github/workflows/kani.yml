@@ -85,7 +85,7 @@ jobs:
   # inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO failures
   # AND that SUCCESSFUL == that shard's pinned count, with the two lists pinned
   # disjoint + exhaustive against the total
-  # EXPECTED_HARNESSES_TOTAL (currently 102: the 15 original + the 5 L2.1 stage-2/
+  # EXPECTED_HARNESSES_TOTAL (currently 112: the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -263,7 +263,25 @@ jobs:
   # frames; NEG: a nibble-truncating encoder collides) / kani_guestlog_regex_inert
   # (THE load-bearing no-raw-leak property: the payload region is lowercase-hex
   # ONLY, so guest bytes are inert to every unanchored host guard; NEG: the
-  # identity-passthrough encoder leaks a forged 'M20: persist OK' byte);
+  # identity-passthrough encoder leaks a forged 'M20: persist OK' byte) + the 10
+  # M38 conductor verified VERIFIER-GATED-ORGAN-SCHEDULER harnesses (the discrete
+  # hand-written policy ALGEBRA: kani_conduct_next_total_deterministic (next total
+  # + panic-free + deterministic over all (turn,role,verdict)) /
+  # kani_conduct_bounded_turns (a Continue advances strictly under MAX_TURNS, the
+  # no-infinite-loop bound) / kani_conduct_verifier_gates_termination (the ONLY
+  # Accept-terminal has role=Verifier; a Worker-ACCEPT cannot forge success) /
+  # kani_conduct_halt_budget_failclosed (at the budget without ACCEPT -> HaltBudget,
+  # never silent success/loop) / kani_conduct_no_fixed_point (the role cycle covers
+  # the Verifier within every 3-turn window -> no starving fixed point, the
+  # next_slot_roundrobin liveness analog) / kani_conduct_organ_select_total
+  # (select_organ total + deterministic + always a registered organ) /
+  # kani_conduct_verdict_gate_clears (the discrete ACCEPT/REVISE verdict is exactly
+  # the bakeoff::gate_clears conjunction; a non-Verifier role NEVER accepts) /
+  # kani_conduct_canon_injective / kani_conduct_canon_roundtrip / kani_conduct_fold_tamper
+  # (M29-C-thinned to LEAF-sensitivity + flip-back, the ONLY budget event -- the
+  # conductor writes NO new fold math, it REUSES the M22 prov fold verbatim under
+  # the NEW prov::kind::CONDUCT_DECISION tag;
+  # fold-claim=LEAF-SENSITIVITY+COMPOSED(chain_mix_tamper, inclusion_sound));
   # bump in LOCKSTEP with scripts/kani-shards.sh -- the #101 one-touch
   # procedure: the new harness name goes into exactly ONE shard list there +
   # EXPECTED_HARNESSES_TOTAL) before emitting the per-shard DoD markers

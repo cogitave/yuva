@@ -305,6 +305,7 @@
 
 pub mod bakeoff;
 pub mod blkfmt;
+pub mod conductor;
 pub mod el2_trap;
 pub mod exittel;
 pub mod exp;

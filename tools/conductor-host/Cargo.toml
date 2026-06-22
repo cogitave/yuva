@@ -1,0 +1,56 @@
+# conductor-host — the M38 stage-A HOST conductor (the offline organ-execution +
+# independent-recompute peer for the conductor-host.yml adjudication lane).
+#
+# WHAT THIS IS (M38 proposal §2.2/§8/§11A): a small std, host-side binary that
+# performs the actual organ EXECUTION the verified `tb-encode::conductor` policy
+# SELECTS, over a FIXED OFFLINE transcript of three M38-authored deterministic
+# mock organs ({RetrievalOverMemory, LocalM32-mock, ExternalMock} — NO real
+# M31/M32 calls, NO network, NO secret). It runs the verified policy to ACCEPT,
+# CAPTURES the organ-call trace as a SEPARATE stream, and INDEPENDENTLY
+# recomputes the M22-folded decision lineage from THAT trace — the cross-process
+# anti-hollow leg (a fabricated trace fails the independent fold). It prints the
+# witness: organ-sequence + role-trace + verdict + turn-count + the decision-
+# lineage head + the ADOPT-4 honest COST record (organ-calls/turns/logical-ticks,
+# honestly NOT wall-clock latency).
+#
+# THE BOUNDARY (proposal §2.2): the DISCRETE policy + the Verifier verdict + the
+# provenance fold are IN `tb-encode` (Kani-provable, no-float, host-verifiable);
+# this binary is the host execution layer. It path-deps `tb-encode` ALONE (one
+# codec, never a re-implementation — the M30 §3d rule) and links the SAME
+# conductor codecs the kernel does.
+#
+# STAGE-A SELF-CONTAINMENT (proposal §2.2 + Landing-note LN-2): for stage A this
+# binary VENDORS its own minimal plumbing rather than depending on the now-landed
+# `tools/xport-core/` — a DELIBERATE dependency-isolation decision (xport-core is
+# a now-available REUSE OPTION, not a forced dependency). The stage-A transcript
+# is fully offline + deterministic, so no chardev socket / MAC serve-loop is
+# exercised here; the byte-identical chardev peer is a stage-B follow-up.
+#
+# An independent nested workspace (the tb-vmm / xport-harness / xport-core
+# precedent): cargo auto-excludes it from the root no_std workspace; it keeps its
+# own Cargo.lock.
+
+[package]
+name = "conductor-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yuva M38 stage-A host conductor: runs the verified tb-encode::conductor policy over a fixed offline mock-organ transcript and independently recomputes the M22 decision lineage (the cross-process anti-hollow leg)."
+license = "Apache-2.0"
+
+[workspace]
+
+[[bin]]
+name = "conductor-host"
+path = "src/main.rs"
+
+[dependencies]
+# The verified conductor policy + the M22 prov fold (no_std + forbid(unsafe_code),
+# zero deps — it builds for the host triple by design, which is exactly what makes
+# this host peer the SAME-math executor instead of a re-implementation). This is
+# the ONLY dependency — zero network, zero TLS, zero secrets, zero unlanded-crate
+# dependency (the proposal §11A "green unattended" guarantee).
+tb-encode = { path = "../../crates/tb-encode" }
+
+[profile.release]
+panic = "abort"

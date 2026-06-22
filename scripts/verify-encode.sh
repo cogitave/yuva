@@ -9,7 +9,7 @@
 # 45-min cap and M31 stage A adds +6 harnesses):
 #   SHARD=all  (default) -- the single full counted pass, local-workflow
 #              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
-#              pinned EXPECTED_HARNESSES_TOTAL (96), marker `V1: kani-encoders OK`.
+#              pinned EXPECTED_HARNESSES_TOTAL (112), marker `V1: kani-encoders OK`.
 #   SHARD=a|b  -- run ONLY that shard's pinned harness list (repeated
 #              `--harness <name>` + `--exact` -- exact-name matching, never
 #              substring, so e.g. kani_kan_envelope_no_widening can never
