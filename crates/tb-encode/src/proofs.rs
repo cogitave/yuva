@@ -3561,9 +3561,10 @@ fn kani_conduct_bounded_turns() {
     kani::assume(vt <= 2);
     let verdict = Verdict::from_tag(vt).unwrap();
     if let Action::Continue { turn: nt, .. } = conduct_next(turn, role, verdict) {
-        // A Continue is emitted ONLY strictly under the budget, and the next turn
-        // is monotone (one greater than the current, saturating).
-        assert!(nt < MAX_TURNS);
+        // A Continue is emitted ONLY within the budget (`<= MAX_TURNS`, never
+        // beyond), and the next turn is monotone (one greater than the current,
+        // saturating). Turn MAX_TURNS is the last evaluable turn.
+        assert!(nt <= MAX_TURNS);
         assert!(nt == turn.saturating_add(1));
     }
 }
@@ -3597,9 +3598,11 @@ fn kani_conduct_verifier_gates_termination() {
     }
 }
 
-/// (4) HALT-BUDGET FAIL-CLOSED: at the budget (`turn + 1 >= MAX_TURNS`) WITHOUT a
-/// Verifier-ACCEPT the transition is `Terminate(HaltBudget)` -- never a silent
-/// fall-through into success, never a silent loop.
+/// (4) HALT-BUDGET FAIL-CLOSED: past the budget (`turn + 1 > MAX_TURNS`, i.e. the
+/// next turn would EXCEED MAX_TURNS) WITHOUT a Verifier-ACCEPT the transition is
+/// `Terminate(HaltBudget)` -- never a silent fall-through into success, never a
+/// silent loop. Turn MAX_TURNS is still evaluable (the Verifier landing there can
+/// ACCEPT); only ADVANCING beyond it fails closed.
 ///
 /// NEGATIVE CONTROL: a silent fall-through at the budget (returning a Continue, or
 /// Terminate(Accept)) would make the budget-exhausted Verifier-REVISE NOT halt ->
@@ -3613,10 +3616,11 @@ fn kani_conduct_halt_budget_failclosed() {
     let vt: u8 = kani::any();
     kani::assume(vt <= 2);
     let verdict = Verdict::from_tag(vt).unwrap();
-    // At-or-past the budget AND not a Verifier-ACCEPT -> fail closed.
+    // The next turn would EXCEED the budget AND it is not a Verifier-ACCEPT ->
+    // fail closed. (turn.saturating_add(1) > MAX_TURNS <=> turn >= MAX_TURNS.)
     let is_verifier_accept =
         role as u8 == Role::Verifier as u8 && verdict as u8 == Verdict::Accept as u8;
-    kani::assume(turn.saturating_add(1) >= MAX_TURNS);
+    kani::assume(turn.saturating_add(1) > MAX_TURNS);
     kani::assume(!is_verifier_accept);
     assert!(conduct_next(turn, role, verdict) == Action::Terminate(Verdict::HaltBudget));
 }

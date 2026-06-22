@@ -326,11 +326,13 @@ pub fn next(turn: u8, role: Role, verdict: Verdict) -> Action {
     if role as u8 == Role::Verifier as u8 && verdict as u8 == Verdict::Accept as u8 {
         return Action::Terminate(Verdict::Accept);
     }
-    // Bounded turns: advance only while strictly under the budget. `next_turn`
+    // Bounded turns: advance only while the next turn is WITHIN the budget
+    // (`<= MAX_TURNS`, so turn MAX_TURNS is the last evaluable turn -- the
+    // Verifier landing on turn MAX_TURNS still gets to ACCEPT). `next_turn`
     // saturates so the counter is monotone and can never wrap (the
-    // `kani_conduct_bounded_turns` invariant).
+    // `kani_conduct_bounded_turns` invariant: monotone, never `> MAX_TURNS`).
     let next_turn = turn.saturating_add(1);
-    if next_turn < MAX_TURNS {
+    if next_turn <= MAX_TURNS {
         return Action::Continue {
             turn: next_turn,
             role: assign_role(next_turn),
@@ -565,9 +567,14 @@ mod tests {
             }
             other => panic!("expected continue, got {other:?}"),
         }
-        // At the budget without ACCEPT -> HaltBudget.
+        // Turn MAX_TURNS is still evaluable -- a Verifier landing on it can ACCEPT.
         assert_eq!(
-            next(MAX_TURNS - 1, Role::Verifier, Verdict::Revise),
+            next(MAX_TURNS, Role::Verifier, Verdict::Accept),
+            Action::Terminate(Verdict::Accept)
+        );
+        // Advancing PAST the budget (turn == MAX_TURNS, REVISE) -> HaltBudget.
+        assert_eq!(
+            next(MAX_TURNS, Role::Verifier, Verdict::Revise),
             Action::Terminate(Verdict::HaltBudget)
         );
     }
@@ -581,7 +588,8 @@ mod tests {
         loop {
             let (_v, action) = step(turn, 0, i64::MAX, VERDICT_MARGIN);
             steps += 1;
-            assert!(steps <= MAX_TURNS + 1, "loop did not terminate");
+            // Evaluable turns are 0..=MAX_TURNS -> at most MAX_TURNS + 1 steps.
+            assert!(steps <= MAX_TURNS + 2, "loop did not terminate");
             match action {
                 Action::Terminate(v) => {
                     assert_eq!(v, Verdict::HaltBudget);
