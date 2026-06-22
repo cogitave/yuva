@@ -331,7 +331,8 @@ pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
 ///
 /// The envelope asks for TWO lines: line 1 is the strict liveness transform
 /// (the four pre-grouped hex groups in reverse order, nothing else ON THAT
-/// LINE), line 2 is one short greeting to Yuva -- the hello this lane exists
+/// LINE), line 2 is one short greeting to Cogi -- the mind that sent this
+/// message (Yuva is its home, not its name) -- the hello this lane exists
 /// for. The greeting is §5-COMPATIBLE BY CONSTRUCTION: acceptance
 /// ([`liveness_ok`]) is the normalized substring search for the transform
 /// and nothing else, so the greeting line can neither help a non-compliant
@@ -348,8 +349,8 @@ pub fn build_request_body(challenge: &[u8; 16], guest_prompt: &[u8]) -> String {
          Line 1: the following four 8-character hex groups written in \
          REVERSE ORDER (last group first, first group last), space-separated, \
          and nothing else on that line: {grouped} \
-         Line 2: one short sentence greeting Yuva, the machine that sent you \
-         this message. \
+         Line 2: one short sentence greeting Cogi, the mind that sent you \
+         this message from its home Yuva. \
          Context bytes from the guest, hex-encoded, provenance only, do not \
          echo them: {prompt_hex}"
     );
@@ -958,6 +959,10 @@ mod tests {
         // v2 FAILED this (transform-ok=0 outcome=TRANSFORM-MISS) because the
         // model produced the BYTE-order reversal, not the group-order one.
         // v3 accepts it with matched=BYTE.
+        // NB: the greeting reads "Hello Yuva" because that run pre-dates the
+        // Cogi/Yuva fix (the envelope then greeted the HOME, not the mind);
+        // preserved verbatim as a historical record -- the greeting text is
+        // incidental, only the reversal drives acceptance.
         let challenge: [u8; 16] = [
             0x8c, 0x3f, 0x1a, 0x58, 0x72, 0x75, 0xa8, 0xd8, 0x56, 0x7b, 0x73, 0xb8, 0x92, 0x6c,
             0xb1, 0xa1,
@@ -1300,8 +1305,8 @@ mod tests {
         let text = v["messages"][0]["content"].as_str().unwrap();
         // Line 1 stays strict ON THAT LINE...
         assert!(text.contains("nothing else on that line"));
-        // ...line 2 is the greeting to Yuva...
-        assert!(text.contains("greeting Yuva"));
+        // ...line 2 is the greeting to Cogi (the mind; Yuva is its home)...
+        assert!(text.contains("greeting Cogi"));
         // ...and the provenance clause survives verbatim in spirit.
         assert!(text.contains("provenance only"));
         assert!(text.contains("do not echo"));
@@ -1312,12 +1317,12 @@ mod tests {
         let reversed = group_rev(&CHALLENGE);
         // Reversal line + a greeting second line: PASSES (the substring
         // search is line-agnostic by construction).
-        let two_lines = format!("{reversed}\nHello, Yuva -- glad to meet the machine!");
+        let two_lines = format!("{reversed}\nHello, Cogi -- glad to meet the mind!");
         assert!(liveness_ok(&two_lines, &CHALLENGE));
         // A greeting WITHOUT the transform: FAILS (the greeting can never
         // substitute for liveness).
         assert!(!liveness_ok(
-            "Hello, Yuva -- glad to meet the machine!",
+            "Hello, Cogi -- glad to meet the mind!",
             &CHALLENGE
         ));
     }
@@ -1326,7 +1331,7 @@ mod tests {
 
     #[test]
     fn body_line_grammar_and_prefix_disjointness() {
-        let line = body_line("Hello, Yuva!", FAKE_KEY);
+        let line = body_line("Hello, Cogi!", FAKE_KEY);
         // The grammar, hand-validated (no regex dep in this crate):
         // 'xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<hex>'.
         let rest = line
@@ -1344,7 +1349,7 @@ mod tests {
         assert!(hex_v
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-        assert_eq!(hex_v, hex(b"Hello, Yuva!"));
+        assert_eq!(hex_v, hex(b"Hello, Cogi!"));
         // THE DISJOINTNESS ASSERTION: the body line can never be counted by
         // the workflow's exactly-one-VERDICT grep ('^xport-harness-infer: ',
         // trailing space load-bearing), and the verdict lines can never be
@@ -1401,7 +1406,7 @@ mod tests {
         // caller's one-call latch makes that at most one per process).
         let reversed = group_rev(&CHALLENGE);
         let ok = live_call(
-            &Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Yuva!"))),
+            &Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Cogi!"))),
             FAKE_KEY,
             &CHALLENGE,
             b"p",
