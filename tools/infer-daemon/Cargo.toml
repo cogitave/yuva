@@ -1,0 +1,66 @@
+# infer-daemon — the M32 stage-A host-adjudicated local-inference daemon.
+#
+# THE SHAPE (M32 proposal §2): a memory-safe Rust daemon that holds the channel
+# key K + the MAC calls + the artifact SHA256 pins + ALL witness emission, and
+# supervises a keyless, env-cleared, seccomp+Landlock-self-sandboxed engine
+# WORKER (the `--worker` re-exec of this same binary) that links vendored
+# llama.cpp (via the path-dep `llama-engine-sys`) and parses the SHA256-pinned
+# GGUF ONLY after the sandbox filter is installed.
+#
+# THE DEBT (machine-tokened, never prose-remembered — §7): the daemon's witness
+# carries `engine=VENDORED-C-LLAMACPP debt=SOVEREIGNTY-OPEN-B3
+# memsafety=UNSAFE-C-PROCESS-CONFINED weights=UNTRUSTED-INPUT-NAMED` on EVERY
+# line, grep-locked BIDIRECTIONALLY to the `llama-engine-sys` dependency.
+#
+# An independent NESTED WORKSPACE (the tb-vmm / xport-harness precedent): the
+# `[workspace]` table below auto-excludes this tree from the root no_std
+# workspace and gives it its OWN Cargo.lock — the DEBT-LOCKSTEP Rule 4
+# zero-network grep runs over THAT lockfile. `llama-engine-sys` is a workspace
+# MEMBER (it must NOT be a separate top-level workspace, or the daemon couldn't
+# path-dep it cleanly).
+
+[package]
+name = "infer-daemon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yuva M32 stage-A: the host-adjudicated local-inference daemon — key-holding safe Rust supervising a keyless sandboxed vendored-llama.cpp worker; machine-tokened SOVEREIGNTY-OPEN-B3 debt."
+license = "Apache-2.0"
+
+[workspace]
+members = ["llama-engine-sys"]
+
+[[bin]]
+name = "infer-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# The dep-clean shared plumbing (carries tb-encode ALONE — zero network deps).
+# This is what keeps DEBT-LOCKSTEP Rule 4 satisfiable: the daemon's lockfile
+# must NOT match ureq|reqwest|hyper|tokio|rustls.
+xport-core = { path = "../xport-core" }
+tb-encode = { path = "../../crates/tb-encode" }
+
+# The C-engine debt. Behind a default-OFF feature so the daemon's safe-Rust
+# paths (witness/hash-pin/sandbox-setup) build + unit-test WITHOUT the heavy
+# llama.cpp toolchain; the local-engine lane enables `engine`. The DEBT-LOCKSTEP
+# Probe A grep matches `llama-engine-sys` in THIS manifest + the lockfile
+# regardless of the feature (the dep is declared), and the CC=/bin/false poison
+# probe builds WITH the feature on.
+llama-engine-sys = { path = "llama-engine-sys", optional = true }
+
+# Host self-sandbox: seccomp-BPF allowlist (the Firecracker lineage) + Landlock
+# read-only ruleset, installed BEFORE the GGUF parse. Linux-only, host-confined
+# (the §11 ledger row). Behind the `engine` feature with llama-engine-sys.
+seccompiler = { version = "0.5", optional = true }
+landlock = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
+
+[features]
+# OFF by default so `cargo test`/`cargo build` of the safe-Rust core needs no
+# C toolchain; the local-infer lane builds with `--features engine`.
+default = []
+engine = ["dep:llama-engine-sys", "dep:seccompiler", "dep:landlock", "dep:libc"]
+
+[profile.release]
+panic = "abort"

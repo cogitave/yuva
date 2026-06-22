@@ -1,0 +1,38 @@
+# llama-engine-sys — the `-sys` crate that builds vendored llama.cpp behind the
+# narrow flat-C `engine_shim` ABI. THIS IS THE C DEBT (M32 proposal §2/§7):
+# `engine=VENDORED-C-LLAMACPP debt=SOVEREIGNTY-OPEN-B3
+# memsafety=UNSAFE-C-PROCESS-CONFINED`. The DEBT-LOCKSTEP grep (§7 Probe A)
+# matches this manifest's name + the `llama.cpp` references in build.rs + the
+# vendor checkout dir; the CC=/bin/false poison probe (Rule 3) proves the C is
+# genuinely in the build graph.
+#
+# Determinism: build.rs configures the pinned llama.cpp source with the §4
+# envelope flags (GGML_NATIVE=OFF, baseline ISA — NO AVX dispatch, OpenMP OFF,
+# BLAS OFF, RPC/server/curl compiled OUT). The source is fetched hash-pinned at
+# BUILD time (network confined to the build, the toolchain-install class — §5.5);
+# RUNTIME is zero-network.
+#
+# Own nested workspace (it is itself a path-dep of the daemon's nested
+# workspace; an empty [workspace] keeps it off the root no_std workspace).
+
+[package]
+name = "llama-engine-sys"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+description = "Yuva M32 -sys crate: vendored llama.cpp (pinned b-tag) built with the deterministic CPU envelope, behind a narrow flat-C engine shim. This crate IS the SOVEREIGNTY-OPEN-B3 debt."
+license = "Apache-2.0"
+
+[lib]
+name = "llama_engine_sys"
+path = "src/lib.rs"
+
+[build-dependencies]
+# `cmake` drives the vendored llama.cpp CMake build with the exact §4 flags;
+# `cc` compiles the engine_shim translation unit against the vendored headers.
+# Both are BUILD-only (they never enter the daemon's runtime lockfile-grep
+# surface for Rule 4 — that grep targets network deps: ureq/reqwest/hyper/
+# tokio/rustls). They DO carry the C-toolchain debt, ledgered as the §11 row.
+cmake = "0.1"
+cc = "1"

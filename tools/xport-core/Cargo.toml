@@ -1,0 +1,44 @@
+# xport-core — the dep-clean shared plumbing for the M30/M31/M32 host peers.
+#
+# WHY THIS CRATE EXISTS (M32 proposal §2, §17.3): the M32 infer-daemon serves
+# the SAME M30 ECHO_REQ + M31 mock INFER_REQ exchange the xport-harness serves,
+# and needs the SAME FrameAccum serve-loop glue + witness/hex helpers. It cannot
+# path-dep the `xport-harness` PACKAGE, because that package's manifest carries
+# unconditional `ureq` + `serde_json` since M31 stage C (PR #40) and Cargo
+# records package-level deps in every consumer's lockfile — any path-dep on it
+# would drag `ureq`/`rustls` into the daemon's Cargo.lock and trip DEBT-LOCKSTEP
+# Rule 4 ("local means local") on day one. A dep-clean crate that carries
+# `tb-encode` ALONE — zero network deps by construction — is the only thing that
+# satisfies a lockfile grep. This is the byte-identical serve glue the daemon
+# wears on its legacy M30/M31 legs (peer_id=0x02), so those required lanes stay
+# green; the daemon adds the third (LOCAL-ENGINE) backend ON TOP.
+#
+# DEVIATION FROM PROPOSAL (noted in the M32 stage-A report): the proposal §14
+# also re-bases the xport-harness bin onto this crate. The stage-A change-surface
+# fence forbids touching tools/xport-harness/**, so the harness is left
+# byte-identical and ONLY the daemon consumes xport-core here. The extraction is
+# real and dep-clean; the harness re-base is a named follow-up.
+#
+# An independent nested workspace (the tb-vmm / xport-harness precedent): cargo
+# auto-excludes it from the root no_std workspace; it keeps its own Cargo.lock.
+
+[package]
+name = "xport-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yuva dep-clean shared plumbing (FrameAccum serve glue + hex/witness helpers) for the M30/M31/M32 host peers; carries tb-encode ALONE so the M32 daemon's zero-network grep holds."
+license = "Apache-2.0"
+
+[workspace]
+
+[lib]
+name = "xport_core"
+path = "src/lib.rs"
+
+[dependencies]
+# The verified codec + keyed-hash leaves (no_std + forbid(unsafe_code), zero
+# deps). This is the ONLY dependency — no network, no TLS, no serde. The
+# DEBT-LOCKSTEP Rule 4 grep over the daemon's lockfile depends on this staying
+# true; a manifest-level deny-grep in CI asserts it (M32 proposal §11).
+tb-encode = { path = "../../crates/tb-encode" }
