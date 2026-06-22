@@ -35,15 +35,18 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
    pre-grouped 8-char hex groups, written back in REVERSE GROUP ORDER
    (`transform=HEX-REVERSE-ANY` — the §5 liveness proof: fresh every boot, so a
    canned fixture or replay fails, and a prompt echo normalizes to the FORWARD
-   order, which is none of the accepted reversals. Acceptance is
-   INTERPRETATION-ROBUST: ANY of the three standard reversals of the challenge
-   hex passes — group-order, byte-order, or char-order — and the witness's
-   `matched=GROUP|BYTE|CHAR` names which the model chose. This is transform v3:
-   v1 asked for character-level reversal (a known LLM tokenization weakness;
-   run 27408247558 missed it); v2 narrowed to group-order only and FAILED a
-   real 200 (run 27959048211) whose model produced the equally-valid
-   byte-order reversal — v3 stops being fragile about WHICH reversal while
-   keeping every anti-parrot/anti-replay property),
+   order. Acceptance is INTERPRETATION-ROBUST: the liveness PROPERTY is
+   freshness (the response carries THIS boot's nonce) + anti-parrot (not the
+   forward order), NOT one exact transform. Any of the three standard reversals
+   passes — group/byte/char (`matched=GROUP|BYTE|CHAR`) — OR (v4) any
+   non-forward permutation of the four nonce groups (`matched=PERM`). The
+   iteration history is itself the lesson that an exact string-transform is a
+   fragile liveness proxy: v1 asked for character-level reversal (a known LLM
+   tokenization weakness; run 27408247558 missed it); v2 narrowed to group-order
+   only and FAILED a real 200 (run 27959048211, model chose byte-order); v3
+   added byte/char but FAILED run 27968811267 (model chose the pair-swap
+   `G1 G0 G3 G2`); v4 stops chasing the exact transform and checks the property
+   directly, keeping every anti-parrot/anti-replay guarantee,
    line 2 one short sentence greeting **Cogi** — the mind that sent the
    message (Yuva is its *home*, not its name) — the hello this lane exists for,
 3. verifies the transform, digests the response text, prints its verdict, and
@@ -57,15 +60,18 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
 In the run log, on success:
 
 ```
-xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x<32 hex> transform=HEX-REVERSE-ANY transform-ok=1 matched=<GROUP|BYTE|CHAR> http=200 reqid-hex=<hex> resp-digest=0x<32 hex> model=claude-haiku-4-5 max-tokens=64 stop=END-TURN key-custody=HOST-ENV
+xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x<32 hex> transform=HEX-REVERSE-ANY transform-ok=1 matched=<GROUP|BYTE|CHAR|PERM> http=200 reqid-hex=<hex> resp-digest=0x<32 hex> model=claude-haiku-4-5 max-tokens=64 stop=END-TURN key-custody=HOST-ENV
 xport-harness-infer-body: len=<dec> truncated=<0|1> hex=<lowercase hex of the response text>
 M31: real-infer OK backend=ANTHROPIC-LIVE
 ```
 
-The `matched=` field names which standard reversal the model returned
-(`GROUP` = the 4 hex groups in reverse order, `BYTE` = the 16 challenge bytes
-in reverse order, `CHAR` = the full hex string reversed) — all three prove
-freshness; `matched=BYTE` is what the live model produced on run 27959048211.
+The `matched=` field names which fresh non-forward rendering the model
+returned (`GROUP` = the 4 hex groups in reverse order, `BYTE` = the 16
+challenge bytes in reverse order, `CHAR` = the full hex string reversed,
+`PERM` = any other non-forward permutation of the 4 groups) — all prove
+freshness. `matched=BYTE` is what the live model produced on run 27959048211;
+`matched=PERM` (the pair-swap `G1 G0 G3 G2`) is what it produced on run
+27968811267 — *"Hello Cogi, greetings from Yuva's wandering guest."*
 
 plus the untouched kernel tail on the same boot:
 

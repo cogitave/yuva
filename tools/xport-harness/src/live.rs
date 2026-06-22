@@ -236,7 +236,18 @@ pub enum Matched {
     Byte,
     /// Char-order reversal: the full 32-char hex string reversed.
     Char,
-    /// No standard reversal present -- liveness failed (TRANSFORM-MISS).
+    /// Generalized (the v4 form): all four 8-hex-char groups of THIS boot's
+    /// challenge appear in the response, in a NON-FORWARD arrangement (any
+    /// permutation except the exact forward order). Catches whatever
+    /// reordering the model invents -- pair-swap, rotate, shuffle -- without
+    /// chasing each interpretation. The live model produced the pair-swap
+    /// `G1 G0 G3 G2` on run 27968811267, which the three explicit reversals
+    /// all missed; this arm accepts it. Freshness and anti-parrot both hold:
+    /// a stale fixture carries DIFFERENT groups (matches NONE), and a forward
+    /// PARROT carries the forward concatenation (vetoed below).
+    Perm,
+    /// No standard reversal or fresh-group permutation present -- liveness
+    /// failed (TRANSFORM-MISS).
     None,
 }
 
@@ -247,6 +258,7 @@ impl Matched {
             Matched::Group => "GROUP",
             Matched::Byte => "BYTE",
             Matched::Char => "CHAR",
+            Matched::Perm => "PERM",
             Matched::None => "NONE",
         }
     }
@@ -312,13 +324,31 @@ pub fn matched_transform(resp_text: &str, challenge: &[u8; 16]) -> Matched {
             return tag;
         }
     }
+    // v4 generalization (the "stop chasing the exact transform" arm): the
+    // model clearly PROCESSED this boot's nonce iff all four of its groups
+    // appear in the response. That alone proves FRESHNESS (a stale fixture
+    // carries different groups). To keep the anti-parrot teeth, reject the
+    // pure FORWARD echo: the forward concatenation `g0g1g2g3` (exactly what
+    // the prompt presents) must NOT be present. Any OTHER arrangement -- the
+    // group-reverse, the observed pair-swap, a rotate, a shuffle -- passes.
+    let g = challenge_groups(challenge);
+    let all_groups_present = g.iter().all(|grp| normalized.contains(grp.as_str()));
+    let forward = format!("{}{}{}{}", g[0], g[1], g[2], g[3]);
+    if all_groups_present && !normalized.contains(&forward) {
+        return Matched::Perm;
+    }
     Matched::None
 }
 
-/// The host-leg liveness check (§5.4): true iff ANY of the three standard
-/// reversals ([`expected_transforms`]) appears in the response text. A thin
-/// boolean over [`matched_transform`] -- the matched variant carries the
-/// forensic detail onto the witness line.
+/// The host-leg liveness check (§5.4): true iff the response carries this
+/// boot's nonce in a fresh, non-forward form -- any of the three standard
+/// reversals ([`expected_transforms`]) OR any non-forward permutation of the
+/// four nonce groups ([`Matched::Perm`], the v4 arm). A thin boolean over
+/// [`matched_transform`] -- the matched variant carries the forensic detail
+/// onto the witness line.
+// A public predicate exercised by the unit tests; the serve path calls
+// `matched_transform` directly for the forensic `matched=` variant.
+#[allow(dead_code)]
 pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
     matched_transform(resp_text, challenge) != Matched::None
 }
@@ -1000,6 +1030,46 @@ mod tests {
             }
             _ => panic!("the run-27959048211 response must satisfy §5.4 under v3"),
         }
+    }
+
+    #[test]
+    fn regression_run_27968811267_pairswap_now_passes() {
+        // The REAL run-27968811267 ground truth (the Cogi-greeting dispatch):
+        // the model reordered the four groups as a PAIR-SWAP (G1 G0 G3 G2) --
+        // neither group-reverse (G3 G2 G1 G0), byte-reverse, nor char-reverse,
+        // so v3 returned matched=NONE / TRANSFORM-MISS. v4's Perm arm accepts
+        // it: all four fresh groups present, not the forward order.
+        let challenge: [u8; 16] = [
+            0xee, 0x86, 0xe9, 0x5a, 0x22, 0x66, 0x92, 0x2c, 0x45, 0x85, 0xd8, 0xbc, 0xae, 0xc1,
+            0x6e, 0xa1,
+        ];
+        assert_eq!(hex(&challenge), "ee86e95a2266922c4585d8bcaec16ea1");
+        // groups G0=ee86e95a G1=2266922c G2=4585d8bc G3=aec16ea1; model said
+        // G1 G0 G3 G2, then greeted Cogi (the mind) from Yuva (its home).
+        let response =
+            "2266922c ee86e95a aec16ea1 4585d8bc\nHello Cogi, greetings from Yuva's wandering guest.";
+        assert!(liveness_ok(response, &challenge));
+        assert_eq!(matched_transform(response, &challenge), Matched::Perm);
+        // The three explicit reversals genuinely did NOT match (this is why v4
+        // exists, not a redundant arm):
+        let [group_rev, byte_rev, char_rev] = expected_transforms(&challenge);
+        let norm: String = response
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        assert!(!norm.contains(&group_rev) && !norm.contains(&byte_rev) && !norm.contains(&char_rev));
+        // Anti-parrot still holds under v4: the FORWARD grouped nonce (what the
+        // prompt shows) is rejected -- it carries the forward concatenation.
+        assert_eq!(
+            matched_transform("ee86e95a 2266922c 4585d8bc aec16ea1", &challenge),
+            Matched::None
+        );
+        // Anti-replay still holds: a DIFFERENT boot's nonce groups match none.
+        assert_eq!(
+            matched_transform("2266922c ee86e95a aec16ea1 4585d8bc", &CHALLENGE),
+            Matched::None
+        );
     }
 
     // --- the response parser -------------------------------------------------

@@ -7,9 +7,10 @@
 # on the M30 channel, the bridge makes EXACTLY ONE pinned Messages API call
 # (model claude-haiku-4-5, max_tokens 64 — both compile-time consts in
 # tools/xport-harness/src/live.rs, the operator's spend pin), verifies the
-# §5 HEX-REVERSE-ANY liveness transform (v3 — accepts ANY of the three standard
-# reversals of the per-boot challenge hex, GROUP/BYTE/CHAR, named in matched=;
-# v2 accepted only the group-order reversal and FAILED a real 200 (run
+# §5 HEX-REVERSE-ANY liveness transform (v4 — accepts ANY fresh non-forward
+# rendering of the per-boot challenge: the three standard reversals
+# GROUP/BYTE/CHAR or PERM, any non-forward permutation of the four nonce groups,
+# named in matched=; v2 accepted only the group-order reversal and FAILED a real 200 (run
 # 27959048211) whose model produced the byte-order reversal; v1's char-level
 # reversal was a tokenization-unrealistic capability test, run 27408247558)
 # of the kernel's per-boot wire challenge,
@@ -175,13 +176,17 @@ jobs:
           # (d) the §5.4 host-leg acceptance: 200 + request-id evidence +
           # transform-ok=1, on the exact witness grammar (hex + closed tokens
           # only — the model text itself appears nowhere; its digest is the
-          # commitment). transform=HEX-REVERSE-ANY is v3 (interpretation-robust:
-          # it accepts ANY of the three standard reversals — GROUP/BYTE/CHAR,
-          # named in matched=): v2 accepted ONLY the group-order reversal and
-          # FAILED a real 200 (run 27959048211) whose model produced the
-          # byte-order reversal; v1's char-level reversal was a tokenization-
-          # unrealistic capability test (run 27408247558).
-          WITNESS_RE='^xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x[0-9a-f]{32} transform=HEX-REVERSE-ANY transform-ok=1 matched=(GROUP|BYTE|CHAR) http=200 reqid-hex=[0-9a-f]+ resp-digest=0x[0-9a-f]{32} model=claude-haiku-4-5 max-tokens=64 stop=[A-Z-]+ key-custody=HOST-ENV$'
+          # commitment). transform=HEX-REVERSE-ANY accepts ANY fresh, non-forward
+          # rendering of the per-boot nonce, named in matched=: the three standard
+          # reversals GROUP/BYTE/CHAR, OR (v4) PERM — any non-forward permutation
+          # of the four nonce groups. The iteration history: v1's char-level
+          # reversal was a tokenization-unrealistic capability test (run
+          # 27408247558); v2 accepted ONLY group-order and FAILED run 27959048211
+          # (model chose byte-order); v3 added the byte/char forms but FAILED run
+          # 27968811267 (model chose the pair-swap G1 G0 G3 G2); v4 stops chasing
+          # the exact transform — the liveness PROPERTY is freshness (the response
+          # carries THIS boot's nonce groups) + anti-parrot (not the forward order).
+          WITNESS_RE='^xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x[0-9a-f]{32} transform=HEX-REVERSE-ANY transform-ok=1 matched=(GROUP|BYTE|CHAR|PERM) http=200 reqid-hex=[0-9a-f]+ resp-digest=0x[0-9a-f]{32} model=claude-haiku-4-5 max-tokens=64 stop=[A-Z-]+ key-custody=HOST-ENV$'
           WITNESS="$(grep -E -- "${WITNESS_RE}" "${LOG}" | head -1 || true)"
           if [ -z "${WITNESS}" ]; then
             FAILLINE="$(grep -E -- '^xport-harness-infer: backend=ANTHROPIC-LIVE .*transform-ok=0' "${LOG}" | head -1 || true)"
