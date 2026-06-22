@@ -157,10 +157,12 @@ fn install_landlock(model_path: &str) -> bool {
     }
 }
 
-/// seccomp-BPF allowlist via seccompiler (TSYNC), installed before llama.cpp
-/// spawns threads. socket/connect/execve/ptrace are denied outright (network
-/// egress + C2 structurally impossible from the worker). We use a DENYLIST of
-/// the dangerous syscalls over a default-allow, because a full allowlist for
+/// seccomp-BPF filter via seccompiler, installed before llama.cpp spawns
+/// threads. socket/connect/execve/ptrace are denied outright (network egress +
+/// C2 structurally impossible from the worker). DEVIATION FROM PROPOSAL §5.1
+/// (noted in the stage-A report): the proposal words this as an "allowlist"; we
+/// install a DENYLIST of the dangerous syscall family over a default-allow,
+/// because a full allowlist for
 /// the whole ggml/libc surface is brittle across glibc versions and a widened
 /// allowlist that accidentally permits socket() would silently defeat the
 /// claim; an explicit deny on the network/exec/ptrace family is the auditable
