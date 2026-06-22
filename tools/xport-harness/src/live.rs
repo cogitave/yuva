@@ -26,13 +26,19 @@
 //!   REPORTED retryable, never retried into a pass).
 //! * **Liveness** (§5, host leg): the prompt envelope renders the kernel's
 //!   per-boot wire challenge as 4 pre-grouped hex groups and instructs the
-//!   model to reply with the groups in REVERSE ORDER
-//!   (`transform=HEX-GROUP-REVERSE` -- v2; v1's character-level reversal was
-//!   a tokenization-unrealistic CAPABILITY test, see [`expected_transform`];
-//!   the challenge is minted in-guest from the cycle counter every boot -- a
-//!   canned fixture or replayed transcript carries a stale nonce and fails).
-//!   A prompt echo cannot pass: the acceptance substring is the REVERSED
-//!   group concatenation, never the forward one.
+//!   model to reply with the groups in REVERSE ORDER -- but acceptance
+//!   (`transform=HEX-REVERSE-ANY` -- v3) is INTERPRETATION-ROBUST: it admits
+//!   ANY of three standard reversals of the 32-char challenge hex (group-,
+//!   byte-, or char-order -- see [`matched_transform`]). v2 accepted ONLY the
+//!   group-order reversal and FAILED a REAL 200 (run 27959048211) whose model
+//!   produced the BYTE-order reversal instead; v1's character-level reversal
+//!   was a tokenization-unrealistic CAPABILITY test. The challenge is minted
+//!   in-guest from the cycle counter every boot -- a canned fixture or replayed
+//!   transcript carries a stale nonce and fails. A prompt echo cannot pass:
+//!   every accepted form is a non-identity reversal of the FORWARD hex (proven
+//!   for any non-palindromic nonce), never the forward hex itself -- the
+//!   anti-parrot teeth are preserved while the gate stops being fragile about
+//!   WHICH standard reversal the model chose.
 //! * **The closed taxonomy** (§2e/§12): provider errors map to the closed
 //!   outcome set below; raw provider JSON/text is NEVER printed and NEVER
 //!   crosses toward the guest -- the response text's traces are its
@@ -218,39 +224,103 @@ pub fn challenge_groups(challenge: &[u8; 16]) -> [String; 4] {
     ]
 }
 
-/// The HEX-GROUP-REVERSE liveness transform (v2): the 4 pre-grouped 8-char
-/// hex groups in REVERSE GROUP ORDER, concatenated (the acceptance
-/// normalization strips the model's separators, so spacing never matters).
-///
-/// WHY v2 (the `transform=HEX-REVERSE` retrospective): character-level
-/// string reversal is a KNOWN LLM tokenization weakness -- the first live
-/// dispatch (run 27408247558) returned a REAL 200 whose text missed the
-/// char-reversal (`outcome=TRANSFORM-MISS`, fail-closed as designed): v1
-/// tested model CAPABILITY, not liveness. Group-ORDER reversal is a trivial
-/// sequence task for any model, and every liveness property is preserved:
-/// the expected substring derives from THIS boot's kernel-minted challenge
-/// (fresh per boot), and a verbatim prompt echo normalizes to the FORWARD
-/// concatenation, never the reversed one. Non-identity degrades only if all
-/// four groups are equal (~2^-72 over a 128-bit random challenge); the
-/// challenge cannot be re-minted here (it is the kernel's), so in that
-/// astronomically unlikely case the lane fails HONESTLY -- assert-and-
-/// proceed, never re-mint, never widen acceptance.
-pub fn expected_transform(challenge: &[u8; 16]) -> String {
-    let g = challenge_groups(challenge);
-    format!("{}{}{}{}", g[3], g[2], g[1], g[0])
+/// The forensic `matched=` field value: WHICH of the three standard reversals
+/// the model's text actually contained (or `NONE` when liveness failed). A
+/// closed set, witness-line-safe (uppercase ASCII + hyphen only).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Matched {
+    /// Group-order reversal (the v2 form): the 4 groups in reverse order.
+    Group,
+    /// Byte-order reversal: the 16 challenge BYTES emitted in reverse order
+    /// (= the v3 form the live model produced, run 27959048211).
+    Byte,
+    /// Char-order reversal: the full 32-char hex string reversed.
+    Char,
+    /// No standard reversal present -- liveness failed (TRANSFORM-MISS).
+    None,
 }
 
-/// The host-leg liveness check (§5.4): the expected transform must appear in
-/// the response text. Tolerance normalizations -- lowercase + strip ASCII
-/// whitespace -- absorb model formatting noise; neither can manufacture a
-/// reversal out of an echo (they are order-preserving).
-pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
+impl Matched {
+    /// The witness token. Closed, uppercase, regex-inert (`[A-Z]+`).
+    pub fn token(self) -> &'static str {
+        match self {
+            Matched::Group => "GROUP",
+            Matched::Byte => "BYTE",
+            Matched::Char => "CHAR",
+            Matched::None => "NONE",
+        }
+    }
+}
+
+/// The THREE standard reversals of the 32-char lowercase challenge hex that
+/// v3 (`transform=HEX-REVERSE-ANY`) accepts, in the fixed forensic order
+/// `[Group, Byte, Char]` (the order [`matched_transform`] probes, so the
+/// `matched=` token is deterministic when more than one form coincides):
+///
+/// 1. **group-reverse** (the v2 form): split the hex into 4 chunks of 8 and
+///    concat `chunk[3]chunk[2]chunk[1]chunk[0]`.
+/// 2. **byte-reverse**: reverse the `[u8;16]` array, then hex it (= the bytes
+///    in reverse order). THIS is what the live model produced on run
+///    27959048211 (`a1b16c92...` for challenge `8c3f1a58...`).
+/// 3. **char-reverse**: reverse the full 32-char hex string.
+///
+/// WHY v3 (`HEX-REVERSE-ANY`, the v1->v2->v3 rationale): v1 asked for
+/// character-level reversal -- a KNOWN LLM tokenization weakness (a CAPABILITY
+/// test wearing a liveness token). v2 narrowed to group-ORDER reversal, but
+/// was INTERPRETATION-FRAGILE: it accepted ONLY that one rendering and FAILED a
+/// REAL 200 (run 27959048211, `transform-ok=0 outcome=TRANSFORM-MISS`) whose
+/// model chose the equally-valid BYTE-order reversal. v3 accepts ANY of the
+/// three STANDARD reversals -- robust to which one the model picks -- while
+/// preserving EVERY liveness property: each form derives from THIS boot's
+/// kernel-minted challenge (fresh per boot, so a stale fixture/replay matches
+/// NONE), and each is NON-IDENTITY vs the forward hex for any non-palindromic
+/// nonce (so a prompt PARROT that echoes the forward groups matches NONE --
+/// the anti-echo teeth). The three forms collide with the forward hex only for
+/// a degenerate palindromic challenge (~2^-64); the challenge is the kernel's
+/// and cannot be re-minted here, so that astronomically unlikely case fails
+/// HONESTLY -- assert-and-proceed, never re-mint, never widen acceptance.
+pub fn expected_transforms(challenge: &[u8; 16]) -> [String; 3] {
+    let g = challenge_groups(challenge);
+    let group_rev = format!("{}{}{}{}", g[3], g[2], g[1], g[0]);
+    let mut byte_arr = *challenge;
+    byte_arr.reverse();
+    let byte_rev = hex(&byte_arr);
+    let char_rev: String = hex(challenge).chars().rev().collect();
+    [group_rev, byte_rev, char_rev]
+}
+
+/// The host-leg liveness matcher (§5.4): return WHICH standard reversal of the
+/// challenge hex appears in the normalized response text, or [`Matched::None`].
+/// Tolerance normalizations -- lowercase + strip ASCII whitespace -- absorb
+/// model formatting noise; neither can manufacture a reversal out of an echo
+/// (they are order-preserving). Probed in the fixed `[Group, Byte, Char]`
+/// order so the forensic token is deterministic if two forms ever coincide.
+///
+/// The all-forms-collide degenerate (a palindromic nonce, ~2^-64) is the
+/// documented assert-and-proceed case: acceptance is not widened, the lane
+/// stands on whatever the model actually returned.
+pub fn matched_transform(resp_text: &str, challenge: &[u8; 16]) -> Matched {
     let normalized: String = resp_text
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    normalized.contains(&expected_transform(challenge))
+    let forms = expected_transforms(challenge);
+    let tags = [Matched::Group, Matched::Byte, Matched::Char];
+    for (form, tag) in forms.iter().zip(tags) {
+        if normalized.contains(form.as_str()) {
+            return tag;
+        }
+    }
+    Matched::None
+}
+
+/// The host-leg liveness check (§5.4): true iff ANY of the three standard
+/// reversals ([`expected_transforms`]) appears in the response text. A thin
+/// boolean over [`matched_transform`] -- the matched variant carries the
+/// forensic detail onto the witness line.
+pub fn liveness_ok(resp_text: &str, challenge: &[u8; 16]) -> bool {
+    matched_transform(resp_text, challenge) != Matched::None
 }
 
 /// Build the ONE request body. The guest prompt crosses to the model
@@ -372,6 +442,10 @@ pub struct LiveEvidence {
     pub resp_digest_hex: String,
     /// The closed stop token.
     pub stop: &'static str,
+    /// WHICH of the three standard reversals the response contained -- the
+    /// witness line's forensic `matched=` field (never [`Matched::None`] on
+    /// the OK path).
+    pub matched: Matched,
     /// The RAW response text. NEVER printed raw: its only log surfaces are
     /// the digest above and the scrubbed, capped, hex-framed [`body_line`].
     pub text: String,
@@ -495,7 +569,8 @@ pub fn live_call(
             resp: None,
         };
     }
-    if !liveness_ok(&parsed.text, challenge) {
+    let matched = matched_transform(&parsed.text, challenge);
+    if matched == Matched::None {
         // Compliant-but-wrong model answer: distinct, reported, NEVER
         // silently retried into a pass (proposal §5.7) -- and since run
         // 27408247558, WITNESSABLE: the digest + hex-framed body ride the
@@ -517,6 +592,7 @@ pub fn live_call(
         reqid_hex: hex(request_id.as_bytes()),
         resp_digest_hex: hex(&digest),
         stop: parsed.stop,
+        matched,
         text: parsed.text,
     })
 }
@@ -527,10 +603,16 @@ pub fn live_call(
 /// tokens ONLY -- structurally key-free and injection-inert.
 pub fn witness_line(ev: &LiveEvidence) -> String {
     format!(
-        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{} transform=HEX-GROUP-REVERSE \
-         transform-ok=1 http=200 reqid-hex={} resp-digest=0x{} model={} max-tokens={} \
+        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{} transform=HEX-REVERSE-ANY \
+         transform-ok=1 matched={} http=200 reqid-hex={} resp-digest=0x{} model={} max-tokens={} \
          stop={} key-custody=HOST-ENV",
-        ev.nonce_hex, ev.reqid_hex, ev.resp_digest_hex, LIVE_MODEL, LIVE_MAX_TOKENS, ev.stop
+        ev.nonce_hex,
+        ev.matched.token(),
+        ev.reqid_hex,
+        ev.resp_digest_hex,
+        LIVE_MODEL,
+        LIVE_MAX_TOKENS,
+        ev.stop
     )
 }
 
@@ -554,9 +636,13 @@ pub fn failure_line(
         Some(d) => format!(" resp-digest=0x{d}"),
         None => String::new(),
     };
+    // `matched=NONE` on every failure line: `transform-ok=0` means no standard
+    // reversal was accepted, so there is no matched variant to forensically
+    // name (the OK path is the only place a GROUP/BYTE/CHAR token appears).
     format!(
-        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{nonce_hex} transform=HEX-GROUP-REVERSE \
-         transform-ok=0 outcome={outcome} http={http_s} retryable={}{digest_s} key-custody=HOST-ENV",
+        "xport-harness-infer: backend=ANTHROPIC-LIVE nonce=0x{nonce_hex} transform=HEX-REVERSE-ANY \
+         transform-ok=0 matched=NONE outcome={outcome} http={http_s} retryable={}{digest_s} \
+         key-custody=HOST-ENV",
         u8::from(retryable)
     )
 }
@@ -735,6 +821,13 @@ mod tests {
         .to_string()
     }
 
+    /// The group-order reversal (the v2/`GROUP` form) -- the rendering the
+    /// prompt asks for and the happy-path fixtures use as the "compliant"
+    /// answer line. A thin alias over `expected_transforms()[0]`.
+    fn group_rev(challenge: &[u8; 16]) -> String {
+        expected_transforms(challenge)[0].clone()
+    }
+
     // --- the request builder ------------------------------------------------
 
     #[test]
@@ -768,50 +861,140 @@ mod tests {
     // --- the liveness checker ----------------------------------------------
 
     #[test]
-    fn transform_is_the_group_reversal() {
+    fn the_three_reversal_forms_are_distinct_and_non_identity() {
         // CHALLENGE hex = "0123456789abcdef1032547698badcfe"; groups forward:
-        // 01234567 89abcdef 10325476 98badcfe; v2 expected = the groups in
-        // reverse ORDER, concatenated (chars inside each group stay forward).
+        // 01234567 89abcdef 10325476 98badcfe.
         let g = challenge_groups(&CHALLENGE);
         assert_eq!(g[0], "01234567");
         assert_eq!(g[3], "98badcfe");
-        let t = expected_transform(&CHALLENGE);
-        assert_eq!(t.len(), 32);
-        assert_eq!(t, "98badcfe1032547689abcdef01234567");
-        assert_eq!(t, format!("{}{}{}{}", g[3], g[2], g[1], g[0]));
-        // Non-identity: the forward concatenation differs (the four groups
-        // are not all equal on this -- and on any realistic -- challenge).
-        assert_ne!(t, hex(&CHALLENGE));
-        // And v2 is NOT the old v1 char-reversal (group-internal order is
-        // preserved): the tokenization-unrealistic transform is retired.
-        let v1: String = hex(&CHALLENGE).chars().rev().collect();
-        assert_ne!(t, v1);
+        let [group_rev, byte_rev, char_rev] = expected_transforms(&CHALLENGE);
+        // Each form is 32 lowercase hex chars.
+        for f in [&group_rev, &byte_rev, &char_rev] {
+            assert_eq!(f.len(), 32);
+        }
+        // (1) group-reverse: chunk[3]chunk[2]chunk[1]chunk[0].
+        assert_eq!(group_rev, "98badcfe1032547689abcdef01234567");
+        assert_eq!(group_rev, format!("{}{}{}{}", g[3], g[2], g[1], g[0]));
+        // (2) byte-reverse: the [u8;16] reversed, hexed (bytes in reverse).
+        let mut arr = CHALLENGE;
+        arr.reverse();
+        assert_eq!(byte_rev, hex(&arr));
+        assert_eq!(byte_rev, "fedcba9876543210efcdab8967452301");
+        // (3) char-reverse: the full 32-char hex reversed.
+        assert_eq!(char_rev, hex(&CHALLENGE).chars().rev().collect::<String>());
+        assert_eq!(char_rev, "efcdab8967452301fedcba9876543210");
+        // All three are NON-IDENTITY vs the forward hex (anti-parrot teeth on
+        // this non-palindromic challenge), and pairwise DISTINCT here.
+        let fwd = hex(&CHALLENGE);
+        for f in [&group_rev, &byte_rev, &char_rev] {
+            assert_ne!(*f, fwd);
+        }
+        assert_ne!(group_rev, byte_rev);
+        assert_ne!(group_rev, char_rev);
+        assert_ne!(byte_rev, char_rev);
     }
 
     #[test]
-    fn liveness_accepts_the_group_reversal_and_rejects_the_echo() {
+    fn liveness_accepts_group_byte_and_char_reversals() {
+        // v3 = HEX-REVERSE-ANY: ANY of the three standard reversals is
+        // accepted, with arbitrary model spacing/case, and `matched=` reports
+        // the right form (probe order Group -> Byte -> Char).
+        let [group_rev, byte_rev, char_rev] = expected_transforms(&CHALLENGE);
+        for (form, want) in [
+            (&group_rev, Matched::Group),
+            (&byte_rev, Matched::Byte),
+            (&char_rev, Matched::Char),
+        ] {
+            // Bare form.
+            assert!(liveness_ok(form, &CHALLENGE));
+            assert_eq!(matched_transform(form, &CHALLENGE), want);
+            // Surrounded by prose + arbitrary spacing.
+            let chatty = format!("Sure thing! Here it is:  {form}  \nHave a nice day.");
+            assert!(liveness_ok(&chatty, &CHALLENGE));
+            assert_eq!(matched_transform(&chatty, &CHALLENGE), want);
+            // Uppercased (normalization lowercases).
+            assert!(liveness_ok(&form.to_ascii_uppercase(), &CHALLENGE));
+            assert_eq!(matched_transform(&form.to_ascii_uppercase(), &CHALLENGE), want);
+            // Per-char whitespace noise (normalization strips ASCII space).
+            let noisy: String = form
+                .chars()
+                .flat_map(|c| [c.to_ascii_uppercase(), ' '])
+                .collect();
+            assert!(liveness_ok(&noisy, &CHALLENGE));
+            assert_eq!(matched_transform(&noisy, &CHALLENGE), want);
+        }
+    }
+
+    #[test]
+    fn liveness_rejects_forward_echo_and_stale_nonce() {
         let g = challenge_groups(&CHALLENGE);
-        // The natural model answer: reversed groups, space-separated, plus
-        // arbitrary spacing/case noise -- the normalization absorbs it.
-        let natural = format!("{} {} {} {}", g[3], g[2], g[1], g[0]);
-        assert!(liveness_ok(&natural, &CHALLENGE));
-        assert!(liveness_ok(&format!("Sure: {natural}"), &CHALLENGE));
-        assert!(liveness_ok(&natural.to_ascii_uppercase(), &CHALLENGE));
-        let noisy: String = expected_transform(&CHALLENGE)
-            .chars()
-            .flat_map(|c| [c.to_ascii_uppercase(), ' '])
-            .collect();
-        assert!(liveness_ok(&noisy, &CHALLENGE));
-        // A verbatim PROMPT ECHO (forward groups, spaced or not) must not
-        // pass -- it normalizes to the FORWARD concatenation.
+        // A verbatim PROMPT ECHO (forward groups / forward hex) is a PARROT:
+        // it normalizes to the FORWARD concatenation, which is NONE of the
+        // three reversals on this non-palindromic challenge -> rejected.
         let echo = format!("{} {} {} {}", g[0], g[1], g[2], g[3]);
         assert!(!liveness_ok(&echo, &CHALLENGE));
+        assert_eq!(matched_transform(&echo, &CHALLENGE), Matched::None);
         assert!(!liveness_ok(&hex(&CHALLENGE), &CHALLENGE));
-        // The OLD v1 char-reversal is NOT the v2 expected -- a model still
-        // answering v1 is correctly rejected under v2.
-        let v1: String = hex(&CHALLENGE).chars().rev().collect();
-        assert!(!liveness_ok(&v1, &CHALLENGE));
+        assert_eq!(matched_transform(&hex(&CHALLENGE), &CHALLENGE), Matched::None);
+        // A DIFFERENT boot's nonce (the replay/stale case): NONE of ITS three
+        // reversals satisfies THIS challenge -> rejected on all three forms.
+        let other: [u8; 16] = [
+            0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa, 0xbb,
+        ];
+        for stale in expected_transforms(&other) {
+            assert!(!liveness_ok(&stale, &CHALLENGE));
+            assert_eq!(matched_transform(&stale, &CHALLENGE), Matched::None);
+        }
+        // And plain non-transform prose stays rejected.
         assert!(!liveness_ok("no transform here", &CHALLENGE));
+        assert_eq!(matched_transform("no transform here", &CHALLENGE), Matched::None);
+    }
+
+    #[test]
+    fn regression_run_27959048211_now_passes() {
+        // The REAL run-27959048211 ground truth: a per-boot challenge and the
+        // EXACT model response text (the byte-reverse line + the greeting).
+        // v2 FAILED this (transform-ok=0 outcome=TRANSFORM-MISS) because the
+        // model produced the BYTE-order reversal, not the group-order one.
+        // v3 accepts it with matched=BYTE.
+        let challenge: [u8; 16] = [
+            0x8c, 0x3f, 0x1a, 0x58, 0x72, 0x75, 0xa8, 0xd8, 0x56, 0x7b, 0x73, 0xb8, 0x92, 0x6c,
+            0xb1, 0xa1,
+        ];
+        assert_eq!(hex(&challenge), "8c3f1a587275a8d8567b73b8926cb1a1");
+        // The model's byte-reverse line (challenge bytes in reverse order),
+        // exactly as it came back, grouped 8-8-8-8.
+        let body_line_text = "a1b16c92 b8737b56 d8a87572 581a3f8c";
+        let response = format!(
+            "{body_line_text}\nHello Yuva, it's a pleasure to meet you!"
+        );
+        // The byte-reverse form is exactly that line, whitespace-stripped.
+        let [_, byte_rev, _] = expected_transforms(&challenge);
+        assert_eq!(byte_rev, "a1b16c92b8737b56d8a87572581a3f8c");
+        // liveness_ok = true, matched = BYTE.
+        assert!(liveness_ok(&response, &challenge));
+        assert_eq!(matched_transform(&response, &challenge), Matched::Byte);
+        // The greeting line does NOT affect acceptance (drop the byte-rev line
+        // -> the greeting alone is rejected; keep it -> accepted): the
+        // transform substring is the ONLY criterion.
+        assert!(!liveness_ok(
+            "Hello Yuva, it's a pleasure to meet you!",
+            &challenge
+        ));
+        // End-to-end through the fixture seam: a 200 carrying this exact text
+        // yields the full §5.4 witness with matched=BYTE.
+        let fx = Fixture::ok(ok_body_with(&response));
+        match live_call(&fx, FAKE_KEY, &challenge, b"prompt-bytes") {
+            LiveOutcome::Ok(ev) => {
+                assert_eq!(ev.matched, Matched::Byte);
+                let line = witness_line(&ev);
+                assert!(line.contains(
+                    "transform=HEX-REVERSE-ANY transform-ok=1 matched=BYTE http=200"
+                ));
+            }
+            _ => panic!("the run-27959048211 response must satisfy §5.4 under v3"),
+        }
     }
 
     // --- the response parser -------------------------------------------------
@@ -941,7 +1124,7 @@ mod tests {
 
     #[test]
     fn happy_path_yields_the_full_witness() {
-        let reversed = expected_transform(&CHALLENGE);
+        let reversed = group_rev(&CHALLENGE);
         let text = format!("The reversed groups are: {reversed}");
         let fx = Fixture::ok(ok_body_with(&text));
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"prompt-bytes") {
@@ -950,9 +1133,11 @@ mod tests {
                 assert_eq!(ev.reqid_hex, hex(b"req_011FIXTURE")); // hex-encoded remote text
                 assert_eq!(ev.resp_digest_hex, hex(&body_digest(text.as_bytes())));
                 assert_eq!(ev.stop, "END-TURN");
+                assert_eq!(ev.matched, Matched::Group); // the group form -> GROUP
                 let line = witness_line(&ev);
                 assert!(line.starts_with("xport-harness-infer: backend=ANTHROPIC-LIVE "));
-                assert!(line.contains("transform=HEX-GROUP-REVERSE transform-ok=1 http=200"));
+                assert!(line
+                    .contains("transform=HEX-REVERSE-ANY transform-ok=1 matched=GROUP http=200"));
                 assert!(line.contains("model=claude-haiku-4-5 max-tokens=64"));
                 assert!(line.contains("key-custody=HOST-ENV"));
                 assert!(!line.contains(FAKE_KEY));
@@ -997,7 +1182,7 @@ mod tests {
         // 200 WITHOUT a request-id: LIVENESS-FAIL (no fresh round-trip
         // evidence), a DIFFERENT token by design -- and body-less (the §5.4
         // evidence chain broke before the text was adjudicated).
-        let mut fx = Fixture::ok(ok_body_with(&expected_transform(&CHALLENGE)));
+        let mut fx = Fixture::ok(ok_body_with(&group_rev(&CHALLENGE)));
         fx.request_id = None;
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
             LiveOutcome::Fail { outcome, resp, .. } => {
@@ -1069,7 +1254,7 @@ mod tests {
         // body line frames the SCRUBBED text (so not even the hex of the key
         // appears); the scrub guards every printed line anyway. All layers
         // asserted.
-        let reversed = expected_transform(&CHALLENGE);
+        let reversed = group_rev(&CHALLENGE);
         let text = format!("{reversed} {FAKE_KEY}");
         let fx = Fixture::ok(ok_body_with(&text));
         match live_call(&fx, FAKE_KEY, &CHALLENGE, b"p") {
@@ -1124,7 +1309,7 @@ mod tests {
 
     #[test]
     fn liveness_acceptance_is_unmoved_by_the_greeting_line() {
-        let reversed = expected_transform(&CHALLENGE);
+        let reversed = group_rev(&CHALLENGE);
         // Reversal line + a greeting second line: PASSES (the substring
         // search is line-agnostic by construction).
         let two_lines = format!("{reversed}\nHello, Yuva -- glad to meet the machine!");
@@ -1170,6 +1355,7 @@ mod tests {
             reqid_hex: hex(b"req_011FIXTURE"),
             resp_digest_hex: hex(&body_digest(b"x")),
             stop: "END-TURN",
+            matched: Matched::Group,
             text: "x".into(),
         };
         assert!(witness_line(&ev).starts_with("xport-harness-infer: "));
@@ -1213,7 +1399,7 @@ mod tests {
     fn body_line_emission_matrix_per_outcome() {
         // OK -> exactly [witness, body] (one body line per OK verdict; the
         // caller's one-call latch makes that at most one per process).
-        let reversed = expected_transform(&CHALLENGE);
+        let reversed = group_rev(&CHALLENGE);
         let ok = live_call(
             &Fixture::ok(ok_body_with(&format!("{reversed}\nHello, Yuva!"))),
             FAKE_KEY,
@@ -1268,7 +1454,7 @@ mod tests {
             ),
             live_call(
                 &{
-                    let mut f = Fixture::ok(ok_body_with(&expected_transform(&CHALLENGE)));
+                    let mut f = Fixture::ok(ok_body_with(&group_rev(&CHALLENGE)));
                     f.request_id = None;
                     f
                 },
