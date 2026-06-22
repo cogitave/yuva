@@ -44,7 +44,8 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
    real 200 (run 27959048211) whose model produced the equally-valid
    byte-order reversal — v3 stops being fragile about WHICH reversal while
    keeping every anti-parrot/anti-replay property),
-   line 2 one short sentence greeting Yuva — the hello this lane exists for,
+   line 2 one short sentence greeting **Cogi** — the mind that sent the
+   message (Yuva is its *home*, not its name) — the hello this lane exists for,
 3. verifies the transform, digests the response text, prints its verdict, and
    frames the (scrubbed, capped at 2048 bytes) response text as lowercase hex
    on one `xport-harness-infer-body:` line — **also on the 200-class
