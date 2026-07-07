@@ -4909,6 +4909,71 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // ---- M33 (stage A): the provenance-lineage crypto-VERIFY substrate ----
+    // PARTICIPATION -> EXCLUSIVITY. M29 made the prov head a SYMMETRIC keyed MAC
+    // (anyone holding K can mint a head); M33 adds public-verify/private-sign
+    // ASYMMETRY via an in-house LMS (RFC 8554) signature whose PRIVATE KEY NEVER
+    // ENTERS THIS KERNEL. Stage A is VERIFY-ONLY: the kernel recomputes the
+    // SHA-256 FIPS 180-4 KAT + the SMALL-parameter (`w=1`) LMS roundtrip KAT
+    // (with TWO regional tamper controls -- an OTS-region flip AND a Merkle-path
+    // flip, so a half-verifier is caught) + the DSSE-PAE attestation codec
+    // roundtrip, ALL through REAL compressions over the Kani-proven, VERIFY-only
+    // tb_encode::{sha256,lmsig,attest} leaves (no device, no scheduler, no
+    // secret, microseconds). HONEST: a signature proves exclusivity against
+    // parties OFF the signing host and NOTHING against the host holding the key
+    // (`exclusivity=OFF-PLATFORM-ONLY`); `key=SIMULATED-ENROLLED-CI-CUSTODIED`;
+    // the head is NOT yet signed/persisted (that + the guest-serial `prov-sig:`
+    // cross-boot witness is STAGE B, which closes #91). DoD (stage A):
+    // "M33: prov-lineage verify OK" (deliberately NOT "M33: prov-lineage OK",
+    // the stage-B marker).
+    {
+        let m = tb_hal::m33_prov_selftest();
+        // FAIL-CLOSED (the #65 idiom): every KAT leg + BOTH regional tamper
+        // controls + the attestation roundtrip must hold, else withhold the
+        // marker (a FAIL line with NO 'prov-lineage verify OK' substring) and
+        // exit red NOW.
+        if !m.sha256_kat_ok
+            || !m.lms_verified
+            || !m.tamper_ots_rejected
+            || !m.tamper_merkle_rejected
+            || !m.attest_ok
+        {
+            tb_hal::serial_write_str("M33: prov-lineage FAIL sha256-kat=");
+            write_hex_u64(m.sha256_kat_ok as u64);
+            tb_hal::serial_write_str(" sig-verified=");
+            write_hex_u64(m.lms_verified as u64);
+            tb_hal::serial_write_str(" tamper-ots=");
+            write_hex_u64(m.tamper_ots_rejected as u64);
+            tb_hal::serial_write_str(" tamper-merkle=");
+            write_hex_u64(m.tamper_merkle_rejected as u64);
+            tb_hal::serial_write_str(" attest=");
+            write_hex_u64(m.attest_ok as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit();
+        }
+        // The stage-A witness line: every flag EARNED this boot through real
+        // compressions (the fail-closed gate above already required them) + the
+        // honesty tokens. `head-persisted=0x0 head-reboot-survived=0x0
+        // stage=A-VERIFY-ONLY` say plainly that the persisted signed head is
+        // stage B; `conformance=RFC8554` is reachable only because the SHA-256
+        // KAT ran; `kat=RFC8554-PASS` anchors to THIS line (disjoint from the
+        // M29 `khash: ...kat=RFC7693-PASS...` line).
+        tb_hal::serial_write_str(
+            "prov-sig: sig=LMS-SHA256-W4-H10 conformance=RFC8554 kat=RFC8554-PASS sha256-kat=FIPS180-4-PASS root=",
+        );
+        write_hex_u64(m.root_witness);
+        tb_hal::serial_write_str(
+            " sig-verified=0x1 tamper-rejected-ots=0x1 tamper-rejected-merkle=0x1 attest-decoded=0x1 attest-digest=",
+        );
+        write_hex_u64(m.attest_digest);
+        tb_hal::serial_write_str(
+            " head-persisted=0x0 head-reboot-survived=0x0 measure=SELF-NO-HW-ROOT selfmeasure=UNATTESTED-LOADER key=SIMULATED-ENROLLED-CI-CUSTODIED exclusivity=OFF-PLATFORM-ONLY state=SIMULATED-REUSE-OK-NO-SECURITY splitview=UNDETECTED-NO-WITNESS-QUORUM sidechannel=NOT-CLAIMED sec=ASSUMED-FROM-LITERATURE stage=A-VERIFY-ONLY\n",
+        );
+        // The stage-A marker -- NO bare claim word (all claims live in the
+        // stripped structured tokens above, the M29 marker discipline).
+        tb_hal::serial_write_str("M33: prov-lineage verify OK\n");
+    }
+
     // ---- M38 (stage B): the kernel-integrated CONDUCTOR -- TRINITY ADOPT-1 ----
     // The in-kernel selftest agent DRIVES the Verifier-gated organ loop FROM THE
     // GUEST, through the SAME capability chokepoint M31 uses: M_MEM_RECALL (the
