@@ -684,6 +684,23 @@ CI runs exactly this matrix on every push — see
 
 Both bound the run with a wall-clock timeout (the kernel halts after the last
 milestone rather than exiting), so a missing marker is always a non-zero exit.
+They pass NO boot cmdline, so they always see the raw marker stream.
+
+### Industrial Boot — the human-meaningful presentation (#106, stage A)
+
+Booting Yuva prints a wall of `Mxx: … OK` markers and machine-tokened witness
+lines — the Definition-of-Done instrument CI greps, unreadable to a person.
+Industrial Boot adds a SECOND presentation pass (`kernel/src/bootreport.rs`): a
+branded header, one `[ STATUS ] <human subsystem>` line per subsystem in the
+systemd grammar, and a `Reached target Ready.` line — rendered ONLY when a
+viewer opts in via the runtime `yuva.console=pretty` cmdline token (x86 PVH
+`-append` at stage A). Its ABSENCE — every CI lane, every re-entrant EL1 guest —
+keeps today's raw marker stream byte-identical (the committed empty-diff test,
+`scripts/test-industrial-boot.sh`, proves it on both arches + the decoded guest
+stream). The vocabulary is HONEST: `[ MOCK ]` (backend=MOCK-DETERMINISTIC),
+`[STANDBY]` (KAN_ACTIVE=0/gate-not-met), `[ SKIP ]` (a `(… skipped)` path), each
+DERIVED from a token on the boot wire and lint-gated against overclaim. Try it
+with `scripts/demo.sh x86_64` (raw with `--verbose`); see `docs/TRY-IT.md`.
 
 ## 5. What's next
 

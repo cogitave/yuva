@@ -50,6 +50,11 @@
 // in tb-hal; this crate just names the allocator and uses `alloc` types.
 extern crate alloc;
 
+// Industrial Boot (#106): the human-meaningful boot PRESENTATION over the
+// untouched machine-truth markers. DEFAULT-OFF; see the module header and
+// docs/proposals/industrial-boot.md.
+mod bootreport;
+
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -287,6 +292,25 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     // --- M0 proof (kept verbatim): serial first-light ----------------------
     tb_hal::serial_init();
+
+    // --- Industrial Boot (#106): select the boot-console presentation -------
+    // Read the runtime `yuva.console=`/`yuva.view=` tokens from the boot
+    // cmdline BEFORE any marker prints, so pretty mode can suppress the raw
+    // stream from the very first byte. x86 PVH only (the aarch64 host
+    // `/chosen/bootargs` knob is a named follow-up; the re-entrant EL1 guest
+    // has no cmdline channel). With NO cmdline — every CI lane, every guest —
+    // this leaves the DEFAULT raw and touches nothing, so the raw stream stays
+    // byte-identical (the committed empty-diff test proves it).
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut cmdline_buf = [0u8; 256];
+        let n = tb_hal::boot_cmdline_x86(boot_info, &mut cmdline_buf);
+        if n > 0 {
+            if let Ok(cmdline) = core::str::from_utf8(&cmdline_buf[..n]) {
+                bootreport::apply_cmdline(cmdline);
+            }
+        }
+    }
 
     // --- MV / tb-boot v0: announce the contract IFF tb-vmm booted us -------
     // On the tb-boot path `boot_info` is the guest-physical address of an
@@ -3857,16 +3881,19 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             write_hex_u64(len as u64);
             tb_hal::serial_write_byte(b'\n');
             tb_hal::serial_write_str("M19: virtio OK\n"); // <-- the M19 DoD marker
+            bootreport::observe(bootreport::Subsys::Virtio, bootreport::State::Ok);
         }
         tb_hal::VirtioProof::Absent => {
             // No DeviceID==4 in any slot (e.g. tb-vmm with no -device: open-bus
             // read): a graceful GREEN skip -- the same marker substring, tagged.
             tb_hal::serial_write_str("M19: virtio OK (no device, skipped)\n");
+            bootreport::observe(bootreport::Subsys::Virtio, bootreport::State::Skip);
         }
         tb_hal::VirtioProof::LegacyUnsupported => {
             // Found but legacy (Version != 2): this driver speaks only modern --
             // an honest GREEN skip.
             tb_hal::serial_write_str("M19: virtio OK (legacy v1, skipped)\n");
+            bootreport::observe(bootreport::Subsys::Virtio, bootreport::State::Skip);
         }
         tb_hal::VirtioProof::Failed { stage } => {
             // Found + driven but the round-trip failed fail-closed -- surfaced
@@ -3912,16 +3939,19 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             write_hex_u64(prior);
             tb_hal::serial_write_byte(b'\n');
             tb_hal::serial_write_str("M20: persist OK\n"); // <-- the M20 DoD marker
+            bootreport::observe(bootreport::Subsys::Storage, bootreport::State::Ok);
         }
         tb_hal::PersistProof::Absent => {
             // No DeviceID==2 in any slot (e.g. a lane with no -drive: open-bus
             // read): a graceful GREEN skip -- the same marker substring, tagged.
             tb_hal::serial_write_str("M20: persist OK (no disk, skipped)\n");
+            bootreport::observe(bootreport::Subsys::Storage, bootreport::State::Skip);
         }
         tb_hal::PersistProof::LegacyUnsupported => {
             // Found but legacy (Version != 2): this driver speaks only modern --
             // an honest GREEN skip.
             tb_hal::serial_write_str("M20: persist OK (legacy v1, skipped)\n");
+            bootreport::observe(bootreport::Subsys::Storage, bootreport::State::Skip);
         }
         tb_hal::PersistProof::Failed { stage } => {
             // Found + driven but the round-trip failed fail-closed -- surfaced
@@ -4699,6 +4729,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 // host peer (bench, l2-nested, vmm-boot until stage C); every
                 // peer-attached lane's guard REJECTS this variant BY NAME (§5.1).
                 tb_hal::serial_write_str("M30: infer-transport OK (no host peer, skipped)\n");
+                bootreport::observe(bootreport::Subsys::Transport, bootreport::State::Skip);
             }
             tb_hal::InferChanProof::LegacyUnsupported => {
                 // A legacy (Version != 2) console transport is rejected, never
@@ -4707,6 +4738,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 tb_hal::serial_write_str(
                     "M30: infer-transport OK (legacy transport, skipped)\n",
                 );
+                bootreport::observe(bootreport::Subsys::Transport, bootreport::State::Skip);
             }
             tb_hal::InferChanProof::Failed { stage } => {
                 // #65 fail-closed: a present-then-silent or faulty peer is a HARD
@@ -4776,6 +4808,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 // ONLY when the host-keyed echo verified and every negative
                 // fired.
                 tb_hal::serial_write_str("M30: infer-transport OK\n");
+                bootreport::observe(bootreport::Subsys::Transport, bootreport::State::Ok);
                 m31_chan = Some((slot, key, nonce));
             }
         }
@@ -4818,6 +4851,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 // The LOUD graceful skip (no backend token -- structurally
                 // unable to pass the attached lanes' cumulative grep).
                 tb_hal::serial_write_str("M31: infer-e2e OK (no host peer, skipped)\n");
+                bootreport::observe(bootreport::Subsys::Inference, bootreport::State::Skip);
             }
             Some((slot, key, nonce)) => {
                 match tb_hal::infer_wire_selftest(
@@ -4902,6 +4936,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                         // marker is load-bearing: the skip variant lacks it.
                         tb_hal::serial_write_str(
                             "M31: infer-e2e OK backend=MOCK-DETERMINISTIC\n",
+                        );
+                        // DERIVED [ MOCK ]: the plumbing round-trip proved, the
+                        // backend is a deterministic stub (backend=MOCK-DETERMINISTIC).
+                        bootreport::observe(
+                            bootreport::Subsys::Inference,
+                            bootreport::State::Mock,
                         );
                     }
                 }
@@ -5250,6 +5290,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str(" organs=");
         write_dec_u64(cp.organs);
         tb_hal::serial_write_str(" verdict=ACCEPT\n");
+        // Industrial Boot gate (proposal §4/§11.3): record that a real in-guest
+        // M38 conductor ACCEPT fired this boot. The Cognitive-orchestrator
+        // pretty LINE is an OPERATOR VETO POINT and is deliberately NOT rendered
+        // at stage A even though M38 stage-B has now landed on the wire; this
+        // observation implements the proposal's gate so the operator can flip
+        // the line on later review.
+        bootreport::observe_m38_ok();
     }
 
     // ---- aL2.4b: the FULL KERNEL as a stage-2-confined EL1 guest (the M34
@@ -5377,6 +5424,15 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     tb_hal::serial_write_str(
         "L2.4b: el1-kernel-guest (aarch64-only, hardware-gated #37, skipped)\n",
     );
+
+    // --- Industrial Boot (#106): paint the human boot presentation ----------
+    // The SINGLE render site, at the end of the cumulative chain. Self-gates on
+    // the runtime mode: a NO-OP in the DEFAULT raw mode (every CI lane, the
+    // re-entrant EL1 guest, aarch64-host at stage A), so reaching here on a CI
+    // lane emits nothing and the raw stream stays byte-identical. In pretty mode
+    // (x86 `yuva.console=pretty`) it paints the clean systemd-style boot via the
+    // gate-bypassing `_raw` serial twins.
+    bootreport::render();
 
     // DIAG (#65): final end-of-chain stack red-zone sweep before parking.
     #[cfg(target_arch = "aarch64")]
