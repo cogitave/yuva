@@ -94,8 +94,9 @@ jobs:
       # Nightly + the components -Zbuild-std needs. rust-toolchain.toml pins the
       # channel to "nightly"; this action honours it and adds the components.
       - name: Install Rust nightly (rust-src, llvm-tools)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-06
           components: rust-src, llvm-tools
 
       # Runner-native QEMU for the lanes that boot on the runner (x86_64). The
