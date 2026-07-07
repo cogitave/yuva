@@ -72,9 +72,9 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=112
+EXPECTED_HARNESSES_TOTAL=120
 
-# Shard A (53): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -152,6 +152,12 @@ SHARD_A=(
   kani_guestlog_roundtrip_total
   kani_guestlog_injective
   kani_guestlog_regex_inert
+  # M33 attest codec x2 (the CHEAP layout harnesses -- no hashing; routed to
+  # the lighter existing shard per the #106 one-touch rule. pae_injective ~3.8s,
+  # decode_fail_closed ~22s local WSL). The M33 crypto-verify harnesses live in
+  # the NEW shard C below (the compression budget).
+  kani_attest_pae_injective             # 3.8s
+  kani_attest_decode_fail_closed        # 22s
 )
 
 # Shard B (59): the learning-loop codec families (M21 kancell, M22 prov canon,
@@ -246,6 +252,30 @@ SHARD_B=(
   kani_conduct_fold_tamper              # 28.5s
 )
 
+# Shard C (6): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
+# leaf (D2, RFC 8554-pinned) + the LMS verify leaf (RFC 8554, the `w=1` TOY
+# instance). PRE-REGISTERED as a THIRD SHARD by the M33 proposal §9: a full-
+# parameter LMS verify is ~1062 SHA-256 compressions (INFEASIBLE in CBMC), so
+# the toy is proven here at a khash-regime budget (~6-8 concrete compressions
+# per verify, SHA-256 MEASURED ~11s/compression local WSL -- close to BLAKE2s's
+# ~9s, NOT the feared 2x). The cheap attest layout harnesses (no hashing) live
+# in shard A; only the compression-bearing crypto leaves land here so the split
+# is by MEASURED cost, not by module. Measured local WSL seconds annotated.
+# Measured local WSL solve times (SHA-256 ~11s/compression): sum = 917.3s
+# (~15.3 min solving); projected CI ~18-20 min (x1.42 runner delta + fixed
+# checkout/cache/smoke), well under the bumped 40-min cap. The streaming SHA-256
+# (crate::sha256::Sha256) is what keeps these tractable -- the one-shot over the
+# 32*67-byte LM-OTS buffer blew CBMC to 20GB, streaming holds only the 64-byte
+# block (measured 8-20% mem).
+SHARD_C=(
+  kani_sha256_total                     # 56.2s (~6 concrete compressions)
+  kani_sha256_kat                       # 22.0s (the FIPS 180-4 "abc" KAT)
+  kani_lms_verify_total                 # 354.9s (toy genuine + 2 regional flips + malformed)
+  kani_lms_verify_tamper                # 182.0s (the pinned-vector iff, symbolic root)
+  kani_lms_otschain_step                # 154.4s (the LM-OTS Winternitz chain + D_PBLC)
+  kani_lms_merklepath                   # 148.5s (the Merkle auth-path, verify_inclusion shape)
+)
+
 # The fail-closed completeness/disjointness guard (#101 -- see the header).
 # Runs in EVERY verify-encode.sh mode; any exit here fails the CI job.
 shards_assert_complete() {
@@ -258,15 +288,16 @@ shards_assert_complete() {
     return 1
   fi
 
-  local a_len b_len list_total src_count
+  local a_len b_len c_len list_total src_count
   a_len="${#SHARD_A[@]}"
   b_len="${#SHARD_B[@]}"
-  list_total=$((a_len + b_len))
+  c_len="${#SHARD_C[@]}"
+  list_total=$((a_len + b_len + c_len))
   src_count="$(grep -c '#\[kani::proof\]' "$proofs")"
 
-  # (1) the two lists together must equal the pinned total.
+  # (1) the three lists together must equal the pinned total.
   if [ "$list_total" -ne "$EXPECTED_HARNESSES_TOTAL" ]; then
-    echo "SHARD GUARD: FAIL -- shard lists sum to $list_total (A=$a_len + B=$b_len) but EXPECTED_HARNESSES_TOTAL=$EXPECTED_HARNESSES_TOTAL (a harness was added/removed without the lockstep list edit in scripts/kani-shards.sh)" >&2
+    echo "SHARD GUARD: FAIL -- shard lists sum to $list_total (A=$a_len + B=$b_len + C=$c_len) but EXPECTED_HARNESSES_TOTAL=$EXPECTED_HARNESSES_TOTAL (a harness was added/removed without the lockstep list edit in scripts/kani-shards.sh)" >&2
     return 1
   fi
 
@@ -279,7 +310,7 @@ shards_assert_complete() {
 
   # (3) the lists must be disjoint (also catches a duplicate within one list).
   local dups
-  dups="$(printf '%s\n' "${SHARD_A[@]}" "${SHARD_B[@]}" | sort | uniq -d)"
+  dups="$(printf '%s\n' "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}" | sort | uniq -d)"
   if [ -n "$dups" ]; then
     echo "SHARD GUARD: FAIL -- harness(es) listed more than once across/within shards:" >&2
     printf '%s\n' "$dups" >&2
@@ -290,7 +321,7 @@ shards_assert_complete() {
   # or a typo statically; the execution gate would also catch it via the
   # SUCCESSFUL-count mismatch, but this fails earlier and names the culprit).
   local h missing=0
-  for h in "${SHARD_A[@]}" "${SHARD_B[@]}"; do
+  for h in "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}"; do
     if ! grep -qE "fn ${h}\b" "$proofs"; then
       echo "SHARD GUARD: FAIL -- listed harness '$h' not found as a fn in proofs.rs (renamed/removed without the lockstep list edit)" >&2
       missing=1
@@ -298,6 +329,6 @@ shards_assert_complete() {
   done
   [ "$missing" -eq 0 ] || return 1
 
-  echo "SHARD GUARD: OK -- A=$a_len + B=$b_len == $EXPECTED_HARNESSES_TOTAL == proofs.rs count, disjoint, all names resolve"
+  echo "SHARD GUARD: OK -- A=$a_len + B=$b_len + C=$c_len == $EXPECTED_HARNESSES_TOTAL == proofs.rs count, disjoint, all names resolve"
   return 0
 }

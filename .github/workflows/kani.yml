@@ -85,7 +85,14 @@ jobs:
   # inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO failures
   # AND that SUCCESSFUL == that shard's pinned count, with the two lists pinned
   # disjoint + exhaustive against the total
-  # EXPECTED_HARNESSES_TOTAL (currently 112: the 15 original + the 5 L2.1 stage-2/
+  # EXPECTED_HARNESSES_TOTAL (currently 120: the 112 prior + the 8 M33
+  # provenance-lineage harnesses -- 2 SHA-256 leaf (kani_sha256_total /
+  # kani_sha256_kat), 4 LMS verify toy-instance (kani_lms_verify_total /
+  # kani_lms_verify_tamper / kani_lms_otschain_step / kani_lms_merklepath), and
+  # 2 DSSE-PAE attestation codec (kani_attest_pae_injective /
+  # kani_attest_decode_fail_closed); the 6 crypto-verify harnesses form the NEW
+  # shard C, the 2 cheap attest layout harnesses joined shard A. Prior tally:
+  # the 15 original + the 5 L2.1 stage-2/
   # el2_trap harnesses + the 1 L2.2 el2-exits classifier harness + the 2 L2.3
   # SYS64/DABT ISS trap-and-emulate decoders + the 1 aL2.4 sctlr_el1_guest_enable
   # guest-S1-enable harness + the 1 aL2.5 gich_lr_encode_roundtrip GICH_LRn
@@ -313,13 +320,14 @@ jobs:
     # The fold family is COMPRESSION-BUDGETED per docs/plans/m29-stage-c-plan.md
     # (the three per-milestone fold harnesses are leaf-sensitivity + the tokened
     # composition; kani_exp_fold_tamper is the one kept-FULL end-to-end witness,
-    # in this shard). Shard A (46 names, the complete khash family included)
-    # measured ~15 min local per the #101 timed rebalance and projects ~21-24
-    # min on the CI runner with duplicated codegen; 30 is a generous margin
-    # above that and far under the old single-lane 45, not a license for
-    # symbolic blow-up. MEASURE each new/changed harness locally in WSL
+    # in this shard). Shard A (the complete khash family + the two cheap M33
+    # attest layout harnesses) MEASURE each new/changed harness locally in WSL
     # (`cargo kani -p tb-encode --harness <name>`) BEFORE pushing.
-    timeout-minutes: 30
+    # M33: the per-job timeout is bumped 30 -> 40 (the #106 hot-run data showed
+    # only ~1.5-2.5 min headroom under the old 30-min cap; the agreed headroom
+    # fix that accompanies the M33 shard-C addition -- a 3-way split PLUS more
+    # headroom -- a finer split is a named later follow-up).
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -371,10 +379,10 @@ jobs:
   prove-encode-b:
     name: "prove #49 encoders shard B (Kani)"
     runs-on: ubuntu-latest
-    # Shard B (44 names) measured ~15 min local per the #101 timed rebalance
-    # and projects ~21-24 min on the CI runner with duplicated codegen; same
-    # margin rationale as shard A.
-    timeout-minutes: 30
+    # Shard B (the learning-loop codec families + M31/M38); same margin
+    # rationale as shard A. Timeout bumped 30 -> 40 with the M33 shard-C
+    # addition (the #106 headroom fix).
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -409,3 +417,54 @@ jobs:
         run: bash scripts/verify-encode.sh
         env:
           SHARD: b
+
+  # The C shard -- the M33 provenance-lineage CRYPTO-VERIFY harnesses (the
+  # SHA-256 leaf + the LMS verify leaf's `w=1` toy instance). PRE-REGISTERED as
+  # a third shard by the M33 proposal §9: a full-parameter LMS verify is ~1062
+  # SHA-256 compressions (INFEASIBLE in CBMC), so the toy is proven at a
+  # khash-regime budget (~6-8 concrete compressions per verify, SHA-256 measured
+  # ~11s/compression local WSL). Only the compression-bearing crypto leaves land
+  # here (the cheap attest layout harnesses live in shard A) so the split is by
+  # MEASURED cost. Identical steps to A/B; only SHARD differs. The three lists
+  # live in scripts/kani-shards.sh, guarded disjoint + exhaustive in ALL jobs.
+  prove-encode-c:
+    name: "prove #49 encoders shard C (Kani) -- M33 crypto-verify"
+    runs-on: ubuntu-latest
+    # Six crypto-verify harnesses; SHA-256 ~11s/compression, LMS toy ~6-8
+    # compressions/verify -- projected well under the 40-min cap (the same
+    # headroom-fix timeout as A/B).
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # #77 cache -- same key as prove-encode-a/b (shared compilation artifacts;
+      # proof results are never cached).
+      - name: Cache Kani toolchain + build artifacts (encode)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/registry
+            target/kani
+          key: kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/tb-encode/**') }}
+          restore-keys: |
+            kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      # One-harness smoke -- same role as in shard A/B (toolchain install only,
+      # never part of the counted gate).
+      - name: Install Kani toolchain (one-harness smoke)
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: '-p tb-encode --harness kani_adjust_within_allowed --output-format=terse'
+
+      # THE gate: the counted shard-C pass -- FAILS CLOSED unless the #101
+      # completeness guard holds, every shard-C harness verifies, AND the
+      # SUCCESSFUL count matches shard C's pinned list length, then emits
+      # `V1-shard-c: kani-encoders OK`.
+      - name: Assert encoder proof marker (shard C, fail-closed harness count)
+        run: bash scripts/verify-encode.sh
+        env:
+          SHARD: c

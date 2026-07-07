@@ -1,0 +1,46 @@
+# prov-signer -- the M33 HOST/OPERATOR LMS signer (stage A).
+#
+# The VERIFY/SIGN split's sign side (proposal §2): this std, host-side binary
+# holds the LMS private key (a compiled-in SIMULATED enrolled seed) + the
+# never-reuse OTS leaf-index counter, signs a 32-byte prov head + the DSSE-PAE
+# attestation bytes, and prints its own `prov-signer:` witness line. The KERNEL
+# never holds the secret key or any signature state -- it only ever verifies
+# (`lms_verify`) against the 32-byte public root baked in the image.
+#
+# key=SIMULATED-ENROLLED-CI-CUSTODIED: exclusivity against everyone OFF the
+# signing host, and NOTHING against a CI/host compromise (the honest residual).
+# state=SIMULATED-REUSE-OK-NO-SECURITY: at stage A the CI lane DELIBERATELY
+# reuses leaf index 0 every run -- acceptable ONLY because the compiled-in
+# simulated key carries no security value; a real never-decrement durable
+# counter is the M35 obligation (leafidx=DEFERRED-TO-M35-MONITOR).
+#
+# It links the SAME Kani-proven `tb-encode::{lmsig,attest,sha256}` leaves the
+# kernel verifies -- NEVER a second signer implementation in shell/python (the
+# same-math rule as tools/xport-harness). Its OWN nested workspace (the empty
+# [workspace] below), auto-excluded from the root no_std workspace, so the
+# kernel kbuild lanes + -Zbuild-std are entirely unaffected.
+
+[package]
+name = "prov-signer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yuva M33 host signer: LMS-signs a prov head + a DSSE-PAE attestation with a simulated CI-custodied key and prints the prov-signer witness (VERIFY/SIGN split, sign side)."
+license = "Apache-2.0"
+
+# An independent nested workspace (the tb-vmm / xport-harness precedent): cargo
+# auto-excludes it from the parent workspace; it keeps its own Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "prov-signer"
+path = "src/main.rs"
+
+[dependencies]
+# The verified LMS/attest/SHA-256 leaves WITH the `signer` feature (which gates
+# the signer OUT of the kernel build but IN here). Zero external deps -- the
+# signer is fixed-buffer, no-alloc, deterministic RFC 8554 Appendix A keygen.
+tb-encode = { path = "../../crates/tb-encode", features = ["signer"] }
+
+[profile.release]
+panic = "abort"

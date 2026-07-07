@@ -44,7 +44,7 @@ members = [
 # its OWN nested workspace, excluded here so the kernel kbuild lanes and the
 # -Zbuild-std settings are entirely unaffected. It depends on crates/tb-encode
 # by path (the SAME verified inferwire/khash leaves the kernel links).
-exclude = ["tb-vmm", "tools/xport-harness"]
+exclude = ["tb-vmm", "tools/xport-harness", "tools/prov-signer"]
 
 # panic = abort everywhere. The custom target specs in /targets already set
 # "panic-strategy": "abort" (so -Zbuild-std rebuilds core without unwinding and

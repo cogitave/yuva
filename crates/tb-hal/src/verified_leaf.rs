@@ -1699,3 +1699,106 @@ pub fn infer_wire_selftest(
 ) -> InferWireProof {
     mem::infer_wire_selftest(slot, key, m30_nonce, req_id, prompt, expected_resp)
 }
+
+// ===========================================================================
+// M33: the provenance-lineage crypto-verify self-test facade (stage A). PURE
+// value computation over the Kani-proven tb_encode leaves (sha256 / lmsig /
+// attest) -- NO device, NO scheduler, NO secret, microseconds at boot. The
+// kernel matches on the returned proof bools and renders the honesty-tokened
+// witness. VERIFY ONLY: the private signing key + the never-reuse leaf-index
+// state live host-side (tools/prov-signer), NEVER in this kernel TCB.
+// ===========================================================================
+
+/// M33 stage-A proof: the in-boot KATs + the small-parameter LMS roundtrip +
+/// the two regional tamper controls + the attestation codec roundtrip. See
+/// [`m33_prov_selftest`].
+pub struct M33ProvProof {
+    /// The SHA-256 in-boot KAT recomputed the official FIPS 180-4 vectors
+    /// through the real compression (earns `sha256-kat=FIPS180-4-PASS`).
+    pub sha256_kat_ok: bool,
+    /// The pinned small-parameter (`w=1`) LMS toy signature VERIFIED against the
+    /// pinned public root through real SHA-256 compressions (earns
+    /// `kat=RFC8554-PASS`, `sig-verified=1`).
+    pub lms_verified: bool,
+    /// A one-byte flip in the LM-OTS-signature region was REJECTED (a Merkle-
+    /// only half-verifier is caught; `tamper-rejected-ots=1`).
+    pub tamper_ots_rejected: bool,
+    /// A one-byte flip in the Merkle-auth-path region was REJECTED (an OTS-only
+    /// half-verifier is caught; `tamper-rejected-merkle=1`).
+    pub tamper_merkle_rejected: bool,
+    /// The DSSE-PAE attestation codec round-tripped (canon -> decode identity)
+    /// AND the DSSE PAE encoded non-empty (`attest-decoded=1`).
+    pub attest_ok: bool,
+    /// A u64 witness fold of the 32-byte public root (rendered `root=<hex16>`).
+    pub root_witness: u64,
+    /// A u64 witness fold of the attestation subject digest (rendered
+    /// `attest-digest=<hex16>`).
+    pub attest_digest: u64,
+}
+
+/// Fold the first 8 bytes of a 32-byte value into a u64 witness (LE). Pure.
+fn fold8(b: &[u8; 32]) -> u64 {
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
+/// M33 stage-A self-test (both arches): recompute the SHA-256 FIPS 180-4 KAT +
+/// the LMS small-parameter roundtrip KAT (with the two regional tamper
+/// controls) through REAL compressions, and round-trip the DSSE-PAE attestation
+/// codec. All value computation is the host-verifiable, Kani-proven
+/// `tb_encode::{sha256,lmsig,attest}` (VERIFY-only in the kernel). HONEST: a
+/// signature proves `exclusivity=OFF-PLATFORM-ONLY` and NOTHING against the
+/// host holding the key; `key=SIMULATED-ENROLLED-CI-CUSTODIED`;
+/// `state=SIMULATED-REUSE-OK-NO-SECURITY`; `sec=ASSUMED-FROM-LITERATURE`.
+pub fn m33_prov_selftest() -> M33ProvProof {
+    let sha256_kat_ok = tb_encode::sha256::kat_ok();
+    let k = tb_encode::lmsig::kat();
+
+    // Exercise the DSSE-PAE attestation codec (self-reported subject digest --
+    // selfmeasure=UNATTESTED-LOADER): build a statement, canon it, decode it
+    // back, and PAE-wrap it under the M33 attestation domain separator.
+    let subject_digest = tb_encode::sha256::sha256(b"YUVA-M33-selfmeasure");
+    let toolchain_hash = tb_encode::sha256::sha256(b"YUVA-M33-toolchain");
+    let materials: [[u8; 32]; 1] = [tb_encode::sha256::sha256(b"YUVA-M33-material-0")];
+    let ledger = [tb_encode::attest::LedgerEntry {
+        dep_tok: 0x594D_3333, // "YM33"
+        status: tb_encode::attest::ledger_status::ACCEPTED_PERMANENT,
+    }];
+    let st = tb_encode::attest::AttestStatement {
+        subject_digest,
+        builder_id: [0x59u8; tb_encode::attest::BUILDER_ID_LEN],
+        build_type: tb_encode::attest::build_type::KERNEL_IMAGE,
+        toolchain_hash,
+        materials: &materials,
+        ledger: &ledger,
+    };
+    let mut cbuf = [0u8; 256];
+    let cn = tb_encode::attest::canon(&st, &mut cbuf);
+    let roundtrip_ok = cn > 0
+        && match tb_encode::attest::decode(&cbuf[..cn]) {
+            Some(d) => {
+                d.subject_digest == subject_digest
+                    && d.toolchain_hash == toolchain_hash
+                    && d.build_type == tb_encode::attest::build_type::KERNEL_IMAGE
+                    && d.n_materials == 1
+                    && d.n_ledger == 1
+            }
+            None => false,
+        };
+    let mut pbuf = [0u8; 384];
+    let pn = tb_encode::attest::pae(
+        tb_encode::attest::ATTEST_PAYLOAD_TYPE,
+        &cbuf[..cn],
+        &mut pbuf,
+    );
+    let attest_ok = roundtrip_ok && pn > 0;
+
+    M33ProvProof {
+        sha256_kat_ok,
+        lms_verified: k.verified,
+        tamper_ots_rejected: k.tamper_ots_rejected,
+        tamper_merkle_rejected: k.tamper_merkle_rejected,
+        attest_ok,
+        root_witness: fold8(&tb_encode::lmsig::TOY_ROOT),
+        attest_digest: fold8(&subject_digest),
+    }
+}
