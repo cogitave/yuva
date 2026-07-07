@@ -10,7 +10,7 @@
 #   DoD-1  DEFAULT is raw + pretty-not-emitted, and DEFAULT == explicit raw.
 #          The raw markers CI greps appear; NO pretty line leaks into default.
 #   DoD-2  the honesty derivation + overclaim/ESC lint on a pretty capture.
-#   DoD-3  the substrate vs cogi view render-filter parity.
+#   DoD-3  the substrate vs agent view render-filter parity.
 #
 # Requires: a built x86_64 kernel + qemu-system-x86_64. Builds if missing.
 set -uo pipefail
@@ -100,7 +100,7 @@ for raw in 'M31: infer-e2e OK' 'M38: conductor OK' 'persist: gen=' 'khash: prim=
 done
 # Derivation: a mock backend is [ MOCK ], never [ OK ] Local AI; the standby cell
 # is [STANDBY]; the EL2 rows are [ SKIP ] on x86.
-printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ MOCK ] Cogi inference' || fail "DoD-2: mock inference not rendered [ MOCK ]"
+printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ MOCK ] Agent inference' || fail "DoD-2: mock inference not rendered [ MOCK ]"
 printf '%s' "${OUT_PRETTY}" | grep -qF -- 'not live AI'            || fail "DoD-2: mock inference missing the 'not live AI' disclaimer"
 printf '%s' "${OUT_PRETTY}" | grep -qF -- '[STANDBY] Adaptive policy' || fail "DoD-2: dormant policy not rendered [STANDBY]"
 printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ SKIP ] Guest isolation'  || fail "DoD-2: x86 guest-isolation not rendered [ SKIP ]"
@@ -116,15 +116,15 @@ else note "DoD-2: no ESC byte in the pretty stream (no ANSI color)"; fi
 printf '%s' "${OUT_PRETTY}" | grep -qF -- 'Cognitive orchestrator' && fail "DoD-2: the deferred 'Cognitive orchestrator' line was rendered (operator veto point)"
 
 # ---------------------------------------------------------------------------
-# DoD-3 — the view render-filter parity (substrate vs cogi).
+# DoD-3 — the view render-filter parity (substrate vs agent).
 # ---------------------------------------------------------------------------
 echo "== DoD-3: view parity =="
 # Substrate view: micro-VMM rows + the honest HIDDEN note; NO inference/learning row.
 printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'HIDDEN in the substrate view' || fail "DoD-3: substrate view missing the honest 'HIDDEN in the substrate view' line"
-printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'Cogi inference' && fail "DoD-3: substrate view leaked the cogi inference row"
+printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'Agent inference' && fail "DoD-3: substrate view leaked the agent inference row"
 printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'not present' && fail "DoD-3: substrate view claimed 'not present' (organs DID execute — must say HIDDEN)"
-# Cogi view: the mock/standby glyphs + the trailing INFO disclaimer.
-printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ INFO ] retrieval=lexical-only' || fail "DoD-3: cogi view missing the trailing [ INFO ] disclaimer"
+# Agent view: the mock/standby glyphs + the trailing INFO disclaimer.
+printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ INFO ] retrieval=lexical-only' || fail "DoD-3: agent view missing the trailing [ INFO ] disclaimer"
 
 echo "== RESULT =="
 if [[ "${FAILED}" -eq 0 ]]; then echo ">> Industrial Boot DoD-1/2/3: ALL PASS"; else echo ">> Industrial Boot DoD: FAILURES ABOVE"; fi

@@ -34,7 +34,7 @@ wsl -d Ubuntu-22.04 -- bash scripts/demo.sh x86_64
 ```
 
 ```
-Yuva 0.9 — sovereign agent-native OS  ·  cogi view (x86_64)
+Yuva 0.9 — sovereign agent-native OS  ·  agent view (x86_64)
 ──────────────────────────────────────────────────────────────
 [  OK  ] Kernel core                traps, paging, preemptive scheduler
 [  OK  ] Isolation & capabilities   per-entity address spaces, capability ABI
@@ -46,13 +46,13 @@ Yuva 0.9 — sovereign agent-native OS  ·  cogi view (x86_64)
 [  OK  ] Agent runtime & memory     tiered store, lexical recall, consolidation
 [  OK  ] Provenance ledger          tamper-evident fold (host TCB residual)
 [  OK  ] Inference transport        host-custodied key, cross-process recompute — plumbing only
-[ MOCK ] Cogi inference             deterministic stub — NO model loaded, not live AI
+[ MOCK ] Agent inference            deterministic stub — NO model loaded, not live AI
 [STANDBY] Adaptive policy            experience logged; activation gate not met
 [  OK  ] Operator channel           transcript, exit telemetry, inbound command
 [  OK  ] Reached target Ready.
 [ INFO ] retrieval=lexical-only · generativity=open-frontier (not claimed) · integrity-primitive=assumed-from-literature
 ──────────────────────────────────────────────────────────────
-Cogi is resident. Yuva ready (logical surrogate) — 13 subsystems (1 mock, 1 standby, 2 skipped, 0 failed).
+The agent runtime is resident. Yuva ready (logical surrogate) — 13 subsystems (1 mock, 1 standby, 2 skipped, 0 failed).
 ```
 
 This is **honest, not marketing**: a mock inference reads `[ MOCK ] … not live

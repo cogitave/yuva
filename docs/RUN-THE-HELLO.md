@@ -47,8 +47,8 @@ its env — env ONLY, never a flag, never logged). When the kernel's real-prompt
    added byte/char but FAILED run 27968811267 (model chose the pair-swap
    `G1 G0 G3 G2`); v4 stops chasing the exact transform and checks the property
    directly, keeping every anti-parrot/anti-replay guarantee,
-   line 2 one short sentence greeting **Cogi** — the mind that sent the
-   message (Yuva is its *home*, not its name) — the hello this lane exists for,
+   line 2 one short sentence greeting **the resident agent of Yuva** — the
+   machine that sent the message — the hello this lane exists for,
 3. verifies the transform, digests the response text, prints its verdict, and
    frames the (scrubbed, capped at 2048 bytes) response text as lowercase hex
    on one `xport-harness-infer-body:` line — **also on the 200-class

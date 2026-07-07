@@ -39,14 +39,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # unconditionally raw and the aarch64-host `/chosen/bootargs` knob is a follow-up,
 # so an aarch64 demo shows the raw stream with a note.
 CONSOLE="pretty"
-VIEW="cogi"
+VIEW="agent"
 ARCH=""
 for a in "$@"; do
   case "$a" in
     --verbose|--raw|-v)  CONSOLE="raw" ;;
     --pretty)            CONSOLE="pretty" ;;
     --substrate)         VIEW="substrate" ;;
-    --cogi)              VIEW="cogi" ;;
+    --agent)             VIEW="agent" ;;
+    --cogi)              VIEW="agent" ;;   # deprecated alias for --agent (kept so old docs/muscle-memory don't break)
     aarch64|x86_64)      ARCH="$a" ;;
     *) echo "usage: scripts/demo.sh [aarch64|x86_64] [--verbose|--raw] [--substrate]" >&2; exit 2 ;;
   esac
