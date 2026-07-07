@@ -60,17 +60,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Install a nightly that ships BOTH `miri` and `rust-src`. With a `nightly`
-      # channel + requested components, dtolnay/rust-toolchain resolves the most
-      # recent nightly DATE that carries all of them, so the blocking gate never
-      # lands on a miri-less nightly. We pin that resolved toolchain into
-      # RUSTUP_TOOLCHAIN below so the repo's rust-toolchain.toml (bare `nightly`)
-      # cannot override it back to a possibly-miri-less latest nightly (rustup
-      # precedence: the RUSTUP_TOOLCHAIN env var > a directory rust-toolchain.toml).
+      # Install a PINNED nightly (nightly-2026-07-06) that ships BOTH `miri` and
+      # `rust-src`. Pinned via dtolnay/rust-toolchain@master + `toolchain:` so the
+      # floating `@nightly` drift that broke main cannot recur. We still pin the
+      # resolved toolchain into RUSTUP_TOOLCHAIN below so the repo's
+      # rust-toolchain.toml (now also nightly-2026-07-06) cannot override it
+      # (rustup precedence: the RUSTUP_TOOLCHAIN env var > a directory
+      # rust-toolchain.toml). Bump this date in lockstep with rust-toolchain.toml
+      # + the other lanes; the chosen date MUST carry miri (verified in CI).
       - name: Install nightly + miri + rust-src
         id: toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-06
           components: miri, rust-src
 
       - name: Cache cargo registry + git + build artifacts

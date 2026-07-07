@@ -44,15 +44,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # A nightly that ships clippy. dtolnay/rust-toolchain@nightly + the
-      # requested component resolves the most recent nightly DATE carrying it,
-      # then we pin that resolved toolchain via RUSTUP_TOOLCHAIN so the repo's
-      # bare-`nightly` rust-toolchain.toml cannot override it back to a possibly
-      # clippy-less latest nightly (same robustness as miri.yml).
+      # A PINNED nightly (nightly-2026-07-06) that ships clippy. Pinned via
+      # dtolnay/rust-toolchain@master + `toolchain:` so the floating `@nightly`
+      # drift that broke main cannot recur; RUSTUP_TOOLCHAIN below still carries
+      # the resolved toolchain name so the repo rust-toolchain.toml (now also
+      # nightly-2026-07-06) cannot override it (same robustness as miri.yml).
+      # Bump this date in lockstep with rust-toolchain.toml + the other lanes.
       - name: Install nightly + clippy
         id: toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-06
           components: clippy
 
       - name: Cache cargo registry + git + build artifacts

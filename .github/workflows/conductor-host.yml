@@ -93,7 +93,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
 
       # §8.7 — the env-ABSENCE assertion (the zero-secret lane's leak negative):
       # ANTHROPIC_API_KEY must not be defined on this lane at all.

@@ -15,6 +15,6 @@
 # not rustup targets; they are built from /targets/*.json via build-std.
 
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-07-06"
 components = ["rust-src", "llvm-tools"]
 profile = "minimal"
