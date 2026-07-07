@@ -38,6 +38,7 @@ dependencies = [
 name = "yuva-kernel"
 version = "0.1.0"
 dependencies = [
+ "brand",
  "tb-boot",
  "tb-hal",
 ]

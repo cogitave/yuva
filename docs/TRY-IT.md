@@ -20,7 +20,55 @@ wsl -d Ubuntu-22.04 -- bash scripts/demo.sh x86_64     # the x86 microvm flavor
 `scripts/demo.sh` builds the kernel if needed, attaches the full device set
 (virtio-rng, the M20 virtio-blk disk, the M30 inference channel with a live
 host-side peer holding a per-run key), and puts the serial console on your
-terminal. You watch the whole chain print live:
+terminal.
+
+### The clean industrial boot (default)
+
+By default the demo shows a human-meaningful, systemd-style boot readout — a
+branded header, one `[ STATUS ] <subsystem>` line per subsystem, and a
+`Reached target Ready.` line. Run the x86 flavor to see it (the pretty knob is
+wired on x86 at stage A; see the honesty note below):
+
+```
+wsl -d Ubuntu-22.04 -- bash scripts/demo.sh x86_64
+```
+
+```
+Yuva 0.9 — sovereign agent-native OS  ·  cogi view (x86_64)
+──────────────────────────────────────────────────────────────
+[  OK  ] Kernel core                traps, paging, preemptive scheduler
+[  OK  ] Isolation & capabilities   per-entity address spaces, capability ABI
+[ SKIP ] Guest isolation            full kernel as EL1 guest under EL2 (no EL2, skipped)
+[  OK  ] Virtio devices             entropy (rng), block
+[  OK  ] Durable storage            virtio-blk, replayed on boot
+[ SKIP ] Sovereign scheduler        CNTHP-preempted (no EL2, skipped)
+[  OK  ] Message-authenticated integrity   keyed BLAKE2s-256 MAC (primitive assumed-from-literature)
+[  OK  ] Agent runtime & memory     tiered store, lexical recall, consolidation
+[  OK  ] Provenance ledger          tamper-evident fold (host TCB residual)
+[  OK  ] Inference transport        host-custodied key, cross-process recompute — plumbing only
+[ MOCK ] Cogi inference             deterministic stub — NO model loaded, not live AI
+[STANDBY] Adaptive policy            experience logged; activation gate not met
+[  OK  ] Operator channel           transcript, exit telemetry, inbound command
+[  OK  ] Reached target Ready.
+[ INFO ] retrieval=lexical-only · generativity=open-frontier (not claimed) · integrity-primitive=assumed-from-literature
+──────────────────────────────────────────────────────────────
+Cogi is resident. Yuva ready (logical surrogate) — 13 subsystems (1 mock, 1 standby, 2 skipped, 0 failed).
+```
+
+This is **honest, not marketing**: a mock inference reads `[ MOCK ] … not live
+AI` (never `[ OK ] Local AI`); the dormant learning cell reads `[STANDBY]`; a
+subsystem that took a `(… skipped)` path reads `[ SKIP ]` (the EL2-only rows are
+skipped on x86); no ANSI color is emitted. `scripts/demo.sh x86_64 --substrate`
+renders the Firecracker-alt minimal (micro-VMM only) view.
+
+### The raw developer markers (`--verbose`)
+
+For the machine-truth marker stream — today's exact `Mxx: … OK` chain that CI
+greps — pass `--verbose` (or `--raw`):
+
+```
+wsl -d Ubuntu-22.04 -- bash scripts/demo.sh x86_64 --verbose
+```
 
 ```
 hello from rust_main
@@ -31,8 +79,15 @@ M27: sched OK … M20: persist OK … M24: bakeoff OK (gate-not-met)
 khash: prim=BLAKE2S-256 … kat=RFC7693-PASS
 opcmd: … mac=KEYED-CRYPTO …
 xport: … echo=HOST-KEYED-VERIFIED …        ← real bytes crossed to the host and back
-M30: infer-transport OK                     ← the cumulative tail
+M30: infer-transport OK … M38: conductor OK … ← the cumulative tail
 ```
+
+This raw stream is the **default and only** thing CI, the re-entrant aarch64
+EL1 guest, and every verifier ever see — the pretty presentation is opt-in via
+the `yuva.console=pretty` cmdline token and is byte-for-byte absent without it.
+The aarch64 demo (`scripts/demo.sh`, the default arch) shows the raw stream: its
+re-entrant guest is unconditionally raw and the aarch64-host pretty knob is a
+named follow-up.
 
 The aarch64 run exits by itself when the chain completes; on x86_64 press
 **Ctrl-A then X** to leave QEMU. First build takes a few minutes (build-std);

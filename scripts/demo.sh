@@ -30,7 +30,28 @@ case ":${PATH}:" in *":${HOME}/.cargo/bin:"*) :;; *) PATH="${HOME}/.cargo/bin:${
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Build identifiers (KERNEL_BIN, TARGET_X86, TARGET_A64) — the single source of truth.
 . "${REPO_ROOT}/scripts/project.env"
-ARCH="${1:-aarch64}"
+
+# Industrial Boot (#106): by DEFAULT this VIEWER shows the clean, human-meaningful
+# systemd-style boot (`yuva.console=pretty`, x86 PVH `-append`). `--verbose`/`--raw`
+# shows the raw developer marker stream instead (today's exact `Mxx: … OK` chain).
+# `--substrate` renders the Firecracker-alt minimal (micro-VMM only) view. The
+# pretty knob is wired on x86 only at stage A; the re-entrant aarch64 EL1 guest is
+# unconditionally raw and the aarch64-host `/chosen/bootargs` knob is a follow-up,
+# so an aarch64 demo shows the raw stream with a note.
+CONSOLE="pretty"
+VIEW="cogi"
+ARCH=""
+for a in "$@"; do
+  case "$a" in
+    --verbose|--raw|-v)  CONSOLE="raw" ;;
+    --pretty)            CONSOLE="pretty" ;;
+    --substrate)         VIEW="substrate" ;;
+    --cogi)              VIEW="cogi" ;;
+    aarch64|x86_64)      ARCH="$a" ;;
+    *) echo "usage: scripts/demo.sh [aarch64|x86_64] [--verbose|--raw] [--substrate]" >&2; exit 2 ;;
+  esac
+done
+ARCH="${ARCH:-aarch64}"
 PROFILE="${PROFILE:-debug}"
 
 case "${ARCH}" in
@@ -73,10 +94,25 @@ else
   echo "[demo] no cargo/harness — the M30 line will print its loud '(no host peer, skipped)'" >&2
 fi
 
+# Industrial Boot (#106): assemble the `yuva.console=`/`yuva.view=` cmdline. On
+# x86 it rides the PVH `-append`. On aarch64 the host knob is a named follow-up
+# (and the EL1 guest has no cmdline channel), so a pretty request there prints a
+# note and shows the raw stream.
+APPEND="yuva.console=${CONSOLE} yuva.view=${VIEW}"
+if [[ "${CONSOLE}" == "pretty" ]]; then
+  echo "[demo] presentation: clean industrial boot (${VIEW} view). Use --verbose for the raw developer markers." >&2
+else
+  echo "[demo] presentation: raw developer marker stream (Mxx: … OK chain)." >&2
+fi
+if [[ "${ARCH}" == "aarch64" && "${CONSOLE}" == "pretty" ]]; then
+  echo "[demo] NOTE: the aarch64-host pretty knob is a follow-up (proposal §10); showing the raw stream. Run 'scripts/demo.sh x86_64' for the pretty industrial boot." >&2
+fi
+
 echo "[demo] booting Yuva (${ARCH}) — serial console below. Ctrl-A X quits QEMU." >&2
 echo "------------------------------------------------------------------------" >&2
 
 if [[ "${ARCH}" == "aarch64" ]]; then
+  # aarch64: no wired cmdline console knob yet -> raw regardless (guest always raw).
   exec "${QEMU}" \
     -M virt,virtualization=on,gic-version=2,iommu=smmuv3 \
     -cpu cortex-a72 -m 128M -accel tcg,thread=single \
@@ -93,6 +129,7 @@ else
     -M microvm,rtc=off \
     -accel tcg -cpu qemu64 -m 256M -smp 1 \
     -kernel "${KERNEL}" \
+    -append "${APPEND}" \
     -no-reboot -nic none \
     -global virtio-mmio.force-legacy=false \
     -device virtio-rng-device \

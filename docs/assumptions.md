@@ -536,6 +536,35 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   correctness rests on the host `cargo test` + the official RFC 8554 Appendix F
   vector + the in-boot small-parameter KAT + Miri.
 
+## 3d. Industrial Boot presentation residuals (#106, the human-facing surface)
+
+- **Presentation only — no new capability claim.** The `[ STATUS ]` boot
+  (`kernel/src/bootreport.rs`) is a second PRESENTATION of the same pass/fail
+  booleans the raw markers carry; a green line means the marker fired and its
+  round-trip boolean passed on that lane, NOT that Yuva reasons. `token=pretty=
+  PRESENTATION-OF-MARKERS-NOT-NEW-CLAIM`.
+- **DEFAULT-raw preserves byte-identical markers/witnesses on all surfaces.**
+  With no `yuva.console=pretty` cmdline token — every CI lane, every re-entrant
+  EL1 guest — the mode is raw, the serial display gate stays down, and the raw
+  stream is byte-identical. Proven by the committed empty-diff test
+  (`scripts/empty-diff-proof.sh` + `scripts/test-industrial-boot.sh`) on the
+  x86_64 host stream AND the decoded aarch64 guest stream; the un-grepped
+  `seed: total_frames=` layout count is the only serial delta and shifts purely
+  with binary size. `token=ci-preservation=DEFAULT-RAW-PRETTY-NOT-EMITTED`.
+- **Derived glyphs come ONLY from on-wire tokens.** `[ MOCK ]` derives from
+  `backend=MOCK-DETERMINISTIC`; `[STANDBY]` from `KAN_ACTIVE=0x0`/`gate-not-met`
+  (compile consts); `[ SKIP ]` from the `(… skipped)` branch taken. Every other
+  human suffix is an AUTHORED-HONEST CONSTANT, lint-gated (DoD-2) against an
+  overclaim vocabulary; no glyph is derived from an off-wire host token.
+- **The re-entrant EL1 guest is unconditionally raw.** It boots the same binary
+  with NO cmdline channel, so it inherits the compiled raw default; pretty is
+  reachable only via a runtime cmdline it never receives. `token=guest=
+  UNCONDITIONALLY-RAW-NO-CMDLINE-CHANNEL`.
+- **Timing is the logical surrogate, not wall-clock; no ANSI color is emitted**
+  (a freestanding kernel has no `isatty`, and every lane hard-fails on a raw
+  ESC byte). The x86 PVH cmdline parse ships; the aarch64-host `/chosen/bootargs`
+  knob and the M38 Cognitive-orchestrator boot line are named follow-ups.
+
 ## 4. Status & review discipline
 
 These assumptions are LIVE and shrink as rungs land: A3 closes at L2.8 (SMMUv3),

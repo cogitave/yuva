@@ -117,6 +117,26 @@ Yuva's claim that "the frozen kernel holds the evaluator" makes verification att
 - **MCP & A2A**: in 2026 **both have an official Rust SDK** (`rmcp` tokio-based) → protocol bridges are pure Rust. The TS/Python SDKs only in the developer-SDK layer.
 - **The AIOS `aios-rs` lesson:** the previous agent-OS chose Python for speed; the Rust port collapsed into placeholder traits because all the value was in Python-ecosystem integration. → **Yuva lesson:** language-lock the kernel/daemons to Rust from day 1, architecturally exile Python outside the node image.
 
+## 7a. Honesty at the user-facing surface (Industrial Boot, #106)
+
+The project's honesty discipline — a marker/witness never overclaims to a
+verifier — extends to the human boot presentation (`kernel/src/bootreport.rs`):
+
+- **Derived-only-from-an-on-wire-token.** A `[ STATUS ]` glyph is DERIVED only
+  from a token the kernel still holds as a boolean/const at render time and that
+  the raw stream carries: `[ MOCK ]`←`backend=MOCK-DETERMINISTIC`,
+  `[STANDBY]`←`KAN_ACTIVE=0x0`/`gate-not-met`, `[ SKIP ]`←the `(… skipped)`
+  branch taken. A derived line can never say more than the machine truth.
+- **Authored-honest-constant + lint.** Every other human word is a static,
+  reviewed constant, NOT claimed to be token-derived, and is lint-gated (DoD-2)
+  against an overclaim vocabulary (`Local AI`, `AI Learning`, `semantic`,
+  `live inference`, `learned`, `reasoned`, `intelligent`, `secure`).
+- **DEFAULT-raw / pretty-not-emitted.** The presentation is opt-in via a runtime
+  cmdline token; its absence keeps the raw stream byte-identical for CI.
+- **Guest-unconditionally-raw; no ESC / no color.** The re-entrant EL1 guest has
+  no cmdline channel and stays raw; the renderer emits no ANSI color (a
+  freestanding kernel has no `isatty`, and every lane hard-fails on a raw ESC).
+
 ## 8. Open Topics → [OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)
 
 - Kernel verification path: pure Rust+tiered-assurance, or seL4-under-node-image for certification?

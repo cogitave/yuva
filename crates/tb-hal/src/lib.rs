@@ -57,16 +57,65 @@ pub fn serial_init() {
     arch::serial_init();
 }
 
+// ---------------------------------------------------------------------------
+// Industrial Boot (#106): the serial DISPLAY gate.
+//
+// A default-FALSE quiet flag. The `kernel` `bootreport` module raises it ONLY
+// on the `yuva.console=pretty` runtime-cmdline path (x86 PVH `-append`), so it
+// can suppress the raw marker/witness stream and paint a clean human boot in
+// its place. It is NEVER raised on any CI lane (the three run scripts pass no
+// cmdline) nor inside the re-entrant aarch64 EL1 guest (no cmdline channel), so
+// the DEFAULT stays raw and the raw stream stays byte-identical -- the load-
+// bearing invariant proved by the committed empty-diff test. The gated writers
+// add one relaxed atomic load on the raw path; the emitted bytes are unchanged.
+// The `_raw` twins BYPASS the gate and are how `bootreport` paints pretty lines.
+// ---------------------------------------------------------------------------
+
+/// The Industrial-Boot serial DISPLAY gate. Default `false` (raw). Raised only
+/// by the `bootreport` pretty path; never on a CI lane or in the EL1 guest.
+static SERIAL_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Raise/lower the serial DISPLAY gate (Industrial Boot, #106). When raised,
+/// [`serial_write_str`] / [`serial_write_byte`] become no-ops so `bootreport`
+/// can paint a clean pretty boot via the `_raw` bypass twins. DEFAULT-false: a
+/// lane that never calls this (every CI lane, the EL1 guest) prints raw bytes
+/// byte-for-byte as before.
+pub fn serial_set_quiet(quiet: bool) {
+    SERIAL_QUIET.store(quiet, Ordering::Relaxed);
+}
+
 /// Write a single byte to the early serial console, blocking until the UART can
-/// accept it.
+/// accept it. No-op while the Industrial-Boot display gate is raised.
 pub fn serial_write_byte(b: u8) {
+    if SERIAL_QUIET.load(Ordering::Relaxed) {
+        return;
+    }
     arch::serial_write_byte(b);
 }
 
-/// Write a string to the early serial console, byte by byte (blocking).
+/// Write a string to the early serial console, byte by byte (blocking). No-op
+/// while the Industrial-Boot display gate is raised.
 ///
 /// Pure safe Rust: a loop over [`serial_write_byte`]; performs no `unsafe`.
 pub fn serial_write_str(s: &str) {
+    if SERIAL_QUIET.load(Ordering::Relaxed) {
+        return;
+    }
+    for &b in s.as_bytes() {
+        arch::serial_write_byte(b);
+    }
+}
+
+/// Write a single byte to serial, BYPASSING the display gate (Industrial Boot).
+/// Only `bootreport`'s pretty renderer uses the `_raw` twins -- so the human
+/// boot paints even while the raw marker stream is gated off.
+pub fn serial_write_byte_raw(b: u8) {
+    arch::serial_write_byte(b);
+}
+
+/// Write a string to serial, BYPASSING the display gate (Industrial Boot). Only
+/// `bootreport`'s pretty renderer uses this.
+pub fn serial_write_str_raw(s: &str) {
     for &b in s.as_bytes() {
         arch::serial_write_byte(b);
     }
@@ -813,6 +862,74 @@ pub fn read_boot_magic(boot_info: usize) -> Option<u64> {
     // is boot RAM that outlives this call.
     let magic = unsafe { (boot_info as *const u64).read_volatile() };
     Some(magic)
+}
+
+/// Industrial Boot (#106): read the boot cmdline into `out`, returning the
+/// number of bytes copied (source is NUL-terminated; the NUL is not copied).
+///
+/// x86_64 only, PVH path: `boot_info` is an `hvm_start_info` whose
+/// `cmdline_paddr` (offset 24, u64) points at a NUL-terminated ASCII string the
+/// hypervisor stages from QEMU `-append`. Returns 0 when there is no PVH block
+/// or no cmdline -- the state of EVERY CI lane (none passes `-append`), so the
+/// boot-report DEFAULT stays raw and the raw stream stays byte-identical. The
+/// aarch64 host cmdline (`/chosen/bootargs`) is a named follow-up, and the
+/// re-entrant EL1 guest has NO cmdline channel, so it is unconditionally raw.
+///
+/// Every read is guarded to the x86_64 identity window `[0x1000, 1 GiB)` (the
+/// same window [`read_boot_magic`] and the PVH pmm walk trust); an out-of-window
+/// or absent pointer copies nothing.
+#[cfg(target_arch = "x86_64")]
+pub fn boot_cmdline_x86(boot_info: usize, out: &mut [u8]) -> usize {
+    const WINDOW_LO: u64 = 0x1000;
+    const WINDOW_HI: u64 = 0x4000_0000; // 1 GiB, exclusive
+    const PVH_MAGIC: u32 = 0x336E_C578; // "xEn3"
+
+    // Guarded little-endian reads over the identity window (mirrors pmm.rs).
+    let rd_u32 = |pa: u64| -> Option<u32> {
+        if pa < WINDOW_LO || pa.checked_add(4).map_or(true, |e| e > WINDOW_HI) {
+            return None;
+        }
+        // SAFETY: `[pa, pa+4)` is inside the identity-mapped `[0x1000, 1 GiB)`
+        // window both x86_64 boot paths establish; `read_volatile` keeps this
+        // foreign single-producer boot read from being reordered/elided.
+        Some(unsafe { (pa as *const u32).read_unaligned() })
+    };
+    let rd_u64 = |pa: u64| -> Option<u64> {
+        if pa < WINDOW_LO || pa.checked_add(8).map_or(true, |e| e > WINDOW_HI) {
+            return None;
+        }
+        // SAFETY: as above, for an 8-byte read inside the same window.
+        Some(unsafe { (pa as *const u64).read_unaligned() })
+    };
+
+    let bi = boot_info as u64;
+    // Only the PVH block carries a cmdline_paddr here; a non-PVH magic (a
+    // TbBootInfo, or garbage) yields an empty cmdline -> raw default.
+    match rd_u32(bi) {
+        Some(m) if m == PVH_MAGIC => {}
+        _ => return 0,
+    }
+    let cmdline_pa = match rd_u64(bi + 24) {
+        Some(p) if p != 0 => p,
+        _ => return 0,
+    };
+
+    // Copy the NUL-terminated string, guarded byte-by-byte, bounded by `out`.
+    let mut n = 0usize;
+    while n < out.len() {
+        let pa = match cmdline_pa.checked_add(n as u64) {
+            Some(p) if p >= WINDOW_LO && p < WINDOW_HI => p,
+            _ => break,
+        };
+        // SAFETY: `pa` is a single byte inside the identity window (checked).
+        let b = unsafe { (pa as *const u8).read_volatile() };
+        if b == 0 {
+            break;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    n
 }
 
 // ===========================================================================

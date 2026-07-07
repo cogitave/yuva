@@ -22,3 +22,7 @@ tb-hal = { path = "../crates/tb-hal" }
 # performs the single guarded raw read of the boot-info pointer; this
 # forbid(unsafe_code)-class crate only compares the returned magic.
 tb-boot = { path = "../crates/tb-boot" }
+# Industrial Boot (#106): the brand crate is the single source of truth for the
+# product name in the pretty boot banner + the `yuva.console=`/`yuva.view=`
+# cmdline keys (composed from `BRAND_LOWER`).
+brand = { path = "../crates/brand" }
