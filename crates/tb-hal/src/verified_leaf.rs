@@ -1734,11 +1734,32 @@ pub struct M33ProvProof {
     /// A u64 witness fold of the attestation subject digest (rendered
     /// `attest-digest=<hex16>`).
     pub attest_digest: u64,
+    // ---- stage B (the persisted signed head; proposal §6/§8) ----
+    /// The compiled-in FULL-parameter `W4`/`H10` signature verified this boot (the
+    /// every-boot full-parameter verify KAT, stronger than the toy-only KAT).
+    pub full_sig_verified: bool,
+    /// The signed head was written + FLUSHED to disk this boot (`head-persisted`).
+    pub head_persisted: bool,
+    /// A signed head from a PRIOR boot was read back + its signature verified
+    /// (`head-reboot-survived` -- the two-boot cross-boot DoD).
+    pub head_reboot_survived: bool,
+    /// A u32 witness fold of the 16-byte LMS identifier `I` (rendered `i-id=<hex8>`).
+    pub i_id_witness: u32,
+    /// A u64 witness fold of the signed head (rendered `head=<hex16>`) -- read
+    /// FROM DISK on survival (the anti-hollow cross-boot evidence).
+    pub head_witness: u64,
+    /// The LMS leaf index of the witnessed head (rendered `leaf-idx=<hex>`).
+    pub leaf_idx: u32,
 }
 
 /// Fold the first 8 bytes of a 32-byte value into a u64 witness (LE). Pure.
 fn fold8(b: &[u8; 32]) -> u64 {
     u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
+/// Fold the first 4 bytes of the 16-byte LMS identifier into a u32 witness (LE).
+fn fold4(b: &[u8; 16]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
 /// M33 stage-A self-test (both arches): recompute the SHA-256 FIPS 180-4 KAT +
@@ -1792,13 +1813,24 @@ pub fn m33_prov_selftest() -> M33ProvProof {
     );
     let attest_ok = roundtrip_ok && pn > 0;
 
+    // Stage B: the persisted signed-head two-boot round-trip (proposal §6/§8).
+    let p = mem::m33_persist_head();
+
     M33ProvProof {
         sha256_kat_ok,
         lms_verified: k.verified,
         tamper_ots_rejected: k.tamper_ots_rejected,
         tamper_merkle_rejected: k.tamper_merkle_rejected,
         attest_ok,
-        root_witness: fold8(&tb_encode::lmsig::TOY_ROOT),
+        // The `root=` witness is now the OPERATIONAL W4/H10 public root the
+        // persisted signature verifies against (not the toy root).
+        root_witness: fold8(&tb_encode::lmsig::PROV_KAT_ROOT),
         attest_digest: fold8(&subject_digest),
+        full_sig_verified: p.full_sig_verified,
+        head_persisted: p.persisted,
+        head_reboot_survived: p.survived,
+        i_id_witness: fold4(&tb_encode::lmsig::TOY_I),
+        head_witness: fold8(&p.head),
+        leaf_idx: p.leaf_idx,
     }
 }

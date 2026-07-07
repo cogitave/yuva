@@ -72,7 +72,7 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=120
+EXPECTED_HARNESSES_TOTAL=122
 
 # Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
@@ -252,7 +252,7 @@ SHARD_B=(
   kani_conduct_fold_tamper              # 28.5s
 )
 
-# Shard C (6): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
+# Shard C (8): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
 # leaf (D2, RFC 8554-pinned) + the LMS verify leaf (RFC 8554, the `w=1` TOY
 # instance). PRE-REGISTERED as a THIRD SHARD by the M33 proposal §9: a full-
 # parameter LMS verify is ~1062 SHA-256 compressions (INFEASIBLE in CBMC), so
@@ -261,8 +261,9 @@ SHARD_B=(
 # ~9s, NOT the feared 2x). The cheap attest layout harnesses (no hashing) live
 # in shard A; only the compression-bearing crypto leaves land here so the split
 # is by MEASURED cost, not by module. Measured local WSL seconds annotated.
-# Measured local WSL solve times (SHA-256 ~11s/compression): sum = 917.3s
-# (~15.3 min solving); projected CI ~18-20 min (x1.42 runner delta + fixed
+# Measured local WSL solve times (SHA-256 ~11s/compression): crypto sum = 917.3s,
+# plus the 2 M33-B codec harnesses (3.1s decode + 1.8s recover, measured) => ~922s
+# (~16 min solving); projected CI ~19-21 min (x1.42 runner delta + fixed
 # checkout/cache/smoke), well under the bumped 40-min cap. The streaming SHA-256
 # (crate::sha256::Sha256) is what keeps these tractable -- the one-shot over the
 # 32*67-byte LM-OTS buffer blew CBMC to 20GB, streaming holds only the 64-byte
@@ -274,6 +275,8 @@ SHARD_C=(
   kani_lms_verify_tamper                # 182.0s (the pinned-vector iff, symbolic root)
   kani_lms_otschain_step                # 154.4s (the LM-OTS Winternitz chain + D_PBLC)
   kani_lms_merklepath                   # 148.5s (the Merkle auth-path, verify_inclusion shape)
+  kani_persisted_record_decode          # M33-B: sectors_for geometry + decode short/bad-buffer fail-close, FNV-free 3.1s
+  kani_persisted_record_recover         # M33-B: pure pick_newer selector, fully symbolic, ~2s
 )
 
 # The fail-closed completeness/disjointness guard (#101 -- see the header).

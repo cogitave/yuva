@@ -431,7 +431,7 @@ bit pattern should be; `tb-hal` keeps the silicon-`unsafe` store next to the
 just-computed value, so the hardware side is byte-identical while the value is
 provably-safe. Each leaf carries Kani harnesses (concretized / bounded so they
 stay tractable — the #49 symbolic-array state-explosion is the documented trap)
-plus a negative control, and is also covered by the Miri UB gate. The 20 leaves:
+plus a negative control, and is also covered by the Miri UB gate. The 24 leaves:
 `vmx` (control-MSR adjust legality + CR0/CR4 fixed-bit clamp + TSS-base decode),
 `paging` (radix-512 page-table + EPT entry algebra), `ipc_frame` (the 16-byte IPC
 wire codec + bounded ring), `route` (the M16 `model:` scheme grammar + longest-
@@ -477,7 +477,19 @@ NEW `"YUVA-M31-INFER-V1"` domain, the chunk-at-a-time fail-closed
 `InferAssembler`, the closed `errcode` enum, and the shared deterministic
 `mock_infer` transform -- +6 harnesses, the khash-bearing pair in the
 PINNED-VECTOR one-khash-execution shape, mutation-tested per the M31 proposal
-§8). Since **#101** the CI lane is **sharded into two cost-balanced
+§8), plus the **M33** provenance-lineage leaves: `sha256` (the FIPS 180-4 / RFC
+6234 second in-house verified hash — RFC 8554 pins SHA-256, so `conformance=
+RFC8554`; streaming + one-shot, official-KAT-pinned), `lmsig` (the RFC 8554 LMS
+`lms_verify` VERIFY-only leaf — LM-OTS Winternitz chains + the Merkle auth-path
+fold, the `w=1` toy Kani instance + the pinned full-`W4`/`H10` KAT vectors
+`PROV_KAT_*`; the private-key signer is cfg-gated OUT of the kernel), `attest`
+(the DSSE-PAE-shaped fixed-width in-toto-Statement-subset attestation codec), and
+`provhead` (the **M33 stage-B** multi-sector torn-write-safe persisted-signed-head
+codec: a record-spanning FNV-64 catches a torn MIDDLE sector, a per-sector
+`gen_tag` catches a mixed-gen torn commit, and the pure `pick_newer` two-phase-
+`gen` recovery selector the `tb-hal` ping-pong reader delegates to — `+2`
+harnesses `kani_persisted_record_decode`/`_recover`, mutation-tested per the M33
+proposal §9). Since **#101** the CI lane is **sharded into two cost-balanced
 parallel jobs** (`prove-encode-a`/`prove-encode-b` — the first post-M29-stage-C
 pass measured 41m22s of the 45-min cap, past the pre-agreed ~38-min option-4
 trigger); the shard lists, the per-shard pinned counts (the list lengths) and
