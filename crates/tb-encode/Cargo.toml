@@ -23,6 +23,15 @@ publish = false
 
 [lib]
 
+[features]
+# The M33 LMS SIGNER (`lmsig::signer`). Gated OUT of the kernel build by default
+# -- the private key + the stateful never-reuse leaf-index counter must NEVER
+# enter the verified, stateless kernel TCB (proposal §2/§3, the VERIFY/SIGN
+# split). Enabled ONLY by host consumers: `tools/prov-signer` (the operator
+# signer) and the `#[cfg(test)]` roundtrip harnesses. Adds no external dep --
+# the signer is fixed-buffer, no-alloc, deterministic RFC 8554 Appendix A keygen.
+signer = []
+
 [dependencies]
 # The ONE allowed workspace-internal dependency (PR-C): the project identity.
 # The "zero deps" policy above means zero EXTERNAL deps; `brand` is itself

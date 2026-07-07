@@ -709,6 +709,34 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         echo "[run-aarch64] FAIL -- final marker present but 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' missing (M31 displaced/regressed)" >&2
         exit 1
     fi
+
+    # M33 (stage A) GUARDS -- the provenance-lineage crypto-VERIFY substrate
+    # (proposal §8, adapted to stage A -- mirroring the x86_64 lane; the
+    # persisted-head marker 'M33: prov-lineage OK' is STAGE B, not this lane).
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'prov-sig: sig=LMS-SHA256-W4-H10 conformance=RFC8554 kat=RFC8554-PASS sha256-kat=FIPS180-4-PASS root=0x[0-9a-f]{16} sig-verified=0x0*1 tamper-rejected-ots=0x0*1 tamper-rejected-merkle=0x0*1 attest-decoded=0x0*1 attest-digest=0x[0-9a-f]{16} head-persisted=0x0 head-reboot-survived=0x0 measure=SELF-NO-HW-ROOT selfmeasure=UNATTESTED-LOADER key=SIMULATED-ENROLLED-CI-CUSTODIED exclusivity=OFF-PLATFORM-ONLY state=SIMULATED-REUSE-OK-NO-SECURITY splitview=UNDETECTED-NO-WITNESS-QUORUM sidechannel=NOT-CLAIMED sec=ASSUMED-FROM-LITERATURE stage=A-VERIFY-ONLY'; then
+        echo "[run-aarch64] FAIL -- M33 marker present but the full 'prov-sig: ...' stage-A witness (every earned flag =0x1 + BOTH regional tamper tokens + both KAT tokens + every honesty token) was NOT seen (hollow M33 pass)" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M33:|prov-sig:)' \
+         | grep -qiE -- 'conformance=NONE|Ed25519|curve25519|P-256|secp|measured[- ]boot|attested[- ]boot|non[- ]falsifiable|chain[- ]of[- ]trust|RTM|TPM'; then
+        echo "[run-aarch64] FAIL -- M33 line carries a disqualified-family / measure-overclaim / D1-fallback token (Ed25519/curve25519/P-256/measured-boot/RTM/TPM/conformance=NONE) -- rejected by name (proposal §8.3)" >&2
+        exit 1
+    fi
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M33:|prov-sig:)' \
+         | sed -e 's/LMS-SHA256-W4-H10//g' -e 's/RFC8554-PASS//g' -e 's/RFC8554//g' \
+               -e 's/FIPS180-4-PASS//g' -e 's/SELF-NO-HW-ROOT//g' -e 's/UNATTESTED-LOADER//g' \
+               -e 's/SIMULATED-ENROLLED-CI-CUSTODIED//g' -e 's/OFF-PLATFORM-ONLY//g' \
+               -e 's/SIMULATED-REUSE-OK-NO-SECURITY//g' -e 's/UNDETECTED-NO-WITNESS-QUORUM//g' \
+               -e 's/NOT-CLAIMED//g' -e 's/ASSUMED-FROM-LITERATURE//g' -e 's/A-VERIFY-ONLY//g' \
+         | grep -qiE -- 'unforgeable|tamper[- ]proof|provably[- ]secure|only[- ]the[- ]operator|reproducible|hardware[- ]root|secure[- ]boot|authenticated[- ]human|trusted[- ]boot|never[- ]reuse'; then
+        echo "[run-aarch64] FAIL -- M33 line carries an overclaim after stripping the declared tokens (proposal §8.7)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M33: prov-lineage verify OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M33: prov-lineage verify OK' missing (M33 displaced/regressed)" >&2
+        exit 1
+    fi
+
     # M38 (stage B) GUARDS (proposal §8 -- house order, mirroring the x86_64 lane):
     # the guest drives the verified organ-loop over the cap chokepoint; the marker
     # is the NEW cumulative tail. M38 displaces NOTHING below it (every prior fold

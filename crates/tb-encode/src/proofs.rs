@@ -5291,3 +5291,270 @@ fn kani_infer_err_closed() {
     }
     assert!(err_decode(&long).is_none());
 }
+
+// ===========================================================================
+// M33: the provenance-lineage crypto-verify substrate (proposal §9) -- the
+// SHA-256 leaf (D2, RFC 8554-pinned), the LMS verify leaf (RFC 8554, the `w=1`
+// TOY instance -- a full-parameter verify is ~1062 SHA-256 compressions,
+// INFEASIBLE in CBMC), and the DSSE-PAE attestation codec. The claim tier is
+// IDENTICAL to khash: PROVEN = totality/determinism/tamper-sensitivity (the
+// pinned-vector iff, symbolic ROOT compared to the recomputed Tc -- the M31
+// KANI_RESP_BINDING_PIN idiom mapped to the value compared at the END, keeping
+// every SHA-256 compression CONCRETE); ASSUMED-FROM-LITERATURE = LMS EUF-CMA +
+// SHA-256 resistance (NO symbolic-EUF-CMA/collision harness -- overclaim-by-
+// implication, banned as khash bans it). Official-vector correctness (FIPS
+// 180-4 / RFC 8554 Appendix F) is the host `cargo test` KAT + Miri.
+// ===========================================================================
+
+/// M33 SHA-256 TOTALITY + DETERMINISM (proposal §9): the FIPS 180-4 driver is
+/// panic-free + deterministic over each padding-block path -- the single-block
+/// pad (len 0, 55), the length-spill two-block pad (len 56), and the aligned
+/// two-block pad (len 64). CONCRETE inputs only (no symbolic bytes through the
+/// 64-round compression -- the #49 rule; full functional correctness is the
+/// host KAT + kani_sha256_kat + Miri).
+///
+/// NEGATIVE CONTROL: a broken padding (0x80 at the wrong offset) or a dropped
+/// length word would move a digest and fail kani_sha256_kat.
+#[kani::proof]
+fn kani_sha256_total() {
+    // The three distinct padding paths: a single 64-byte block with the length
+    // fitting after the 0x80 (len 55), the length-SPILL two-block pad (len 56),
+    // and the block-ALIGNED two-block pad (len 64). Each digest computed ONCE
+    // (bound) to keep the compression budget lean.
+    let m55 = [0x11u8; 55];
+    let m56 = [0x22u8; 56];
+    let m64 = [0x33u8; 64];
+    let d55 = crate::sha256::sha256(&m55);
+    let d56 = crate::sha256::sha256(&m56);
+    let d64 = crate::sha256::sha256(&m64);
+    // Determinism (panic-free recompute of one representative).
+    assert!(crate::sha256::sha256(&m55) == d55);
+    // A padding bug that collapsed the block-count paths would alias these.
+    assert!(d55 != d56);
+    assert!(d56 != d64);
+}
+
+/// M33 SHA-256 KAT (proposal §9): the in-boot `sha256::kat_ok()` recomputes the
+/// official FIPS 180-4 "abc" vector through the REAL compression -- proven here
+/// to reproduce the pinned constant (earns `sha256-kat=FIPS180-4-PASS`).
+///
+/// NEGATIVE CONTROL: a one-byte-perturbed expected digest must NOT match (a
+/// vacuous comparator that accepts everything fails).
+#[kani::proof]
+fn kani_sha256_kat() {
+    assert!(crate::sha256::sha256(b"abc") == crate::sha256::KAT_ABC);
+    let mut bad = crate::sha256::KAT_ABC;
+    bad[0] ^= 0x01;
+    assert!(crate::sha256::sha256(b"abc") != bad);
+}
+
+use crate::lmsig::{
+    lms_root, lms_verify_params, ots_kc, TOY_H, TOY_I, TOY_LS, TOY_MSG, TOY_P, TOY_ROOT, TOY_SIG,
+    TOY_TAMPER_MERKLE_OFF, TOY_TAMPER_OTS_OFF, TOY_W,
+};
+
+/// M33 LMS VERIFY TOTALITY (proposal section 9): the w=1 TOY instance (p=2, h=1
+/// -- a non-standard reduced LMS, NOT the RFC W1 p=265) accepts the PINNED
+/// genuine signature AND fail-closes (never panics) on malformed inputs. The
+/// genuine verify is ONE concrete execution (~6-8 SHA-256 compressions -- the
+/// khash budget regime); the malformed legs reject BEFORE any hash (constant-
+/// folded length/param guards). Two REGIONAL tamper controls (an OTS-region flip
+/// and a Merkle-auth-path flip, proposal section 16 must-fix 1) prove a half-
+/// verifier that checks only one leg is caught.
+///
+/// NEGATIVE CONTROL: a verifier that ignored the auth path would accept the
+/// Merkle-region flip; one that ignored the OTS chains would accept the
+/// OTS-region flip -- each fails its assert.
+#[kani::proof]
+fn kani_lms_verify_total() {
+    // The pinned genuine toy signature verifies (real compressions).
+    assert!(lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &TOY_SIG, TOY_W, TOY_P, TOY_LS, TOY_H));
+    // Two REGIONAL tamper controls (concrete, each one more verify execution).
+    let mut ots = TOY_SIG;
+    ots[TOY_TAMPER_OTS_OFF] ^= 0x01;
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &ots, TOY_W, TOY_P, TOY_LS, TOY_H));
+    let mut mrk = TOY_SIG;
+    mrk[TOY_TAMPER_MERKLE_OFF] ^= 0x80;
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &mrk, TOY_W, TOY_P, TOY_LS, TOY_H));
+    // Malformed inputs fail closed BEFORE hashing (cheap, no compression):
+    // empty buffer, wrong length, degenerate params.
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &[], TOY_W, TOY_P, TOY_LS, TOY_H));
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &TOY_SIG[..139], TOY_W, TOY_P, TOY_LS, TOY_H));
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &TOY_SIG, TOY_W, TOY_P, TOY_LS, 0));
+    assert!(!lms_verify_params(&TOY_ROOT, &TOY_I, &TOY_MSG, &TOY_SIG, TOY_W, 0, TOY_LS, TOY_H));
+}
+
+/// M33 LMS TAMPER-SENSITIVITY -- the PINNED-VECTOR IFF (proposal section 9, the
+/// M31 KANI_RESP_BINDING_PIN idiom mapped correctly): over a FULLY SYMBOLIC
+/// public root, `lms_verify_params` accepts the pinned genuine signature IFF the
+/// root equals the pinned genuine root (TOY_ROOT, = the recomputed Tc). The
+/// signature is CONCRETE, so the ~6-8 SHA-256 compressions run ONCE on concrete
+/// data producing a concrete Tc; only the final root comparison is symbolic (the
+/// M31 trick -- the symbolic value is the one compared at the END, NEVER through
+/// the compression, so this is NOT the number-49 symbolic-through-hash trap). The
+/// iff proves verify is a FAITHFUL root-equality check: a forged/wrong root
+/// (which a tampered signature's recomputed Tc becomes vs the pinned root, and
+/// vice versa) is provably rejected.
+///
+/// NEGATIVE CONTROL (non-vacuous both ways): a reject-everything verifier fails
+/// the == direction; a root-ignoring verifier fails the != direction.
+#[kani::proof]
+fn kani_lms_verify_tamper() {
+    let sym_root: [u8; 32] = kani::any();
+    let accepted =
+        lms_verify_params(&sym_root, &TOY_I, &TOY_MSG, &TOY_SIG, TOY_W, TOY_P, TOY_LS, TOY_H);
+    if accepted {
+        assert!(sym_root == TOY_ROOT);
+    } else {
+        assert!(sym_root != TOY_ROOT);
+    }
+}
+
+/// M33 LM-OTS CHAIN STEP (proposal section 9): the LM-OTS public-key candidate
+/// Kc (`ots_kc`, the Winternitz-chain + D_PBLC hash) is DETERMINISTIC and
+/// TAMPER-SENSITIVE -- a one-byte flip of a y chain element changes Kc. Concrete
+/// inputs (~5 compressions per `ots_kc`).
+///
+/// NEGATIVE CONTROL: a constant/identity chain would leave Kc unchanged under
+/// the y flip and fail the inequality.
+#[kani::proof]
+fn kani_lms_otschain_step() {
+    let q: u32 = 0;
+    let mut c = [0u8; 32];
+    let mut i = 0usize;
+    while i < 32 {
+        c[i] = TOY_SIG[8 + i];
+        i += 1;
+    }
+    let mut y0 = [0u8; 32];
+    let mut y1 = [0u8; 32];
+    i = 0;
+    while i < 32 {
+        y0[i] = TOY_SIG[40 + i];
+        y1[i] = TOY_SIG[72 + i];
+        i += 1;
+    }
+    let y = [y0, y1];
+    let mut kc = [0u8; 32];
+    assert!(ots_kc(&TOY_I, q, TOY_W, TOY_P, TOY_LS, &c, &y, &TOY_MSG, &mut kc));
+    let mut kc2 = [0u8; 32];
+    assert!(ots_kc(&TOY_I, q, TOY_W, TOY_P, TOY_LS, &c, &y, &TOY_MSG, &mut kc2));
+    assert!(kc == kc2);
+    let mut yf = y;
+    yf[0][0] ^= 0x01;
+    let mut kcf = [0u8; 32];
+    assert!(ots_kc(&TOY_I, q, TOY_W, TOY_P, TOY_LS, &c, &yf, &TOY_MSG, &mut kcf));
+    assert!(kcf != kc);
+}
+
+/// M33 LMS MERKLE PATH (proposal section 9): the Merkle-auth-path leg
+/// (`lms_root`, the `prov::verify_inclusion` fold shape) lands on the committed
+/// root for the genuine (Kc, path) and on a DIFFERENT root when the path is
+/// tampered -- so 75's balanced-batch-Merkle upgrade swaps only the path-walk,
+/// not the verify contract. Concrete (~3 compressions per `lms_root`, h=1).
+///
+/// NEGATIVE CONTROL: a path-ignoring fold would land on the same root under the
+/// sibling flip and fail the inequality.
+#[kani::proof]
+fn kani_lms_merklepath() {
+    let q: u32 = 0;
+    let mut c = [0u8; 32];
+    let mut i = 0usize;
+    while i < 32 {
+        c[i] = TOY_SIG[8 + i];
+        i += 1;
+    }
+    let mut y0 = [0u8; 32];
+    let mut y1 = [0u8; 32];
+    i = 0;
+    while i < 32 {
+        y0[i] = TOY_SIG[40 + i];
+        y1[i] = TOY_SIG[72 + i];
+        i += 1;
+    }
+    let y = [y0, y1];
+    let mut kc = [0u8; 32];
+    assert!(ots_kc(&TOY_I, q, TOY_W, TOY_P, TOY_LS, &c, &y, &TOY_MSG, &mut kc));
+    let mut path0 = [0u8; 32];
+    i = 0;
+    while i < 32 {
+        path0[i] = TOY_SIG[108 + i];
+        i += 1;
+    }
+    let path = [path0];
+    let root = lms_root(&TOY_I, q, TOY_H, &kc, &path);
+    assert!(root == TOY_ROOT);
+    let mut pf = path;
+    pf[0][0] ^= 0x80;
+    let root2 = lms_root(&TOY_I, q, TOY_H, &kc, &pf);
+    assert!(root2 != TOY_ROOT);
+}
+
+/// M33 DSSE-PAE INJECTIVITY (proposal section 9): the DSSE Pre-Authentication
+/// Encoding `pae` is TOTAL + length-exact + INJECTIVE by its length prefixes --
+/// distinct (type, body) splits at the same total length encode to DISTINCT
+/// bytes (the classic ambiguity killer). NO hashing (pure layout, seconds).
+///
+/// NEGATIVE CONTROL: an encoder that dropped a length prefix would collide the
+/// two splits below and fail the inequality.
+#[kani::proof]
+fn kani_attest_pae_injective() {
+    let body: [u8; 3] = kani::any();
+    let t = b"YT";
+    let mut out = [0u8; 64];
+    let n = crate::attest::pae(t, &body, &mut out);
+    assert!(n == crate::attest::pae_len(t, &body));
+    assert!(n > 0);
+    let mut a = [0u8; 32];
+    let mut b = [0u8; 32];
+    let na = crate::attest::pae(b"ab", b"", &mut a);
+    let nb = crate::attest::pae(b"a", b"b", &mut b);
+    assert!(!(na == nb && a[..na] == b[..nb]));
+    let mut tiny = [0u8; 4];
+    assert!(crate::attest::pae(b"xx", b"yy", &mut tiny) == 0);
+}
+
+/// M33 ATTESTATION-STATEMENT CODEC (proposal section 9): the fixed-width in-toto-
+/// subset `canon`/`decode` is TOTAL, roundtrips every field, and FAIL-CLOSES on
+/// bad magic/version, over-cap counts, and wrong lengths. NO hashing (pure
+/// layout, seconds).
+///
+/// NEGATIVE CONTROL: a decoder that skipped the magic check would accept the
+/// perturbed-magic buffer and fail the `is_none` assert.
+#[kani::proof]
+fn kani_attest_decode_fail_closed() {
+    use crate::attest::*;
+    let sd: [u8; ATTEST_DIGEST_LEN] = kani::any();
+    let th: [u8; ATTEST_DIGEST_LEN] = kani::any();
+    let bid: [u8; BUILDER_ID_LEN] = kani::any();
+    let bt: u8 = kani::any();
+    let mat = [[0x7u8; ATTEST_DIGEST_LEN]; 1];
+    let led = [LedgerEntry { dep_tok: 0x1234, status: 2 }];
+    let st = AttestStatement {
+        subject_digest: sd,
+        builder_id: bid,
+        build_type: bt,
+        toolchain_hash: th,
+        materials: &mat,
+        ledger: &led,
+    };
+    let mut buf = [0u8; 256];
+    let n = canon(&st, &mut buf);
+    assert!(n == canon_len(&st));
+    let d = decode(&buf[..n]).unwrap();
+    assert!(d.subject_digest == sd);
+    assert!(d.toolchain_hash == th);
+    assert!(d.builder_id == bid);
+    assert!(d.build_type == bt);
+    assert!(d.n_materials == 1 && d.n_ledger == 1);
+    let mut bad = buf;
+    bad[0] ^= 0xFF;
+    assert!(decode(&bad[..n]).is_none());
+    let mut badv = buf;
+    badv[2] = 0x99;
+    assert!(decode(&badv[..n]).is_none());
+    assert!(decode(&buf[..n - 1]).is_none());
+    let mut over = buf;
+    over[ATTEST_PREFIX_LEN - 2] = (MAX_MATERIALS + 1) as u8;
+    assert!(decode(&over[..n]).is_none());
+}

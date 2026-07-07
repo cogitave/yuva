@@ -7,19 +7,19 @@
 # SHARD MODES (#101 -- the prove-encode lane is sharded into 2 parallel CI
 # jobs; trigger: the first post-M29-stage-C CI pass measured 41m22s of the
 # 45-min cap and M31 stage A adds +6 harnesses):
-#   SHARD=all  (default) -- the single full counted pass, local-workflow
+#   SHARD=all   (default) -- the single full counted pass, local-workflow
 #              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
-#              pinned EXPECTED_HARNESSES_TOTAL (112), marker `V1: kani-encoders OK`.
-#   SHARD=a|b  -- run ONLY that shard's pinned harness list (repeated
+#              pinned EXPECTED_HARNESSES_TOTAL (120), marker `V1: kani-encoders OK`.
+#   SHARD=a|b|c -- run ONLY that shard's pinned harness list (repeated
 #              `--harness <name>` + `--exact` -- exact-name matching, never
 #              substring, so e.g. kani_kan_envelope_no_widening can never
 #              shadow ..._m24), SUCCESSFUL must equal that shard's pinned
 #              count (the list length), marker `V1-shard-a: kani-encoders OK`
-#              / `V1-shard-b: kani-encoders OK` (DISTINCT tokens -- a shard
-#              marker never claims the full 90).
+#              / `V1-shard-b: kani-encoders OK` / `V1-shard-c: kani-encoders OK`
+#              (DISTINCT tokens -- a shard marker never claims the full 120).
 # The shard lists + per-shard counts + the total live in ONE place,
 # scripts/kani-shards.sh (sourced below) -- consumed by this script in all
-# modes and by kani.yml only via SHARD=a|b. EVERY mode first runs the
+# modes and by kani.yml only via SHARD=a|b|c. EVERY mode first runs the
 # fail-closed completeness guard (lists disjoint + exhaustive + in lockstep
 # with proofs.rs's '#[kani::proof]' count), so a renamed/added/dropped harness
 # can never silently vanish from coverage even when no full pass runs on CI.
@@ -397,9 +397,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SHARD="${SHARD:-all}"
 case "$SHARD" in
-  a|b|all) ;;
+  a|b|c|all) ;;
   *)
-    echo "ENCODE PROOF GATE: FAIL -- unknown SHARD='$SHARD' (must be a, b, or all)" >&2
+    echo "ENCODE PROOF GATE: FAIL -- unknown SHARD='$SHARD' (must be a, b, c, or all)" >&2
     exit 1
     ;;
 esac
@@ -436,6 +436,12 @@ case "$SHARD" in
     MARKER="V1-shard-b: kani-encoders OK"
     KANI_ARGS+=(--exact)
     for h in "${SHARD_B[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
+    ;;
+  c)
+    EXPECTED="${#SHARD_C[@]}"
+    MARKER="V1-shard-c: kani-encoders OK"
+    KANI_ARGS+=(--exact)
+    for h in "${SHARD_C[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
 esac
 

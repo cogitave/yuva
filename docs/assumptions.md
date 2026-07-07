@@ -487,6 +487,55 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   sensitive context ever rides the channel — a named successor, not an M31
   claim.
 
+## 3c. M33 provenance-lineage custody + attestation residuals (the signature trust path)
+
+- **`key=SIMULATED-ENROLLED-CI-CUSTODIED exclusivity=OFF-PLATFORM-ONLY` (rung 0).**
+  The LMS signing key at stage A is a fixed compiled-in simulated key held by
+  the CI runner. A signature gives exclusivity against anyone *off the signing
+  host* (a third party, an auditor, a downstream consumer) and **ZERO** new
+  protection against a CI/host compromise, a repo-write maintainer, or a
+  malicious workflow dependency — the holder of the key in CI **is the CI**, not
+  the operator. The gain over M29's symmetric MAC is exactly public-verify /
+  private-sign asymmetry; the §7 custody ladder (rung 2 = operator-offline #85,
+  rung 3 = HW-nonexportable HSM per SP 800-208) restores cross-platform
+  exclusivity only when custody leaves CI. No token overclaims the rung below.
+- **`state=SIMULATED-REUSE-OK-NO-SECURITY` (stage-A deliberate reuse).** LMS
+  keys are STATEFUL: reusing any one-time leaf index is catastrophic and
+  unrecoverable (SP 800-208 §1.1; RFC 8391 §1.1). The stage-A compiled-in
+  simulated key **deliberately reuses leaf index 0 every run** — acceptable ONLY
+  because it carries no security value; the lane says so on its own token (NOT
+  `HOST-CUSTODIED-NEVER-REUSE`, which would be false for that lane). The durable,
+  never-decrement TOP-level counter that makes `NEVER-REUSE` honest is the M35
+  monitor obligation (`leafidx=DEFERRED-TO-M35-MONITOR`); the two-level-tree
+  "resolution" relocates the reuse hazard up one level, it does not close it.
+- **The LMS leaf-index is a SEPARATE state machine from M28's `key_evolve`.** The
+  M28 symmetric-MAC PRF-chain (`key_{i+1}=khash(key_i, EVOLVE_DOMAIN)`) and the
+  M33 asymmetric LMS signing key's monotone OTS leaf-index are disjoint custody
+  domains. An implementer must NEVER advance the LMS leaf-index via `key_evolve`
+  — that is PRF-chain evolution, not OTS-leaf advancement, and conflating them
+  silently breaks the OTS structure. Forward security gives no post-compromise
+  healing (a stolen signing seed yields all future signatures; the M28
+  `oldkey-zeroized` caveat re-stated).
+- **`splitview=UNDETECTED-NO-WITNESS-QUORUM`.** A signature proves
+  authenticity-of-extension, not chain honesty or fork-freedom: a single signer
+  signing two divergent heads is undetectable without an external witness/gossip
+  quorum (RFC 6962 §3.5 / Rekor) — a named successor, not an M33 claim.
+- **`measure=SELF-NO-HW-ROOT selfmeasure=UNATTESTED-LOADER` (A4/A6-conditional).**
+  The DSSE-PAE attestation carries only truthfully-measurable subjects (the
+  `crates/brand` build-id + the kernel-image digest); with NO measured boot, NO
+  RTM, NO external measurer (QEMU loads the image directly), the `subject_digest`
+  is computed by the very image being attested — a malicious image reports
+  whatever it chooses. M34 inherits this boundary BY NAME, never by marker-grep.
+  M33 reaches SLSA L1→toward L2; L3 (non-falsifiable) is M36. Image-identity ≠
+  source-identity is not closed (A6).
+- **`sec=ASSUMED-FROM-LITERATURE`.** LMS EUF-CMA unforgeability + SHA-256
+  2nd-preimage/collision resistance are ASSUMED, never proven — no tool in the
+  field proves primitive security, and the *original* SPHINCS+ tight proof was
+  flawed-then-fixed. The Kani proofs cover a `w=1` toy instance (totality /
+  determinism / the pinned-vector iff tamper-sensitivity); full W4/H10
+  correctness rests on the host `cargo test` + the official RFC 8554 Appendix F
+  vector + the in-boot small-parameter KAT + Miri.
+
 ## 4. Status & review discipline
 
 These assumptions are LIVE and shrink as rungs land: A3 closes at L2.8 (SMMUv3),

@@ -105,6 +105,14 @@ pub const DOMSEP_M30_ECHO: &[u8] = concat!(brand_upper!(), "-M30-ECHO-V1").as_by
 /// (the `kani_infer_domain_sep` harness proves the label is load-bearing).
 pub const DOMSEP_M31_INFER: &[u8] = concat!(brand_upper!(), "-M31-INFER-V1").as_bytes();
 
+/// The M33 provenance-lineage ATTESTATION domain separator -- the DSSE
+/// `payloadType` for the [`tb-encode::attest`] DSSE-PAE codec (the signed bytes
+/// are `PAE(DOMSEP_M33_ATTEST, canon(statement))`). Disjoint from every
+/// echo/infer/opcmd/evolve label by the distinct suffix, so an attestation PAE
+/// can never be confused with a keyed-MAC message (the M28/Terrapin rule). This
+/// module never re-spells it -- `attest.rs` consumes it, never a literal.
+pub const DOMSEP_M33_ATTEST: &[u8] = concat!(brand_upper!(), "-M33-ATTEST-V1").as_bytes();
+
 // ===========================================================================
 // The boot ELF note (tb-boot v0 entry discovery)
 // ===========================================================================
@@ -210,6 +218,7 @@ mod tests {
             DOMSEP_KEY_EVOLVE,
             DOMSEP_M30_ECHO,
             DOMSEP_M31_INFER,
+            DOMSEP_M33_ATTEST,
         ];
         for d in all {
             assert!(!d.is_empty());
@@ -227,6 +236,7 @@ mod tests {
         assert_eq!(DOMSEP_KEY_EVOLVE, b"YUVA-KEY-EVOLVE-V1");
         assert_eq!(DOMSEP_M30_ECHO, b"YUVA-M30-ECHO-V1");
         assert_eq!(DOMSEP_M31_INFER, b"YUVA-M31-INFER-V1");
+        assert_eq!(DOMSEP_M33_ATTEST, b"YUVA-M33-ATTEST-V1");
     }
 
     #[test]

@@ -303,6 +303,7 @@
 //! identity, total/fail-closed decoding, and the page-table/EPT entry bit
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
+pub mod attest;
 pub mod bakeoff;
 pub mod blkfmt;
 pub mod conductor;
@@ -315,12 +316,14 @@ pub mod inferwire;
 pub mod ipc_frame;
 pub mod kancell;
 pub mod khash;
+pub mod lmsig;
 pub mod memscore;
 pub mod opframe;
 pub mod opframe_rx;
 pub mod paging;
 pub mod prov;
 pub mod route;
+pub mod sha256;
 pub mod smmuv3;
 pub mod stage2;
 pub mod tpsched;
