@@ -5,8 +5,8 @@
 > verification.
 > Answers the question: *what does "full sovereignty" concretely mean for Yuva,
 > where does it land, and in what order do we get there?*
-> Source data: [`sovereignty-research.json`](../research/raw/sovereignty-research.json) ·
-> [`sovereignty-verified.json`](../research/raw/sovereignty-verified.json) ·
+> Source data: [`sovereignty-research.json`](research/raw/sovereignty-research.json) ·
+> [`sovereignty-verified.json`](research/raw/sovereignty-verified.json) ·
 > Builds on: [SOVEREIGNTY](SOVEREIGNTY.md) · [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) · [MILESTONES](MILESTONES.md)
 
 ---

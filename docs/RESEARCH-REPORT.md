@@ -35,13 +35,13 @@ The research was conducted in three workflow waves (total **147 subagents**, ~3.
 - *Firecracker is not "from-scratch"* — it started from Google's crosvm and replaced QEMU (the components later diverged substantially) [NSDI'20 Agache et al.].
 - *CoALA calls procedural memory writes not "categorically riskier" but "significantly riskier"* [arXiv:2309.02427].
 
-Raw verification logs: [`verified.json`](../research/raw/verified.json) (wave 2) + [`verified-wave1.json`](../research/raw/verified-wave1.json) (the 3 confirmed claims of wave 1) · Domain findings: [`../research/raw/`](../research/raw/)
+Raw verification logs: [`verified.json`](research/raw/verified.json) (wave 2) + [`verified-wave1.json`](research/raw/verified-wave1.json) (the 3 confirmed claims of wave 1) · Domain findings: [`research/raw/`](research/raw/)
 
 ---
 
 ## 2. The "LLM as OS" Paradigm — Conceptual Framework
 
-### 2.1 The AIOS vision paper (verified: 3-0, 3-0 — wave 1 log: [`verified-wave1.json`](../research/raw/verified-wave1.json))
+### 2.1 The AIOS vision paper (verified: 3-0, 3-0 — wave 1 log: [`verified-wave1.json`](research/raw/verified-wave1.json))
 
 Ge et al., *"LLM as OS, Agents as Apps: Envisioning AIOS, Agents and the AIOS-Agent Ecosystem"* [arXiv:2312.03815, December 2023] — the field's founding vocabulary:
 
@@ -55,7 +55,7 @@ It proposes a four-layer architecture: **LLM (system-level) → Agents (applicat
 
 ## 3. Kernel Architecture Literature
 
-### 3.1 Microkernel: seL4 (verified: 2-1*, 3-0; MCS finding: 2-0 in wave 1 — log: [`verified-wave1.json`](../research/raw/verified-wave1.json))
+### 3.1 Microkernel: seL4 (verified: 2-1*, 3-0; MCS finding: 2-0 in wave 1 — log: [`verified-wave1.json`](research/raw/verified-wave1.json))
 
 - **TCB shrinkage:** Linux ~20 MSLOC versus a well-designed microkernel ~10 kSLOC — a *three orders of magnitude* difference; the attack surface shrinks proportionally. Per the Biggs et al. (APSys 2018) study, **29% of critical Linux violations are completely eliminated by microkernel design, and 55% are reduced below criticality** [seL4 whitepaper]. (*A verifier note: the whitepaper attributes this result to general "microkernel design," not to "verified."*)
 - **Capability monopoly:** *"Invoking a capability is the one and only way of performing an operation on a system object."* Every syscall is a capability invocation; rights are encoded inside the capability; unlike what Linux calls "capabilities" (syscall-granular ACLs), this is a true object capability. There are **exactly ten kernel object types**, all referenced via capabilities [seL4 whitepaper].
@@ -85,7 +85,7 @@ Engler et al. [SOSP'95]: traditional OS abstractions (VM, IPC) are realized **in
 
 ### 3.5 Isolation foundations: Plan 9, KeyKOS/EROS, Capsicum, Zircon/Fuchsia, Redox, WASM, gVisor
 
-The densest section of the 8-area expansion research ([`expand-isolation-foundations.json`](../research/raw/expand-isolation-foundations.json)):
+The densest section of the 8-area expansion research ([`expand-isolation-foundations.json`](research/raw/expand-isolation-foundations.json)):
 
 | System | Portable mechanism | Translation to Yuva |
 |---|---|---|
@@ -110,7 +110,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 - **CoALA** [arXiv:2309.02427] (3-0, 3-0, corrected): **Working memory + three long-term stores (episodic, semantic, procedural)**; the action space is split into three by memory-access direction: retrieval (read) / reasoning (update working) / learning (write) — mapping one-to-one onto the `tb_recall()/tb_reflect()/tb_learn()` syscall family. Procedural writes are **significantly riskier** than episodic/semantic (risk of bugs + of overriding the designer's intent) → asymmetric, capability-gated permission.
 - **HippoRAG** [arXiv:2405.14831, NeurIPS'24] (3-0, 3-0): LLM + knowledge graph + Personalized PageRank, modeling the hippocampal indexing theory; single-step retrieval matches/exceeds IRCoT-class iterative retrieval and is **10–30× cheaper, 6–13× faster** — proof that `tb_recall()` can be a graph-based single shot instead of expensive multi-call loops.
 
-### 4.2 Expansion findings ([`expand-memory-landscape.json`](../research/raw/expand-memory-landscape.json))
+### 4.2 Expansion findings ([`expand-memory-landscape.json`](research/raw/expand-memory-landscape.json))
 
 - **A-MEM** [arXiv:2502.12110]: Zettelkasten-style atomic note: `{content, timestamp, keywords, tags, context, embedding, links}`; **writes are not append-only** — each insert can evolve k neighboring records (transactional multi-record update + versioning required). Cost: ~1,200 tokens per operation (~85-93% below the baselines), **1.1 s/op with a local Llama 3.2 1B** → the kernel's default write-path enricher can be a small local model. It doubles multi-hop F1 on LoCoMo; but on DialSim (350K tokens) F1 is 3.45 — **all systems collapse at OS-lifetime scale**; a raw lossless log + reindexing is mandatory.
 - **Mem0** [arXiv:2504.19413]: Two phases (extraction → update); in update the LLM, via function-calling, picks **one of exactly four ops**: `ADD / UPDATE / DELETE / NOOP` — the minimal, model-agnostic memory-op vocabulary the kernel can standardize. LOCOMO: J≈67% (full-context 73% ceiling), search p95 **<200 ms**; end-to-end total latency 92% lower than full-context (p95 1.44 s vs 17.1 s), >90% token savings. The graph variant (Mem0g): wins on temporal/open-domain, loses on single-hop, 2× storage + 3× latency → **the graph tier is an optional module, not the default**.
@@ -118,7 +118,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 - **Generative Agents** [arXiv:2304.03442]: Memory stream + score (a weighted **sum**): `α_rec·recency(0.995^hour, last-access-based) + α_imp·importance(1-10 from the LLM at write time) + α_rel·relevance(cosine)`, all α=1, components min-max normalized; **reflection** triggers when accumulated importance crosses the threshold of 150 (not a cron!), building evidence-cited reflection trees (the derived→source citation link = hallucination control). Ablation: full architecture μ=29.89 vs no-reflection μ=26.88 vs no-memory μ=21.21 (human baseline μ=22.95!).
 - **Survey** [arXiv:2404.13501]: The design space = SOURCES (inside-trial/cross-trial/external — a provenance tag on each record) × FORMS (textual: cheap-write/expensive-read ↔ parametric: expensive-write/cheap-read — the cache-hierarchy argument) × OPERATIONS (writing/management/reading → `tb_mem_write/tb_mem_manage/tb_mem_read`). **Open areas (no one has solved):** multi-agent shared memory, principled forgetting, lifelong-learning scale. **None** of the five primary systems contains tested, real deletion-based forgetting (A-MEM has no op; Mem0 has DELETE but it was not evaluated in isolation; Zep/Mem0g only tombstone; GA only score decay).
 
-### 4.3 Cognitive architectures: 40 years of validated constants ([`expand-cognitive-arch.json`](../research/raw/expand-cognitive-arch.json))
+### 4.3 Cognitive architectures: 40 years of validated constants ([`expand-cognitive-arch.json`](research/raw/expand-cognitive-arch.json))
 
 - **Soar** [soar.eecs.umich.edu]: A 5-phase decision cycle (parallel knowledge retrieval → selection of a single operator → application) — *"Decisions are never precompiled into uninterruptible sequences"*; working memory = a state-rooted graph, **unreachable objects automatically GC'd by the architecture**; the distinction between i-support (a derived belief whose justification is automatically retracted when the reasoning disappears) and o-support (persistent); **impasse → automatic substate** (tie/conflict/constraint-failure/no-change = an architectural trap, like a page fault); **chunking**: a new production is compiled from the trace of an impasse resolution (dependency-traced, generalizable; tunable in Soar 9.6.5).
 - **Soar SMem/EpMem**: A SQLite-embedded semantic store, **sub-ms retrieval over millions of nodes, <1 KB per fact**; episodic memory an automatic flight-recorder (without agent intervention), cue-based time-travel + replay cursors; *known gaps: no forgetting, worst-case linear scan* — places Yuva must close.
@@ -129,7 +129,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ## 5. Existing Systems and the Greenfield Rationale
 
-([`expand-aios-letta-e2b.json`](../research/raw/expand-aios-letta-e2b.json))
+([`expand-aios-letta-e2b.json`](research/raw/expand-aios-letta-e2b.json))
 
 ### 5.1 AIOS (implementation) [arXiv:2403.16971, COLM 2025]
 
@@ -155,7 +155,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ## 6. Protocols — The Raw Material for the IPC Layer
 
-([`expand-protocols.json`](../research/raw/expand-protocols.json) · Survey: [arXiv:2505.02279]; protocol taxonomy: [arXiv:2504.16736])
+([`expand-protocols.json`](research/raw/expand-protocols.json) · Survey: [arXiv:2505.02279]; protocol taxonomy: [arXiv:2504.16736])
 
 - **MCP** [spec 2025-06-18/2025-11-25]: host/client/server; the host's role (connection permission, consent, context gathering, cross-server isolation: *"servers should not be able to read the whole conversation"*) **is exactly the kernel's role**. The six primitives = a ready-made syscall taxonomy: tools (model authority), resources (application), prompts (user), **sampling** (delegated inference — modelPreferences: a cost/speed/intelligence 0-1 vector; the template for the LLM-agnostic inference syscall), roots (sandbox boundary), elicitation (human approval; constrained schema + accept/decline/cancel). 2025-11-25: durable **tasks** (experimental), tool calls within sampling (the kernel inference path must be re-entrant), error philosophy: *validation errors are returned as tool-execution errors so the model can self-correct* → Yuva's global error philosophy: **kernel errors are structured and model-readable**.
 - **A2A** [a2a-protocol.org, Linux Foundation v1.0]: A layered spec (canonical proto data model + abstract ops + 3 equivalent bindings) → the kernel ABI must be a single schema-defined source, bindings a userspace shim. **9-state task machine**: SUBMITTED/WORKING/COMPLETED/FAILED/CANCELED/REJECTED/INPUT_REQUIRED/AUTH_REQUIRED(+UNSPECIFIED) — `REJECTED` (agent refusal) is a first-class result specific to an agent-native scheduler; INPUT_REQUIRED/AUTH_REQUIRED = "blocked on human/credential". The rule of ordered event emission over multiple streams = the foundation of multi-agent sessions with N observers. **Agent Card**: a JWS-signed capability manifest; the "undeclared capability → typed error" pattern becomes "→ EPERM-equivalent" in the kernel. The *"opaque execution"* principle must be a kernel guarantee: working memory/plan is kernel-protected private memory.
@@ -167,7 +167,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ## 7. Self-Improvement — As an OS Service
 
-([`expand-self-improvement.json`](../research/raw/expand-self-improvement.json))
+([`expand-self-improvement.json`](research/raw/expand-self-improvement.json))
 
 - **Voyager** [arXiv:2305.16291]: Skill library = executable code + a description embedding as the key; top-5 retrieval. Skills are cumulative and mitigate catastrophic forgetting; without the library the agent plateaus. Ablations: removing the automatic curriculum cuts exploration **−93%**; removing self-verification cuts it **−73%** → **verification-before-commit is the kernel gate of the skill tier** (bounded retry: 4 rounds). Structured feedback (env state, errors) must be designed as LLM-consumable syscall output.
 - **Reflexion** [arXiv:2303.11366]: Verbal reinforcement without weight updates; the **bounded reflection tier** (a last-3 window) is a tier separate from the raw trajectory log (ablation: +8% absolute). Measurements: AlfWorld +22%, HotPotQA +20%, HumanEval 91% pass@1 (previous SOTA GPT-4 80%). Stuck heuristics (same action repeated >3 times, >30 actions) → a kernel watchdog produces a "reflect" signal. Because it is weight-free it **works the same on API and local models → default-on self-improvement mode**.
@@ -178,7 +178,7 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 
 ## 8. Token/Context/Inference — As a Schedulable Resource
 
-([`expand-tokens-as-resource.json`](../research/raw/expand-tokens-as-resource.json))
+([`expand-tokens-as-resource.json`](research/raw/expand-tokens-as-resource.json))
 
 - **vLLM PagedAttention** [arXiv:2309.06180, SOSP'23]: KV cache = the dominant dynamic memory object (800 KB per token in OPT-13B; 2048 tokens ≈ 1.6 GB); with contiguous allocation actual utilization is **20.4–38.2%**, in vLLM **96.3%**; *"blocks=pages, tokens=bytes, requests=processes"*; 2–4× throughput; block-granular copy-on-write. **LLM-specific deviations**: all-or-nothing eviction, gang scheduling, and **recompute-as-page-fault** — the persistent state is the token *text*, the KV is a regenerable cache → agent checkpoint/migration serializes **KB of tokens, not GB of tensors**. The agent-native kernel's biggest asymmetric advantage over a generic OS.
 - **SGLang RadixAttention** [arXiv:2312.07104]: A system-wide **radix tree of token prefixes** = the agent-OS counterpart of the page cache + shared read-only segments; system prompts, tool definitions, OS memory tiers are "linked" shared segments. Cache-aware scheduling (longest-shared-prefix-first ≡ DFS, Theorem 3.1; 96% of optimum in measurement) but **starvation risk** → fairness/aging into the scheduler spec on day one.
@@ -195,11 +195,11 @@ The densest section of the 8-area expansion research ([`expand-isolation-foundat
 > **Yuva** *(Turkish: "nest, home")* was decided in 2026-06 (no acronym, no
 > backronym).
 
-Two vetting rounds ([`expand-naming.json`](../research/raw/expand-naming.json), [`naming-round2.json`](../research/raw/naming-round2.json)) screened a total of **31 candidates** (GitHub repos/orgs, npm, PyPI, crates.io, RDAP .com/.org, web):
+Two vetting rounds ([`expand-naming.json`](research/raw/expand-naming.json), [`naming-round2.json`](research/raw/naming-round2.json)) screened a total of **31 candidates** (GitHub repos/orgs, npm, PyPI, crates.io, RDAP .com/.org, web):
 
 - **Round 1 (24 candidates, the -ix/-ux family):** All `agent*` roots (Agentix: 4 concurrent occupants; Agnix: an active linter with 267⭐) and the neural roots are taken. The only fully virgin one: Mnemux; near-virgin: Cognux, Mindux, Nousix. Structural lesson: **-nix names are mistaken for a Nix-ecosystem tool; historical Unix brands (SINIX, IRIX…) must also be screened.**
 - **Round 2 (7 candidates, dictionary words):** engram, mneme, daimon, hexis, noesis, noema, polis — **7/7 eliminated**; each has an active occupant in the AI/agent space (two of them used literally the same word as our naming rationale). Structural lesson: **real dictionary-word metaphors seem "obvious" to everyone at the same time; the strategy that sticks is a derived/coined word.**
-- **Code-name decision (Arda, 2026-06-06): TABOS — Turkiye's Agent Based Operating System** (working title; not the final brand, may change — namespace reservation was deliberately not done). Post-decision vetting (log: [`naming-tabos.json`](../research/raw/naming-tabos.json)): npm/PyPI/crates **all three empty**; on GitHub all 53 matches are trivial (max 4⭐, irrelevant); **no** active conflict in the AI/agent/OS space. The GitHub org `tabos` is on a dead account from 2019 (0 repos) → a `tabos-project`/`tabos-os` variant may be needed; tabos.com (since 1996) and tabos.org (a small German FOSS group — flathub `org.tabos.*` packages) are registered → **tabos.com.tr / tabos.org.tr** are natural and probably free addresses. A formal trademark screen (Nice 9/42) was not done → [OPEN-QUESTIONS](OPEN-QUESTIONS.md).
+- **Code-name decision (Arda, 2026-06-06): TABOS — Turkiye's Agent Based Operating System** (working title; not the final brand, may change — namespace reservation was deliberately not done). Post-decision vetting (log: [`naming-tabos.json`](research/raw/naming-tabos.json)): npm/PyPI/crates **all three empty**; on GitHub all 53 matches are trivial (max 4⭐, irrelevant); **no** active conflict in the AI/agent/OS space. The GitHub org `tabos` is on a dead account from 2019 (0 repos) → a `tabos-project`/`tabos-os` variant may be needed; tabos.com (since 1996) and tabos.org (a small German FOSS group — flathub `org.tabos.*` packages) are registered → **tabos.com.tr / tabos.org.tr** are natural and probably free addresses. A formal trademark screen (Nice 9/42) was not done → [OPEN-QUESTIONS](OPEN-QUESTIONS.md).
 - Kernel symbol prefix proposal (a placeholder tied to the code name): **`tb_` / `TB_`**.
 
 ---

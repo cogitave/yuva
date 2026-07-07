@@ -143,7 +143,7 @@ crates/             tb-hal (the ONLY unsafe+asm crate), tb-encode (verified leav
 tb-vmm/             our own userspace VMM on /dev/kvm (own workspace)
 scripts/            QEMU/KVM launch + the fail-closed serial verdicts (the executable DoD)
 docs/               design docs, specs, plans; docs/plans + docs/proposals are the work records
-research/raw/       immutable research provenance (JSON) that the docs cite
+docs/research/raw/       immutable research provenance (JSON) that the docs cite
 ```
 
 ## Contributing

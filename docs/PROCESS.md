@@ -15,9 +15,9 @@ Until now this project followed an **implicit** methodology (research → multi-
 | # | Step (2026-06-06) | Method | Output / evidence path |
 |---|---|---|---|
 | 1 | Scope clarification | 3 structured questions (architecture layer, model assumption, output format) → Arda's decisions | [VISION](VISION.md), memory record |
-| 2 | Wave 1: deep-research | 105 subagents: 5 search axes → 23 primary sources → 115 claims → 3-vote adversarial verification (partial due to API failure) | [`verified-wave1.json`](../research/raw/verified-wave1.json) (3 confirmations) |
-| 3 | Wave 2: verify + expand | 35 subagents: source-grouped re-verification of 22 claims (9×3 votes) + 8 domain investigations | [`verified.json`](../research/raw/verified.json) (20+2), `expand-*.json` (100 findings) |
-| 4 | Naming | vetting of 24+7 candidates → 7/7 + most eliminated → **TABOS code name** (Arda; the final name **Yuva** was decided 2026-06) + post-decision vetting | [`expand-naming.json`](../research/raw/expand-naming.json), [`naming-round2.json`](../research/raw/naming-round2.json), [`naming-tabos.json`](../research/raw/naming-tabos.json) |
+| 2 | Wave 1: deep-research | 105 subagents: 5 search axes → 23 primary sources → 115 claims → 3-vote adversarial verification (partial due to API failure) | [`verified-wave1.json`](research/raw/verified-wave1.json) (3 confirmations) |
+| 3 | Wave 2: verify + expand | 35 subagents: source-grouped re-verification of 22 claims (9×3 votes) + 8 domain investigations | [`verified.json`](research/raw/verified.json) (20+2), `expand-*.json` (100 findings) |
+| 4 | Naming | vetting of 24+7 candidates → 7/7 + most eliminated → **TABOS code name** (Arda; the final name **Yuva** was decided 2026-06) + post-decision vetting | [`expand-naming.json`](research/raw/expand-naming.json), [`naming-round2.json`](research/raw/naming-round2.json), [`naming-tabos.json`](research/raw/naming-tabos.json) |
 | 5 | Document set authoring | 8 documents, marked with [DECISION]/[PROPOSAL]/[OPEN] status | `README` + `docs/*` |
 | 6 | Adversarial review | 3 independent reviewers (claim fidelity / internal consistency / completeness) → 1 critical + 14 major + 9 minor → **29 corrections** applied | review output workflow `wf_f1a0e71d`; corrections in the documents |
 | 7 | Code name correction | "TABOS = code name, no hardcoding, no reservation" (Arda) → 9 corrections | README naming note, OPEN-QUESTIONS §G |

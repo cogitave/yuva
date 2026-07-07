@@ -8,7 +8,7 @@
 > competes with. This file is generated/maintained by the milestone pipeline
 > (`.claude/skills/tabos-milestone`); the harness is
 > [`scripts/bench-boot.sh`](../scripts/bench-boot.sh); raw cited data is
-> [`research/raw/bootbench-research.json`](../research/raw/bootbench-research.json).
+> [`research/raw/bootbench-research.json`](research/raw/bootbench-research.json).
 
 ## 1. The one rule that makes boot numbers comparable
 

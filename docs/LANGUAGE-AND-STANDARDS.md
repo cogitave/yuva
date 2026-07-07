@@ -2,7 +2,7 @@
 
 > Status: v1.0 · Question: *"What language do you write an agent-native kernel from scratch in; what are serious organizations actually doing in 2026?"*
 > Method: 7-area research (32 subagents) + 2-vote adversarial verification of 12 decision-critical claims.
-> Basis: [`lang-research.json`](../research/raw/lang-research.json) · [`lang-verified.json`](../research/raw/lang-verified.json) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [PROCESS](PROCESS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
+> Basis: [`lang-research.json`](research/raw/lang-research.json) · [`lang-verified.json`](research/raw/lang-verified.json) · Related: [ARCHITECTURE](ARCHITECTURE.md) · [PROCESS](PROCESS.md) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---
 
@@ -125,4 +125,4 @@ Yuva's claim that "the frozen kernel holds the evaluator" makes verification att
 ---
 
 ### Verification note
-All numeric claims in this document passed 2-vote adversarial verification in [`lang-verified.json`](../research/raw/lang-verified.json); 9 were clean approvals, 3 approved with correction (Fuchsia kernel C/C++ — not "C++ only"; the VeriSMo "versus Isabelle" comparison is not in the source, a measured inference; FLS does not replace the Reference; NSA says "memory protection"). The design inferences ([DECISION]/[PROPOSAL]) are derived from this data; they will be tested against prototype measurements.
+All numeric claims in this document passed 2-vote adversarial verification in [`lang-verified.json`](research/raw/lang-verified.json); 9 were clean approvals, 3 approved with correction (Fuchsia kernel C/C++ — not "C++ only"; the VeriSMo "versus Isabelle" comparison is not in the source, a measured inference; FLS does not replace the Reference; NSA says "memory protection"). The design inferences ([DECISION]/[PROPOSAL]) are derived from this data; they will be tested against prototype measurements.

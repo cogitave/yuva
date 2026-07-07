@@ -28,3 +28,7 @@ Thumbs.db
 # Scratch files from the PR workflow (never commit these)
 *.pr-body.md
 *.scratch.md
+
+# Raw research source material (PDFs and text extractions) cited by
+# docs/research/*; kept locally, re-downloadable from the URLs cited there.
+/docs/research/sources/

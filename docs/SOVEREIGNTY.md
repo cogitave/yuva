@@ -3,7 +3,7 @@
 > Status: v1.0 · **All [DECISION]** — no open decisions.
 > Question (Arda, 2026-06-07): *"Are we writing the kernel from scratch? It will not be a Linux system, it will be entirely our own build; we will inherit recent academic sources and we are not obliged to carry old bugs."*
 > This document answers that question **sourced and honestly**: it draws what is silicon-mandatory, what is a neutral open standard, what is rejected Linux heritage, and what belongs to Yuva.
-> Basis: [`cleanslate-research.json`](../research/raw/cleanslate-research.json) · [`cleanslate-verified.json`](../research/raw/cleanslate-verified.json) · Related: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) · [ARCHITECTURE](ARCHITECTURE.md) · [VISION](VISION.md)
+> Basis: [`cleanslate-research.json`](research/raw/cleanslate-research.json) · [`cleanslate-verified.json`](research/raw/cleanslate-verified.json) · Related: [KERNEL-FOUNDATION-SPEC](KERNEL-FOUNDATION-SPEC.md) · [ARCHITECTURE](ARCHITECTURE.md) · [VISION](VISION.md)
 
 ---
 

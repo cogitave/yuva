@@ -1,7 +1,7 @@
 # Yuva Open Questions
 
 > Status: v1.0 · Priority: **P0** = must close before spec freeze · **P1** = before the Phase-1 prototype · **P2** = before the relevant phase starts
-> Source: domain-based openQuestions outputs from the three research waves ([`../research/raw/`](../research/raw/)) + questions arising during document authoring.
+> Source: domain-based openQuestions outputs from the three research waves ([`research/raw/`](research/raw/)) + questions arising during document authoring.
 
 ---
 
@@ -90,7 +90,7 @@
 |---|---|---|
 | P1 | **Formal trademark search (Nice 9/42)** — once the final name is settled, for that name: USPTO/EUIPO/TURKPATENT search; a human/attorney job since it is not bot-accessible | All vettings were at the registry-level |
 | P2 | **Final name decision** + (but only after the decision) namespace reservation — **RESOLVED (2026-06): the final name is Yuva** (no acronym; TABOS was the code name). Namespace reservation is now actionable; the half-life of virgin spaces is short (agnix 0→267⭐ in ~1 year), so act fast | Arda (2026-06): "just Yuva" |
-| P1 | Full web sweep on big engines (Google/Bing) for the final name — mandatory before announcement (lesson from round 2: registry/Mojeek level is not enough); record: `naming-tabos.json` web column NOT SWEPT | [naming-tabos.json](../research/raw/naming-tabos.json) |
+| P1 | Full web sweep on big engines (Google/Bing) for the final name — mandatory before announcement (lesson from round 2: registry/Mojeek level is not enough); record: `naming-tabos.json` web column NOT SWEPT | [naming-tabos.json](research/raw/naming-tabos.json) |
 | P2 | The risk of confusion with the current owner of tabos.org (German FOSS group, flathub `org.tabos.*`) is low but must be monitored; the RDAP entity lookup of the tabos.com (1996) owner was not done | Naming report |
 
 ## I. Language and Verification
