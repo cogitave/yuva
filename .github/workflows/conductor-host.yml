@@ -1,4 +1,7 @@
-# Yuva M38 stage A — the conductor host-adjudication lane (TRINITY ADOPT-1).
+# Yuva M38 — the conductor host-adjudication lane (TRINITY ADOPT-1). STAGE A's
+# OFFLINE host-adjudicated path, RETAINED as stage B lands the kernel-integrated
+# loop (proposal §11A/§11B: the conductor-host stays for the offline lane; stage B
+# ADDS the guest-serial path -- it is not removed).
 #
 # WHAT THIS IS (M38 proposal §2.2/§8/§11A): a CPU-only, zero-network-at-runtime,
 # zero-secret, autonomously-buildable lane that proves the machine ORCHESTRATES
@@ -11,18 +14,18 @@
 # stub-killer is the cross-process equality policy-head == host-independent-recompute
 # head (§8.6) — a fabricated trace yields a different head and the lane goes RED.
 #
-# THE MARKER `M38: conductor OK turns=N organs=K verdict=ACCEPT` is printed ONLY in
-# this workflow's adjudication summary (the real-infer.yml / m32-local-infer.yml
-# precedent) — structurally outside every guest-serial grep, so it can NEVER enter
-# the cumulative chain. The CI-required cumulative tail stays
-# `M31: infer-e2e OK backend=MOCK-DETERMINISTIC` permanently; this lane displaces
-# nothing (proposal §8 marker discipline).
+# THE MARKER `M38: conductor OK turns=N organs=K verdict=ACCEPT` is printed in this
+# workflow's adjudication summary AND (since stage B) on the guest serial as the
+# NEW cumulative tail (the run scripts grep it; M31 is demoted-not-deleted). At
+# stage B the §8.6 cross-process recompute moved guest->host: the kernel emits the
+# trace, the host conductor-host (--recompute-from-trace) independently re-folds it,
+# and the run-script string-equals the two heads.
 #
 # STAGE SCOPE (binding, §8/§11): stage A is HOST-ADJUDICATED
-# (guestpath=MOCK-PINNED-HOST-ADJUDICATED) — no conductor byte reaches the guest;
-# the kernel-integrated organ-execution loop is stage B (#105 closes there, NEVER
-# at stage A). This lane adjudicates the conductor-host witness; the cumulative
-# chain + run scripts stay byte-identical.
+# (guestpath=MOCK-PINNED-HOST-ADJUDICATED) — this lane's witness; the kernel-
+# integrated organ-execution loop is STAGE B (#105 closes there), wired into the
+# boot in scripts/run-{x86_64,aarch64}.sh. This lane keeps adjudicating the
+# offline conductor-host witness + the two anti-hollow negatives.
 #
 # ANTI-HOLLOW (§8): the lane ALSO runs the two negative modes (--forge-single-organ
 # and --forge-lineage) and asserts they go RED — a stub that always picks one organ
@@ -45,36 +48,41 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # The cumulative-tail INVARIANT + lane cross-pin (source-level). The full
-  # M0..M31 chain boot is ci.yml's job (it runs on the SAME push); re-booting it
-  # here would duplicate ci.yml for zero added evidence. Stage A's witness is
-  # DECOUPLED (the conductor-host is not the boot's chardev peer), so the M38
-  # lane's chain obligation is exactly: the cumulative-tail spelling is UNCHANGED
-  # and no run script secretly emits an M38 conductor token (the lane cross-pin,
-  # §8.4, at the source). Stage B re-introduces the on-boot proof.
+  # The cumulative-tail INVARIANT (source-level), STAGE B. The full M0..M38 chain
+  # boot is ci.yml's job (it runs on the SAME push); re-booting it here would
+  # duplicate ci.yml for zero added evidence. At STAGE B the conductor is wired
+  # into the kernel boot and M38 IS the cumulative tail (it DISPLACED M31, which is
+  # demoted-not-deleted per the run-script displacement discipline). So the source-
+  # level obligation INVERTS from stage A: the run scripts now grep for the M38
+  # marker as the top-level DoD, and M31 is still asserted directly (the
+  # demote-not-delete invariant).
   # ---------------------------------------------------------------------------
   cumulative-tail-invariant:
-    name: cumulative tail unchanged + lane cross-pin (source)
+    name: cumulative tail is M38 + M31 demoted-not-deleted (source)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: The cumulative tail spelling is unchanged (ci.yml boots it)
+      - name: The cumulative tail is now M38 (stage B) on BOTH arches
         run: |
           set -euo pipefail
-          if ! grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' scripts/run-x86_64.sh; then
-            echo "::error::the cumulative-tail marker spelling moved in run-x86_64.sh — M38 must displace nothing at stage A"
-            exit 1
-          fi
-          echo ">> cumulative tail 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' intact"
-      - name: Lane cross-pin (§8.4) — no M38 conductor token in the run scripts
+          for f in scripts/run-x86_64.sh scripts/run-aarch64.sh; do
+            if ! grep -qE -- "MARKER=.M38: conductor OK" "$f"; then
+              echo "::error::the M38 cumulative-tail marker is not the top-level grep in $f (stage B wires the conductor into the boot — M38 must be the tail)"
+              exit 1
+            fi
+          done
+          echo ">> cumulative tail 'M38: conductor OK ...' is the top-level grep on both arches"
+      - name: M31 is demoted-not-deleted (still asserted directly)
         run: |
           set -euo pipefail
-          if grep -RqiE '(^|[^[:alnum:]])(conduct:|conductor-host:|M38:)|M38: conductor OK' scripts/run-x86_64.sh scripts/run-aarch64.sh; then
-            echo "::error::a run script carries an M38 conductor token near the cumulative chain (lane cross-pin violated — no lane borrows another's evidence class)"
-            exit 1
-          fi
-          echo ">> lane cross-pin OK: the run scripts carry no M38 conductor evidence"
+          for f in scripts/run-x86_64.sh scripts/run-aarch64.sh; do
+            if ! grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' "$f"; then
+              echo "::error::M31 was DELETED from $f — the displacement discipline is demote-NOT-delete (M31 must still be asserted directly under the M38 tail)"
+              exit 1
+            fi
+          done
+          echo ">> M31 demoted-not-deleted: still asserted directly beneath the M38 tail on both arches"
 
   # ---------------------------------------------------------------------------
   # The conductor measurement + adjudication — the heart of the lane.

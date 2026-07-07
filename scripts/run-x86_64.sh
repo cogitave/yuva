@@ -29,7 +29,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${TARGET_X86}"
 PROFILE="${PROFILE:-debug}"
 KERNEL="${1:-${REPO_ROOT}/target/${TARGET}/${PROFILE}/${KERNEL_BIN}}"
-MARKER='M31: infer-e2e OK backend=MOCK-DETERMINISTIC'
+# M38 (stage B) DISPLACED M31 as the cumulative tail: the kernel-integrated
+# conductor loop is the newest milestone. M31 is demoted-not-deleted (asserted
+# directly below per the displacement discipline); the M38 marker is the new
+# top-level grep. DECIMAL grammar (turns=N organs=K) -- the host-adjudicated
+# stage-A marker shape, now guest-serial.
+MARKER='M38: conductor OK turns=6 organs=3 verdict=ACCEPT'
 TIMEOUT_SECS="${QEMU_TIMEOUT:-15}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
@@ -104,6 +109,23 @@ if [[ ! -x "${HARNESS_BIN}" ]]; then
     # on the runner FIRST (see ci.yml); a missing binary here is a lane fault.
     echo ">> FAIL: ${HARNESS_BIN} missing and cargo unavailable -- build it first:" >&2
     echo ">>   cargo build --release --manifest-path tools/xport-harness/Cargo.toml" >&2
+    exit 1
+  fi
+fi
+
+# M38 (stage B): the host conductor binary -- used ONLY for the §8.6 CROSS-PROCESS
+# recompute leg (--recompute-from-trace folds the GUEST's OWN emitted conduct-step
+# trace INDEPENDENTLY, host-side, and the M38 guard string-equals its head against
+# the guest-emitted conduct: head). The SAME verified tb_encode::conductor leaf, a
+# SEPARATE process -- the anti-hollow leg now guest -> host. Zero network, zero secret.
+CONDUCTOR_HOST_BIN="${REPO_ROOT}/tools/conductor-host/target/release/conductor-host"
+if [[ ! -x "${CONDUCTOR_HOST_BIN}" ]]; then
+  if command -v cargo >/dev/null 2>&1; then
+    echo ">> building conductor-host (host, release)" >&2
+    ( cd "${REPO_ROOT}/tools/conductor-host" && cargo build --release >&2 )
+  else
+    echo ">> FAIL: ${CONDUCTOR_HOST_BIN} missing and cargo unavailable -- build it first:" >&2
+    echo ">>   cargo build --release --manifest-path tools/conductor-host/Cargo.toml" >&2
     exit 1
   fi
 fi
@@ -606,7 +628,102 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     echo ">> FAIL: M31 marker/witness carries an overclaim ('understood'/'reasoned'/'intelligen*'/'knows'/'learned'/'validated'/'evaluated'/'secure'/'confidential'/'private'/'authenticated-human'/'agi') -- M31's mock lane proves plumbing (recall -> prompt -> deterministic transform -> digest fold), never intelligence or semantics (M31 proposal §7.8)" >&2
     exit 1
   fi
-  echo ">> PASS: observed marker '${MARKER}' (and 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed)" >&2
+  # M31 is no longer the top-level grep (M38 displaced it as the cumulative tail);
+  # assert it directly so the M31 -> M38 order stays fail-closed + traceable (the
+  # demote-not-delete displacement discipline).
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC'; then
+    echo ">> FAIL: final marker present but 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' missing (M31 displaced/regressed)" >&2
+    exit 1
+  fi
+
+  # M38 (stage B) GUARDS (proposal §8 -- house order: skip-reject, positive-
+  # require [the anti-hollow core + the §8.6 CROSS-PROCESS independent recompute],
+  # by-name rejects, lane cross-pin, inherited tripwires, strip-then-reject). The
+  # guest drives the verified organ-loop over the cap chokepoint; the marker is
+  # the NEW cumulative tail. M38 displaces NOTHING below it (every prior head is
+  # byte-identical -- the conductor folds on its OWN lane).
+  #
+  # (§8.1) Skip-reject: honest-skip-is-FAILURE, never green-by-omission. No
+  # skip/single-organ/always-accept variant may carry the marker substring.
+  if printf '%s' "${OUTPUT}" | grep -qiE -- 'M38: conductor OK \(.*(skip|single organ|always-accept)'; then
+    echo ">> FAIL: M38 ran in a skipped/degenerate variant -- honest-skip-is-FAILURE (proposal §8.1)" >&2
+    exit 1
+  fi
+  # (§8.2) Positive-require the FULL one-line conductor witness: every honest
+  # token literal, every flag =0x0*1, AND revise-cycles>=0x1 AND organs>=0x2 AND
+  # fold-verified=0x1 tamper-caught=0x1 -- the measured anti-hollow thresholds.
+  # These printed numbers are NECESSARY-not-sufficient; the load-bearing check is
+  # the §8.6 independent host recompute below (a stub printing them fails recompute).
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'conduct: head=0x[0-9a-f]{16} turns=0x[0-9a-f]+ organs=0x[0-9a-f]+ roles=[TWV]+ organ-seq=0x[0-9a-f]+ verdict=ACCEPT accept-at=0x[0-9a-f]+ revise-cycles=0x[0-9a-f]+ fold-verified=0x0*1 tamper-caught=0x0*1 organ-calls=0x[0-9a-f]+ logical-ticks=0x[0-9a-f]+ attested=0x0*1 prov-tag=0x4 policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED learning=DORMANT retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI local-organ=M38-AUTHORED-MOCK verifier=CI-DISCRETE-VERDICT m18-gate=ADMISSION-ONLY-INERT-IN-MOCK cost=HONEST-ACCOUNTED-TOKENED cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK orchestration=RAG-AGENTS-NOT-NEW-PARADIGM live[+]web=DISPATCH-ONLY novelty=VERIFIED-PROVENANCE-SOVEREIGN-WRAPPER generativity=OPEN-FRONTIER realtime=NOT-CLAIMED benchmark=NOT-CLAIMED stub-resistance=HOST-RECOMPUTE-FROM-INDEPENDENT-TRACE host=RESIDUAL-TCB sec=ASSUMED-FROM-LITERATURE'; then
+    echo ">> FAIL: M38 marker present but the full one-line 'conduct: head=.. ..' witness (every honest token + flag) was NOT seen (hollow M38 pass)" >&2
+    exit 1
+  fi
+  CONDUCT_LINE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^conduct: head=0x' | head -1)"
+  # organs >= 0x2 (the measured multi-organ sequence).
+  M38_ORG_HEX="$(printf '%s' "${CONDUCT_LINE}" | sed -E 's/.* organs=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${M38_ORG_HEX}" ]] || (( 16#${M38_ORG_HEX} < 2 )); then
+    echo ">> FAIL: M38 organs=0x${M38_ORG_HEX} < 0x2 (a degenerate single-organ stub; the witness requires a measured >=2-organ sequence)" >&2
+    exit 1
+  fi
+  # revise-cycles >= 0x1 (the measured REVISE->ACCEPT cycle).
+  M38_RC_HEX="$(printf '%s' "${CONDUCT_LINE}" | sed -E 's/.* revise-cycles=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${M38_RC_HEX}" ]] || (( 16#${M38_RC_HEX} < 1 )); then
+    echo ">> FAIL: M38 revise-cycles=0x${M38_RC_HEX} < 0x1 (an always-accept stub; the witness requires a measured REVISE->ACCEPT cycle)" >&2
+    exit 1
+  fi
+  # (§8.6) THE LOAD-BEARING CROSS-PROCESS INDEPENDENT-RECOMPUTE LEG (the loopback/
+  # fixture killer): feed the GUEST's OWN emitted `conduct-step:` trace into the
+  # host conductor binary (--recompute-from-trace), which INDEPENDENTLY re-folds
+  # the M22 lineage via the SAME verified tb_encode::conductor leaf in a SEPARATE
+  # process, and string-equal the host-recomputed head against the guest-emitted
+  # `conduct: head=..`. A forged guest summary (or a doctored trace) yields a
+  # different head -> caught here. The guest emitted >=1 conduct-step line.
+  GUEST_HEAD="$(printf '%s' "${CONDUCT_LINE}" | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+  if [[ -z "${GUEST_HEAD}" ]]; then
+    echo ">> FAIL: could not extract the guest-emitted 'conduct: head=0x<hex16>' (the conductor produced no head)" >&2
+    exit 1
+  fi
+  CONDUCT_TRACE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^conduct-step: ')"
+  if [[ -z "${CONDUCT_TRACE}" ]]; then
+    echo ">> FAIL: the guest emitted NO 'conduct-step:' trace lines -- the §8.6 independent host-recompute has no input (a forged summary with no trace)" >&2
+    exit 1
+  fi
+  RECOMPUTE_OUT="$(printf '%s\n' "${CONDUCT_TRACE}" | "${CONDUCTOR_HOST_BIN}" --recompute-from-trace 2>/dev/null || true)"
+  HOST_HEAD="$(printf '%s' "${RECOMPUTE_OUT}" | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+  if [[ -z "${HOST_HEAD}" ]]; then
+    echo ">> FAIL: the host conductor recompute produced no head from the guest trace (the §8.6 cross-process leg failed to run)" >&2
+    echo ">>   recompute-out: ${RECOMPUTE_OUT}" >&2
+    exit 1
+  fi
+  if [[ "${GUEST_HEAD}" != "${HOST_HEAD}" ]]; then
+    echo ">> FAIL: CROSS-PROCESS mismatch -- guest-emitted conduct head (${GUEST_HEAD}) != host independent-recompute head (${HOST_HEAD}) from the guest's OWN trace; the lineage is forged/fixtured (proposal §8.6 -- the loopback killer)" >&2
+    exit 1
+  fi
+  # (§8.3) By-name rejects (case-insensitive, near the M38 lines): the learned/
+  # ES/CMA policy, the live backend, a learned verifier, and the embedding/cosine/
+  # loopback/fixture/replay vocabulary are structurally banned from the mock chain.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(conduct:|conduct-step:|M38:)' | grep -qiE -- 'policy=LEARNED|policy=ES|policy=CMA|KAN_ACTIVE=true|backend=ANTHROPIC-LIVE|verifier=LEARNED|verifier=CLASSIFIER|embedding|cosine|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-infer'; then
+    echo ">> FAIL: M38 marker/witness carries a by-name reject token (learned/ES/CMA/live/embedding/cosine/loopback/fixture/replay) -- the conductor policy is HAND-WRITTEN + the verifier is the discrete CI verdict (proposal §8.3)" >&2
+    exit 1
+  fi
+  # (§8.5) Inherited tripwires: every conduct-step trace line is lowercase-hex
+  # ONLY (regex-inert -- model-derived bytes cannot forge a marker/token/escape).
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])conduct-step:' | grep -vE -- '^conduct-step: turn=0x[0-9a-f]+ role=0x[0-9a-f]+ organ=0x[0-9a-f]+ verdict=0x[0-9a-f]+ organ-calls=0x[0-9a-f]+ t-logical=0x[0-9a-f]+$' | grep -q .; then
+    echo ">> FAIL: a conduct-step line violates the strict lowercase-hex grammar -- the conductor trace must cross serial ONLY hex-encoded (proposal §8.5)" >&2
+    exit 1
+  fi
+  # (§8.7) Strip-then-reject: strip the declared token VALUES FIRST, then reject
+  # any residual claim vocabulary near the M38 lines (the M29 discipline: ALL
+  # claims live in structured stripped tokens, never bare words). The inside-a-
+  # token occurrences (LEXICAL-NOT-SEMANTIC, NOT-LEARNED, NOT-WALLCLOCK) survive.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(conduct:|M38:)' \
+       | sed -E 's/[a-z+-]+=[A-Za-z0-9+/.:_-]+//g' \
+       | grep -qiE -- 'learned|trained|intelligen|understood|generaliz|benchmark|SOTA|real-time|semantic|cosine|float|embedding'; then
+    echo ">> FAIL: a residual claim word (learned/trained/intelligen/understood/generaliz/benchmark/SOTA/real-time/semantic/float/embedding) survives token-stripping near the M38 lines (proposal §8.7 razor)" >&2
+    exit 1
+  fi
+
+  echo ">> PASS: observed marker '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))" >&2
   exit 0
 fi
 
