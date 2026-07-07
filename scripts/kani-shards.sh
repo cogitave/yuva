@@ -25,6 +25,21 @@
 # kani_khash_total_deterministic (90.3s) was moved B->A to rebalance ON THE
 # MEASUREMENT (a side benefit: the whole M29 khash family now lives
 # coherently in shard A). Balance is by measured COST, not count.
+#
+# #106 REBALANCE (post-M38, pre-M33): once the M31 six + the M38 conductor ten
+# landed in shard B it grew to 60 harnesses and drifted to the cap -- MEASURED
+# CI wall on main (5650a1f / df322d0e, cold cache): shard B 28m23s / 28m47s vs
+# shard A 24m2s / 24m51s, a ~4-min imbalance under the 30-min per-job timeout,
+# with M33's encoder harnesses still to come. To restore symmetric headroom,
+# kani_inferwire_peer_label_bound (83s local) is moved B->A -- the single move
+# that both relieves the near-cap shard by ~2 min CI and CONSOLIDATES the whole
+# M30 inferwire family in shard A (the same coherence side benefit as the khash
+# move above). Projection: both shards ~26 min, ~4 min of headroom each for the
+# M33 additions (which follow the one-touch rule into the then-lighter shard).
+# Note: editing THIS file does not change crates/tb-encode/** so the #77 codegen
+# cache still HITS on this PR -- the PR's CI shows the WARM split (the direction
+# and the fail-closed guard), while the absolute cold numbers project from the
+# main baseline above.
 #   measured-heavy sum:  shard A = 799.6s (46 names), shard B = 620.0s (44)
 #   measured local wall: see the #101 PR (one timed pass per final shard,
 #                        guard + duplicated codegen included, ~15 min each)
@@ -59,7 +74,7 @@
 # milestone adds/removes a harness.
 EXPECTED_HARNESSES_TOTAL=112
 
-# Shard A (52): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (53): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -120,11 +135,14 @@ SHARD_A=(
   kani_khash_vectors                    # 59.5s
   kani_khash_tamper                     # 112.2s
   kani_khash_keyed_distinct             # 36.5s
-  # M30 inferwire x4 (PR #30 measured)
+  # M30 inferwire x5 (PR #30 measured; peer_label_bound moved B->A on the #106
+  # rebalance -- see the header -- so the whole M30 inferwire family now lives
+  # coherently in shard A alongside the M29 khash family)
   kani_inferwire_canon_roundtrip        # 14s
   kani_inferwire_decode_total           # 7s
   kani_inferwire_echo_sound             # 100s
   kani_inferwire_accum_resync           # 3s
+  kani_inferwire_peer_label_bound       # 83s  (#106: moved from shard B)
   # aL2.4b carve map + guestlog codec x6 (measured locally at landing, WSL
   # seconds -- all small symbolic envelopes per the #49 discipline; placed in
   # shard A, the lighter shard after the M31 six landed in B)
@@ -136,7 +154,7 @@ SHARD_A=(
   kani_guestlog_regex_inert
 )
 
-# Shard B (60): the learning-loop codec families (M21 kancell, M22 prov canon,
+# Shard B (59): the learning-loop codec families (M21 kancell, M22 prov canon,
 # M23 exp, M24 explore/bakeoff, M25 opframe, M26 exittel, M27 tpsched, M28 cmd
 # -- measured ~6.5s average, NOT trivial) + the heavy iff/determinism fold
 # legs (inclusion_sound, head_deterministic, bakeoff_replay), the thinned
@@ -198,9 +216,9 @@ SHARD_B=(
   kani_cmd_head_binding
   kani_cmd_dual_custody
   kani_cmd_key_evolve                   # 45s
-  # M30 inferwire x2 (PR #30 measured)
+  # M30 inferwire x1 (PR #30 measured; peer_label_bound moved to shard A on the
+  # #106 rebalance -- see the header)
   kani_inferwire_req_binding            # 2s
-  kani_inferwire_peer_label_bound       # 83s
   # M31 inferwire adapter x6 (measured locally at landing, WSL seconds -- the
   # khash-bearing pair runs the PINNED-VECTOR one-khash-execution shape: a
   # 90-byte M31 MAC message measured ~70s per CBMC execution, so each harness
