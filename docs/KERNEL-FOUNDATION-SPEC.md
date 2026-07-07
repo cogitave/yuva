@@ -3,7 +3,7 @@
 > Status: v1.0 · **All items [DECISION]** — this document deliberately contains no open decisions (locked to scenario).
 > Scope: the `tb-hal` foundation crate — the layer where ALL of the kernel's `unsafe` + ALL assembly is confined. Every crate above it is `#![forbid(unsafe_code)]`.
 > Target arch: **x86_64 + aarch64** (the two arches Firecracker supports); riscv64 = future, not planned.
-> Basis: [SOVEREIGNTY](SOVEREIGNTY.md) (boot/VMM sovereignty decision) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [ARCHITECTURE](ARCHITECTURE.md) · Raw data: [`kernel-asm-research.json`](../research/raw/kernel-asm-research.json) · Verification: [`kernel-asm-verified.json`](../research/raw/kernel-asm-verified.json)
+> Basis: [SOVEREIGNTY](SOVEREIGNTY.md) (boot/VMM sovereignty decision) · [LANGUAGE-AND-STANDARDS](LANGUAGE-AND-STANDARDS.md) · [ARCHITECTURE](ARCHITECTURE.md) · Raw data: [`kernel-asm-research.json`](research/raw/kernel-asm-research.json) · Verification: [`kernel-asm-verified.json`](research/raw/kernel-asm-verified.json)
 > Related: [PROCESS](PROCESS.md) (gates) · [OPEN-QUESTIONS](OPEN-QUESTIONS.md)
 
 ---

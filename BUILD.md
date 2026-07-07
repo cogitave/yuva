@@ -132,7 +132,7 @@ Reproduced here for traceability; cite the source in each asm file's header note
   `compatible = "ns16550a"` (an **NS16550A**, *not* PL011). For M0 first-light we
   **hardcode the QEMU-virt PL011**; the sibling `arch/aarch64/serial.rs` must
   carry a clearly-marked `TODO`/`cfg` for the FDT-driven NS16550A path used on
-  Firecracker. Source: `research/raw/kernel-asm-verified.json` (FDT
+  Firecracker. Source: `docs/research/raw/kernel-asm-verified.json` (FDT
   `compatible="ns16550a"`); KERNEL-FOUNDATION-SPEC.md §2 correction note.
 * AAPCS64: callee-saved `x19–x28, x29, x30, SP`; arg0 = `x0`; `SP % 16 == 0`.
 
@@ -276,5 +276,5 @@ step once the QEMU path is green.
   <https://www.qemu.org/docs/master/system/i386/microvm.html>
 * Arm PrimeCell PL011 TRM DDI0183 (`UARTDR`@0x00, `UARTFR`@0x18, FR.TXFF=bit5).
 * 16550 UART register map (THR@0, LSR@5, LSR.THRE=bit5); e.g. TI PC16550D.
-* Repo-internal verification: `research/raw/kernel-asm-verified.json`,
+* Repo-internal verification: `docs/research/raw/kernel-asm-verified.json`,
   `docs/KERNEL-FOUNDATION-SPEC.md`.

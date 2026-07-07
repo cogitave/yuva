@@ -18,7 +18,7 @@ M14 shipped capability-passing channels but the scheduler<->IPC round-trip was e
 ")`.
 7. 7. Wire the marker into the arbiter. Keep `MARKER='L2.0: vmxroot OK'` in scripts/run-x86_64.sh and scripts/run-aarch64.sh (it transitively gates the new self-test, which halts on failure), and ADD an explicit second assertion `grep -qF 'M14.1: blocking-recv OK'` to both scripts for direct traceability.
 8. 8. Build + boot the arbiter: `cargo kbuild` for targets/x86_64-tabos-none.json and aarch64-tabos-none.json (0 warnings), then `bash scripts/run-x86_64.sh` and `bash scripts/run-aarch64.sh` (M0..M18+L2.0 chain re-prints AND the new marker appears), then the vmm-boot /dev/kvm path.
-9. 9. Update docs + design record: ROADMAP-V2.md M14 status line (Step-2 blocking-recv/runnable-on-send now DONE, new marker), AGENTS-SPEC.md §6 (blocking-recv semantics + lost-wakeup-free note), BACKLOG.md task #21 marked done, and write research/raw/m14-blocking-design.json capturing the seL4-grounded design + the decisions below.
+9. 9. Update docs + design record: ROADMAP-V2.md M14 status line (Step-2 blocking-recv/runnable-on-send now DONE, new marker), AGENTS-SPEC.md §6 (blocking-recv semantics + lost-wakeup-free note), BACKLOG.md task #21 marked done, and write docs/research/raw/m14-blocking-design.json capturing the seL4-grounded design + the decisions below.
 
 ## Decisions — no open questions (açık karar bırakma)
 - DoD marker = "M14.1: blocking-recv OK" (a NEW cumulative marker printed immediately after "M14: ipc OK", before M15). Why: M14 already shipped "M14: ipc OK"; a distinct sub-marker preserves traceability and re-runs every boot. The final-marker grep stays 'L2.0: vmxroot OK' (it transitively requires the new self-test to pass, since a failure halts before L2.0), plus an explicit second grep is added for direct visibility.
@@ -46,7 +46,7 @@ M14 shipped capability-passing channels but the scheduler<->IPC round-trip was e
 - `docs/ROADMAP-V2.md`
 - `docs/AGENTS-SPEC.md`
 - `docs/BACKLOG.md`
-- `research/raw/m14-blocking-design.json`
+- `docs/research/raw/m14-blocking-design.json`
 
 ## Verification — the build is the arbiter
 - cargo kbuild (alias in .cargo/config.toml) builds tabos-kernel for both targets/x86_64-tabos-none.json and targets/aarch64-tabos-none.json with 0 warnings; forbid(unsafe_code) holds in kernel/, caps.rs, ipc.rs, mem.rs (only arch/*/timer.rs gains the two new unsafe asm primitives).
