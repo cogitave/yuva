@@ -5558,3 +5558,95 @@ fn kani_attest_decode_fail_closed() {
     over[ATTEST_PREFIX_LEN - 2] = (MAX_MATERIALS + 1) as u8;
     assert!(decode(&over[..n]).is_none());
 }
+
+// ===========================================================================
+// M33 STAGE B -- the multi-sector, torn-write-safe PERSISTED SIGNED-HEAD codec
+// (`provhead`, proposal §6/§9). Kani proves the TRACTABLE, FNV-FREE core cheaply
+// -- `sectors_for` geometry totality/correctness over a fully-symbolic siglen +
+// `decode`'s panic-free short/bad-buffer fail-close, and the PURE two-phase-`gen`
+// `pick_newer` recovery selector fully symbolically. The FNV-1a `wrapping_mul`
+// over a full 512-byte sector is a CBMC bit-vector-multiply cost floor (a decode
+// -> Some proof is ~5-8 min), so the FNV-bearing round-trip + the per-sector-CRC
+// / record-spanning FNV-64 / per-sector `gen_tag` gates + injectivity + the
+// full-size 6-sector record + the byte-level torn-write recovery are DELEGATED to
+// the `provhead.rs` host tests (`roundtrip_full_size`, `roundtrip_small`,
+// `torn_middle_sector_rejected`, `mixed_gen_rejected`, `spanning_crc_isolation`,
+// `bad_magic_version_len_rejected`, `encode_injective`,
+// `torn_write_recovery_prior_head`) + Miri + the two-boot boot witness -- the M30
+// accum_resync precedent ("prove the discipline at a tiny cap, delegate the full
+// trace to host + boot"). NO hashing of key material; 0 SHA-256 compressions.
+// ===========================================================================
+
+/// M33 STAGE B -- the `provhead` codec GEOMETRY + FAIL-CLOSE core (proposal
+/// §6/§9): the sector-count function `sectors_for` is TOTAL and correct over
+/// EVERY signature length (fully SYMBOLIC siglen) -- a valid length maps to a
+/// 1..=MAX_SECTORS count, an over-cap length fails closed -- and `decode`
+/// PANIC-FREELY fail-closes on a short (< 1 sector) buffer and on a valid-length
+/// bad-magic buffer, both BEFORE any FNV is reached. The FNV `wrapping_mul` over
+/// a full 512-byte sector is a CBMC bit-vector-multiply cost FLOOR (a decode ->
+/// Some proof is ~5-8 min), so the FNV-bearing round-trip + the per-sector-CRC /
+/// record-spanning / gen_tag gates + injectivity + the full-size 6-sector record
+/// + the byte-level torn-write recovery are DELEGATED to the `provhead.rs` host
+/// tests (`roundtrip_full_size`, `roundtrip_small`, `torn_middle_sector_
+/// rejected`, `spanning_crc_isolation`, `mixed_gen_rejected`, `bad_magic_version_
+/// len_rejected`, `encode_injective`, `torn_write_recovery_prior_head`) + Miri +
+/// the two-boot boot witness -- the M30 accum_resync precedent (prove the
+/// tractable discipline at a tiny cap, delegate the full trace to host + boot).
+///
+/// NEGATIVE CONTROL: a `sectors_for` that dropped its `> SIG_CAP` guard admits
+/// the over-cap `is_none` case; a `decode` that dropped its `< SECTOR` short-
+/// buffer guard PANICS on the sub-sector slice (both caught here).
+#[kani::proof]
+fn kani_persisted_record_decode() {
+    use crate::provhead::*;
+    // `sectors_for` totality + correctness over a FULLY SYMBOLIC siglen (pure
+    // arithmetic -- no FNV).
+    let siglen: usize = kani::any();
+    kani::assume(siglen <= SIG_CAP);
+    match sectors_for(siglen) {
+        Some(nsec) => {
+            assert!(nsec >= 1 && nsec <= MAX_SECTORS);
+            // nsec is exactly ceil((BLOB_FIXED + siglen + BLOB_CRC)/SEC_PAYLOAD).
+            let l = BLOB_FIXED + siglen + BLOB_CRC;
+            assert!((nsec - 1) * SEC_PAYLOAD < l && l <= nsec * SEC_PAYLOAD);
+        }
+        None => assert!(false), // a <= SIG_CAP length must always fit
+    }
+    assert!(sectors_for(SIG_CAP + 1).is_none()); // over-cap fails closed
+
+    // `decode` panic-freely fail-closes on the two pre-FNV paths.
+    let mut blob = [0u8; BLOB_CAP];
+    let short = [0u8; SECTOR - 1];
+    assert!(decode(&short, &mut blob).is_none()); // sub-sector -> None (no panic)
+    let zero = [0u8; SECTOR];
+    assert!(decode(&zero, &mut blob).is_none()); // bad magic -> None before any FNV
+}
+
+/// M33 STAGE B -- the two-phase-`gen` TORN-WRITE RECOVERY SELECTOR (proposal §6):
+/// `pick_newer` is the pure function the `tb-hal` ping-pong reader delegates to.
+/// Proven FULLY SYMBOLICALLY over both slot generations: the strictly-greater gen
+/// wins, a torn slot (decoded `None`) NEVER wins over a present one, and two torn
+/// slots yield `None` -- so the reader always recovers the prior consistent head.
+/// The byte-level recovery (a torn newer slot → decode `None` → the prior slot is
+/// returned) is the host test `torn_write_recovery_prior_head` + the two-boot
+/// witness.
+///
+/// NEGATIVE CONTROL: a selector that ignored the torn `None` (picked B anyway)
+/// fails the `Some(false)` assert; one that inverted the gen comparison fails the
+/// symbolic `gb > ga` iff.
+#[kani::proof]
+fn kani_persisted_record_recover() {
+    use crate::provhead::pick_newer;
+    let ga: u64 = kani::any();
+    let gb: u64 = kani::any();
+    // Both slots present -> the strictly-greater gen wins (ties resolve to A).
+    match pick_newer(Some(ga), Some(gb)) {
+        Some(true) => assert!(gb > ga),
+        Some(false) => assert!(gb <= ga),
+        None => assert!(false),
+    }
+    // A torn slot (None) never wins over a present one; both-None -> None.
+    assert!(pick_newer(Some(ga), None) == Some(false));
+    assert!(pick_newer(None, Some(gb)) == Some(true));
+    assert!(pick_newer(None, None).is_none());
+}

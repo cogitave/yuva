@@ -51,10 +51,13 @@ if ! command -v "${QEMU}" >/dev/null 2>&1; then
     exit 127
 fi
 
-# M20: a fresh 4 MiB raw disk per run for the virtio-blk durable-persistence
-# round-trip. `mktemp` + `truncate -s 4M` gives a zeroed image (so the first
-# mount finds no valid superblock and formats); the `trap` removes it on EXIT so
-# the temp never leaks or gets committed. A lane that does NOT attach this disk
+# M20 + M33: a fresh 8 MiB raw disk per run. The low 4 MiB (sectors 0..8192) is
+# M20's virtio-blk durable-persistence partition; the M33 stage-B persisted
+# signed head lives ABOVE it (ping-pong slots at sector 8192 = the 4 MiB
+# boundary), so the two never alias and the M33 two-boot (below) resets ONLY
+# M20's region between boots while the signed head SURVIVES. `truncate -s 8M`
+# gives a zeroed image (so the first mount finds no valid superblock and
+# formats); the `trap` removes it on EXIT. A lane that does NOT attach this disk
 # (the kernel scans, finds no DeviceID==2, and renders the green
 # "(no disk, skipped)" skip) is unaffected -- this lane proves the REAL path.
 IMG="$(mktemp)"
@@ -78,8 +81,11 @@ XKEY="$(mktemp)"      # the harness-custodied key hex (the §5.7 key-leak check 
 # succeeds -- which would mask a guard's `exit 1` locally; CI's bash 5.2
 # preserves it, but pin the behaviour here so a red guard reds the lane on
 # EVERY bash, never a silently-green local run).
-trap 'rc=$?; rm -f "$IMG" "$XSOCK" "$XHOUT" "$XKEY"; exit $rc' EXIT
-truncate -s 4M "$IMG"
+XSOCK2="$(mktemp -u)"  # M33 stage-B second-boot echo-harness socket
+XHOUT2="$(mktemp)"
+XKEY2="$(mktemp)"
+trap 'rc=$?; rm -f "$IMG" "$XSOCK" "$XHOUT" "$XKEY" "$XSOCK2" "$XHOUT2" "$XKEY2"; exit $rc' EXIT
+truncate -s 8M "$IMG"
 
 HARNESS_BIN="${REPO_ROOT}/tools/xport-harness/target/release/xport-harness"
 if [[ ! -x "${HARNESS_BIN}" ]]; then
@@ -710,11 +716,23 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         exit 1
     fi
 
-    # M33 (stage A) GUARDS -- the provenance-lineage crypto-VERIFY substrate
-    # (proposal §8, adapted to stage A -- mirroring the x86_64 lane; the
-    # persisted-head marker 'M33: prov-lineage OK' is STAGE B, not this lane).
-    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'prov-sig: sig=LMS-SHA256-W4-H10 conformance=RFC8554 kat=RFC8554-PASS sha256-kat=FIPS180-4-PASS root=0x[0-9a-f]{16} sig-verified=0x0*1 tamper-rejected-ots=0x0*1 tamper-rejected-merkle=0x0*1 attest-decoded=0x0*1 attest-digest=0x[0-9a-f]{16} head-persisted=0x0 head-reboot-survived=0x0 measure=SELF-NO-HW-ROOT selfmeasure=UNATTESTED-LOADER key=SIMULATED-ENROLLED-CI-CUSTODIED exclusivity=OFF-PLATFORM-ONLY state=SIMULATED-REUSE-OK-NO-SECURITY splitview=UNDETECTED-NO-WITNESS-QUORUM sidechannel=NOT-CLAIMED sec=ASSUMED-FROM-LITERATURE stage=A-VERIFY-ONLY'; then
-        echo "[run-aarch64] FAIL -- M33 marker present but the full 'prov-sig: ...' stage-A witness (every earned flag =0x1 + BOTH regional tamper tokens + both KAT tokens + every honesty token) was NOT seen (hollow M33 pass)" >&2
+    # M33 (stage B) GUARDS -- the provenance-lineage PERSISTED SIGNED HEAD
+    # (proposal §8; closes #91 -- mirroring the x86_64 lane). This is BOOT 1 of the
+    # two-boot cross-boot witness: the signed head is written+flushed to disk
+    # (head-persisted=0x1) but nothing has survived a reboot yet on this FRESH disk
+    # (head-reboot-survived=0x0). BOOT 2 (below, after the guest guards) reboots
+    # against the SAME M33 sectors and requires survived=0x1. The HOST kernel's
+    # prov-sig line is the un-framed one in ${OUTPUT} (the in-guest aL2.4b leg is
+    # hex-framed + diskless, so it never confuses this grep).
+    M33_SIG_RE='prov-sig: sig=LMS-SHA256-W4-H10 conformance=RFC8554 kat=RFC8554-PASS sha256-kat=FIPS180-4-PASS root=0x[0-9a-f]{16} i-id=0x[0-9a-f]{8} head=0x[0-9a-f]{16} leaf-idx=0x[0-9a-f]+ sig-verified=0x0*1 tamper-rejected-ots=0x0*1 tamper-rejected-merkle=0x0*1 head-persisted=0x0*1 head-reboot-survived='
+    M33_SIG_TAIL=' attest-decoded=0x0*1 attest-digest=0x[0-9a-f]{16} measure=SELF-NO-HW-ROOT selfmeasure=UNATTESTED-LOADER key=SIMULATED-ENROLLED-CI-CUSTODIED exclusivity=OFF-PLATFORM-ONLY state=SIMULATED-REUSE-OK-NO-SECURITY splitview=UNDETECTED-NO-WITNESS-QUORUM sidechannel=NOT-CLAIMED sec=ASSUMED-FROM-LITERATURE'
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- "${M33_SIG_RE}0x0${M33_SIG_TAIL}"; then
+        echo "[run-aarch64] FAIL -- M33 boot-1 marker present but the full 'prov-sig: ...' stage-B witness (root/i-id/head/leaf-idx + every earned flag =0x1 + BOTH regional tamper tokens + head-persisted=0x1 head-reboot-survived=0x0 + every honesty token) was NOT seen (hollow M33 pass)" >&2
+        exit 1
+    fi
+    M33_BOOT1_HEAD="$(printf '%s' "${OUTPUT}" | grep -oE 'prov-sig:.*' | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+    if [[ -z "${M33_BOOT1_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- could not capture boot-1 M33 head= for the cross-boot check" >&2
         exit 1
     fi
     if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M33:|prov-sig:)' \
@@ -727,13 +745,13 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
                -e 's/FIPS180-4-PASS//g' -e 's/SELF-NO-HW-ROOT//g' -e 's/UNATTESTED-LOADER//g' \
                -e 's/SIMULATED-ENROLLED-CI-CUSTODIED//g' -e 's/OFF-PLATFORM-ONLY//g' \
                -e 's/SIMULATED-REUSE-OK-NO-SECURITY//g' -e 's/UNDETECTED-NO-WITNESS-QUORUM//g' \
-               -e 's/NOT-CLAIMED//g' -e 's/ASSUMED-FROM-LITERATURE//g' -e 's/A-VERIFY-ONLY//g' \
+               -e 's/NOT-CLAIMED//g' -e 's/ASSUMED-FROM-LITERATURE//g' \
          | grep -qiE -- 'unforgeable|tamper[- ]proof|provably[- ]secure|only[- ]the[- ]operator|reproducible|hardware[- ]root|secure[- ]boot|authenticated[- ]human|trusted[- ]boot|never[- ]reuse'; then
         echo "[run-aarch64] FAIL -- M33 line carries an overclaim after stripping the declared tokens (proposal §8.7)" >&2
         exit 1
     fi
-    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M33: prov-lineage verify OK'; then
-        echo "[run-aarch64] FAIL -- final marker present but 'M33: prov-lineage verify OK' missing (M33 displaced/regressed)" >&2
+    if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M33: prov-lineage OK'; then
+        echo "[run-aarch64] FAIL -- final marker present but 'M33: prov-lineage OK' missing (M33 displaced/regressed)" >&2
         exit 1
     fi
 
@@ -1159,7 +1177,74 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         exit 1
     fi
 
-    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M38 kernel as a stage-2-confined EL1 guest: monitor-witnessed doorbell/nonce/final-WFI, confinement-probe fault, in-guest skip-profile, forged-markers hex-framed]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))"
+    # =======================================================================
+    # M33 STAGE B -- BOOT 2: the CROSS-BOOT SURVIVAL witness (proposal §6/§8.6).
+    # Reboot QEMU against the SAME disk, but first ZERO ONLY M20's low-4-MiB
+    # partition (sectors 0..8192) so M20 mounts a fresh store again while the M33
+    # signed head ABOVE the 4-MiB boundary SURVIVES untouched. Boot 2 must read
+    # the persisted signed head back off disk, verify its LMS signature, and emit
+    # head-reboot-survived=0x1 with a head= that string-equals boot 1's persisted
+    # head= -- the anti-hollow proof a SIGNED head survived a genuine reboot
+    # (closes #91). A fresh echo-harness serves boot 2's M30 leg; the whole
+    # cumulative chain (incl. the aL2.4b EL1 guest) re-runs.
+    # =======================================================================
+    echo "[run-aarch64] M33 stage B: BOOT 2 (cross-boot survival) -- resetting ONLY M20's region, preserving the M33 signed head" >&2
+    dd if=/dev/zero of="$IMG" bs=1M count=4 conv=notrunc status=none
+
+    "${HARNESS_BIN}" --socket "${XSOCK2}" --key-out "${XKEY2}" \
+        --timeout-secs $((TIMEOUT_SECS + 60)) > "${XHOUT2}" 2>&1 &
+    XPID2=$!
+    set +e
+    RAW_OUTPUT2="$(timeout --foreground "${TIMEOUT_SECS}" \
+        "${QEMU}" \
+            -M virt,virtualization=on,gic-version=2,iommu=smmuv3 \
+            -cpu cortex-a72 \
+            -m 128M \
+            -accel tcg,thread=single \
+            -nographic \
+            -no-reboot \
+            -nic none \
+            -global virtio-mmio.force-legacy=false \
+            -device virtio-rng-device \
+            -drive file="$IMG",if=none,format=raw,id=vblk0 \
+            -device virtio-blk-device,drive=vblk0 \
+            -chardev socket,id=xport0,path="${XSOCK2}",server=on,wait=off \
+            -device virtio-serial-device \
+            -device virtconsole,chardev=xport0 \
+            -device loader,file="${GUEST_BIN}",addr=0x46080000,force-raw=on \
+            -semihosting \
+            -kernel "${KERNEL}" \
+        < /dev/null 2>&1)"
+    set -e
+    for _ in $(seq 1 50); do
+        kill -0 "${XPID2}" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -9 "${XPID2}" 2>/dev/null || true
+    wait "${XPID2}" 2>/dev/null || true
+    OUTPUT2="$(printf '%s\n' "${RAW_OUTPUT2}" | grep -v '^guestlog: ' || true)"
+    printf '%s\n' "${RAW_OUTPUT2}"
+
+    if ! printf '%s' "${OUTPUT2}" | grep -qF -- "${MARKER}"; then
+        echo "[run-aarch64] FAIL -- M33 boot 2 did not reach the final marker '${MARKER}' (cross-boot reboot regressed the chain)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT2}" | grep -qE -- "${M33_SIG_RE}0x0*1${M33_SIG_TAIL}"; then
+        echo "[run-aarch64] FAIL -- M33 boot 2 present but the 'prov-sig: ...' witness with head-persisted=0x1 head-reboot-survived=0x1 was NOT seen (the signed head did NOT survive the reboot -- hollow stage B)" >&2
+        exit 1
+    fi
+    M33_BOOT2_HEAD="$(printf '%s' "${OUTPUT2}" | grep -oE 'prov-sig:.*' | grep -oE 'head=0x[0-9a-f]{16}' | head -1)"
+    if [[ -z "${M33_BOOT2_HEAD}" || "${M33_BOOT2_HEAD}" != "${M33_BOOT1_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- M33 cross-boot head mismatch -- boot 1 persisted '${M33_BOOT1_HEAD}' but boot 2 read back '${M33_BOOT2_HEAD}' (the signed head did not survive intact)" >&2
+        exit 1
+    fi
+    if ! printf '%s' "${OUTPUT2}" | grep -qF -- 'M33: prov-lineage OK'; then
+        echo "[run-aarch64] FAIL -- M33 boot 2 reached the final marker but 'M33: prov-lineage OK' missing" >&2
+        exit 1
+    fi
+    echo "[run-aarch64] M33 stage B: signed head SURVIVED the reboot (${M33_BOOT2_HEAD} == ${M33_BOOT1_HEAD}, head-reboot-survived=0x1) -- #91 closed" >&2
+
+    echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M38 kernel as a stage-2-confined EL1 guest]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M33 stage-B signed head survived a reboot (two-boot cross-boot); M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))"
     exit 0
 fi
 

@@ -127,9 +127,10 @@ cost three blind ~30-min CI round-trips once — never again).
      current state (read the files).
 
 4. **Add the tb-encode verified leaf (when it ships value-computation).** Add a pure
-   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves — 20: vmx, paging,
+   leaf in `crates/tb-encode/src/<leaf>.rs` (existing leaves — 24: vmx, paging,
    ipc_frame, route, memscore, stage2, smmuv3, el2_trap, blkfmt, kancell, prov, exp,
-   explore, bakeoff, opframe, exittel, tpsched, opframe_rx, khash, inferwire). Add `#[kani::proof]`
+   explore, bakeoff, opframe, exittel, tpsched, opframe_rx, khash, inferwire, sha256,
+   lmsig, attest, provhead). Add `#[kani::proof]`
    harnesses in `proofs.rs`, each:
    - **TRACTABLE — and MEASURED locally before pushing.** Run `cargo kani -p tb-encode
      --harness <name>` (WSL) on EVERY new/changed harness; the full gate is

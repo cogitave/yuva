@@ -2154,3 +2154,169 @@ pub(crate) fn persist_selftest() -> crate::PersistProof {
     }
 }
 
+
+// ===========================================================================
+// M33 STAGE B -- the PERSISTED SIGNED-HEAD two-boot path (proposal §6/§8). The
+// kernel writes the compiled-in full-parameter W4/H10 signed head (the private
+// key NEVER enters this TCB -- the signature is a pinned signer artifact,
+// `PROV_KAT_*`) to a PING-PONG pair of on-disk slots ABOVE the M20 partition,
+// via a NEW multi-sector torn-write-safe codec (`tb_encode::provhead`), and on
+// a later boot reads it back + verifies its LMS signature -- so a signed head
+// SURVIVES a genuine reboot (the load-bearing #91-closing evidence). Fail-closed
+// + honest: no disk (or a too-small one) is a GRACEFUL skip (persisted=survived=
+// false, the marker still prints); a torn/forged persisted head is caught by the
+// codec decode + the `lms_verify` (survived stays false).
+// ===========================================================================
+
+/// The first M33 signed-head slot sector -- immediately ABOVE the M20 fixed
+/// partition (sectors 0..8192), so the two subsystems never alias. Slot A at
+/// `[BASE .. BASE+MAX_SECTORS)`, slot B at `[BASE+MAX_SECTORS .. BASE+2*MAX)`.
+const M33_BASE: u64 = 8192;
+
+/// The stage-B persisted-head outcome (rendered into the `prov-sig:` witness).
+pub(crate) struct M33PersistResult {
+    /// A modern virtio-blk device with room for the two slots was present.
+    pub present: bool,
+    /// The compiled-in full-parameter W4/H10 signature verified (the every-boot
+    /// full-parameter verify KAT, stronger than stage A's toy-only KAT).
+    pub full_sig_verified: bool,
+    /// The signed head was written + FLUSHED to disk this boot.
+    pub persisted: bool,
+    /// A signed head from a PRIOR boot was read back AND its signature verified
+    /// (survived a genuine reboot).
+    pub survived: bool,
+    /// The signed head witnessed -- read FROM DISK on survival (the anti-hollow
+    /// cross-boot evidence), else the head just persisted.
+    pub head: [u8; 32],
+    /// The LMS leaf index of the witnessed head.
+    pub leaf_idx: u32,
+}
+
+/// Read `provhead::MAX_SECTORS` sectors from `base` into `dst` (a full slab).
+/// Returns false on any device read error. One reusable 512-byte stack buffer.
+fn m33_read_slab(slot: u32, base: u64, dst: &mut [u8]) -> bool {
+    use tb_encode::provhead::{MAX_SECTORS, SECTOR};
+    let mut s = 0u64;
+    while (s as usize) < MAX_SECTORS {
+        let mut sec = [0u8; 512];
+        if !crate::arch::blk_read(slot, base + s, &mut sec) {
+            return false;
+        }
+        let off = (s as usize) * SECTOR;
+        dst[off..off + SECTOR].copy_from_slice(&sec);
+        s += 1;
+    }
+    true
+}
+
+/// Write `n_sectors` (`bytes.len()/512`) sectors of `bytes` to `base`. Returns
+/// false on any device write error. One reusable 512-byte stack buffer.
+fn m33_write_slab(slot: u32, base: u64, bytes: &[u8]) -> bool {
+    use tb_encode::provhead::SECTOR;
+    let n = bytes.len() / SECTOR;
+    let mut s = 0usize;
+    while s < n {
+        let mut sec = [0u8; 512];
+        sec.copy_from_slice(&bytes[s * SECTOR..(s + 1) * SECTOR]);
+        if !crate::arch::blk_write(slot, base + s as u64, &sec) {
+            return false;
+        }
+        s += 1;
+    }
+    true
+}
+
+/// M33 stage-B persisted-head round-trip (both arches). Verifies the compiled-in
+/// full W4/H10 signature (every-boot KAT), then -- if a large-enough virtio-blk
+/// disk is present -- reads the ping-pong slots, RECOVERS the newer consistent
+/// signed head and verifies its signature (survival), and RE-PERSISTS the signed
+/// head at `gen+1` into the staler slot (torn-write-safe: a torn write leaves the
+/// prior slot's consistent record intact). All big buffers are heap-boxed (the
+/// #65 no-large-stack-array discipline). HONEST: the signature is a SIMULATED
+/// enrolled-key artifact (`key=SIMULATED-ENROLLED-CI-CUSTODIED`,
+/// `state=SIMULATED-REUSE-OK-NO-SECURITY`); the private key is never here.
+pub(crate) fn m33_persist_head() -> M33PersistResult {
+    use alloc::boxed::Box;
+    use tb_encode::lmsig;
+    use tb_encode::provhead::{self, MAX_SECTORS, OFF_SIG, SLAB_BYTES};
+
+    let mut r = M33PersistResult {
+        present: false,
+        full_sig_verified: false,
+        persisted: false,
+        survived: false,
+        head: lmsig::PROV_KAT_HEAD,
+        leaf_idx: lmsig::PROV_KAT_Q,
+    };
+
+    // The every-boot FULL-parameter verify KAT: the compiled-in W4/H10 signature
+    // verifies against the image-embedded public root through real SHA-256.
+    r.full_sig_verified = lmsig::lms_verify(
+        &lmsig::PROV_KAT_ROOT,
+        &lmsig::TOY_I,
+        &lmsig::PROV_KAT_HEAD,
+        &lmsig::PROV_KAT_SIG,
+    );
+
+    // A modern virtio-blk device with room for both slots, or a graceful skip.
+    let (slot, cap) = match crate::arch::blk_probe() {
+        Some(x) => x,
+        None => return r,
+    };
+    if cap < M33_BASE + 2 * (MAX_SECTORS as u64) {
+        return r; // disk too small for the M33 slots -> graceful skip
+    }
+    r.present = true;
+
+    // Read both ping-pong slots + decode each (heap-boxed buffers).
+    let mut slab_a: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let mut slab_b: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let read_a = m33_read_slab(slot, M33_BASE, &mut slab_a[..]);
+    let read_b = m33_read_slab(slot, M33_BASE + MAX_SECTORS as u64, &mut slab_b[..]);
+    let mut blob_a: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let mut blob_b: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let da = if read_a { provhead::decode(&slab_a[..], &mut blob_a[..]) } else { None };
+    let db = if read_b { provhead::decode(&slab_b[..], &mut blob_b[..]) } else { None };
+
+    // Pick the newer CONSISTENT slot; verify ITS signature (a torn/forged head
+    // that decodes but fails verify does NOT count as survived).
+    let winner = provhead::pick_newer(da.map(|x| x.gen), db.map(|x| x.gen));
+    let mut prior_gen = 0u64;
+    if let Some(is_b) = winner {
+        let (rec, blob) = if is_b { (db, &blob_b) } else { (da, &blob_a) };
+        if let Some(rec) = rec {
+            prior_gen = rec.gen;
+            let sig = &blob[OFF_SIG..OFF_SIG + rec.siglen as usize];
+            if lmsig::lms_verify(&lmsig::PROV_KAT_ROOT, &rec.i_id, &rec.head, sig) {
+                r.survived = true;
+                r.head = rec.head; // the head read FROM DISK (cross-boot witness)
+                r.leaf_idx = rec.q;
+            }
+        }
+    }
+
+    // Re-persist the signed head at gen+1 into the STALER slot (ping-pong): if the
+    // winner is slot A (or none) write slot B, else write slot A.
+    let target = match winner {
+        Some(false) => M33_BASE + MAX_SECTORS as u64, // A is newer -> write B
+        Some(true) => M33_BASE,                       // B is newer -> write A
+        None => M33_BASE,                             // fresh disk -> write A
+    };
+    let new_gen = prior_gen.wrapping_add(1);
+    let mut wblob: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let mut wslab: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let n = provhead::encode(
+        new_gen,
+        lmsig::PROV_KAT_Q,
+        &lmsig::PROV_KAT_HEAD,
+        &lmsig::TOY_I,
+        &lmsig::PROV_KAT_ROOT,
+        &lmsig::PROV_KAT_SIG,
+        &mut wblob[..],
+        &mut wslab[..],
+    );
+    if n > 0 && m33_write_slab(slot, target, &wslab[..n]) && crate::arch::blk_flush(slot) {
+        r.persisted = true;
+    }
+    r
+}

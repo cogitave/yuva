@@ -535,6 +535,24 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   determinism / the pinned-vector iff tamper-sensitivity); full W4/H10
   correctness rests on the host `cargo test` + the official RFC 8554 Appendix F
   vector + the in-boot small-parameter KAT + Miri.
+- **`head=SIGNED-PERSISTED-M20` — durability scope is WITHIN one invocation
+  (stage B).** The two-boot cross-boot witness proves a signed head survives a
+  genuine reboot (two QEMU processes against the SAME disk file), NOT survival
+  across CI RUNS: the disk is fresh per script invocation, and the two boots
+  share it. The `tb-encode::provhead` codec is torn-write-SAFE by construction —
+  a record-spanning FNV-64 catches a torn MIDDLE sector, a per-sector `gen_tag`
+  catches a mixed-gen torn commit, and the two-phase-`gen` ping-pong of two slots
+  recovers the prior consistent head when the newer slot is torn (the crash-
+  ordering window of §3, closed at stage A by single-signature-per-invocation).
+  A torn OR forged persisted head is caught by the decode fail-close AND the
+  `lms_verify` of the read-back signature, so `head-reboot-survived` stays `0x0`
+  in that case (never a false survival). The checksums are torn-write DETECTION
+  only — the signature's authenticity is the `lms_verify` against the image-
+  embedded root, never the on-disk FNV. The true cross-RUN persistent-disk lane +
+  the durable never-decrement leaf-index custody are the M35 obligation, NOT an
+  M33 claim. (Harness mechanics: the two-boot resets ONLY M20's low-4-MiB region
+  between boots so M20's fresh-disk self-test still holds while the M33 head above
+  the 4-MiB sector boundary survives — a test-harness detail, not a kernel path.)
 
 ## 3d. Industrial Boot presentation residuals (#106, the human-facing surface)
 
