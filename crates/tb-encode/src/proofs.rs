@@ -4804,6 +4804,69 @@ fn kani_inferwire_peer_label_bound() {
     assert!(base != echo_tag(&key, iw_peer::TB_VMM_HOST, &n2, &chal, &body));
 }
 
+/// (6b) M32 PEER-BINDING under `infer_tag` (proposal §3/§9 -- the actual
+/// evidence for the NEW local-engine peers, distinct from the echo-only
+/// `kani_inferwire_peer_label_bound` above): on the SAME concrete
+/// `(K, N, C, req_id, kind, sub, chunk)`, the closed peer set
+/// `{QEMU_CHARDEV_HARNESS=0x02, INFER_DAEMON=0x03, INFER_DAEMON_PURE=0x04}`
+/// yields PAIRWISE-DISTINCT tags under the `YUVA-M31-INFER-V1` domain -- so the
+/// kernel rendering `local-organ`/engine identity from `peer_id` on a `0x03`
+/// RESP is MAC-un-forgeable: a `0x02` mock frame can never wear the `0x03`
+/// local-engine identity, and neither can pre-empt the reserved `0x04` closure
+/// peer. NEGATIVE CONTROL: an `infer_tag` that DROPPED `peer_id` from its MAC
+/// input makes these pairs EQUAL and fails the inequalities.
+#[kani::proof]
+#[kani::unwind(70)]
+fn kani_inferwire_infer_peer_bound() {
+    let key: [u8; INFER_KEY_LEN] = [0x2Bu8; INFER_KEY_LEN];
+    let mut nonce = [0u8; INFER_NONCE_LEN];
+    let mut chal = [0u8; INFER_CHALLENGE_LEN];
+    let mut i = 0usize;
+    while i < 16 {
+        nonce[i] = (i as u8).wrapping_mul(17).wrapping_add(9);
+        chal[i] = (i as u8).wrapping_mul(23).wrapping_add(2);
+        i += 1;
+    }
+    let req_id: u64 = 0x0123_4567_89ab_cdef;
+    let sub = kani_m31_sub(0, false, 8);
+    let chunk = [0x5Au8; 8];
+
+    let t02 = infer_tag(
+        &key,
+        iw_peer::QEMU_CHARDEV_HARNESS,
+        &nonce,
+        &chal,
+        req_id,
+        iw_kind::INFER_RESP,
+        &sub,
+        &chunk,
+    );
+    let t03 = infer_tag(
+        &key,
+        iw_peer::INFER_DAEMON,
+        &nonce,
+        &chal,
+        req_id,
+        iw_kind::INFER_RESP,
+        &sub,
+        &chunk,
+    );
+    let t04 = infer_tag(
+        &key,
+        iw_peer::INFER_DAEMON_PURE,
+        &nonce,
+        &chal,
+        req_id,
+        iw_kind::INFER_RESP,
+        &sub,
+        &chunk,
+    );
+    // Pairwise-distinct: peer_id is provably INSIDE the infer_tag MAC input.
+    assert!(t02 != t03);
+    assert!(t03 != t04);
+    assert!(t02 != t04);
+}
+
 // ===========================================================================
 // M31: the inferwire INFERENCE-ADAPTER extension (proposal §8) -- the chunked
 // byte-body framing on the SAME leaf: kind extension, the 24-byte in-payload

@@ -85,7 +85,9 @@ jobs:
   # inline asm into CBMC), then scripts/verify-encode.sh asserts ZERO failures
   # AND that SUCCESSFUL == that shard's pinned count, with the two lists pinned
   # disjoint + exhaustive against the total
-  # EXPECTED_HARNESSES_TOTAL (currently 122: the 112 prior + the 10 M33
+  # EXPECTED_HARNESSES_TOTAL (currently 123: the 122 prior + the M32-B
+  # infer_tag peer-pair negative kani_inferwire_infer_peer_bound; before that 112
+  # prior + the 10 M33
   # provenance-lineage harnesses -- 2 SHA-256 leaf (kani_sha256_total /
   # kani_sha256_kat), 4 LMS verify toy-instance (kani_lms_verify_total /
   # kani_lms_verify_tamper / kani_lms_otschain_step / kani_lms_merklepath),

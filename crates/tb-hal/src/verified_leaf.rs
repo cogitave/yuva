@@ -1663,6 +1663,12 @@ pub enum InferWireProof {
 /// wire exchange always chunks).
 pub const INFER_MOCK_RESP_LEN: usize = tb_encode::inferwire::INFER_MOCK_RESP_LEN;
 
+/// M32 (stage B): the LOCAL-ORGAN request sentinel prefix (re-exported so the
+/// `#![forbid(unsafe_code)]`, tb-encode-free kernel can build the M32 prompt
+/// that routes a host peer to the local-organ leg -- see
+/// [`infer_local_wire_selftest`]).
+pub const INFER_LOCAL_PROBE: &[u8] = tb_encode::inferwire::INFER_LOCAL_PROBE;
+
 /// M31: the deterministic correlation id for a byte prompt: the leading 8
 /// bytes (LE) of `op_hash(prompt)` -- deterministic so the SAME id appears in
 /// the M25 transcript fold (computed before M25 prints) and on the wire
@@ -1712,6 +1718,28 @@ pub fn infer_wire_selftest(
     expected_resp: &[u8],
 ) -> InferWireProof {
     mem::infer_wire_selftest(slot, key, m30_nonce, req_id, prompt, expected_resp)
+}
+
+/// M32 (stage B): run the LOCAL-ORGAN receive path -- a PARALLEL exchange beside
+/// the untouched M31 mock leg. Sends ONE MAC'd `INFER_REQ` whose body opens with
+/// [`tb_encode::inferwire::INFER_LOCAL_PROBE`] on the SAME proven channel and
+/// receives PENDING + `INFER_RESP` chunks stamped `peer_id = INFER_DAEMON
+/// (0x03)`; every frame is MAC-verified, the local peer id is asserted (so a
+/// mock `0x02` frame can never wear the local identity), and the reassembled
+/// body must equal the in-kernel DETERMINISTIC STAND-IN `expected_resp`
+/// bit-exact. This receive is what feeds the M38 conductor a REAL, over-the-wire
+/// local organ. See [`InferWireProof`] (the `0x3x` fail band is disjoint from
+/// M31's). NO vendored C engine runs here -- the honest render is
+/// `local-organ=DETERMINISTIC-STANDIN`, never live inference.
+pub fn infer_local_wire_selftest(
+    slot: u32,
+    key: &[u8; 32],
+    m30_nonce: &[u8; 16],
+    req_id: u64,
+    prompt: &[u8],
+    expected_resp: &[u8],
+) -> InferWireProof {
+    mem::infer_local_wire_selftest(slot, key, m30_nonce, req_id, prompt, expected_resp)
 }
 
 // ===========================================================================

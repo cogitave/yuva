@@ -45,7 +45,7 @@ use tb_encode::inferwire::{
     body_digest, canon, decode, echo_tag, err_canon, errcode, infer_tag, kind, mock_infer, peer,
     verify_infer_req, wire_len, AsmPush, FrameAccum, InferAssembler, InferFrame, SubHdr,
     INFER_ACCUM_CAP, INFER_BODY_CAP, INFER_CHUNK_CAP, INFER_ERR_PAYLOAD_LEN, INFER_KEY_LEN,
-    INFER_MOCK_RESP_LEN, INFER_NOKEY_PROBE, INFER_NONCE_LEN, INFER_SUBHDR_LEN,
+    INFER_LOCAL_PROBE, INFER_MOCK_RESP_LEN, INFER_NOKEY_PROBE, INFER_NONCE_LEN, INFER_SUBHDR_LEN,
 };
 
 use crate::error::VmmError;
@@ -300,6 +300,20 @@ impl InferHost {
             return;
         }
 
+        // M32 (stage B) LOCAL-ORGAN leg: a body opening with the reserved
+        // sentinel is answered on the LOCAL peer identity (peer_id=0x03) as a
+        // DETERMINISTIC STAND-IN (no vendored C engine on this lane either), so
+        // the kernel's M32 receive path exercises a REAL cross-process receive
+        // under the distinct MAC-bound peer id. The transform is the SAME shared
+        // mock_infer leaf, so the guest still cross-checks bit-exact.
+        let is_local = body.len() >= INFER_LOCAL_PROBE.len()
+            && &body[..INFER_LOCAL_PROBE.len()] == INFER_LOCAL_PROBE;
+        let resp_peer = if is_local {
+            peer::INFER_DAEMON
+        } else {
+            peer::TB_VMM_HOST
+        };
+
         // The deterministic mock transform — the SAME shared tb-encode leaf
         // the in-kernel backend runs, so the guest cross-checks bit-for-bit.
         let mut resp = vec![0u8; INFER_MOCK_RESP_LEN];
@@ -312,7 +326,8 @@ impl InferHost {
         let dig = body_digest(&resp);
 
         // ONE PENDING heartbeat (liveness plumbing — never a completion).
-        let mut out = self.m31_frame(
+        let mut out = self.tagged_frame(
+            resp_peer,
             challenge,
             req_id,
             kind::INFER_PENDING,
@@ -340,7 +355,8 @@ impl InferHost {
                 INFER_SUBHDR_LEN
             );
             payload.extend_from_slice(&resp[off..end]);
-            out.extend_from_slice(&self.m31_frame(
+            out.extend_from_slice(&self.tagged_frame(
+                resp_peer,
                 challenge,
                 req_id,
                 kind::INFER_RESP,
@@ -352,12 +368,21 @@ impl InferHost {
             seq += 1;
         }
         self.outbuf.extend(out);
-        let line = format!(
-            "xport-harness-infer: backend=MOCK-DETERMINISTIC req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1\n",
-            resp.len(),
-            hex(&dig),
-            seq
-        );
+        let line = if is_local {
+            format!(
+                "xport-local: peer=0x03 local-organ=DETERMINISTIC-STANDIN req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1\n",
+                resp.len(),
+                hex(&dig),
+                seq
+            )
+        } else {
+            format!(
+                "xport-harness-infer: backend=MOCK-DETERMINISTIC req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1\n",
+                resp.len(),
+                hex(&dig),
+                seq
+            )
+        };
         self.witness_write(&line);
     }
 
@@ -373,22 +398,32 @@ impl InferHost {
         chunk: &[u8],
         payload: Vec<u8>,
     ) -> Vec<u8> {
-        let tag = infer_tag(
-            &self.key,
-            peer::TB_VMM_HOST,
-            &self.nonce,
-            challenge,
-            req_id,
-            k,
-            sub,
-            chunk,
-        );
+        self.tagged_frame(peer::TB_VMM_HOST, challenge, req_id, k, sub, chunk, payload)
+    }
+
+    /// Build one MAC'd host->guest frame stamped with an EXPLICIT `peer_id` —
+    /// the M31 mock leg uses this lane's `TB_VMM_HOST (0x01)`, the M32 local-
+    /// organ leg uses `INFER_DAEMON (0x03)`. The `peer_id` is bound INSIDE
+    /// [`infer_tag`], so a `0x01` mock frame can never masquerade as the `0x03`
+    /// local organ (the kani_inferwire_infer_peer_bound proof).
+    #[allow(clippy::too_many_arguments)]
+    fn tagged_frame(
+        &self,
+        peer_id: u8,
+        challenge: &[u8; 16],
+        req_id: u64,
+        k: u8,
+        sub: &SubHdr,
+        chunk: &[u8],
+        payload: Vec<u8>,
+    ) -> Vec<u8> {
+        let tag = infer_tag(&self.key, peer_id, &self.nonce, challenge, req_id, k, sub, chunk);
         let frame = InferFrame {
             kind: k,
             req_id,
             challenge: *challenge,
             nonce: self.nonce,
-            peer_id: peer::TB_VMM_HOST,
+            peer_id,
             tag,
             payload: &payload,
         };
@@ -646,6 +681,58 @@ mod tests {
         assert_eq!(chunks, infer_chunk_count(INFER_MOCK_RESP_LEN) as u32);
         assert!(asm.is_done());
         assert_eq!(asm.body(), &expected[..], "MOCK-DETERMINISTIC bit-exactness");
+    }
+
+    #[test]
+    fn local_probe_gets_peer_0x03_standin() {
+        // M32 (stage B): an INFER_REQ body opening with the reserved sentinel is
+        // answered on the LOCAL peer identity (peer_id=0x03), distinct from the
+        // 0x01 mock, and MAC-verifies under that peer id -- so the kernel's
+        // `frame.peer_id == INFER_DAEMON` assertion holds ONLY for this leg.
+        let (mut host, _sink) = host_with_sink();
+        let challenge = [0x22u8; 16];
+        let req_id = 0xD00D;
+        let body = INFER_LOCAL_PROBE;
+        host.push_guest_bytes(&infer_req_wire(&KEY, challenge, req_id, body));
+
+        let expect = INFER_HEADER_LEN + infer_chunks_wire_len(INFER_MOCK_RESP_LEN);
+        assert_eq!(host.out_len(), expect);
+        let out = host.take_output(expect);
+
+        let mut expected = vec![0u8; INFER_MOCK_RESP_LEN];
+        assert_eq!(mock_infer(body, &mut expected), INFER_MOCK_RESP_LEN);
+        let mut asm: InferAssembler<INFER_BODY_CAP> = InferAssembler::new();
+        let mut pending = 0u32;
+        let mut chunks = 0u32;
+        let mut off = 0usize;
+        while off < out.len() {
+            let frame = decode(&out[off..]).expect("each emitted frame decodes");
+            let flen = INFER_HEADER_LEN + frame.payload.len();
+            // The LOCAL peer identity is stamped + MAC-bound on EVERY frame.
+            assert_eq!(
+                frame.peer_id,
+                peer::INFER_DAEMON,
+                "the M32 local leg must wear peer_id=0x03"
+            );
+            let (sub, chunk) = verify_infer_resp(&KEY, &frame, req_id, &challenge)
+                .expect("every host frame MAC-verifies under its 0x03 peer id");
+            match frame.kind {
+                kind::INFER_PENDING => pending += 1,
+                kind::INFER_RESP => {
+                    chunks += 1;
+                    match asm.push_chunk(&sub, chunk) {
+                        AsmPush::Accepted | AsmPush::Complete(_) => {}
+                        AsmPush::Rejected => panic!("assembler rejected a host chunk"),
+                    }
+                }
+                k => panic!("unexpected kind {k}"),
+            }
+            off += flen;
+        }
+        assert_eq!(pending, 1, "EXACTLY one PENDING heartbeat");
+        assert_eq!(chunks, infer_chunk_count(INFER_MOCK_RESP_LEN) as u32);
+        assert!(asm.is_done());
+        assert_eq!(asm.body(), &expected[..], "the stand-in is bit-exact");
     }
 
     #[test]

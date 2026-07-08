@@ -196,6 +196,16 @@ pub mod peer {
     pub const TB_VMM_HOST: u8 = 0x01;
     /// The stock-QEMU `virtconsole`+chardev harness (the TCG lanes).
     pub const QEMU_CHARDEV_HARNESS: u8 = 0x02;
+    /// The M32 LOCAL-INFERENCE peer (the local-organ leg -- proposal §3). The
+    /// engine identity the kernel renders for a `0x03` RESP is fixed by the
+    /// CLOSED in-kernel peer map, never echoed daemon bytes; at stage B the
+    /// served organ is a DETERMINISTIC STAND-IN (no vendored C engine reaches
+    /// the boot yet -- that is the real-engine follow-up), so the honest render
+    /// is `local-organ=DETERMINISTIC-STANDIN`, NOT `engine=VENDORED-C-LLAMACPP`.
+    pub const INFER_DAEMON: u8 = 0x03;
+    /// Reserved for the B3 pure-Rust closure landing (proposal §3/§12); wired
+    /// ONLY by that reviewed flip, never before.
+    pub const INFER_DAEMON_PURE: u8 = 0x04;
 }
 
 /// A fixed, canonical inference-transport frame (proposal §2). Every header
@@ -785,6 +795,16 @@ pub const INFER_MOCK_RESP_LEN: usize = 1280;
 /// (never re-spelled); stage C replaces this rule with real key-presence.
 pub const INFER_NOKEY_PROBE: &[u8] =
     concat!(brand::brand_upper!(), "-M31-NOKEY-PROBE-V1").as_bytes();
+
+/// The M32 LOCAL-ORGAN request sentinel prefix (proposal §3, stage B). A host
+/// peer that sees an `INFER_REQ` body opening with these bytes answers on the
+/// LOCAL peer identity (`peer::INFER_DAEMON = 0x03`) with a DETERMINISTIC
+/// STAND-IN response (the shared `mock_infer` transform over the request body --
+/// no vendored C engine runs at this stage), so the kernel's M32 receive path
+/// exercises a REAL cross-process receive under the local-engine peer id while
+/// honestly tokening the organ as a stand-in. Brand-derived wire bytes.
+pub const INFER_LOCAL_PROBE: &[u8] =
+    concat!(brand::brand_upper!(), "-M32-LOCAL-ORGAN-V1").as_bytes();
 
 /// The MOCK-DETERMINISTIC keystream label (brand-derived at the use site, the
 /// M30 challenge-label precedent). NOT a keyed-MAC domain separator -- the
