@@ -547,20 +547,31 @@ pub(crate) fn corpus_selftest() -> crate::CorpusProof {
 /// Slot A at `[BASE .. BASE+MAX_SECTORS)`, slot B at `[BASE+MAX_SECTORS .. BASE+2*MAX)`.
 const CORPUS_PERSIST_BASE: u64 = 12288;
 
-/// M39 (inc-3): SEED the deterministic two-cluster corpus scenario and run the REAL
-/// M17 consolidation, returning the substrate whose SEPARATE `corpus_head` /
-/// `corpus_records` now hold the freshly curated provenance skeletons -- the exact
-/// seeding [`corpus_selftest`] uses, factored so the durable persist seam curates the
-/// IDENTICAL deterministic records (so the in-RAM self-test head + the persisted head
-/// coincide each boot). `None` on a seed failure.
-fn corpus_seed_and_consolidate() -> Option<MemSubstrate> {
+/// M39 (inc-3): SEED the deterministic two-cluster corpus scenario, run the REAL M17
+/// consolidation, and return ONLY this boot's freshly curated corpus records (the
+/// [`corpus::CORPUS_CANON_LEN`]-byte canonical rows) + the running `corpus_head` (the
+/// 32-byte M22 fold) -- the exact seeding [`corpus_selftest`] uses, factored so the
+/// durable persist seam curates the IDENTICAL deterministic records (so the in-RAM
+/// self-test head + the persisted head coincide each boot). `None` on a seed failure.
+///
+/// STACK DISCIPLINE (#65): the ~3 KiB [`MemSubstrate`] (its inline `xp_ring` POD
+/// dominates the frame) lives and DIES inside THIS frame -- we return the extracted
+/// heap `Vec` + the 32-byte head, NEVER the substrate by value, so it never enters the
+/// caller's [`corpus_persist`] frame (which then descends into the slab-write + SHA-
+/// fold call chain on the tight aarch64 boot stack). Returning the substrate by value
+/// would reserve its 3 KiB slot in `corpus_persist`'s frame for the whole persist path
+/// and breach the boot-stack red-zone.
+#[allow(clippy::type_complexity)]
+fn corpus_seed_and_consolidate(
+) -> Option<(Vec<[u8; tb_encode::corpus::CORPUS_CANON_LEN]>, [u8; tb_encode::corpus::PROV_HASH_LEN])>
+{
     let mut sub = MemSubstrate::new();
     sub.push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())?;
     sub.push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())?;
     sub.push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())?;
     sub.push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())?;
     let _ = sub.consolidation_cycle();
-    Some(sub)
+    Some((sub.corpus_records().to_vec(), sub.corpus_head()))
 }
 
 /// M39 increment-3: the DURABLE experience-corpus persist round-trip (both arches).
@@ -609,19 +620,16 @@ pub(crate) fn corpus_persist() -> crate::CorpusPersistProof {
     }
 
     // (curate) The deterministic scenario -> this boot's freshly curated records +
-    // running corpus_head (the SAME the in-RAM self-test verifies). We DROP the
-    // ~3 KiB `MemSubstrate` (its inline `xp_ring` POD dominates the frame) the moment
-    // we have extracted this boot's records + head, BEFORE the disk read / SHA-fold /
-    // write call chain below -- so the boot-stack high-water mark never carries the
-    // substrate INTO the slab + fold frames (the #65 no-deep-stack discipline; the
-    // aarch64 boot stack is tight, and m33_read_slab/m33_write_slab each stack a
-    // 512-byte sector buffer on top of the persist frame).
-    let (cur_records, cur_head) = {
-        let sub = match corpus_seed_and_consolidate() {
-            Some(s) => s,
-            None => return r,
-        };
-        (sub.corpus_records().to_vec(), sub.corpus_head())
+    // running corpus_head (the SAME the in-RAM self-test verifies). The helper returns
+    // ONLY the heap `Vec` + the 32-byte head and drops its ~3 KiB `MemSubstrate` in its
+    // OWN frame,
+    // so the substrate never lands in THIS frame ahead of the slab-write + SHA-fold
+    // call chain below (the #65 no-deep-stack discipline; the aarch64 boot stack is
+    // tight, and m33_read_slab/m33_write_slab each stack a 512-byte sector buffer on
+    // top of the persist frame).
+    let (cur_records, cur_head) = match corpus_seed_and_consolidate() {
+        Some(x) => x,
+        None => return r,
     };
     if cur_records.is_empty() {
         return r; // no curated record this boot -> nothing to persist (anti-hollow)
