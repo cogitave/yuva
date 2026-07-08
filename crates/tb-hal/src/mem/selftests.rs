@@ -2123,10 +2123,15 @@ pub(crate) fn infer_local_wire_selftest(
         return fail(0x30);
     }
     req_payload[INFER_SUBHDR_LEN..].copy_from_slice(prompt);
+    // Protocol constant, NOT a secret nonce: a REQ carries NO host nonce --
+    // `verify_infer_req` REJECTS any non-zero REQ nonce (fail-closed), the host
+    // custodies N and stamps it on the RESPONSE only, and per-boot freshness
+    // rides the MAC-bound `challenge`. Zero-initialised (mirrors the M31 REQ).
+    let req_nonce: [u8; 16] = Default::default();
     let req_tag = infer_tag(
         key,
         0,
-        &[0u8; 16],
+        &req_nonce,
         &challenge,
         req_id,
         kind::INFER_REQ,
@@ -2137,7 +2142,7 @@ pub(crate) fn infer_local_wire_selftest(
         kind: kind::INFER_REQ,
         req_id,
         challenge,
-        nonce: [0u8; 16],
+        nonce: req_nonce,
         peer_id: 0,
         tag: req_tag,
         payload: &req_payload,
