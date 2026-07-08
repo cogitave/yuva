@@ -2043,6 +2043,187 @@ pub(crate) fn infer_wire_selftest(
     }
 }
 
+/// M32 (stage B): the LOCAL-ORGAN receive path -- a PARALLEL exchange beside the
+/// untouched M31 mock leg (proposal §3). On the SAME proven channel `(slot, key,
+/// m30_nonce)` the kernel sends ONE MAC'd `INFER_REQ` whose body opens with
+/// [`tb_encode::inferwire::INFER_LOCAL_PROBE`]; a host peer routes that to the
+/// LOCAL leg and answers PENDING + `INFER_RESP` chunks stamped
+/// `peer_id = INFER_DAEMON (0x03)` (the DETERMINISTIC STAND-IN -- no vendored C
+/// engine reaches the boot at this stage). This receive is the genuine cross-
+/// process leg feeding the M38 conductor's local organ: every frame is MAC-
+/// verified under `YUVA-M31-INFER-V1`, the per-run host nonce must carry
+/// through, the response peer_id MUST equal `INFER_DAEMON` (so a `0x02` mock
+/// frame can NEVER masquerade as the local organ -- the
+/// `kani_inferwire_infer_peer_bound` proof), the body digest commitment
+/// arbitrates, and the reassembled body must equal the in-kernel stand-in
+/// expectation BIT-EXACT (the same shared `mock_infer` leaf both ends compile).
+///
+/// The response length is a-priori-known (the stand-in transform is
+/// deterministic), so this reuses the M31 exact-size digest-committed receive
+/// rather than the proposal's variable-length primitive (§17.18) -- that
+/// primitive is only forced by an UNKNOWN-length REAL engine, the real-engine
+/// follow-up. `Failed { stage }` uses the `0x3x` band (disjoint from M31's
+/// `0x1x`/`0x2x`) so a fault localises to this leg.
+pub(crate) fn infer_local_wire_selftest(
+    slot: u32,
+    key: &[u8; 32],
+    m30_nonce: &[u8; 16],
+    req_id: u64,
+    prompt: &[u8],
+    expected_resp: &[u8],
+) -> crate::InferWireProof {
+    use tb_encode::inferwire::{
+        body_digest, canon, decode, infer_chunk_count, infer_chunks_wire_len, infer_tag, kind,
+        peer, subhdr_canon, verify_infer_resp, AsmPush, FrameAccum, InferAssembler, InferFrame,
+        SubHdr, INFER_ACCUM_CAP, INFER_CHALLENGE_LEN, INFER_HEADER_LEN, INFER_MOCK_RESP_LEN,
+        INFER_SUBHDR_LEN,
+    };
+    use tb_encode::khash::uhash;
+
+    let fail = |stage: u32| crate::InferWireProof::Failed { stage };
+
+    if prompt.is_empty() || expected_resp.len() != INFER_MOCK_RESP_LEN {
+        return fail(0x30);
+    }
+
+    // A fresh per-boot challenge under an M32-DISTINCT label (never collides with
+    // the M31 exchange's; the host echoes it back + MAC-binds it).
+    const LABEL: &[u8] = concat!(brand::brand_upper!(), "-M32-LOCAL-CHALLENGE-V1").as_bytes();
+    let ticks = crate::read_cycle_counter();
+    let mut seed = [0u8; LABEL.len() + 8];
+    let mut i = 0usize;
+    while i < LABEL.len() {
+        seed[i] = LABEL[i];
+        i += 1;
+    }
+    let tb = ticks.to_le_bytes();
+    let mut t = 0usize;
+    while t < 8 {
+        seed[LABEL.len() + t] = tb[t];
+        t += 1;
+    }
+    let h = uhash(&seed);
+    let mut challenge = [0u8; INFER_CHALLENGE_LEN];
+    let mut c = 0usize;
+    while c < INFER_CHALLENGE_LEN {
+        challenge[c] = h[c];
+        c += 1;
+    }
+
+    // Build + send the M32 INFER_REQ (peer_id=0 in a REQ; the sentinel body
+    // routes the host to the LOCAL leg).
+    let req_sub = SubHdr {
+        seq: 0,
+        more: false,
+        total_len: prompt.len() as u32,
+        body_digest: body_digest(prompt),
+    };
+    let mut req_payload = alloc::vec![0u8; INFER_SUBHDR_LEN + prompt.len()];
+    if subhdr_canon(&req_sub, &mut req_payload) != INFER_SUBHDR_LEN {
+        return fail(0x30);
+    }
+    req_payload[INFER_SUBHDR_LEN..].copy_from_slice(prompt);
+    let req_tag = infer_tag(
+        key,
+        0,
+        &[0u8; 16],
+        &challenge,
+        req_id,
+        kind::INFER_REQ,
+        &req_sub,
+        prompt,
+    );
+    let req_frame = InferFrame {
+        kind: kind::INFER_REQ,
+        req_id,
+        challenge,
+        nonce: [0u8; 16],
+        peer_id: 0,
+        tag: req_tag,
+        payload: &req_payload,
+    };
+    let mut req_wire = alloc::vec![0u8; INFER_HEADER_LEN + req_payload.len()];
+    let rn = canon(&req_frame, &mut req_wire);
+    if rn != req_wire.len() {
+        return fail(0x30);
+    }
+    let expect_rx = INFER_HEADER_LEN + infer_chunks_wire_len(expected_resp.len());
+    let mut rx = alloc::vec![0u8; expect_rx];
+    match crate::arch::chan_send_recv(slot, &req_wire[..rn], &mut rx) {
+        Some(n) if n == expect_rx => {}
+        _ => return fail(0x31),
+    }
+
+    // Stream-reframe + MAC-verify EVERY frame + assert the LOCAL peer id + chunk-
+    // assemble (the M31 shape, one ring inward: peer 0x03, no NOKEY probe leg).
+    let mut acc: FrameAccum<INFER_ACCUM_CAP> = FrameAccum::new();
+    let mut asm: InferAssembler<INFER_MOCK_RESP_LEN> = InferAssembler::new();
+    let mut pending: u64 = 0;
+    let mut chunks: u64 = 0;
+    let mut body_len: usize = 0;
+    let mut rb = 0usize;
+    while rb < expect_rx {
+        let emitted = acc.push_byte(rx[rb]);
+        rb += 1;
+        let flen = match emitted {
+            Some(n) => n,
+            None => continue,
+        };
+        let frame = match decode(&acc.bytes()[..flen]) {
+            Some(f) => f,
+            None => return fail(0x32),
+        };
+        if frame.nonce != *m30_nonce {
+            return fail(0x32); // the per-run host nonce must carry through
+        }
+        // The LOCAL-ENGINE peer binding: a 0x02 mock frame can never wear the
+        // 0x03 local identity (MAC-bound; kani_inferwire_infer_peer_bound).
+        if frame.peer_id != peer::INFER_DAEMON {
+            return fail(0x33);
+        }
+        let (sub, chunk) = match verify_infer_resp(key, &frame, req_id, &challenge) {
+            Some(x) => x,
+            None => return fail(0x33), // an unMAC'd/spliced frame never lands
+        };
+        match frame.kind {
+            kind::INFER_PENDING => {
+                if chunks != 0 {
+                    return fail(0x35);
+                }
+                pending += 1;
+                if pending > INFER_PENDING_CAP {
+                    return fail(0x35);
+                }
+            }
+            kind::INFER_RESP => match asm.push_chunk(&sub, chunk) {
+                AsmPush::Accepted => chunks += 1,
+                AsmPush::Complete(n) => {
+                    chunks += 1;
+                    body_len = n;
+                }
+                AsmPush::Rejected => return fail(0x34),
+            },
+            _ => return fail(0x33),
+        }
+        acc.consume(flen);
+    }
+    if !asm.is_done() || body_len != expected_resp.len() || !acc.is_empty() {
+        return fail(0x35);
+    }
+    if pending != 1 || chunks != infer_chunk_count(expected_resp.len()) as u64 {
+        return fail(0x35);
+    }
+    if asm.body() != expected_resp {
+        return fail(0x36); // the cross-process bit-exact stand-in check
+    }
+
+    crate::InferWireProof::Proven {
+        pending,
+        chunks,
+        resp_len: body_len as u64,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known-token sentinel records the round-trip writes + replays.

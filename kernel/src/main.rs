@@ -5277,6 +5277,137 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M33: prov-lineage OK (substrate profile, agent organ skipped)\n");
     }
 
+    // ---- M32 (stage B): the kernel LOCAL-ORGAN receive path -- closes #90 -----
+    // The M38 conductor below schedules a LOCAL organ. Until now that organ was
+    // an in-kernel authored mock; M32 stage B makes it a REAL, over-the-wire
+    // receive: a SECOND INFER_REQ (BESIDE the untouched M31 mock exchange) whose
+    // body opens with the reserved LOCAL sentinel, answered by a host peer on the
+    // DISTINCT local peer identity `peer::INFER_DAEMON (0x03)`. The kernel
+    // receives the response through `infer_local_wire_selftest` -- MAC-verified
+    // per chunk under `YUVA-M31-INFER-V1`, the per-run host nonce carried
+    // through, the response peer id ASSERTED == 0x03 (so a `0x02` mock frame can
+    // never wear the local identity -- kani_inferwire_infer_peer_bound), the body
+    // digest committed, and the reassembled body equal BIT-EXACT to the in-kernel
+    // stand-in expectation. That validated organ then FEEDS the M38 conductor's
+    // round-1 refinement (data dependency, below), so the ACCEPT genuinely rides
+    // the received organ, not an in-kernel stub.
+    //
+    // HONESTY (the anti-hollow ceiling, machine-tokened): NO vendored C engine
+    // reaches the boot at this stage -- the served organ is a DETERMINISTIC
+    // STAND-IN (the shared `mock_infer` transform), so the witness renders
+    // `local-organ=DETERMINISTIC-STANDIN engine=NONE-DETERMINISTIC-STANDIN`,
+    // NEVER `engine=VENDORED-C-LLAMACPP` and NEVER live inference. The
+    // debt=SOVEREIGNTY-OPEN-B3 pointer stays. Real engine bytes over this SAME
+    // seam are the named follow-up. The receive is variable-frame-count in shape
+    // but a-priori-sized here (the stand-in is deterministic), so it reuses the
+    // M31 exact-size digest-committed receive rather than the proposal's
+    // variable-length primitive (that primitive is only forced by an
+    // unknown-length REAL engine). Offline + deterministic: NO network, NO secret.
+    //
+    // Boot-Profiles: AGENT-profile organ -- gated. In the substrate profile it is
+    // NOT ADMITTED and emits NO `infer-local:` witness (the census-forbidden
+    // prefix); on a channel-less agent lane it is a LOUD skip WITHOUT the witness
+    // prefix (the conductor falls back to its in-kernel stand-in, identical head).
+    let (m32_local_received, m32_local_resp_len): (bool, u64) =
+        if profile::agent_organs_enabled() {
+            use tb_hal::caps::{self, Handle};
+            let ok = caps::SysStatus::Ok as u32;
+            let den = caps::SysStatus::Denied as u32;
+            match m31_chan {
+                None => {
+                    // No host peer on this agent lane: no over-the-wire organ. The
+                    // conductor falls back to its in-kernel stand-in (§ M38 below),
+                    // which yields the identical fold head. No witness prefix here.
+                    tb_hal::serial_write_str(
+                        "infer-local-skip: local-organ=DETERMINISTIC-STANDIN reason=NO-HOST-PEER\n",
+                    );
+                    (false, 0)
+                }
+                Some((slot, key, nonce)) => {
+                    // (1) The M32 prompt = the reserved LOCAL sentinel; a host peer
+                    // routes it to the local-organ leg (peer 0x03).
+                    let m32_prompt = tb_hal::INFER_LOCAL_PROBE;
+                    // (2) The in-kernel DETERMINISTIC STAND-IN expectation, via the
+                    // SAME cap-gated mock path M31 uses (the cross-process bit-exact
+                    // anchor; the possession gate is exercised = a real organ call).
+                    let (s, sraw) =
+                        tb_hal::agent_model_open(agent_c, "model:mock/echo").unwrap_or((den, 0));
+                    if s != ok {
+                        tb_hal::serial_write_str("infer-local: FAIL open stage=0x01\n");
+                        tb_hal::fail_exit();
+                    }
+                    let sess = Handle::from_raw(sraw);
+                    let mut expected = alloc::vec![0u8; tb_hal::INFER_MOCK_RESP_LEN];
+                    let (s, result) =
+                        tb_hal::agent_model_invoke_bytes(agent_c, sess, m32_prompt, &mut expected)
+                            .unwrap_or((den, None));
+                    let elen = match (s == ok, result) {
+                        (true, Some(Ok((n, _stop)))) => n,
+                        _ => {
+                            tb_hal::serial_write_str("infer-local: FAIL invoke stage=0x02\n");
+                            tb_hal::fail_exit();
+                        }
+                    };
+                    if elen != tb_hal::INFER_MOCK_RESP_LEN {
+                        tb_hal::serial_write_str("infer-local: FAIL shape stage=0x02\n");
+                        tb_hal::fail_exit();
+                    }
+                    expected.truncate(elen);
+                    // (3) THE RECEIVE: send the M32 INFER_REQ + receive the peer-0x03
+                    // stand-in over the wire. A present-then-silent / faulty /
+                    // wrong-peer peer is a HARD FAIL (#65), never a skip.
+                    let m32_req_id = tb_hal::infer_req_id_for(m32_prompt);
+                    match tb_hal::infer_local_wire_selftest(
+                        slot, &key, &nonce, m32_req_id, m32_prompt, &expected,
+                    ) {
+                        tb_hal::InferWireProof::Failed { stage } => {
+                            tb_hal::serial_write_str("infer-local: FAIL wire stage=");
+                            write_hex_u64(stage as u64);
+                            tb_hal::serial_write_byte(b'\n');
+                            tb_hal::fail_exit();
+                        }
+                        tb_hal::InferWireProof::Proven {
+                            pending,
+                            chunks,
+                            resp_len,
+                        } => {
+                            // resp-digest is the CROSS-PROCESS anchor: its leading 16
+                            // bytes equal the host `xport-local:` line's body_digest
+                            // (the §8.6 leg, a SEPARATE capture stream).
+                            let d = tb_hal::infer_resp_digest(&expected);
+                            let mut d16 = [0u8; 16];
+                            d16.copy_from_slice(&d[..16]);
+                            tb_hal::serial_write_str(
+                                "infer-local: backend=LOCAL-STANDIN engine=NONE-DETERMINISTIC-STANDIN \
+                                 local-organ=DETERMINISTIC-STANDIN peer=0x03 debt=SOVEREIGNTY-OPEN-B3 \
+                                 memsafety=SAFE-RUST-STANDIN weights=NONE-NO-MODEL-LOADED \
+                                 received=OVER-M32-SEAM fed-to=M38-CONDUCTOR req-id=",
+                            );
+                            write_hex_u64(m32_req_id);
+                            tb_hal::serial_write_str(" resp-len=");
+                            write_hex_u64(resp_len);
+                            tb_hal::serial_write_str(" resp-digest=");
+                            write_hex_bytes16(&d16);
+                            tb_hal::serial_write_str(" chunks=");
+                            write_hex_u64(chunks);
+                            tb_hal::serial_write_str(" pending=");
+                            write_hex_u64(pending);
+                            tb_hal::serial_write_str(
+                                " mac-verified=0x1 peer-bound=0x1 guestpath=RECEIVED-OVER-WIRE \
+                                 live-inference=NOT-CLAIMED key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB \
+                                 ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE\n",
+                            );
+                            (true, resp_len)
+                        }
+                    }
+                }
+            }
+        } else {
+            // Substrate: the organ is NOT admitted; no `infer-local:` witness
+            // (census-forbidden prefix). The M38 skip form carries the note.
+            (false, 0)
+        };
+
     // ---- M38 (stage B): the kernel-integrated CONDUCTOR -- TRINITY ADOPT-1 ----
     // The in-kernel selftest agent DRIVES the Verifier-gated organ loop FROM THE
     // GUEST, through the SAME capability chokepoint M31 uses: M_MEM_RECALL (the
@@ -5303,8 +5434,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // discipline). The `conduct_head` folds on its OWN lane, SEPARATE from every
     // other fold head (M22/M23/M25/M26/...), so the cumulative chain stays byte-
     // identical except the new conductor activity. Any fault is a hard fail
-    // (#65 -- red NOW). Offline + deterministic: NO network, NO secret, all organs
-    // are mocks (the real M32 organ is the #90 follow-up).
+    // (#65 -- red NOW). Offline + deterministic: NO network, NO secret. M32 stage
+    // B (above) now feeds the LOCAL organ from a REAL over-the-wire receive
+    // (peer 0x03, deterministic stand-in -- #90 closed); the external organ stays
+    // a CI mock, and no vendored C engine reaches the boot yet (the real-engine
+    // follow-up).
     if profile::agent_organs_enabled() {
         use tb_hal::caps::{self, Handle};
 
@@ -5407,11 +5541,23 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // cross-process fold matches byte-for-byte; ctx_recalls==3 is the precondition
         // (asserted above) that proves the lexical-recall organ genuinely ran.
         let context_strength: i64 = 200;
-        // The mock organ's deterministic refinement: a fixed +200 per retry round
-        // (the stage-A `mock_worker_score` shape; resp non-empty proves the organ
-        // ran). resp_len is load-bearing -- a dead organ (empty resp) would not
-        // refine. round 0 -> 200 (REVISE), round 1 -> 400 (ACCEPT).
-        let refinement: i64 = if resp_len > 0 { 200 } else { 0 };
+        // The organ's deterministic refinement: a fixed +200 per retry round (the
+        // stage-A `mock_worker_score` shape; a non-empty response proves the organ
+        // ran). round 0 -> 200 (REVISE), round 1 -> 400 (ACCEPT). M32 stage B: the
+        // refinement is now SOURCED FROM the LOCAL organ RECEIVED OVER THE WIRE
+        // (`m32_local_resp_len`, peer 0x03, digest-committed, bit-exact) whenever
+        // the channel is present -- a genuine data dependency, so the conductor's
+        // ACCEPT rides the received organ. A channel-less agent lane falls back to
+        // the in-kernel stand-in (`resp_len`). BOTH are the same deterministic
+        // stand-in yielding 1280>0 -> +200, so the fold head is byte-identical
+        // across lanes; what changes is the SOURCE + the honest `local-organ=`
+        // token below.
+        let local_organ_len: u64 = if m32_local_received {
+            m32_local_resp_len
+        } else {
+            resp_len as u64
+        };
+        let refinement: i64 = if local_organ_len > 0 { 200 } else { 0 };
         let scores: [i64; 2] = [context_strength, context_strength + refinement];
 
         // (4) RUN the verified policy + fold the lineage (the value computation;
@@ -5521,8 +5667,19 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str(
             " attested=0x1 prov-tag=0x4 \
              policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED learning=DORMANT \
-             retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI \
-             local-organ=M38-AUTHORED-MOCK verifier=CI-DISCRETE-VERDICT \
+             retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI ",
+        );
+        // M32 stage B: the local organ is now RECEIVED OVER THE M32 WIRE SEAM
+        // (peer 0x03, deterministic stand-in) when the channel is present -- the
+        // honest transition from the in-kernel authored mock. This token is
+        // PRINTED only (never folded into the head), so the fold stays identical.
+        if m32_local_received {
+            tb_hal::serial_write_str("local-organ=RECEIVED-M32-DETERMINISTIC-STANDIN ");
+        } else {
+            tb_hal::serial_write_str("local-organ=M38-AUTHORED-MOCK ");
+        }
+        tb_hal::serial_write_str(
+            "verifier=CI-DISCRETE-VERDICT \
              m18-gate=ADMISSION-ONLY-INERT-IN-MOCK cost=HONEST-ACCOUNTED-TOKENED \
              cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK \
              orchestration=RAG-AGENTS-NOT-NEW-PARADIGM live+web=DISPATCH-ONLY \

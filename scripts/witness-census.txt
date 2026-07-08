@@ -7,6 +7,8 @@ cost:
 exittel:
 exp:
 infer-dump:
+infer-local-skip:
+infer-local:
 infer:
 kan:
 mem:

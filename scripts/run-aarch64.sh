@@ -755,6 +755,47 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         exit 1
     fi
 
+    # M32 (stage B) GUARDS -- the kernel LOCAL-ORGAN receive path (#90), mirroring
+    # the x86_64 lane. The HOST leg is the un-framed lines in ${OUTPUT} (the
+    # guest's own channel-less infer-local-skip lives inside guestlog: frames,
+    # stripped from ${OUTPUT}). The chardev harness IS attached, so the local
+    # organ MUST have been received over the wire + fed to the M38 conductor.
+    #
+    # (1) Skip-reject on the attached HOST leg.
+    if printf '%s' "${OUTPUT}" | grep -qE -- '(^|[^[:alnum:]])infer-local-skip:'; then
+        echo "[run-aarch64] FAIL -- M32 ran in SKIP mode (infer-local-skip) on the HOST leg but this lane attaches the chardev harness -- the local-organ receive was NOT exercised" >&2
+        exit 1
+    fi
+    # (2) Positive-require the FULL one-line infer-local witness (honest stand-in
+    # tokens; NEVER a vendored-C/live claim at this stage), peer=0x03, flags =0x1.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'infer-local: backend=LOCAL-STANDIN engine=NONE-DETERMINISTIC-STANDIN local-organ=DETERMINISTIC-STANDIN peer=0x03 debt=SOVEREIGNTY-OPEN-B3 memsafety=SAFE-RUST-STANDIN weights=NONE-NO-MODEL-LOADED received=OVER-M32-SEAM fed-to=M38-CONDUCTOR req-id=0x[0-9a-f]{16} resp-len=0x[0-9a-f]+ resp-digest=0x[0-9a-f]{32} chunks=0x0*2 pending=0x0*1 mac-verified=0x0*1 peer-bound=0x0*1 guestpath=RECEIVED-OVER-WIRE live-inference=NOT-CLAIMED key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE'; then
+        echo "[run-aarch64] FAIL -- M38 conductor witnessed but the real 'infer-local: backend=LOCAL-STANDIN .. peer=0x03 .. received=OVER-M32-SEAM ..' witness was NOT seen on the HOST leg (hollow M32 pass)" >&2
+        exit 1
+    fi
+    # (3) THE CROSS-PROCESS LEG (loopback/fixture killer): the guest-witnessed
+    # infer-local resp-digest MUST string-equal the HOST peer's xport-local
+    # resp-digest (SEPARATE ${HARNESS_OUT} capture stream, peer_id=0x03).
+    GUEST_LOCAL_DIG="$(printf '%s\n' "${OUTPUT}" | grep -oE '^infer-local: .*resp-digest=0x[0-9a-f]{32}' | grep -oE 'resp-digest=0x[0-9a-f]{32}' | head -1)"
+    HOST_LOCAL_DIG="$(printf '%s\n' "${HARNESS_OUT}" | grep -oE '^xport-local: .*resp-digest=0x[0-9a-f]{32}' | grep -oE 'resp-digest=0x[0-9a-f]{32}' | head -1)"
+    if [[ -z "${GUEST_LOCAL_DIG}" || -z "${HOST_LOCAL_DIG}" ]]; then
+        echo "[run-aarch64] FAIL -- M32 cross-process leg has no input -- guest infer-local digest='${GUEST_LOCAL_DIG}' host xport-local digest='${HOST_LOCAL_DIG}'" >&2
+        exit 1
+    fi
+    if [[ "${GUEST_LOCAL_DIG}" != "${HOST_LOCAL_DIG}" ]]; then
+        echo "[run-aarch64] FAIL -- M32 CROSS-PROCESS mismatch -- guest infer-local ${GUEST_LOCAL_DIG} != host xport-local ${HOST_LOCAL_DIG} (loopback/fixtured, not received over the wire)" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "${HARNESS_OUT}" | grep -qE -- '^xport-local: peer=0x03 local-organ=DETERMINISTIC-STANDIN '; then
+        echo "[run-aarch64] FAIL -- the host peer did NOT emit an 'xport-local: peer=0x03 ..' line -- the M32 local leg was not served under the distinct local peer identity" >&2
+        exit 1
+    fi
+    # (4) By-name rejects near the M32 lines: no live/real-engine/vendored-C claim
+    # at this stage, no loopback/fixture vocabulary (stand-in only).
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(infer-local:|xport-local:)' | grep -qiE -- 'engine=VENDORED-C-LLAMACPP|engine=PURE-RUST|backend=ANTHROPIC-LIVE|backend=LOCAL-ENGINE|live-inference=CLAIMED|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-engine'; then
+        echo "[run-aarch64] FAIL -- M32 infer-local/xport-local carries a by-name reject token (real-engine/live/loopback) -- stage B serves a DETERMINISTIC STAND-IN only" >&2
+        exit 1
+    fi
+
     # M38 (stage B) GUARDS (proposal §8 -- house order, mirroring the x86_64 lane):
     # the guest drives the verified organ-loop over the cap chokepoint; the marker
     # is the NEW cumulative tail. M38 displaces NOTHING below it (every prior fold
@@ -770,7 +811,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     # (§8.2) Positive-require the FULL one-line conductor witness (every honest
     # token + flag), AND organs>=0x2 AND revise-cycles>=0x1. NECESSARY-not-
     # sufficient; the load-bearing check is the §8.6 cross-process recompute below.
-    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'conduct: head=0x[0-9a-f]{16} turns=0x[0-9a-f]+ organs=0x[0-9a-f]+ roles=[TWV]+ organ-seq=0x[0-9a-f]+ verdict=ACCEPT accept-at=0x[0-9a-f]+ revise-cycles=0x[0-9a-f]+ fold-verified=0x0*1 tamper-caught=0x0*1 organ-calls=0x[0-9a-f]+ logical-ticks=0x[0-9a-f]+ attested=0x0*1 prov-tag=0x4 policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED learning=DORMANT retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI local-organ=M38-AUTHORED-MOCK verifier=CI-DISCRETE-VERDICT m18-gate=ADMISSION-ONLY-INERT-IN-MOCK cost=HONEST-ACCOUNTED-TOKENED cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK orchestration=RAG-AGENTS-NOT-NEW-PARADIGM live[+]web=DISPATCH-ONLY novelty=VERIFIED-PROVENANCE-SOVEREIGN-WRAPPER generativity=OPEN-FRONTIER realtime=NOT-CLAIMED benchmark=NOT-CLAIMED stub-resistance=HOST-RECOMPUTE-FROM-INDEPENDENT-TRACE host=RESIDUAL-TCB sec=ASSUMED-FROM-LITERATURE'; then
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'conduct: head=0x[0-9a-f]{16} turns=0x[0-9a-f]+ organs=0x[0-9a-f]+ roles=[TWV]+ organ-seq=0x[0-9a-f]+ verdict=ACCEPT accept-at=0x[0-9a-f]+ revise-cycles=0x[0-9a-f]+ fold-verified=0x0*1 tamper-caught=0x0*1 organ-calls=0x[0-9a-f]+ logical-ticks=0x[0-9a-f]+ attested=0x0*1 prov-tag=0x4 policy=DISCRETE-HAND-WRITTEN-NOT-LEARNED learning=DORMANT retrieval=LEXICAL-NOT-SEMANTIC external-organ=MOCK-IN-CI local-organ=RECEIVED-M32-DETERMINISTIC-STANDIN verifier=CI-DISCRETE-VERDICT m18-gate=ADMISSION-ONLY-INERT-IN-MOCK cost=HONEST-ACCOUNTED-TOKENED cost-metric=LOGICAL-SURROGATE-NOT-WALLCLOCK orchestration=RAG-AGENTS-NOT-NEW-PARADIGM live[+]web=DISPATCH-ONLY novelty=VERIFIED-PROVENANCE-SOVEREIGN-WRAPPER generativity=OPEN-FRONTIER realtime=NOT-CLAIMED benchmark=NOT-CLAIMED stub-resistance=HOST-RECOMPUTE-FROM-INDEPENDENT-TRACE host=RESIDUAL-TCB sec=ASSUMED-FROM-LITERATURE'; then
         echo "[run-aarch64] FAIL -- M38 marker present but the full one-line 'conduct: head=.. ..' witness (every honest token + flag) was NOT seen (hollow M38 pass)" >&2
         exit 1
     fi

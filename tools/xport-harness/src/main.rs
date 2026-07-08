@@ -84,7 +84,7 @@ use tb_encode::inferwire::{
     body_digest, canon, decode, echo_tag, errcode, err_canon, infer_tag, kind, mock_infer, peer,
     verify_infer_req, AsmPush, FrameAccum, InferAssembler, InferFrame, SubHdr, INFER_ACCUM_CAP,
     INFER_BODY_CAP, INFER_CHUNK_CAP, INFER_ERR_PAYLOAD_LEN, INFER_KEY_LEN, INFER_MOCK_RESP_LEN,
-    INFER_NOKEY_PROBE, INFER_NONCE_LEN, INFER_SUBHDR_LEN,
+    INFER_LOCAL_PROBE, INFER_NOKEY_PROBE, INFER_NONCE_LEN, INFER_SUBHDR_LEN,
 };
 
 /// Render a byte slice as lowercase hex in WIRE BYTE ORDER (byte 0 first) --
@@ -130,22 +130,43 @@ fn m31_frame(
     chunk: &[u8],
     payload: Vec<u8>,
 ) -> Vec<u8> {
-    let tag = infer_tag(
-        key,
+    tagged_frame(
         peer::QEMU_CHARDEV_HARNESS,
+        key,
         nonce,
         challenge,
         req_id,
         k,
         sub,
         chunk,
-    );
+        payload,
+    )
+}
+
+/// Build one MAC'd host->guest frame stamped with an EXPLICIT `peer_id` -- the
+/// M31 mock leg uses `QEMU_CHARDEV_HARNESS (0x02)`, the M32 local-organ leg uses
+/// `INFER_DAEMON (0x03)`. The `peer_id` is bound INSIDE [`infer_tag`], so a
+/// `0x02` mock frame can never masquerade as the `0x03` local organ (the
+/// kani_inferwire_infer_peer_bound proof).
+#[allow(clippy::too_many_arguments)]
+fn tagged_frame(
+    peer_id: u8,
+    key: &[u8; INFER_KEY_LEN],
+    nonce: &[u8; INFER_NONCE_LEN],
+    challenge: &[u8; 16],
+    req_id: u64,
+    k: u8,
+    sub: &SubHdr,
+    chunk: &[u8],
+    payload: Vec<u8>,
+) -> Vec<u8> {
+    let tag = infer_tag(key, peer_id, nonce, challenge, req_id, k, sub, chunk);
     let frame = InferFrame {
         kind: k,
         req_id,
         challenge: *challenge,
         nonce: *nonce,
-        peer_id: peer::QEMU_CHARDEV_HARNESS,
+        peer_id,
         tag,
         payload: &payload,
     };
@@ -385,9 +406,17 @@ fn main() {
                             // process's stdout; real-infer.yml adjudicates it
                             // -- the kernel-side live leg (§5.5) is a NAMED
                             // kernel follow-up, deliberately absent here.
+                            // The M32 local-organ sentinel is plumbing (a
+                            // deterministic stand-in probe), NOT a prompt -- it
+                            // must NEVER ride the live bridge (defense in depth
+                            // over the one-shot latch; the M31 real prompt
+                            // arrives first and already latches live_done).
+                            let is_local_probe = body.len() >= INFER_LOCAL_PROBE.len()
+                                && &body[..INFER_LOCAL_PROBE.len()] == INFER_LOCAL_PROBE;
                             if live_key.is_some()
                                 && !live_done
                                 && body.as_slice() != INFER_NOKEY_PROBE
+                                && !is_local_probe
                             {
                                 live_done = true; // the latch: at most ONE call
                                 let api_key =
@@ -450,6 +479,20 @@ fn serve_infer(
         return;
     }
 
+    // M32 (stage B) LOCAL-ORGAN leg: a body opening with the reserved sentinel
+    // is answered on the LOCAL peer identity (peer_id=0x03), as a DETERMINISTIC
+    // STAND-IN (no vendored C engine runs here -- that is the real-engine
+    // follow-up), so the kernel's M32 receive path exercises a REAL cross-
+    // process receive under the distinct MAC-bound peer id. The transform is the
+    // SAME shared mock_infer leaf, so the guest can still cross-check bit-exact.
+    let is_local = body.len() >= INFER_LOCAL_PROBE.len()
+        && &body[..INFER_LOCAL_PROBE.len()] == INFER_LOCAL_PROBE;
+    let resp_peer = if is_local {
+        peer::INFER_DAEMON
+    } else {
+        peer::QEMU_CHARDEV_HARNESS
+    };
+
     // The deterministic mock transform -- the SAME shared tb-encode leaf the
     // in-kernel backend runs, so the guest can cross-check bit-for-bit.
     let mut resp = vec![0u8; INFER_MOCK_RESP_LEN];
@@ -462,7 +505,8 @@ fn serve_infer(
     let dig = body_digest(&resp);
 
     // ONE PENDING heartbeat (liveness plumbing -- never a completion).
-    let mut out = m31_frame(
+    let mut out = tagged_frame(
+        resp_peer,
         key,
         nonce,
         challenge,
@@ -491,7 +535,8 @@ fn serve_infer(
             INFER_SUBHDR_LEN
         );
         payload.extend_from_slice(&resp[off..end]);
-        out.extend_from_slice(&m31_frame(
+        out.extend_from_slice(&tagged_frame(
+            resp_peer,
             key,
             nonce,
             challenge,
@@ -508,11 +553,24 @@ fn serve_infer(
         eprintln!("xport-harness: INFER_RESP write error: {e}");
         exit(1);
     }
-    println!(
-        "xport-harness-infer: backend=MOCK-DETERMINISTIC req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1",
-        resp.len(),
-        hex(&dig),
-        seq
-    );
+    if is_local {
+        // The M32 local-organ witness -- a SEPARATE capture stream from the M31
+        // mock line, stamped peer_id=0x03 + the honest stand-in token. The run
+        // script cross-pins this resp-digest against the guest `infer-local:`
+        // line (the §8.6 cross-process leg).
+        println!(
+            "xport-local: peer=0x03 local-organ=DETERMINISTIC-STANDIN req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1",
+            resp.len(),
+            hex(&dig),
+            seq
+        );
+    } else {
+        println!(
+            "xport-harness-infer: backend=MOCK-DETERMINISTIC req-id=0x{req_id:016x} resp-len={} resp-digest=0x{} chunks={} pending=1",
+            resp.len(),
+            hex(&dig),
+            seq
+        );
+    }
     std::io::stdout().flush().ok();
 }

@@ -72,7 +72,7 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=122
+EXPECTED_HARNESSES_TOTAL=123
 
 # Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
@@ -277,6 +277,7 @@ SHARD_C=(
   kani_lms_merklepath                   # 148.5s (the Merkle auth-path, verify_inclusion shape)
   kani_persisted_record_decode          # M33-B: sectors_for geometry + decode short/bad-buffer fail-close, FNV-free 3.1s
   kani_persisted_record_recover         # M33-B: pure pick_newer selector, fully symbolic, ~2s
+  kani_inferwire_infer_peer_bound       # M32-B: infer_tag peer-pair 0x02/0x03/0x04 distinctness, 3 concrete khash, ~4s
 )
 
 # The fail-closed completeness/disjointness guard (#101 -- see the header).
