@@ -63,7 +63,7 @@ const _: () = assert!(brand::BRAND.as_bytes()[0] == b'Y');
 const BANNER_NAME: &str = "Yuva";
 
 // ===========================================================================
-// Mode + View (runtime, cmdline-driven; DEFAULT raw / cogi)
+// Mode + View (runtime, cmdline-driven; DEFAULT raw / agent)
 // ===========================================================================
 
 /// The boot-console verbosity mode, selected by the `yuva.console=` cmdline
@@ -87,7 +87,7 @@ pub enum Mode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     /// The full resident-agent render (the DEFAULT).
-    Cogi,
+    Agent,
     /// The Firecracker-alt minimal render (micro-VMM rows only).
     Substrate,
 }
@@ -111,7 +111,7 @@ fn view() -> View {
     if VIEW_SUBSTRATE.load(Ordering::Relaxed) {
         View::Substrate
     } else {
-        View::Cogi
+        View::Agent
     }
 }
 
@@ -150,7 +150,7 @@ pub enum Subsys {
     Storage,
     /// M30 inference transport: real vs `(no host peer, skipped)`.
     Transport,
-    /// M31 cogi inference: `[ MOCK ]` (backend=MOCK-DETERMINISTIC) vs
+    /// M31 agent inference: `[ MOCK ]` (backend=MOCK-DETERMINISTIC) vs
     /// `(no host peer, skipped)`.
     Inference,
 }
@@ -221,7 +221,7 @@ pub fn observe_m38_ok() {
 ///
 /// Recognised tokens (space-separated, order-independent):
 /// * `yuva.console=raw|pretty|both` — DEFAULT `raw`.
-/// * `yuva.view=cogi|substrate`    — DEFAULT `cogi`.
+/// * `yuva.view=agent|substrate`   — DEFAULT `agent`.
 ///
 /// When pretty is selected, this RAISES the serial display gate so the raw
 /// stream is suppressed and [`render`] paints the clean boot in its place.
@@ -318,7 +318,7 @@ pub fn render() {
     tb_hal::serial_write_str_raw(PRODUCT_VERSION);
     tb_hal::serial_write_str_raw(" — sovereign agent-native OS  ·  ");
     tb_hal::serial_write_str_raw(match v {
-        View::Cogi => "cogi view",
+        View::Agent => "agent view",
         View::Substrate => "substrate view (render filter, stage A)",
     });
     #[cfg(target_arch = "aarch64")]
@@ -374,7 +374,7 @@ pub fn render() {
             // line is "HIDDEN in the substrate view", never "not present".
             line(State::Info, "Cognitive subsystems present in this build but HIDDEN in the substrate view");
         }
-        View::Cogi => {
+        View::Agent => {
             // --- the resident-agent rows ------------------------------------
             line(State::Ok, "Agent runtime & memory     tiered store, lexical recall, consolidation");
             line(State::Ok, "Provenance ledger          tamper-evident fold (host TCB residual)");
@@ -388,10 +388,10 @@ pub fn render() {
             line(
                 inference,
                 match inference {
-                    State::Skip => "Cogi inference             deterministic stub — NO model loaded (no host peer, skipped)",
+                    State::Skip => "Agent inference            deterministic stub — NO model loaded (no host peer, skipped)",
                     // DERIVED [ MOCK ] from backend=MOCK-DETERMINISTIC; the
                     // mandatory "not live AI" disclaimer.
-                    _ => "Cogi inference             deterministic stub — NO model loaded, not live AI",
+                    _ => "Agent inference            deterministic stub — NO model loaded, not live AI",
                 },
             );
             // DERIVED [STANDBY] from KAN_ACTIVE=0x0 / gate-not-met (compile
@@ -404,10 +404,10 @@ pub fn render() {
     // --- reached-target ------------------------------------------------------
     line(State::Ok, "Reached target Ready.");
 
-    // --- the trailing authored disclaimer (cogi only) -----------------------
+    // --- the trailing authored disclaimer (agent only) ----------------------
     // AUTHORED-HONEST CONSTANT, not derived: these are HOST-conductor artifacts,
     // NOT on the boot wire. Never a green line. No banned overclaim words.
-    if v == View::Cogi {
+    if v == View::Agent {
         line(State::Info, "retrieval=lexical-only · generativity=open-frontier (not claimed) · integrity-primitive=assumed-from-literature");
     }
 
@@ -419,7 +419,7 @@ pub fn render() {
     // skip/mock counts match the screen above (substrate hides transport +
     // inference, so they must not be counted there).
     match v {
-        View::Cogi => render_summary(v, &[guest_iso, virtio, storage, sched, transport, inference]),
+        View::Agent => render_summary(v, &[guest_iso, virtio, storage, sched, transport, inference]),
         View::Substrate => render_summary(v, &[guest_iso, virtio, storage, sched]),
     }
 }
@@ -430,7 +430,7 @@ fn render_summary(v: View, variable: &[State]) {
     // Total subsystem count differs by view (substrate hides the resident rows).
     let (total, mock, standby): (u32, u32, u32) = match v {
         // 7 micro-VMM rows + 6 resident rows = 13; 1 mock (inference), 1 standby.
-        View::Cogi => (13, count(variable, State::Mock), 1),
+        View::Agent => (13, count(variable, State::Mock), 1),
         // 7 micro-VMM rows only (+ the INFO line, not a subsystem).
         View::Substrate => (7, 0, 0),
     };
@@ -438,7 +438,7 @@ fn render_summary(v: View, variable: &[State]) {
     let failed = count(variable, State::Failed);
 
     match v {
-        View::Cogi => tb_hal::serial_write_str_raw("Cogi is resident. Yuva ready (logical surrogate) — "),
+        View::Agent => tb_hal::serial_write_str_raw("The agent runtime is resident. Yuva ready (logical surrogate) — "),
         View::Substrate => {
             tb_hal::serial_write_str_raw("Yuva ready (logical surrogate) — substrate view, micro-VMM subsystems only (");
             write_dec(total);
