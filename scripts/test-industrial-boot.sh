@@ -125,7 +125,28 @@ printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'Agent inference' && fail "DoD-3: s
 printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'not present' && fail "DoD-3: substrate view claimed 'not present' (organs DID execute — must say HIDDEN)"
 # Agent view: the mock/standby glyphs + the trailing INFO disclaimer.
 printf '%s' "${OUT_PRETTY}" | grep -qF -- '[ INFO ] retrieval=lexical-only' || fail "DoD-3: agent view missing the trailing [ INFO ] disclaimer"
+# The view-only substrate render is the AGENT profile (organs RAN): it keeps the
+# ledger-bound "sovereign" agent header (§1.5) — the term is profile-bound.
+printf '%s' "${OUT_SUBSTRATE}" | grep -qF -- 'sovereign agent-native OS' || fail "DoD-3: view-only substrate render dropped the 'sovereign' agent header (the term is profile-bound, agent profile keeps it)"
+
+# ---------------------------------------------------------------------------
+# DoD-4 (Boot Profiles §7) — the PROFILE render vs the VIEW render: the three
+# wordings in their correct contexts, "not present" rejected everywhere, and the
+# adjective-free substrate-profile tail (no ledger-bound "sovereign").
+# ---------------------------------------------------------------------------
+echo "== DoD-4: profile-vs-view wording parity =="
+OUT_PROFILE="$(boot 'yuva.console=pretty yuva.profile=substrate')"
+# The substrate PROFILE upgrades the INFO from HIDDEN to NOT-RUN-NOT-ADMITTED.
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'NOT RUN and NOT ADMITTED (substrate profile, runtime-gated)' || fail "DoD-4: substrate PROFILE render missing the 'NOT RUN and NOT ADMITTED' INFO line"
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'HIDDEN in the substrate view' && fail "DoD-4: substrate PROFILE render used the view-only 'HIDDEN' wording (organs did NOT run under the profile)"
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'not present' && fail "DoD-4: substrate PROFILE render claimed 'not present' (stage-B-only vocabulary; stage A is code-PRESENT-IN-IMAGE)"
+# The substrate-profile header tail is adjective-free — never the ledger-bound "sovereign".
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'agent-agnostic micro-VMM core (substrate profile)' || fail "DoD-4: substrate PROFILE render missing the adjective-free 'agent-agnostic micro-VMM core (substrate profile)' tail"
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'sovereign' && fail "DoD-4: substrate PROFILE render inherited the ledger-bound 'sovereign' (agent-render only, §1.5)"
+# The §3.2 hosting-ABI row is present in the substrate render (a real core mechanism).
+printf '%s' "${OUT_PROFILE}" | grep -qF -- 'Agent hosting ABI' || fail "DoD-4: substrate render missing the M12 hosting-ABI row (§3.2 row split)"
+note "DoD-4: substrate PROFILE says NOT-RUN-NOT-ADMITTED + adjective-free tail; view-only substrate keeps HIDDEN + sovereign; 'not present' rejected"
 
 echo "== RESULT =="
-if [[ "${FAILED}" -eq 0 ]]; then echo ">> Industrial Boot DoD-1/2/3: ALL PASS"; else echo ">> Industrial Boot DoD: FAILURES ABOVE"; fi
+if [[ "${FAILED}" -eq 0 ]]; then echo ">> Industrial Boot DoD-1/2/3 + Boot-Profiles DoD-4: ALL PASS"; else echo ">> Industrial Boot DoD: FAILURES ABOVE"; fi
 exit "${FAILED}"

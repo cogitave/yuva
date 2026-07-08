@@ -222,9 +222,17 @@ pub fn observe_m38_ok() {
 /// Recognised tokens (space-separated, order-independent):
 /// * `yuva.console=raw|pretty|both` — DEFAULT `raw`.
 /// * `yuva.view=agent|substrate`   — DEFAULT `agent`.
+/// * `yuva.profile=agent|substrate` — DEFAULT `agent` (Boot Profiles stage A).
 ///
 /// When pretty is selected, this RAISES the serial display gate so the raw
 /// stream is suppressed and [`render`] paints the clean boot in its place.
+///
+/// Boot Profiles (§2.1): `yuva.profile=substrate` latches the substrate profile
+/// ([`crate::profile::set_substrate`] — organs skipped + the cognitive
+/// chokepoint armed) AND defaults the render VIEW to substrate (the honest
+/// render for that profile), UNLESS an explicit `yuva.view=` token overrides it.
+/// The absent-token default is the AGENT profile, so every CI lane stays the
+/// byte-identical agent stream.
 //
 // Called only on x86 at stage A (the sole arch with a wired cmdline channel);
 // the aarch64-host `/chosen/bootargs` caller is a named follow-up, so allow the
@@ -233,7 +241,10 @@ pub fn observe_m38_ok() {
 pub fn apply_cmdline(cmdline: &str) {
     let console_key = concat!(brand::brand_lower!(), ".console=");
     let view_key = concat!(brand::brand_lower!(), ".view=");
+    let profile_key = concat!(brand::brand_lower!(), ".profile=");
 
+    let mut view_explicit = false;
+    let mut profile_substrate = false;
     for tok in cmdline.split(|c: char| c == ' ' || c == '\t') {
         if let Some(val) = tok.strip_prefix(console_key) {
             let m = match val {
@@ -244,6 +255,22 @@ pub fn apply_cmdline(cmdline: &str) {
             MODE.store(m, Ordering::Relaxed);
         } else if let Some(val) = tok.strip_prefix(view_key) {
             VIEW_SUBSTRATE.store(val == "substrate", Ordering::Relaxed);
+            view_explicit = true;
+        } else if let Some(val) = tok.strip_prefix(profile_key) {
+            // DEFAULT agent (any value other than the exact "substrate" literal
+            // leaves the agent profile — fail-safe toward the byte-identical
+            // stream). The latch is applied AFTER the loop so an explicit
+            // `yuva.view=` seen anywhere on the line wins the view default.
+            profile_substrate = val == "substrate";
+        }
+    }
+
+    if profile_substrate {
+        crate::profile::set_substrate();
+        // The substrate profile's honest render is the substrate view; a viewer
+        // may still override with an explicit `yuva.view=`.
+        if !view_explicit {
+            VIEW_SUBSTRATE.store(true, Ordering::Relaxed);
         }
     }
 
@@ -316,7 +343,15 @@ pub fn render() {
     tb_hal::serial_write_str_raw(BANNER_NAME);
     tb_hal::serial_write_str_raw(" ");
     tb_hal::serial_write_str_raw(PRODUCT_VERSION);
-    tb_hal::serial_write_str_raw(" — sovereign agent-native OS  ·  ");
+    // §1.5: "sovereign" is a sovereignty-plan LEDGER-bound term and stays on the
+    // AGENT render only; the SUBSTRATE-PROFILE render takes the adjective-free
+    // tail (a view-only substrate render under the agent profile keeps the
+    // sovereign agent tail — the term is profile-bound, not view-bound).
+    if crate::profile::is_substrate() {
+        tb_hal::serial_write_str_raw(" — agent-agnostic micro-VMM core (substrate profile)  ·  ");
+    } else {
+        tb_hal::serial_write_str_raw(" — sovereign agent-native OS  ·  ");
+    }
     tb_hal::serial_write_str_raw(match v {
         View::Agent => "agent view",
         View::Substrate => "substrate view (render filter, stage A)",
@@ -370,9 +405,22 @@ pub fn render() {
 
     match v {
         View::Substrate => {
-            // Render filter, stage A: the organs DID execute, so the honest
-            // line is "HIDDEN in the substrate view", never "not present".
-            line(State::Info, "Cognitive subsystems present in this build but HIDDEN in the substrate view");
+            // §3.2 the M12 row split: the agent-agnostic HOSTING ABII — the M12
+            // AgentProcess socket + M14/M15 IPC + the M18 admission MECHANISM —
+            // STAYS in the substrate core (Linux has processes with none
+            // running; Yuva has an agent socket with no agent admitted). It is a
+            // real, present micro-VMM-core mechanism, so it renders green here.
+            line(State::Ok, "Agent hosting ABI          socket + admission gate present, no organ admitted");
+            // The cognitive-organ INFO line. The WORDING is the load-bearing
+            // three-way distinction (§1.4): under the substrate PROFILE the
+            // organs NOT RUN and NOT ADMITTED (an execution+admission gate);
+            // under a view-only substrate render (agent profile) they DID run
+            // and are merely HIDDEN. Neither ever says "not present" (stage B).
+            if crate::profile::is_substrate() {
+                line(State::Info, "Cognitive subsystems present in this build, NOT RUN and NOT ADMITTED (substrate profile, runtime-gated)");
+            } else {
+                line(State::Info, "Cognitive subsystems present in this build but HIDDEN in the substrate view");
+            }
         }
         View::Agent => {
             // --- the resident-agent rows ------------------------------------
@@ -431,8 +479,10 @@ fn render_summary(v: View, variable: &[State]) {
     let (total, mock, standby): (u32, u32, u32) = match v {
         // 7 micro-VMM rows + 6 resident rows = 13; 1 mock (inference), 1 standby.
         View::Agent => (13, count(variable, State::Mock), 1),
-        // 7 micro-VMM rows only (+ the INFO line, not a subsystem).
-        View::Substrate => (7, 0, 0),
+        // 7 micro-VMM rows + the §3.2 hosting-ABI row = 8 (+ the INFO line, not
+        // a subsystem). The hosting-ABI row is green (present mechanism), so the
+        // skip/mock/standby/failed tallies are unchanged.
+        View::Substrate => (8, 0, 0),
     };
     let skipped = count(variable, State::Skip);
     let failed = count(variable, State::Failed);

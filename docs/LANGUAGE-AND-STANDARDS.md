@@ -165,6 +165,38 @@ contract is `docs/spec/yuva-abi-v1.md`; the frozen registry is
   addition-past-ceiling, a relabel — NOT every semantic change under a stable
   signature. Claim exactly that, never "semantically frozen".
 
+## 7b. Boot Profiles — the three-wordings honesty rule (stage A landed)
+
+Yuva boots one of two profiles selected by `yuva.profile=substrate|agent`, **DEFAULT
+`agent`** (an absent token — every CI lane, the re-entrant EL1 guest — so the
+cumulative M0..M38 stream is byte-identical). The distinction is a real
+EXECUTION + ADMISSION gate, not a render filter. Language discipline:
+
+- **The three wordings are mapped 1:1 to three mechanisms and NEVER swapped.**
+  *View* (a render filter, organs RAN): "present in this build but **HIDDEN** in
+  the substrate view". *Stage-A profile* (runtime gate, organs **NOT RUN / NOT
+  ADMITTED**, code still in image): the marker skip form `(substrate profile,
+  agent organ skipped)` + INFO "present in this build, **NOT RUN and NOT
+  ADMITTED**". *Stage B* (compile-out, deferred): markers **ABSENT-BY-OMISSION** /
+  "**NOT built**". "not present"/"removed"/"compiled-out"/"smaller image" are
+  STAGE-B-ONLY vocabulary — forbidden at stage A (`code=PRESENT-IN-IMAGE`).
+- **Skip-form prefix parity (DoD-5).** Every substrate skip marker is
+  `<landed marker literal> (substrate profile, agent organ skipped)` — the prefix
+  STRING-EQUAL to the literal the agent arm emits (mechanically checked; hand
+  paraphrases like `M16: infer-bridge OK` are structurally impossible).
+- **DEFAULT-agent is the byte-identity invariant.** Any change of the default away
+  from `agent` touches CI's input and is an operator veto point — never silent.
+- **Cross-lane rejection is LANE-level, not per-guard.** Substrate skip forms lack
+  the agent witness tokens and the pinned M38 tail, so no required LANE passes on a
+  substrate stream; individual positive substring greps DO match skip forms (by
+  design — the cumulative-substring invariant).
+- **"sovereign" is ledger-bound (sovereignty-plan principle 1) and renders on the
+  AGENT profile ONLY.** The substrate-profile render takes the adjective-free
+  "agent-agnostic micro-VMM core (substrate profile)" tail.
+- **The substrate tail says `substrate`, never `substrate-vmm`** — no stage-A
+  substrate boot witnesses EL2/guest-running (the lane is x86_64-only;
+  `guest-evidence=AARCH64-AGENT-LANE-ONLY`).
+
 ## 8. Open Topics → [OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)
 
 - Kernel verification path: pure Rust+tiered-assurance, or seL4-under-node-image for certification?
