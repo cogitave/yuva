@@ -377,10 +377,13 @@ jobs:
       # (bumped) 50-min budget. Additive, hermetic, no proof change.
       - name: Add swap headroom for CBMC
         run: |
-          sudo fallocate -l 14G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # ubuntu-latest already has an active /swapfile (can't resize -> "Text
+          # file busy"); add a fresh, larger swapfile on the big /mnt ephemeral
+          # disk instead (~74 GiB free) so we never touch the busy one.
+          sudo fallocate -l 14G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           echo "swap enabled:"; free -h
 
       - name: Assert encoder proof marker (shard A, fail-closed harness count)
@@ -431,10 +434,13 @@ jobs:
       # CBMC peak-memory headroom (see shard-A rationale).
       - name: Add swap headroom for CBMC
         run: |
-          sudo fallocate -l 14G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # ubuntu-latest already has an active /swapfile (can't resize -> "Text
+          # file busy"); add a fresh, larger swapfile on the big /mnt ephemeral
+          # disk instead (~74 GiB free) so we never touch the busy one.
+          sudo fallocate -l 14G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           echo "swap enabled:"; free -h
 
       - name: Assert encoder proof marker (shard B, fail-closed harness count)
@@ -492,10 +498,13 @@ jobs:
       # FNV persisted-head proofs); this is the shard that was OOM-reclaimed.
       - name: Add swap headroom for CBMC
         run: |
-          sudo fallocate -l 14G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # ubuntu-latest already has an active /swapfile (can't resize -> "Text
+          # file busy"); add a fresh, larger swapfile on the big /mnt ephemeral
+          # disk instead (~74 GiB free) so we never touch the busy one.
+          sudo fallocate -l 14G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           echo "swap enabled:"; free -h
 
       - name: Assert encoder proof marker (shard C, fail-closed harness count)
