@@ -329,7 +329,7 @@ jobs:
     # only ~1.5-2.5 min headroom under the old 30-min cap; the agreed headroom
     # fix that accompanies the M33 shard-C addition -- a 3-way split PLUS more
     # headroom -- a finer split is a named later follow-up).
-    timeout-minutes: 40
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -370,6 +370,19 @@ jobs:
       # completeness guard holds (lists disjoint + exhaustive vs proofs.rs),
       # every shard-A harness verifies, AND the SUCCESSFUL count matches shard
       # A's pinned list length, then emits `V1-shard-a: kani-encoders OK`.
+      # CBMC peak-memory headroom: the heavy encoder proofs (esp. the shard-C
+      # multi-sector FNV persisted-head proofs) sit near the 7 GiB runner ceiling
+      # and marginally OOM -> the runner is reclaimed ("received a shutdown
+      # signal", exit 143). Disk-backed swap lets the solve complete within the
+      # (bumped) 50-min budget. Additive, hermetic, no proof change.
+      - name: Add swap headroom for CBMC
+        run: |
+          sudo fallocate -l 14G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "swap enabled:"; free -h
+
       - name: Assert encoder proof marker (shard A, fail-closed harness count)
         run: bash scripts/verify-encode.sh
         env:
@@ -384,7 +397,7 @@ jobs:
     # Shard B (the learning-loop codec families + M31/M38); same margin
     # rationale as shard A. Timeout bumped 30 -> 40 with the M33 shard-C
     # addition (the #106 headroom fix).
-    timeout-minutes: 40
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -415,6 +428,15 @@ jobs:
       # completeness guard holds, every shard-B harness verifies, AND the
       # SUCCESSFUL count matches shard B's pinned list length, then emits
       # `V1-shard-b: kani-encoders OK`.
+      # CBMC peak-memory headroom (see shard-A rationale).
+      - name: Add swap headroom for CBMC
+        run: |
+          sudo fallocate -l 14G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "swap enabled:"; free -h
+
       - name: Assert encoder proof marker (shard B, fail-closed harness count)
         run: bash scripts/verify-encode.sh
         env:
@@ -435,7 +457,7 @@ jobs:
     # Six crypto-verify harnesses; SHA-256 ~11s/compression, LMS toy ~6-8
     # compressions/verify -- projected well under the 40-min cap (the same
     # headroom-fix timeout as A/B).
-    timeout-minutes: 40
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -466,6 +488,16 @@ jobs:
       # completeness guard holds, every shard-C harness verifies, AND the
       # SUCCESSFUL count matches shard C's pinned list length, then emits
       # `V1-shard-c: kani-encoders OK`.
+      # CBMC peak-memory headroom -- shard C is the heaviest (the multi-sector
+      # FNV persisted-head proofs); this is the shard that was OOM-reclaimed.
+      - name: Add swap headroom for CBMC
+        run: |
+          sudo fallocate -l 14G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "swap enabled:"; free -h
+
       - name: Assert encoder proof marker (shard C, fail-closed harness count)
         run: bash scripts/verify-encode.sh
         env:
