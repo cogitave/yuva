@@ -764,8 +764,14 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
   # verifier -- or one that overclaims -- FAILS). corpus=PROVENANCE-SKELETON,
   # curation=PREDICATE-DECLARED-NOT-LEARNED, training=NONE-PHASE2-GATED are REQUIRED so
   # the marker mechanically cannot overclaim (no learning, no training, not text).
-  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} records=0x[0-9a-f]+ accepted=0x[0-9a-f]+ rejected=0x[0-9a-f]+ clean=0x0*1 inclusion=0x0*1 tamper-caught=0x0*1 predicate-two-sided=0x0*1 kan_active=0x0+ corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE'; then
-    echo ">> FAIL: M39 marker present but the real round-trip witness 'corpus: head=.. records=.. accepted=.. rejected=.. clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=0x0 corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED ..' was NOT seen (hollow M39 pass)" >&2
+  # inc-3: the witness now also carries the DURABILITY tokens. BOOT 1 (this OUTPUT) is
+  # the FRESH-region control: corpus-present=0x1 + corpus-persisted=0x1 (the attached
+  # lane wrote+flushed) but corpus-reboot-survived=0x0 + corpus-head-matches=0x0 +
+  # corpus-records-disk=0x0 (nothing survives on a fresh region -- the anti-hollow "no
+  # false survival" negative control). BOOT 2 (below, after the M33 boot-2 block) reboots
+  # against the SAME corpus region and requires survived=0x1 + a matching head-disk.
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} records=0x[0-9a-f]+ accepted=0x[0-9a-f]+ rejected=0x[0-9a-f]+ clean=0x0*1 inclusion=0x0*1 tamper-caught=0x0*1 predicate-two-sided=0x0*1 kan_active=0x0+ corpus-present=0x0*1 corpus-persisted=0x0*1 corpus-reboot-survived=0x0+ corpus-head-matches=0x0+ corpus-head-disk=0x[0-9a-f]{16} corpus-records-disk=0x0+ corpus-records-total=0x[0-9a-f]+ durability=TORN-WRITE-SAFE-PING-PONG-FNV head-integrity=M22-FOLD-VERBATIM lms-signature=NONE-THIS-INCREMENT corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE'; then
+    echo ">> FAIL: M39 marker present but the real round-trip + durability witness 'corpus: head=.. clean=0x1 .. corpus-present=0x1 corpus-persisted=0x1 corpus-reboot-survived=0x0 corpus-head-matches=0x0 corpus-head-disk=.. corpus-records-disk=0x0 corpus-records-total=.. durability=TORN-WRITE-SAFE-PING-PONG-FNV head-integrity=M22-FOLD-VERBATIM lms-signature=NONE-THIS-INCREMENT ..' was NOT seen on BOOT 1 (hollow M39 pass or a fresh region falsely claiming survival)" >&2
     exit 1
   fi
   # (3) ANTI-HOLLOW: the records-appended count MUST be > 0 (a real consolidation
@@ -774,6 +780,18 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
   M39_REC_HEX="$(printf '%s' "${CORPUS_LINE}" | sed -E 's/.* records=0x0*([0-9a-f]+) .*/\1/')"
   if [[ -z "${M39_REC_HEX}" ]] || (( 16#${M39_REC_HEX} < 1 )); then
     echo ">> FAIL: M39 records=0x${M39_REC_HEX} < 0x1 (no real corpus record flowed -- an anti-hollow stub)" >&2
+    exit 1
+  fi
+  # (3b) DURABILITY anti-hollow: capture BOOT 1's persisted corpus-head-disk (for the
+  # cross-boot equality check in BOOT 2) + records-total (the accumulated count, > 0).
+  CORPUS_BOOT1_HEAD="$(printf '%s' "${CORPUS_LINE}" | grep -oE 'corpus-head-disk=0x[0-9a-f]{16}' | head -1)"
+  CORPUS_BOOT1_TOTAL_HEX="$(printf '%s' "${CORPUS_LINE}" | sed -E 's/.* corpus-records-total=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${CORPUS_BOOT1_HEAD}" ]]; then
+    echo ">> FAIL: could not capture BOOT 1 corpus-head-disk for the M39 cross-boot check" >&2
+    exit 1
+  fi
+  if [[ -z "${CORPUS_BOOT1_TOTAL_HEX}" ]] || (( 16#${CORPUS_BOOT1_TOTAL_HEX} < 1 )); then
+    echo ">> FAIL: M39 corpus-records-total=0x${CORPUS_BOOT1_TOTAL_HEX} < 0x1 on BOOT 1 (nothing accumulated -- an anti-hollow persist stub)" >&2
     exit 1
   fi
   # (4) Anti-overclaim: the M39 marker/witness lines may NOT carry a live-learning /
@@ -944,6 +962,42 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     exit 1
   fi
   echo ">> M33 stage B: signed head SURVIVED the reboot (${M33_BOOT2_HEAD} == ${M33_BOOT1_HEAD}, head-reboot-survived=0x1) -- #91 closed" >&2
+
+  # =========================================================================
+  # M39 (inc-3) -- BOOT 2: the DURABLE-CORPUS CROSS-BOOT SURVIVAL witness. The
+  # SAME reboot that carried the M33 signed head ALSO preserved the corpus region
+  # (both live ABOVE M20's low-4-MiB, which is the ONLY region the BOOT-2 reset
+  # zeroed). BOOT 2 must read the persisted corpus back, re-fold it to the stored
+  # head (survived=0x1 + head-matches=0x1), read back >= 1 record (records-disk),
+  # ACCUMULATE (records-total > boot 1's), and its corpus-head-disk must string-
+  # equal BOOT 1's persisted corpus-head-disk -- the dataset moat survived + grew.
+  # =========================================================================
+  # (positive-require) the BOOT-2 corpus line with survived=0x1 + head-matches=0x1.
+  if ! printf '%s' "${OUTPUT2}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} .* corpus-present=0x0*1 corpus-persisted=0x0*1 corpus-reboot-survived=0x0*1 corpus-head-matches=0x0*1 corpus-head-disk=0x[0-9a-f]{16} corpus-records-disk=0x[0-9a-f]+ corpus-records-total=0x[0-9a-f]+ durability=TORN-WRITE-SAFE-PING-PONG-FNV'; then
+    echo ">> FAIL: M39 BOOT 2 present but the corpus witness with corpus-reboot-survived=0x1 + corpus-head-matches=0x1 was NOT seen (the durable corpus did NOT survive the reboot -- hollow inc-3)" >&2
+    exit 1
+  fi
+  CORPUS_BOOT2_LINE="$(printf '%s\n' "${OUTPUT2}" | grep -E -- '^corpus: head=0x' | head -1)"
+  # (cross-boot equality) boot 2's head-disk (read FROM DISK) must equal boot 1's.
+  CORPUS_BOOT2_HEAD="$(printf '%s' "${CORPUS_BOOT2_LINE}" | grep -oE 'corpus-head-disk=0x[0-9a-f]{16}' | head -1)"
+  if [[ -z "${CORPUS_BOOT2_HEAD}" || "${CORPUS_BOOT2_HEAD}" != "${CORPUS_BOOT1_HEAD}" ]]; then
+    echo ">> FAIL: M39 cross-boot corpus head mismatch -- boot 1 persisted '${CORPUS_BOOT1_HEAD}' but boot 2 read back '${CORPUS_BOOT2_HEAD}' (the corpus did not survive intact)" >&2
+    exit 1
+  fi
+  # (anti-hollow read-back) boot 2 read >= 1 record off disk.
+  CORPUS_B2_DISK_HEX="$(printf '%s' "${CORPUS_BOOT2_LINE}" | sed -E 's/.* corpus-records-disk=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${CORPUS_B2_DISK_HEX}" ]] || (( 16#${CORPUS_B2_DISK_HEX} < 1 )); then
+    echo ">> FAIL: M39 boot 2 corpus-records-disk=0x${CORPUS_B2_DISK_HEX} < 0x1 (claimed survival but read ZERO records off disk -- hollow)" >&2
+    exit 1
+  fi
+  # (accumulation / the moat) boot 2's records-total must EXCEED boot 1's (the corpus
+  # GREW across the reboot -- prior records survived AND this boot's appended on top).
+  CORPUS_B2_TOTAL_HEX="$(printf '%s' "${CORPUS_BOOT2_LINE}" | sed -E 's/.* corpus-records-total=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${CORPUS_B2_TOTAL_HEX}" ]] || (( 16#${CORPUS_B2_TOTAL_HEX} <= 16#${CORPUS_BOOT1_TOTAL_HEX} )); then
+    echo ">> FAIL: M39 corpus did not ACCUMULATE across the reboot -- boot 2 records-total=0x${CORPUS_B2_TOTAL_HEX} <= boot 1 records-total=0x${CORPUS_BOOT1_TOTAL_HEX} (the dataset moat must grow)" >&2
+    exit 1
+  fi
+  echo ">> M39 inc-3: durable corpus SURVIVED + GREW across the reboot (head-disk ${CORPUS_BOOT2_HEAD} == ${CORPUS_BOOT1_HEAD}, records-total 0x${CORPUS_BOOT1_TOTAL_HEX} -> 0x${CORPUS_B2_TOTAL_HEX}, corpus-reboot-survived=0x1)" >&2
 
   echo ">> PASS: observed marker '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'M14.2: blocking-recv OK'; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M33 stage-B signed head survived a reboot (two-boot cross-boot); M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))" >&2
   exit 0

@@ -74,6 +74,28 @@ pub use crate::prov::{
 /// reinterpretation (corpus-format-v1 SS2/SS4).
 pub const CORPUS_SCHEMA_V1: u8 = 1;
 
+/// M39 increment-3 (the DURABLE corpus): the 16-byte DOMAIN TAG stamped into the
+/// REUSED [`crate::provhead`] record's `i_id` slot to mark an on-disk slab as a
+/// Yuva EXPERIENCE-CORPUS region -- disjoint from the M33 signed-head slabs (which
+/// live in a SEPARATE disk region and carry the real LMS identifier in that slot).
+/// The durable persistence REUSES the proven `provhead` MULTI-SECTOR, TORN-WRITE-
+/// SAFE codec VERBATIM (no new fold/codec math): the record `head` slot carries the
+/// tamper-evident M22 `corpus_head`, and the `sig` slot carries the packed fixed-
+/// width [`CorpusRecord`] canonical bytes (`count * CORPUS_CANON_LEN`). NO LMS
+/// signature is added this increment -- the head's tamper-evidence is the M22 fold
+/// (reused verbatim), and the `provhead` FNV checksums are TORN-WRITE detection
+/// ONLY, never a security property. A read-back whose `i_id` != this tag is
+/// fail-closed rejected (a defense-in-depth domain gate on top of the region split).
+pub const CORPUS_PERSIST_DOMAIN: [u8; 16] = *b"YUVA-CORPUS-M39\0";
+
+/// The maximum number of fixed-width [`CorpusRecord`]s ONE durable slab carries:
+/// `provhead::SIG_CAP / CORPUS_CANON_LEN` (the packed records ride the reused
+/// `provhead` signature slot, capped by `SIG_CAP`). An accumulation that would
+/// exceed this is bounded to the MOST-RECENT records (the ring discipline the
+/// persist seam applies); an unbounded multi-slab corpus region is a later
+/// increment. `2508 / 71 == 35`.
+pub const CORPUS_PERSIST_MAX_RECORDS: usize = crate::provhead::SIG_CAP / CORPUS_CANON_LEN;
+
 /// The curated-channel kind tags (corpus-format-v1 SS3.1): which curated experience a
 /// row is. A closed set the seam emits; the digest folds it in, so an operator-turn
 /// can never masquerade as an episodic-consolidation outcome (the byte differs -> the

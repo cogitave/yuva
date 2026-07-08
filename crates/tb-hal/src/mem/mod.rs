@@ -720,9 +720,9 @@ impl BackingStore for VirtioBlkStore {
 // (behaviour-preserving move; the kernel calls these via the re-export below.)
 mod selftests;
 pub(crate) use selftests::{
-    bakeoff_selftest, conductor_selftest, corpus_selftest, exittel_selftest, exp_selftest,
-    infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head, opcmd_selftest,
-    opframe_selftest, persist_selftest, prov_selftest, xport_selftest,
+    bakeoff_selftest, conductor_selftest, corpus_persist, corpus_selftest, exittel_selftest,
+    exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
+    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, xport_selftest,
 };
 
 // --- T0: context registers (ACT-R buffers; const-bounded, no unbounded blob) --
@@ -977,6 +977,15 @@ pub(crate) struct MemSubstrate {
     /// chain), for the boot self-test's genuine inclusion proofs. Bounded by the same
     /// write-amplification discipline; small + heap-`Vec`.
     corpus_ids: Vec<[u8; PROV_HASH_LEN]>,
+    /// M39 (inc-3, the DURABLE corpus): the committed record's CANONICAL BYTES in
+    /// append order, retained alongside [`corpus_ids`](Self::corpus_ids) so the durable
+    /// persistence seam + the host `corpus-export` can spill/join the ACTUAL provenance
+    /// skeletons (token ids + metadata), not just their 32-byte fold ids. Each entry is
+    /// the exact [`corpus::CORPUS_CANON_LEN`]-byte encoding folded into
+    /// [`corpus_head`](Self::corpus_head), so `corpus_hash(records[i]) == corpus_ids[i]`
+    /// by construction. Additive-only (it does NOT change the record byte-format or the
+    /// fold); STRICTLY OBSERVATIONAL like the rest of the corpus state.
+    corpus_records: Vec<[u8; corpus::CORPUS_CANON_LEN]>,
     /// M39: the running count of corpus records the DECLARED curation predicate
     /// ACCEPTED into the corpus this session (rendered `accepted=<n>` in the witness).
     corpus_accepted: u64,
@@ -1037,6 +1046,7 @@ impl MemSubstrate {
             // zeroed accept/reject counts -- SEPARATE from the M22 and M23 heads.
             corpus_head: [0u8; PROV_HASH_LEN],
             corpus_ids: Vec::new(),
+            corpus_records: Vec::new(),
             corpus_accepted: 0,
             corpus_rejected: 0,
         }
@@ -1236,6 +1246,10 @@ impl MemSubstrate {
         if let Some((new_head, id)) = corpus::corpus_append(self.corpus_head, &rec, &mut scratch) {
             self.corpus_head = new_head;
             self.corpus_ids.push(id);
+            // Retain the exact canonical bytes `corpus_append` folded (`scratch` holds
+            // the CORPUS_CANON_LEN-byte encoding on a Some), so the durable persist seam
+            // + host export spill the ACTUAL provenance skeletons, not just fold ids.
+            self.corpus_records.push(scratch);
             if verdict == corpus::curation_verdict::ACCEPTED {
                 self.corpus_accepted = self.corpus_accepted.saturating_add(1);
             } else {
@@ -1255,6 +1269,14 @@ impl MemSubstrate {
     #[allow(dead_code)]
     pub(crate) fn corpus_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
         &self.corpus_ids
+    }
+
+    /// M39 (inc-3): the committed record CANONICAL BYTES in append order (read-only
+    /// borrow). The durable persist seam packs these into the reused `provhead` slab;
+    /// the host `corpus-export` joins them (token ids + metadata) to the agent dict.
+    #[allow(dead_code)]
+    pub(crate) fn corpus_records(&self) -> &[[u8; corpus::CORPUS_CANON_LEN]] {
+        &self.corpus_records
     }
 
     /// M39: the running (accepted, rejected) DECLARED-curation counts.

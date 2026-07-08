@@ -5468,6 +5468,30 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_byte(b'\n');
             tb_hal::fail_exit();
         }
+        // ---- M39 (inc-3): make the corpus DURABLE -- survive + accumulate across
+        // reboots (the dataset moat). REUSES the M33 `provhead` torn-write-safe codec
+        // VERBATIM over a SEPARATE disk region (ABOVE the M20 + M33 partitions); reads
+        // back any prior boot's persisted corpus, re-folds it to confirm the stored
+        // `corpus_head` (survival + integrity), and re-persists the ACCUMULATED corpus
+        // at gen+1. HONEST: no LMS signature (the head's tamper-evidence is the M22
+        // fold, reused verbatim); the FNV checksums are torn-write detection ONLY.
+        let p = tb_hal::corpus_persist();
+        // Anti-hollow persist consistency (LANE-SAFE: a no-disk lane has present=0x0, so
+        // this never fires there). A present disk that accumulated ZERO records, or a
+        // CLAIMED survival with ZERO read-back records, is an internal fault -> withhold
+        // the marker (a FAIL line with NO 'corpus OK' substring) and exit red NOW.
+        if (p.present && p.records_total == 0) || (p.survived && p.records_disk == 0) {
+            tb_hal::serial_write_str("M39: corpus FAIL persist-present=");
+            write_hex_u64(p.present as u64);
+            tb_hal::serial_write_str(" persist-records-total=");
+            write_hex_u64(p.records_total);
+            tb_hal::serial_write_str(" persist-survived=");
+            write_hex_u64(p.survived as u64);
+            tb_hal::serial_write_str(" persist-records-disk=");
+            write_hex_u64(p.records_disk);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit();
+        }
         // The witness line (census prefix `corpus:`). Every flag EARNED this boot
         // through the real fold/inclusion/tamper round-trip (the fail-closed gate
         // required them); `records`/`accepted`/`rejected` reflect the ACTUAL curated
@@ -5483,8 +5507,28 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         write_hex_u64(c.rejected);
         tb_hal::serial_write_str(" clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=");
         write_hex_u64(c.kan_active as u64);
+        // M39 (inc-3) DURABILITY tokens (folded onto the SAME `corpus:` line -- no new
+        // census prefix). `corpus-reboot-survived` is the anti-hollow cross-boot signal:
+        // 0x0 on a fresh disk (boot 1), 0x1 once a prior boot's corpus is read back +
+        // re-folded to the stored head (boot 2). `corpus-records-total` GROWS across
+        // boots (the moat). `corpus-head-disk` is the head persisted (boot 1) / read from
+        // disk (boot 2) -- string-equal across the two boots.
+        tb_hal::serial_write_str(" corpus-present=");
+        write_hex_u64(p.present as u64);
+        tb_hal::serial_write_str(" corpus-persisted=");
+        write_hex_u64(p.persisted as u64);
+        tb_hal::serial_write_str(" corpus-reboot-survived=");
+        write_hex_u64(p.survived as u64);
+        tb_hal::serial_write_str(" corpus-head-matches=");
+        write_hex_u64(p.head_matches as u64);
+        tb_hal::serial_write_str(" corpus-head-disk=");
+        write_hex_u64(p.head_disk);
+        tb_hal::serial_write_str(" corpus-records-disk=");
+        write_hex_u64(p.records_disk);
+        tb_hal::serial_write_str(" corpus-records-total=");
+        write_hex_u64(p.records_total);
         tb_hal::serial_write_str(
-            " corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE\n",
+            " durability=TORN-WRITE-SAFE-PING-PONG-FNV head-integrity=M22-FOLD-VERBATIM lms-signature=NONE-THIS-INCREMENT corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE\n",
         );
         // The marker -- NO bare claim word (all claims live in the structured tokens
         // above, the M29/M33 marker discipline). NOT the cumulative tail: M38 below

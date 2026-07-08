@@ -1112,6 +1112,48 @@ pub fn corpus_selftest() -> CorpusProof {
     mem::corpus_selftest()
 }
 
+/// M39 (increment-3) DURABLE-corpus persist outcome (returned to the kernel for the
+/// `corpus:` witness). A closed, pure-data verdict -- mirroring the M33 persist result
+/// for the corpus lane. Every field is EARNED by the real read-back / re-fold / write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CorpusPersistProof {
+    /// A modern virtio-blk device with room for both corpus slots was present. `false`
+    /// is a GRACEFUL skip (no disk / too small) -- the marker still prints, but an
+    /// ATTACHED lane (the run-scripts) REQUIRES `present` + `persisted`.
+    pub present: bool,
+    /// The accumulated corpus was written + FLUSHED to disk this boot (`gen+1` into the
+    /// staler ping-pong slot). The run-scripts require this on the attached lane.
+    pub persisted: bool,
+    /// A prior boot's persisted corpus was read back, EVERY packed record fail-closed-
+    /// decoded, AND the re-folded `corpus_head` string-equalled the stored head (the
+    /// corpus SURVIVED a genuine reboot with integrity). `false` on a FRESH disk (the
+    /// anti-hollow "no false survival on a fresh region" negative control -- boot 1).
+    pub survived: bool,
+    /// The read-back corpus re-folded to the SAME stored `corpus_head` (integrity). Set
+    /// with (and equal to) `survived`; rendered `corpus-head-matches=0x1`.
+    pub head_matches: bool,
+    /// A u64 WITNESS of the corpus head (via `corpus_head_witness`): on SURVIVAL the head
+    /// read FROM DISK (the cross-boot evidence), else the head just persisted this boot.
+    /// Boot 1's persisted-head witness string-equals boot 2's read-back witness.
+    pub head_disk: u64,
+    /// The number of records READ BACK off disk from a prior boot (`0` on a fresh disk;
+    /// `>= 1` once a prior corpus survived -- the anti-hollow read-back evidence).
+    pub records_disk: u64,
+    /// The number of records now persisted (the ACCUMULATED total: prior ++ this boot,
+    /// ring-bounded). GROWS across boots -- the dataset-moat evidence (`records-total`).
+    pub records_total: u64,
+}
+
+/// M39 (increment-3): run the DURABLE-corpus persist round-trip (both arches) and report
+/// the outcome. See [`CorpusPersistProof`]. REUSES the M33 `provhead` torn-write-safe
+/// codec VERBATIM over a SEPARATE disk region; touches NO scheduler and NEITHER the M22
+/// nor the M23 head. HONEST: no LMS signature (the head's tamper-evidence is the M22
+/// fold, reused verbatim); the FNV checksums are torn-write detection ONLY; it persists
+/// PROVENANCE SKELETONS and trains nothing.
+pub fn corpus_persist() -> CorpusPersistProof {
+    mem::corpus_persist()
+}
+
 // ===========================================================================
 // M24: the verified HONEST ACTIVATION GATE self-test facade. The honest
 // resolution of the M21 activation gate (#72): shielded epsilon-greedy
