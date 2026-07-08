@@ -40,7 +40,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      # The repo-root rust-toolchain.toml PINS nightly-2026-07-06 (needed for the
+      # kernel's -Zbuild-std) and would OVERRIDE a plain @stable for every cargo
+      # command in the tree -- and that pinned nightly ships NO clippy component.
+      # Install the SAME pinned nightly WITH clippy (the clippy.yml / miri.yml
+      # pattern) and pin RUSTUP_TOOLCHAIN on the clippy step so the toml cannot
+      # strip it. Bump this date in lockstep with rust-toolchain.toml + the other lanes.
+      - name: Install nightly + clippy
+        id: toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
+          components: clippy
 
       # The env-ABSENCE assertion (the zero-secret lane's leak negative): no operator
       # / API secret is defined on this lane at all.
@@ -65,6 +77,8 @@ jobs:
           echo ">> dep-clean OK: corpus-export links tb-encode alone (no network deps)"
 
       - name: Clippy (deny warnings)
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
         run: cargo clippy --manifest-path tools/corpus-export/Cargo.toml --all-targets -- -D warnings
 
       # THE ROUND-TRIP + FAIL-CLOSED proof: extract/re-fold/emit over kernel-identical

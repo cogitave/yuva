@@ -597,14 +597,32 @@ pub(crate) fn corpus_persist() -> crate::CorpusPersistProof {
         records_total: 0,
     };
 
+    // The re-entrant aL2.4b EL1 guest has NO virtio disk (virtio=OPEN-BUS-ABSENT) and
+    // its stage-2-confined carve is torn down at teardown, so persisting there is
+    // pointless -- AND the guest boot stack is the tightest in the system. Skip the
+    // whole durable seam in-guest (other disk/organ paths already skip in-guest); the
+    // host boot does the real persist and the guest witness honestly renders the all-
+    // zero (skipped) form. Guarded: `in_guest` is aarch64-only.
+    #[cfg(target_arch = "aarch64")]
+    if crate::arch::in_guest() {
+        return r;
+    }
+
     // (curate) The deterministic scenario -> this boot's freshly curated records +
-    // running corpus_head (the SAME the in-RAM self-test verifies).
-    let sub = match corpus_seed_and_consolidate() {
-        Some(s) => s,
-        None => return r,
+    // running corpus_head (the SAME the in-RAM self-test verifies). We DROP the
+    // ~3 KiB `MemSubstrate` (its inline `xp_ring` POD dominates the frame) the moment
+    // we have extracted this boot's records + head, BEFORE the disk read / SHA-fold /
+    // write call chain below -- so the boot-stack high-water mark never carries the
+    // substrate INTO the slab + fold frames (the #65 no-deep-stack discipline; the
+    // aarch64 boot stack is tight, and m33_read_slab/m33_write_slab each stack a
+    // 512-byte sector buffer on top of the persist frame).
+    let (cur_records, cur_head) = {
+        let sub = match corpus_seed_and_consolidate() {
+            Some(s) => s,
+            None => return r,
+        };
+        (sub.corpus_records().to_vec(), sub.corpus_head())
     };
-    let cur_records: Vec<[u8; CORPUS_CANON_LEN]> = sub.corpus_records().to_vec();
-    let cur_head = sub.corpus_head();
     if cur_records.is_empty() {
         return r; // no curated record this boot -> nothing to persist (anti-hollow)
     }
