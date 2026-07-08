@@ -72,7 +72,7 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=123
+EXPECTED_HARNESSES_TOTAL=128
 
 # Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
@@ -250,6 +250,18 @@ SHARD_B=(
   kani_conduct_canon_injective
   kani_conduct_canon_roundtrip
   kani_conduct_fold_tamper              # 28.5s
+  # M39 corpus x5 (the experience-corpus codec -- mirrors the M23 exp family, which
+  # lives in shard B; routed HERE per the one-touch rule -- shard B was the lighter
+  # shard by measured cost, 620.0s vs A's 799.6s. Four are FNV-FREE geometry/fail-
+  # close/schema proofs (the cheap exp-canon regime, ~2-7s each); the ONE fold leg
+  # kani_corpus_fold_determinism rides a CONCRETE record = a single prov evaluation,
+  # NOT the 174s symbolic-index shape of kani_exp_fold_tamper -- the corpus writes NO
+  # new fold math, it REUSES the M22 prov fold under a separate corpus_head.)
+  kani_corpus_canon_injective
+  kani_corpus_canon_roundtrip
+  kani_corpus_decode_fail_closed
+  kani_corpus_schema_stability
+  kani_corpus_fold_determinism          # concrete record, one prov evaluation
 )
 
 # Shard C (8): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
