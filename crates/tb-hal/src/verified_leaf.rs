@@ -1046,6 +1046,73 @@ pub fn exp_selftest() -> ExpProof {
 }
 
 // ===========================================================================
+// M39: the verified EXPERIENCE-CORPUS self-test facade (the in-kernel seam). A
+// SEPARATE per-agent, GROWING, tamper-evident EXPERIENCE CORPUS over the M17
+// CONSOLIDATION outcomes: at each `distill()` survivor + `reflect_inner()` insight
+// the OS CURATES the outcome via a DECLARED (not learned) predicate and folds an
+// injective `corpus::CorpusRecord` -- a PROVENANCE SKELETON in interned tokens, not
+// text -- into a SEPARATE per-agent `corpus_head` (REUSING the M22 fold verbatim, so
+// the M22 `chain_head` / M23 `xp_head` witnesses stay byte-identical). The math is
+// the Kani-proven `tb_encode::corpus`; the verdict is a pure-data struct the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`ExpProof`]). HONEST: the
+// corpus is a Phase-1 data-engineering PREREQUISITE -- it does NOT touch `KAN_ACTIVE`,
+// does NOT flip the Learning pillar out of dormancy, and TRAINS NOTHING (Phase-2
+// gated). `token=corpus=PROVENANCE-SKELETON`, `token=curation=PREDICATE-DECLARED-NOT-
+// LEARNED`, `token=training=NONE-PHASE2-GATED`.
+// ===========================================================================
+
+/// M39 experience-corpus self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`ExpProof`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CorpusProof {
+    /// The CLEAN corpus verified: the independently re-folded committed record ids
+    /// equal the running `corpus_head` AND the FIRST committed record's canonical
+    /// bytes were FAITHFULLY reconstructed (`corpus_hash(canon) == committed id`, so
+    /// the tamper leg hits a REAL committed record). The kernel requires this.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for a known committed record verified `== true`
+    /// against the clean `corpus_head`. The kernel requires this.
+    pub inclusion_ok: bool,
+    /// A single-byte tamper of a COMMITTED record's canonical bytes was caught on
+    /// BOTH legs (head-mismatch AND inclusion-fail). The kernel requires this -- the
+    /// load-bearing tamper-evidence claim (inherited from the proven `prov` fold;
+    /// rendered `tamper-caught=0x1`).
+    pub tamper_caught: bool,
+    /// The DECLARED curation predicate is genuinely TWO-SIDED on real consolidation
+    /// outcomes this boot (`>=1 ACCEPT` AND `>=1 REJECT`) -- proof it is not a constant
+    /// (rendered `predicate-two-sided=0x1`). The kernel requires this.
+    pub predicate_two_sided: bool,
+    /// The number of curated records that genuinely FLOWED into the corpus (the
+    /// anti-hollow evidence -- rendered `records=<n>`, MUST be `> 0`). The kernel
+    /// requires this.
+    pub records: u64,
+    /// The DECLARED-predicate ACCEPT count this boot (rendered `accepted=<n>`).
+    pub accepted: u64,
+    /// The DECLARED-predicate REJECT count this boot -- RECORDED, not dropped
+    /// (rendered `rejected=<n>`).
+    pub rejected: u64,
+    /// A u64 WITNESS folded from the 32-byte committed `corpus_head` (every head byte
+    /// contributes), rendered as `head=<hex16>` in the boot witness line.
+    pub head: u64,
+    /// Whether the learned cell is on the decision path. `false` this milestone (the
+    /// corpus does NOT touch `KAN_ACTIVE` and trains nothing). The run-scripts REQUIRE
+    /// `kan_active=0` for this lane.
+    pub kan_active: bool,
+}
+
+/// M39: run the experience-corpus round-trip self-test (both arches) and report the
+/// outcome. See [`CorpusProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::corpus` leaf and the REAL `mem::MemSubstrate` M17 CONSOLIDATION path
+/// -- seeds two near-duplicate clusters and runs the ACTUAL `consolidation_cycle`, so
+/// `distill()`/`reflect_inner()` CURATE genuine outcomes into a SEPARATE per-agent
+/// `corpus_head` (the M22/M23 heads untouched), then re-folds + tamper-checks the
+/// committed records; touches NO device and NO scheduler. `KAN_ACTIVE` stays `false`
+/// (the corpus trains nothing).
+pub fn corpus_selftest() -> CorpusProof {
+    mem::corpus_selftest()
+}
+
+// ===========================================================================
 // M24: the verified HONEST ACTIVATION GATE self-test facade. The honest
 // resolution of the M21 activation gate (#72): shielded epsilon-greedy
 // exploration (restores statistical overlap, populating the M23-reserved

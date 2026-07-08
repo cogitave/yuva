@@ -744,6 +744,53 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     exit 1
   fi
 
+  # M39 GUARDS -- the in-kernel EXPERIENCE-CORPUS seam (Phase-1 dataset moat). The
+  # M17 consolidation CURATES real outcomes into a SEPARATE tamper-evident
+  # `corpus_head`. House order: skip-reject, positive-require [the anti-hollow core:
+  # REAL records flowed], anti-overclaim, direct-assert. M39 displaces NOTHING (M38
+  # below stays the cumulative tail; the corpus folds on its OWN lane).
+  #
+  # (1) Skip-reject: honest-skip-is-FAILURE on the agent lane -- the substrate skip
+  # form ('M39: corpus OK (substrate profile, agent organ skipped)') may NOT carry the
+  # marker here (the consolidation seam IS admitted, so real records were due).
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M39: corpus OK (substrate profile, agent organ skipped)'; then
+    echo ">> FAIL: M39 ran in SKIP mode (substrate form) on an AGENT lane -- the corpus consolidation seam was NOT exercised (a skip is never legitimate here)" >&2
+    exit 1
+  fi
+  # (2) Positive-require the FULL one-line `corpus:` witness: the earned round-trip
+  # flags (clean/inclusion/tamper-caught/predicate-two-sided all =0x1), a records-
+  # appended count, the accept/reject counts, kan_active=0 (DORMANT), AND every honesty
+  # token literal (so a marker printed WITHOUT running the fold/inclusion/tamper
+  # verifier -- or one that overclaims -- FAILS). corpus=PROVENANCE-SKELETON,
+  # curation=PREDICATE-DECLARED-NOT-LEARNED, training=NONE-PHASE2-GATED are REQUIRED so
+  # the marker mechanically cannot overclaim (no learning, no training, not text).
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} records=0x[0-9a-f]+ accepted=0x[0-9a-f]+ rejected=0x[0-9a-f]+ clean=0x0*1 inclusion=0x0*1 tamper-caught=0x0*1 predicate-two-sided=0x0*1 kan_active=0x0+ corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE'; then
+    echo ">> FAIL: M39 marker present but the real round-trip witness 'corpus: head=.. records=.. accepted=.. rejected=.. clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=0x0 corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED ..' was NOT seen (hollow M39 pass)" >&2
+    exit 1
+  fi
+  # (3) ANTI-HOLLOW: the records-appended count MUST be > 0 (a real consolidation
+  # append genuinely flowed -- not a zero-record head printed by a stub).
+  CORPUS_LINE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^corpus: head=0x' | head -1)"
+  M39_REC_HEX="$(printf '%s' "${CORPUS_LINE}" | sed -E 's/.* records=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${M39_REC_HEX}" ]] || (( 16#${M39_REC_HEX} < 1 )); then
+    echo ">> FAIL: M39 records=0x${M39_REC_HEX} < 0x1 (no real corpus record flowed -- an anti-hollow stub)" >&2
+    exit 1
+  fi
+  # (4) Anti-overclaim: the M39 marker/witness lines may NOT carry a live-learning /
+  # training-happened / text-bearing claim. The honest tokens deliberately spell the
+  # NEGATIONS (NOT-LEARNED / NONE-PHASE2-GATED), so reject only POSITIVE overclaims.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M39:|corpus:)' | grep -qiE -- 'kan_active=0x0*1|training=(ACTIVE|DONE|RAN)|learning=ACTIVE|(^|[^[:alnum:]])trained|weights-updated|is-text|text-stored'; then
+    echo ">> FAIL: M39 marker/witness carries an overclaim (live learning / training-happened / text-stored) -- the corpus is a PROVENANCE-SKELETON prerequisite that trains nothing" >&2
+    exit 1
+  fi
+  # (5) Direct-assert the marker is present (M39 is not the top-level grep -- M38
+  # displaces it as the cumulative tail; assert directly so M39 -> M38 order stays
+  # fail-closed + traceable).
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M39: corpus OK'; then
+    echo ">> FAIL: final marker present but 'M39: corpus OK' missing (M39 displaced/regressed)" >&2
+    exit 1
+  fi
+
   # M38 (stage B) GUARDS (proposal §8 -- house order: skip-reject, positive-
   # require [the anti-hollow core + the §8.6 CROSS-PROCESS independent recompute],
   # by-name rejects, lane cross-pin, inherited tripwires, strip-then-reject). The

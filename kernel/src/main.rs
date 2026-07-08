@@ -5418,6 +5418,82 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             (false, 0)
         };
 
+    // ---- M39: the in-kernel EXPERIENCE-CORPUS seam (Phase-1 dataset moat) ------
+    // The FLAGSHIP ungated Phase-1 move: turn Yuva's M17 CONSOLIDATION outcomes into
+    // a GROWING, CURATED, tamper-evident EXPERIENCE CORPUS -- the dataset moat a future
+    // sovereign agent model would fine-tune on -- with NO live model, by REUSING the M22
+    // prov fold verbatim under a SEPARATE `corpus_head`. Every boot the kernel drives
+    // the REAL M17 `consolidation_cycle` over a seeded scenario: `distill()`'s survivor
+    // + `reflect_inner()`'s insight are each CURATED by a DECLARED (not learned)
+    // predicate and folded as an injective `corpus::CorpusRecord` into the per-agent
+    // `corpus_head`, then the committed records are independently re-folded + a genuine
+    // inclusion proof verified + a single-byte record tamper caught (head-mismatch AND
+    // inclusion-fail). HONEST (machine-tokened so the marker mechanically cannot
+    // overclaim): a corpus record is a PROVENANCE SKELETON in u64 INTERNED TOKENS, not
+    // text (the dictionary is agent-side, joined host-side) -- `corpus=PROVENANCE-
+    // SKELETON`; the `curation_verdict` is DECLARED by a deterministic predicate,
+    // nothing learns or grades -- `curation=PREDICATE-DECLARED-NOT-LEARNED`; the corpus
+    // is a Phase-1 PREREQUISITE that does NOT touch `KAN_ACTIVE` and TRAINS NOTHING --
+    // `training=NONE-PHASE2-GATED`. The `corpus_head` folds on its OWN lane, SEPARATE
+    // from the M22/M23/M38 heads, so every prior fold witness (and the M38 conduct head,
+    // SP#4) stays byte-identical. DoD: "M39: corpus OK". Boot-Profiles: AGENT-profile
+    // organ -- gated; in the substrate profile it is NOT admitted and emits NO `corpus:`
+    // witness (the census-forbidden prefix).
+    if profile::agent_organs_enabled() {
+        let c = tb_hal::corpus_selftest();
+        // FAIL-CLOSED (the #65 idiom): the clean re-fold + faithful reconstruction, the
+        // genuine inclusion proof, the single-byte tamper catch, the genuinely TWO-SIDED
+        // DECLARED predicate, a NON-ZERO records-appended count (anti-hollow), and the
+        // DORMANT learned cell must ALL hold, else withhold the marker (a FAIL line with
+        // NO 'corpus OK' substring) and exit red NOW.
+        if !c.clean_ok
+            || !c.inclusion_ok
+            || !c.tamper_caught
+            || !c.predicate_two_sided
+            || c.records == 0
+            || c.kan_active
+        {
+            tb_hal::serial_write_str("M39: corpus FAIL clean=");
+            write_hex_u64(c.clean_ok as u64);
+            tb_hal::serial_write_str(" inclusion=");
+            write_hex_u64(c.inclusion_ok as u64);
+            tb_hal::serial_write_str(" tamper-caught=");
+            write_hex_u64(c.tamper_caught as u64);
+            tb_hal::serial_write_str(" predicate-two-sided=");
+            write_hex_u64(c.predicate_two_sided as u64);
+            tb_hal::serial_write_str(" records=");
+            write_hex_u64(c.records);
+            tb_hal::serial_write_str(" kan_active=");
+            write_hex_u64(c.kan_active as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit();
+        }
+        // The witness line (census prefix `corpus:`). Every flag EARNED this boot
+        // through the real fold/inclusion/tamper round-trip (the fail-closed gate
+        // required them); `records`/`accepted`/`rejected` reflect the ACTUAL curated
+        // outcomes the consolidation produced; the honesty tokens are STRUCTURAL so the
+        // marker mechanically cannot overclaim (no "learning", no "training", not text).
+        tb_hal::serial_write_str("corpus: head=");
+        write_hex_u64(c.head);
+        tb_hal::serial_write_str(" records=");
+        write_hex_u64(c.records);
+        tb_hal::serial_write_str(" accepted=");
+        write_hex_u64(c.accepted);
+        tb_hal::serial_write_str(" rejected=");
+        write_hex_u64(c.rejected);
+        tb_hal::serial_write_str(" clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=");
+        write_hex_u64(c.kan_active as u64);
+        tb_hal::serial_write_str(
+            " corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE\n",
+        );
+        // The marker -- NO bare claim word (all claims live in the structured tokens
+        // above, the M29/M33 marker discipline). NOT the cumulative tail: M38 below
+        // stays the tail (this seam folds on its own lane).
+        tb_hal::serial_write_str("M39: corpus OK\n");
+    } else {
+        tb_hal::serial_write_str("M39: corpus OK (substrate profile, agent organ skipped)\n");
+    }
+
     // ---- M38 (stage B): the kernel-integrated CONDUCTOR -- TRINITY ADOPT-1 ----
     // The in-kernel selftest agent DRIVES the Verifier-gated organ loop FROM THE
     // GUEST, through the SAME capability chokepoint M31 uses: M_MEM_RECALL (the

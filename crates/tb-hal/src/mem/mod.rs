@@ -67,6 +67,21 @@ use tb_encode::prov::{self, ProvEntry, PROV_HASH_LEN};
 // the live forget/demote decision is BYTE-IDENTICAL to M22's. Strictly downstream /
 // observational -- no perturbation of `clock`/finsts/the M22 `chain_head`.
 use tb_encode::exp::{self, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN};
+// M39: the verified EXPERIENCE-CORPUS CODEC leaf -- the fixed-width injective
+// `CorpusRecord` encoder (`corpus::canon`) + the SEPARATE per-agent `corpus_head`
+// fold over the canonical bytes (REUSING the M22 `prov` fold via
+// `corpus::corpus_append`, NOT a new fold). `tb-hal` CALLS `corpus_append` at the
+// M17 CONSOLIDATION curation sites (the `distill()` survivor + the `reflect_inner()`
+// insight), exactly as it calls `exp::xp_append` at the forget sites. The math
+// (canon-injectivity / roundtrip / fail-close / schema-stability / fold tamper-
+// sensitivity) is Kani-proven in `tb-encode::corpus`. HONEST: a corpus record is a
+// PROVENANCE SKELETON in u64 INTERNED TOKENS, not text (the dictionary is agent-
+// side); the `curation_verdict` is DECLARED by a deterministic predicate, NOTHING
+// here learns or trains, and `KAN_ACTIVE` is UNTOUCHED. Strictly downstream /
+// observational -- the emit folds ONLY the SEPARATE `corpus_head`, perturbing NO T3
+// record / `clock` / importance / the M22 `chain_head` / the M23 `xp_head`, so
+// recall output (the M38 conductor input, SP#4) stays BYTE-IDENTICAL.
+use tb_encode::corpus;
 // M24: the verified HONEST-GATE leaves -- the shielded epsilon-greedy logging
 // PROPENSITY (`explore::explore_propensity_q`, stamped into the M23-reserved
 // `logging_propensity_q` field) and the bake-off estimator math (the 3-way
@@ -224,6 +239,13 @@ const DISTILL_BATCH: usize = 32;
 const REFLECT_WINDOW: usize = 16;
 /// REFLECT insight importance (mid-band: above-default, below flashbulb-pin).
 const REFLECT_IMP: u8 = 5;
+/// M39 DECLARED-curation salience floor: a consolidation outcome enters the corpus
+/// as `ACCEPTED` only if its (interned, non-zero) content token clears this salience
+/// bar; a lower-salience outcome is RECORDED as `REJECTED` (not dropped). This is a
+/// DECLARED deterministic predicate -- nothing here learns or grades
+/// (`token=curation=PREDICATE-DECLARED-NOT-LEARNED`). A distilled survivor carries
+/// its record importance as salience; the reflection insight carries `REFLECT_IMP`.
+const CORPUS_CURATION_MIN_SALIENCE: u8 = 2;
 /// REFLECT digest seed (golden-ratio constant; non-zero so a digest is non-zero).
 const REFLECT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 /// Typed link kinds (`MemRecord.links`): the schema's cites/relates/supersedes.
@@ -698,9 +720,9 @@ impl BackingStore for VirtioBlkStore {
 // (behaviour-preserving move; the kernel calls these via the re-export below.)
 mod selftests;
 pub(crate) use selftests::{
-    bakeoff_selftest, conductor_selftest, exittel_selftest, exp_selftest, infer_local_wire_selftest,
-    infer_wire_selftest, kan_selftest, m33_persist_head, opcmd_selftest, opframe_selftest,
-    persist_selftest, prov_selftest, xport_selftest,
+    bakeoff_selftest, conductor_selftest, corpus_selftest, exittel_selftest, exp_selftest,
+    infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head, opcmd_selftest,
+    opframe_selftest, persist_selftest, prov_selftest, xport_selftest,
 };
 
 // --- T0: context registers (ACT-R buffers; const-bounded, no unbounded blob) --
@@ -937,6 +959,31 @@ pub(crate) struct MemSubstrate {
     /// experience chain), for the boot self-test's genuine inclusion proofs. Bounded
     /// by the same write-amplification discipline; small + heap-`Vec`.
     xp_ids: Vec<[u8; PROV_HASH_LEN]>,
+    /// M39: the SEPARATE per-agent EXPERIENCE-CORPUS head -- a 256-bit running fold
+    /// over every curated [`corpus::CorpusRecord`]'s canonical bytes, ALONGSIDE (never
+    /// inside) the M22 [`chain_head`](Self::chain_head) and the M23
+    /// [`xp_head`](Self::xp_head). Genesis is all-zero; each
+    /// [`MemSubstrate::corpus_emit_consolidation`] folds the new curated record's
+    /// structural digest into it via the REUSED M22 `tb_encode::prov` fold
+    /// (`corpus::corpus_append`). The head makes the corpus TAMPER-EVIDENT (any single-
+    /// byte mutation to a committed record invalidates the recomputed head) -- proven
+    /// by the boot `corpus_selftest`. Kept IN-RAM this milestone (the durable growing
+    /// region is a LATER M39 increment); it touches NEITHER the M22 nor the M23 head,
+    /// so their persist/prov/exp witnesses stay byte-identical. A corpus record is a
+    /// PROVENANCE SKELETON in tokens, not text; `curation_verdict` is DECLARED, not
+    /// learned; NOTHING here trains or touches `KAN_ACTIVE`.
+    corpus_head: [u8; PROV_HASH_LEN],
+    /// M39: the committed corpus-record ids in append order (the per-agent corpus
+    /// chain), for the boot self-test's genuine inclusion proofs. Bounded by the same
+    /// write-amplification discipline; small + heap-`Vec`.
+    corpus_ids: Vec<[u8; PROV_HASH_LEN]>,
+    /// M39: the running count of corpus records the DECLARED curation predicate
+    /// ACCEPTED into the corpus this session (rendered `accepted=<n>` in the witness).
+    corpus_accepted: u64,
+    /// M39: the running count of corpus records the DECLARED curation predicate
+    /// REJECTED -- RECORDED, not silently dropped (the M22 tombstone discipline:
+    /// deletion stays provable). Rendered `rejected=<n>`.
+    corpus_rejected: u64,
 }
 
 impl MemSubstrate {
@@ -986,6 +1033,12 @@ impl MemSubstrate {
             xp_head: [0u8; PROV_HASH_LEN],
             xp_ring: ExpRing::new(),
             xp_ids: Vec::new(),
+            // M39: genesis corpus head (all-zero) + an empty per-agent corpus chain +
+            // zeroed accept/reject counts -- SEPARATE from the M22 and M23 heads.
+            corpus_head: [0u8; PROV_HASH_LEN],
+            corpus_ids: Vec::new(),
+            corpus_accepted: 0,
+            corpus_rejected: 0,
         }
     }
 
@@ -1122,6 +1175,92 @@ impl MemSubstrate {
     #[allow(dead_code)]
     pub(crate) fn xp_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
         &self.xp_ids
+    }
+
+    /// M39: the DECLARED curation predicate -- the deterministic, pure rule that
+    /// decides whether a consolidation outcome is `ACCEPTED` into the corpus or
+    /// `REJECTED`. A non-zero content token that clears the [`CORPUS_CURATION_MIN_SALIENCE`]
+    /// salience floor is a genuine, joinable, salient provenance skeleton and is
+    /// ACCEPTED; anything else is REJECTED (still RECORDED -- the M22 tombstone
+    /// discipline). NOTHING here learns, grades, or touches `KAN_ACTIVE`; the verdict
+    /// is a DECLARED byte (`token=curation=PREDICATE-DECLARED-NOT-LEARNED`). Pure +
+    /// total (no substrate read/write), so it is trivially deterministic across boots.
+    fn corpus_curate(content_tok: u64, salience: u8) -> u8 {
+        if content_tok != 0 && salience >= CORPUS_CURATION_MIN_SALIENCE {
+            corpus::curation_verdict::ACCEPTED
+        } else {
+            corpus::curation_verdict::REJECTED
+        }
+    }
+
+    /// M39: fold ONE M17 consolidation outcome into the SEPARATE per-agent
+    /// [`corpus_head`](Self::corpus_head) as a curated `EPISODIC_CONSOLIDATION`
+    /// [`corpus::CorpusRecord`] (a PROVENANCE SKELETON in interned tokens, not text),
+    /// REUSING the M22 prov fold verbatim (`corpus::corpus_append` -- NO new fold
+    /// math). It runs the DECLARED [`corpus_curate`](Self::corpus_curate) predicate,
+    /// stamps the record with the current `clock` (`t_created`) and the live M22
+    /// `chain_head` as the `source_head` lineage position, folds the canonical bytes
+    /// into `corpus_head`, remembers the id, and bumps the accept/reject count.
+    ///
+    /// STRICTLY DOWNSTREAM / OBSERVATIONAL (the M23 `xp_record` discipline): it
+    /// mutates ONLY the M39 corpus state (`corpus_head`/`corpus_ids`/the counts) and
+    /// READS -- never writes -- `clock`/`chain_head`. It touches NO T3 record, NO
+    /// `clock` tick, NO importance, and NEITHER the M22 nor the M23 head, so recall
+    /// output (the M38 conductor input, SP#4) and every prior fold witness stay
+    /// BYTE-IDENTICAL. FAIL-SOFT (`let _`-style): a scratch overflow (unreachable for
+    /// the fixed-width record) leaves `corpus_head` un-advanced rather than panicking.
+    fn corpus_emit_consolidation(
+        &mut self,
+        content_tok: u64,
+        aux_tok: u64,
+        source_stream: u8,
+        salience: u8,
+    ) {
+        let verdict = Self::corpus_curate(content_tok, salience);
+        let rec = corpus::CorpusRecord {
+            schema_version: corpus::CORPUS_SCHEMA_V1,
+            example_kind: corpus::example_kind::EPISODIC_CONSOLIDATION,
+            source_stream,
+            curation_verdict: verdict,
+            content_tok,
+            aux_tok,
+            t_created: self.clock,
+            source_head: self.chain_head,
+            // RESERVED (reserve-now, present-`Unset` / zero this milestone -- a later
+            // labeled-outcome / graded-curation increment populates them WITHOUT
+            // shifting the fold, the schema-stability lemma).
+            outcome: corpus::OutcomeLabel::Unset,
+            curation_score_q: 0,
+        };
+        let mut scratch = [0u8; corpus::CORPUS_CANON_LEN];
+        if let Some((new_head, id)) = corpus::corpus_append(self.corpus_head, &rec, &mut scratch) {
+            self.corpus_head = new_head;
+            self.corpus_ids.push(id);
+            if verdict == corpus::curation_verdict::ACCEPTED {
+                self.corpus_accepted = self.corpus_accepted.saturating_add(1);
+            } else {
+                self.corpus_rejected = self.corpus_rejected.saturating_add(1);
+            }
+        }
+    }
+
+    /// M39: the current per-agent experience-corpus head (the running fold).
+    #[allow(dead_code)]
+    pub(crate) fn corpus_head(&self) -> [u8; PROV_HASH_LEN] {
+        self.corpus_head
+    }
+
+    /// M39: the committed corpus-record ids in append order (read-only borrow). The
+    /// boot `corpus_selftest` builds genuine inclusion proofs from this slice.
+    #[allow(dead_code)]
+    pub(crate) fn corpus_ids(&self) -> &[[u8; PROV_HASH_LEN]] {
+        &self.corpus_ids
+    }
+
+    /// M39: the running (accepted, rejected) DECLARED-curation counts.
+    #[allow(dead_code)]
+    pub(crate) fn corpus_counts(&self) -> (u64, u64) {
+        (self.corpus_accepted, self.corpus_rejected)
     }
 
     /// M23: read the `i`-th live experience-ring row (FIFO order; `0` == oldest), or
@@ -1558,6 +1697,17 @@ impl MemSubstrate {
                 merged += 1;
             }
             self.t3.records[*surv].provenance = 2; // distilled survivor
+            // M39: curate the distilled survivor into the EXPERIENCE CORPUS -- a real
+            // M17 consolidation outcome (an M13 `MemRecord`), folded into the SEPARATE
+            // corpus_head under the DECLARED salience predicate. Read the survivor's
+            // token + importance FIRST (ending the index borrow), then emit; the emit
+            // touches ONLY the corpus state, so the survivor record + the live decision
+            // stay byte-identical.
+            let (surv_tok, surv_imp) = {
+                let r = &self.t3.records[*surv];
+                (r.token, r.importance)
+            };
+            self.corpus_emit_consolidation(surv_tok, 0, corpus::source_stream::M13_MEM, surv_imp);
         }
         if merged > 0 {
             self.clock = self.clock.wrapping_add(1);
@@ -1618,6 +1768,18 @@ impl MemSubstrate {
                 }
             }
         }
+        // M39: curate the reflection insight into the EXPERIENCE CORPUS -- a real M17
+        // consolidation outcome (an M17 reflection insight), folded into the SEPARATE
+        // corpus_head under the DECLARED salience predicate. `insight_token` is the
+        // digest (or the daemon-substituted model token); `REFLECT_IMP` is its salience.
+        // Strictly downstream: the emit touches ONLY the corpus state, so the insight
+        // record + the live decision stay byte-identical.
+        self.corpus_emit_consolidation(
+            insight_token,
+            0,
+            corpus::source_stream::M17_REFLECT,
+            REFLECT_IMP,
+        );
         Some(new_id)
     }
 

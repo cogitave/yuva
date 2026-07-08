@@ -368,6 +368,165 @@ pub(crate) fn exp_selftest() -> crate::ExpProof {
     }
 }
 
+// --- M39: the verified experience-corpus self-test (the marker body) ----------
+
+/// The two DECLARED-curation salience seeds: a HIGH-salience duplicate cluster
+/// (importance >= [`CORPUS_CURATION_MIN_SALIENCE`] -> the distilled survivor is
+/// ACCEPTED) and a LOW-salience one (importance 1 -> REJECTED). The smaller token is
+/// consolidated FIRST (the BTreeMap lexical index iterates keys ascending), so the
+/// HIGH survivor is the FIRST committed corpus record (`corpus_ids[0]`).
+const CORPUS_TOK_HIGH: u64 = 0x0000_0000_00C0_0001;
+const CORPUS_TOK_LOW: u64 = 0x0000_0000_00C0_0002;
+const CORPUS_IMP_HIGH: u8 = 3; // >= CORPUS_CURATION_MIN_SALIENCE (2) -> ACCEPTED
+const CORPUS_IMP_LOW: u8 = 1; // <  CORPUS_CURATION_MIN_SALIENCE (2) -> REJECTED
+
+/// M39: run the per-agent EXPERIENCE-CORPUS round-trip self-test and report a
+/// [`crate::CorpusProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::corpus` leaf and the REAL
+/// [`MemSubstrate`] M17 CONSOLIDATION path (`distill` + `reflect_inner`, driven by
+/// [`MemSubstrate::consolidation_cycle`]).
+///
+/// It SEEDS two near-duplicate clusters -- a HIGH-salience one and a LOW-salience one
+/// -- then runs the ACTUAL [`MemSubstrate::consolidation_cycle`]. `distill()` collapses
+/// each cluster and, at the survivor site, CURATES the outcome into the SEPARATE
+/// `corpus_head` under the DECLARED [`MemSubstrate::corpus_curate`] predicate (the HIGH
+/// survivor ACCEPTED, the LOW survivor REJECTED); `reflect_inner()` folds the recent
+/// slice into an insight and curates it too. It proves: (a) records genuinely FLOWED --
+/// `records >= 1` real corpus appends (the anti-hollow evidence); (b) the DECLARED
+/// predicate is genuinely TWO-SIDED on real outcomes (`>=1 ACCEPT` AND `>=1 REJECT`, so
+/// it is not a constant); (c) CLEAN: independently re-folding the committed record ids
+/// reproduces the running `corpus_head` AND a genuine inclusion proof for the first
+/// committed record verifies; (d) a single-byte tamper of a COMMITTED record's canonical
+/// bytes is CAUGHT (head-mismatch AND inclusion-fail). It reports `kan_active` (asserted
+/// `false` -- the corpus does NOT touch `KAN_ACTIVE`, trains nothing). The marker is
+/// withheld unless every leg holds. HONEST: a corpus record is a PROVENANCE SKELETON in
+/// interned tokens, not text; `curation_verdict` is DECLARED, not learned; NOTHING here
+/// trains (`token=corpus=PROVENANCE-SKELETON`, `token=curation=PREDICATE-DECLARED-NOT-
+/// LEARNED`, `token=training=NONE-PHASE2-GATED`).
+pub(crate) fn corpus_selftest() -> crate::CorpusProof {
+    use tb_encode::corpus::{
+        self, canon, corpus_hash, corpus_recompute, corpus_verify_inclusion, CorpusRecord,
+        CORPUS_CANON_LEN, CORPUS_SCHEMA_V1,
+    };
+
+    let fail = |head: u64, records: u64, accepted: u64, rejected: u64| crate::CorpusProof {
+        clean_ok: false,
+        inclusion_ok: false,
+        tamper_caught: false,
+        predicate_two_sided: false,
+        records,
+        accepted,
+        rejected,
+        head,
+        kan_active: KAN_ACTIVE,
+    };
+
+    // (seed) A fresh RAM-backed substrate. Push two near-duplicate clusters via the
+    // low-level record path (each cluster = two live HOT records sharing a token, so
+    // distill collapses it). The HIGH cluster's survivor clears the salience floor
+    // (ACCEPTED); the LOW cluster's does not (REJECTED). NONE of push_record / distill /
+    // reflect advances the M22 chain_head, and the fresh records never clear the FORGET
+    // envelope -- so chain_head stays GENESIS (all-zero) for the whole run, which the
+    // tamper-leg reconstruction below relies on.
+    let mut sub = MemSubstrate::new();
+    if sub
+        .push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())
+        .is_none()
+        || sub
+            .push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())
+            .is_none()
+        || sub
+            .push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())
+            .is_none()
+        || sub
+            .push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())
+            .is_none()
+    {
+        return fail(0, 0, 0, 0);
+    }
+
+    // Run the REAL M17 maintenance cycle: distill curates both survivors, reflect
+    // curates the insight -- each a genuine corpus append into the SEPARATE head.
+    let _ = sub.consolidation_cycle();
+
+    let committed = sub.corpus_head();
+    let ids = sub.corpus_ids().to_vec();
+    let (accepted, rejected) = sub.corpus_counts();
+    let nrec = ids.len() as u64;
+    let head_w = corpus::corpus_head_witness(committed);
+
+    // (a) ANTI-HOLLOW: at least one real corpus record must have flowed; (b) the
+    // DECLARED predicate must be genuinely TWO-SIDED (>=1 ACCEPT AND >=1 REJECT).
+    if nrec == 0 || ids.is_empty() {
+        return fail(head_w, nrec, accepted, rejected);
+    }
+    let predicate_two_sided = accepted >= 1 && rejected >= 1;
+
+    // (c) CLEAN: independently re-fold the committed record ids and confirm the head;
+    // a genuine inclusion proof for the FIRST committed record verifies.
+    let leaf = ids[0];
+    let siblings: Vec<[u8; corpus::PROV_HASH_LEN]> = ids[1..].to_vec();
+    let clean_ok = corpus_recompute(leaf, &siblings) == committed;
+    let inclusion_ok = corpus_verify_inclusion(leaf, &siblings, committed);
+
+    // (d) TAMPER: faithfully reconstruct the FIRST committed record's canonical bytes.
+    // Every field is known from the seeded HIGH cluster (schema=v1, kind=EPISODIC-
+    // CONSOLIDATION, source=M13_MEM, verdict=ACCEPTED, content_tok=HIGH, aux=0,
+    // outcome=Unset, score=0, source_head=GENESIS) EXCEPT t_created (the clock at the
+    // distill emit); we SEARCH a small clock window for the t_created making
+    // corpus_hash(canon)==ids[0], proving the tamper hits a REAL committed record's
+    // bytes (recon_faithful) rather than a guess (fail-closed if it is ever wrong).
+    let mut recon_faithful = false;
+    let mut committed_bytes = [0u8; CORPUS_CANON_LEN];
+    let mut t = 1u64;
+    while t < 64 {
+        let recon = CorpusRecord {
+            schema_version: CORPUS_SCHEMA_V1,
+            example_kind: corpus::example_kind::EPISODIC_CONSOLIDATION,
+            source_stream: corpus::source_stream::M13_MEM,
+            curation_verdict: corpus::curation_verdict::ACCEPTED,
+            content_tok: CORPUS_TOK_HIGH,
+            aux_tok: 0,
+            t_created: t,
+            source_head: [0u8; corpus::PROV_HASH_LEN],
+            outcome: corpus::OutcomeLabel::Unset,
+            curation_score_q: 0,
+        };
+        let mut b = [0u8; CORPUS_CANON_LEN];
+        if canon(&recon, &mut b) == CORPUS_CANON_LEN && corpus_hash(&b) == leaf {
+            committed_bytes = b;
+            recon_faithful = true;
+            break;
+        }
+        t += 1;
+    }
+
+    let mut tamper_caught = false;
+    if recon_faithful {
+        // Flip ONE byte of the COMMITTED record's canonical bytes (the curation_verdict
+        // field -- a real closed-set field, not padding).
+        committed_bytes[3] ^= 0x01;
+        let bad_leaf = corpus_hash(&committed_bytes);
+        let head_mismatch = corpus_recompute(bad_leaf, &siblings) != committed;
+        let inclusion_failed = !corpus_verify_inclusion(bad_leaf, &siblings, committed);
+        tamper_caught = bad_leaf != leaf && head_mismatch && inclusion_failed;
+    }
+
+    crate::CorpusProof {
+        // The clean leg ALSO requires the reconstruction to be faithful (the tamper hit
+        // a REAL committed record) -- a fail-closed guard against a hollow pass.
+        clean_ok: clean_ok && recon_faithful,
+        inclusion_ok,
+        tamper_caught,
+        predicate_two_sided,
+        records: nrec,
+        accepted,
+        rejected,
+        head: head_w,
+        kan_active: KAN_ACTIVE,
+    }
+}
+
 // --- M24: the honest activation-gate bake-off self-test (the marker body) -----
 
 /// M24: run the HONEST ACTIVATION-GATE bake-off self-test and report a
