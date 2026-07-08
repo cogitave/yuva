@@ -1,0 +1,69 @@
+# Yuva-ABI stage A -- the conformance lane (DoD-4).
+#
+# The POSITIVE agent-agnostic demonstration, kept SEPARATE from the required
+# cumulative M0..M38 chain: build the x86_64 kernel and boot it OFFLINE (no host
+# echo peer, no network, no human, no hardware -- the conformance witness is
+# emitted right after `M11: caps OK`, before M12/M19/M20/M30). The in-kernel
+# mini-agent (sharing no code with the resident agent's M12/M38 runtime) passes
+# the FROZEN vectors across BOTH planes; `scripts/run-abi-conformance.sh`
+# adjudicates the witness and prints the additional lane's SUMMARY marker
+# `ABI: conformance OK planes=2 vectors=K`. A skip / absent witness / all-pass !=
+# 0x1 / single-plane pass / any registry-drift `abi: FAIL` fails the lane by name.
+#
+# This job NEVER emits its marker onto the guest-serial cumulative chain -- it
+# lives ONLY here (the workflow step + the job summary), so it cannot displace
+# the M0..M38 markers even by accident (the M38 additional-lane discipline).
+name: abi-conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_BIN: yuva-kernel
+  TARGET_X86: x86_64-yuva-none
+
+jobs:
+  abi-conformance:
+    name: abi conformance (x86_64, offline)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
+          components: rust-src, llvm-tools
+
+      - name: Install QEMU (headless)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo registry + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-abi-conformance-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (x86_64)
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
+
+      # Boot offline + deterministic; adjudicate the frozen conformance vectors
+      # across both planes; the script exits non-zero (fails the lane) on any
+      # skip / drift / single-plane pass, and prints the summary marker on pass.
+      - name: Boot + adjudicate ABI conformance
+        run: |
+          MARKER="$(bash scripts/run-abi-conformance.sh | tee /dev/stderr | grep -E '^ABI: conformance OK ')"
+          echo "### ${MARKER}" >> "${GITHUB_STEP_SUMMARY}"

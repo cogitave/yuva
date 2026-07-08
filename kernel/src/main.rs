@@ -1451,6 +1451,67 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         }
     }
 
+    // --- Yuva-ABI stage A: the conformance SKELETON (the mini-agent). A small
+    // in-kernel conformant agent -- sharing NO code with the resident agent's
+    // M12/M38 runtime -- binds through both planes and passes the FROZEN vectors
+    // (docs/spec/yuva-abi-v1.md §6). Plane 1: the cap-dispatch vectors run against
+    // the REAL `caps::dispatch` gate (a NEGATIVE `Denied` vector returning `Ok`
+    // would fail). Plane 2: the wire codec + the organ-registry contract. This
+    // emits an ADDITIVE `abi-conformance:` witness and NEVER fail-exits --
+    // conformance is adjudicated by the SEPARATE `abi-conformance` lane, not the
+    // required M0..M38 chain (no required verifier greps it). Honest ceiling: the
+    // mini-agent runs IN-PROCESS in the SAME binary (the EL0 trap gate is
+    // unbuilt), so it demonstrates SPEAKABILITY by non-resident in-process code,
+    // NOT extractability by a separately-privileged agent.
+    {
+        use tb_hal::abi;
+        use tb_hal::caps::{self, ObjKind, Rights, SyscallArgs, SysStatus};
+
+        let mut tbl = caps::HandleTable::with_capacity(8);
+        let mut cap_pass = 0u32;
+        let mut cap_neg = 0u32;
+        for &(method, rights_bits, expect) in abi::CONFORMANCE_CAP_VECTORS {
+            let h = match tbl.mint(ObjKind::Generic, Rights::from_bits(rights_bits)) {
+                Some(h) => h,
+                None => break,
+            };
+            let got = caps::dispatch(&mut tbl, &SyscallArgs::call(method, h)).status;
+            let ok = match expect {
+                abi::EXPECT_OK => got == SysStatus::Ok,
+                abi::EXPECT_DENIED => got == SysStatus::Denied,
+                abi::EXPECT_BADMETHOD => got == SysStatus::BadMethod,
+                _ => false,
+            };
+            if ok {
+                cap_pass += 1;
+                if expect == abi::EXPECT_DENIED {
+                    cap_neg += 1;
+                }
+            }
+        }
+        let cap_total = abi::CONFORMANCE_CAP_VECTORS.len() as u32;
+        let wire_ok = tb_hal::abi_conformance_wire_ok();
+        let conductor_ok = tb_hal::abi_conformance_conductor_ok();
+        let all_pass = cap_pass == cap_total && wire_ok && conductor_ok;
+        let vectors = cap_total + 2; // the cap family + the wire vector + the conductor vector
+
+        tb_hal::serial_write_str("abi-conformance: planes=0x2 vectors=");
+        write_hex_u64(u64::from(vectors));
+        tb_hal::serial_write_str(" cap-pass=");
+        write_hex_u64(u64::from(cap_pass));
+        tb_hal::serial_write_str(" cap-total=");
+        write_hex_u64(u64::from(cap_total));
+        tb_hal::serial_write_str(" cap-neg-denied=");
+        write_hex_u64(u64::from(cap_neg));
+        tb_hal::serial_write_str(" wire=");
+        write_hex_u64(u64::from(wire_ok));
+        tb_hal::serial_write_str(" conductor=");
+        write_hex_u64(u64::from(conductor_ok));
+        tb_hal::serial_write_str(" all-pass=");
+        write_hex_u64(u64::from(all_pass));
+        tb_hal::serial_write_str(" agent=MINI-IN-PROCESS-SKELETON\n");
+    }
+
     // --- M12: the agent runtime -- AgentProcess as a first-class OS entity ----
     // Root spawns TWO agents, each in its OWN address space (M10) holding ONLY
     // its manifest-declared handles (M11), scheduled PREEMPTIVELY in ring3/EL0

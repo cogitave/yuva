@@ -194,6 +194,43 @@ pub const FROZEN_ORGANS: &[(u8, &str)] = &[
 ];
 
 // ===========================================================================
+// The FROZEN conformance-vector skeleton (docs/spec/yuva-abi-v1.md §6)
+//
+// The POSITIVE agent-agnostic demonstration: a mini/mock conformant agent
+// (in-kernel, sharing no code with the resident agent's M12/M38 runtime) binds
+// through the two planes and passes these FROZEN literal vectors. Committed
+// literals, NOT recomputed at test time. The Plane-1 family is the load-bearing
+// one -- it runs against the REAL `caps::dispatch` gate, so a RELAXED admission
+// (a negative vector returning Ok instead of Denied) FAILS the conformance lane.
+// ===========================================================================
+
+/// Expected outcome tag for a [`CONFORMANCE_CAP_VECTORS`] row: dispatch returns
+/// `SysStatus::Ok`.
+pub const EXPECT_OK: u8 = 0;
+/// Expected outcome: dispatch returns `SysStatus::Denied` (the rights gate
+/// fail-closed BEFORE any method body -- a NEGATIVE vector).
+pub const EXPECT_DENIED: u8 = 1;
+/// Expected outcome: dispatch returns `SysStatus::BadMethod` (the method space
+/// is closed; an unknown number is rejected).
+pub const EXPECT_BADMETHOD: u8 = 2;
+
+/// Frozen Plane-1 capability-dispatch conformance vectors:
+/// `(method, granted_rights_bits, expected_outcome)`. Run IN-KERNEL against the
+/// real `caps::dispatch` gate by minting a handle carrying `granted_rights_bits`
+/// and invoking `method`. The NEGATIVE (`EXPECT_DENIED`) rows are the runtime
+/// complement to the registry cross-check: a relaxed admission that returns `Ok`
+/// where `Denied` is frozen FAILS. The gate fail-closes before any method body,
+/// so the negative + `BadMethod` rows are body-independent (safe at any boot
+/// stage); the one positive uses `M_OBJECT_INSPECT` (proven `Ok` at M11).
+pub const CONFORMANCE_CAP_VECTORS: &[(u32, u32, u8)] = &[
+    (0, 1, EXPECT_OK),        // M_OBJECT_INSPECT, granted READ            -> Ok
+    (21, 1, EXPECT_DENIED),   // M_EMIT_EXTERNAL, granted READ (no EMIT)   -> Denied
+    (18, 1, EXPECT_DENIED),   // M_MEM_WRITE_PROC, granted READ (no WPROC) -> Denied
+    (16, 1, EXPECT_DENIED),   // M_AGENT_SPAWN, granted READ (no SPAWN)    -> Denied
+    (0xDEAD, 0x1FFF, EXPECT_BADMETHOD), // unknown method, all rights      -> BadMethod
+];
+
+// ===========================================================================
 // Frozen-internal consistency (compile-time; NOT a cross-check -- these pin the
 // literals' self-consistency so a typo in THIS file is a compile error)
 // ===========================================================================
