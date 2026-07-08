@@ -83,6 +83,12 @@ if ! printf '%s' "${OUTPUT}" | grep -qE -- '^abi: cap-plane=[0-9]+\.[0-9]+ .*sel
   echo ">> FAIL: the abi: version witness (cap-plane=.. selfcheck=0x1) was not seen" >&2
   exit 1
 fi
+# Yuva-ABI stage B: the method space is CLOSED past the ceiling (the caps-side
+# `required_right` pin -- an addition-past-ceiling reddens the boot before here).
+if ! printf '%s' "${OUTPUT}" | grep -qE -- '^abi: .*ceiling-closed=0x1'; then
+  echo ">> FAIL: the abi: witness is missing ceiling-closed=0x1 (the stage-B closed-method-space pin did not run)" >&2
+  exit 1
+fi
 
 # The conformance witness: BOTH planes, all-pass, and a NON-ZERO negative-vector
 # count (the relaxed-admission catcher must have actually run and been Denied).

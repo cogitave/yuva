@@ -26,11 +26,14 @@
 //! detectors -- neither is a self-comparison:
 //!
 //! * **Wire magics + domain labels + organ tags** -- the frozen literals here are
-//!   cross-checked against the LIVE `brand` / `attest` / `conductor` constants by
-//!   the `#[cfg(test)]` module at the bottom of THIS file (it runs under
+//!   cross-checked against the LIVE `brand` / `conductor` constants by the
+//!   `#[cfg(test)]` module at the bottom of THIS file (it runs under
 //!   `cargo test -p tb-encode` / `cargo miri test -p tb-encode`, the CI host-test
 //!   lane). A renumbered magic, a relabelled domain separator, or a renumbered
-//!   organ tag FAILS here.
+//!   organ tag FAILS here. As of Yuva-ABI stage B all FOUR frame magics are
+//!   single-sourced in `brand` (the standalone `attest.rs` `ATTEST_MAGIC` literal
+//!   was unified into `brand::MAGIC_ATTEST` and is now a re-export), so the
+//!   cross-check reads all four from `brand`.
 //! * **Method numbers + `required_right()` mapping + `Rights` bits** -- these live
 //!   in `tb-hal::caps` (a downstream crate) and its `required_right()` is private,
 //!   so they cannot be cross-checked from a `tb-encode` host test. They are
@@ -149,22 +152,22 @@ pub const FROZEN_RIGHTS: &[(u32, &str)] = &[
 ];
 
 // ===========================================================================
-// Plane 2 -- the FROZEN wire namespace (the FIRST place all four u16 frame
-// magics sit together under an enforced disjointness check; three are in `brand`,
-// ATTEST_MAGIC is standalone in `tb-encode::attest`)
+// Plane 2 -- the FROZEN wire namespace (all four u16 frame magics enumerated
+// together under an enforced disjointness check; as of Yuva-ABI stage B all four
+// are single-sourced in `brand`)
 // ===========================================================================
 
 /// The frozen `(magic, name)` snapshot of the FULL u16 frame-magic namespace,
-/// as ONE unit. `MAGIC_OPFRAME/RX/INFERWIRE` are single-sourced in `brand`;
-/// `ATTEST_MAGIC` is a standalone literal in `tb-encode::attest`. This registry
-/// is the first place all four are enumerated together with a pairwise
-/// disjointness check (the `brand` assert covers only the three). Cross-checked
-/// against the live `brand::MAGIC_*` + `attest::ATTEST_MAGIC` below.
+/// as ONE unit. As of Yuva-ABI stage B all four -- `MAGIC_OPFRAME/RX/INFERWIRE`
+/// and `MAGIC_ATTEST` (the former standalone `attest::ATTEST_MAGIC`) -- are
+/// single-sourced in `brand`. This registry still adds value as the enumerated
+/// union with its own four-way disjointness const-assert. Cross-checked against
+/// the live `brand::MAGIC_*` below.
 pub const FROZEN_WIRE_MAGICS: &[(u16, &str)] = &[
     (0x5956, "MAGIC_OPFRAME"),    // M25 operator-transcript frame
     (0x5957, "MAGIC_OPFRAME_RX"), // M28 operator-inbound command frame
     (0x5958, "MAGIC_INFERWIRE"),  // M30 inference-transport frame
-    (0x5959, "ATTEST_MAGIC"),     // M33 attestation-statement codec
+    (0x5959, "MAGIC_ATTEST"),     // M33 attestation-statement codec (brand::MAGIC_ATTEST)
 ];
 
 /// The frozen domain-separator label snapshot (the M28/M29/M30/M31/M33
@@ -282,8 +285,9 @@ mod abi_snapshot {
     use crate::attest;
     use crate::conductor::{self, Organ, N_ORGANS};
 
-    /// Each frozen frame magic equals its LIVE source constant (three in `brand`,
-    /// `ATTEST_MAGIC` in `tb-encode::attest`). A renumber of any live magic FAILS.
+    /// Each frozen frame magic equals its LIVE source constant. As of Yuva-ABI
+    /// stage B all four are single-sourced in `brand` (`ATTEST_MAGIC` is now a
+    /// re-export of `brand::MAGIC_ATTEST`). A renumber of any live magic FAILS.
     #[test]
     fn frozen_wire_magics_match_live() {
         for &(magic, name) in FROZEN_WIRE_MAGICS {
@@ -291,7 +295,7 @@ mod abi_snapshot {
                 "MAGIC_OPFRAME" => brand::MAGIC_OPFRAME,
                 "MAGIC_OPFRAME_RX" => brand::MAGIC_OPFRAME_RX,
                 "MAGIC_INFERWIRE" => brand::MAGIC_INFERWIRE,
-                "ATTEST_MAGIC" => attest::ATTEST_MAGIC,
+                "MAGIC_ATTEST" => brand::MAGIC_ATTEST,
                 other => panic!("abi: FROZEN_WIRE_MAGICS has an unmapped name {other:?}"),
             };
             assert_eq!(
@@ -299,18 +303,21 @@ mod abi_snapshot {
                 "abi: live wire magic {name} = {live:#06x} != frozen {magic:#06x} (renumber)"
             );
         }
+        // The `attest::ATTEST_MAGIC` re-export resolves to the same brand source
+        // (guards a future divergence of the codec-local alias from its home).
+        assert_eq!(attest::ATTEST_MAGIC, brand::MAGIC_ATTEST);
     }
 
     /// All four LIVE frame magics are pairwise disjoint (via the frozen==live
     /// bridge above + the frozen-literal disjointness const-assert). This is the
-    /// enforced union `brand` does not have (its assert covers only three).
+    /// enforced union; `brand`'s own KAT covers the same four.
     #[test]
     fn all_four_live_magics_disjoint() {
         let live = [
             brand::MAGIC_OPFRAME,
             brand::MAGIC_OPFRAME_RX,
             brand::MAGIC_INFERWIRE,
-            attest::ATTEST_MAGIC,
+            brand::MAGIC_ATTEST,
         ];
         for i in 0..live.len() {
             for j in (i + 1)..live.len() {

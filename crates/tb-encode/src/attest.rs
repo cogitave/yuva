@@ -31,7 +31,7 @@
 //! TEMPORARY|ACCEPTED-PERMANENT|QUARANTINED` per plan principle 1 -- the
 //! machine-checked carrier the M32 debt token feeds into).
 
-use brand::DOMSEP_M33_ATTEST;
+use brand::{DOMSEP_M33_ATTEST, MAGIC_ATTEST};
 
 /// The 32-byte digest width (matches `khash::uhash` / `sha256`).
 pub const ATTEST_DIGEST_LEN: usize = 32;
@@ -46,11 +46,13 @@ pub const MAX_MATERIALS: usize = 8;
 /// The largest sovereignty-ledger entry list this codec carries.
 pub const MAX_LEDGER: usize = 16;
 
-/// The attestation-statement codec magic (a NEW disk/wire-neutral 2-byte magic,
-/// family `0x5959` = the brand initial 'Y' twice, disjoint from the M25/M28/M30
-/// frame magics 0x5956/57/58 and the note-type half 0x5955). Spelled here (a
-/// codec-local constant, not a persisted/MAC'd cross-process byte), version 1.
-pub const ATTEST_MAGIC: u16 = 0x5959;
+/// The attestation-statement codec magic (`0x5959` = the brand initial 'Y'
+/// twice, disjoint from the M25/M28/M30 frame magics 0x5956/57/58 and the
+/// note-type half 0x5955), version 1. As of Yuva-ABI stage B this is
+/// SINGLE-SOURCED in `crates/brand` alongside the other three house frame magics
+/// ([`brand::MAGIC_ATTEST`]); this constant now RE-EXPORTS it (a byte-identical
+/// `0x5959`) rather than spelling the literal, so all four magics have one home.
+pub const ATTEST_MAGIC: u16 = MAGIC_ATTEST;
 /// The codec version byte.
 pub const ATTEST_VERSION: u8 = 1;
 
