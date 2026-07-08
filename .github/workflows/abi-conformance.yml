@@ -37,6 +37,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # DoD-6: the agent-neutrality lint -- fail closed if the specific
+      # resident-agent identity name "Cogi" reappears in kernel/src or crates/
+      # (Yuva is agent-agnostic). Cheap, no build needed; runs first.
+      - name: Agent-neutrality lint (no 'Cogi' in kernel/src or crates/)
+        run: bash scripts/check-agent-neutral.sh
+
       - name: Install Rust nightly (rust-src, llvm-tools)
         uses: dtolnay/rust-toolchain@master
         with:
