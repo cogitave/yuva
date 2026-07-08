@@ -81,6 +81,7 @@ GATED_MARKERS=(
   'M31: infer-e2e OK'
   'M33: prov-lineage OK'
   'M38: conductor OK'
+  'M39: corpus OK'
 )
 SKIP_SUFFIX='(substrate profile, agent organ skipped)'
 
