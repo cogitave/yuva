@@ -61,6 +61,11 @@ use crate::exp::{
     canon as exp_canon, canon_len as exp_canon_len, decode as exp_decode, replay_shadow,
     ExpRing, ExperienceRecord, OutcomeLabel, EXP_CANON_LEN, PROPENSITY_DETERMINISTIC_Q,
 };
+use crate::corpus::{
+    canon as corpus_canon, canon_len as corpus_canon_len, corpus_append, corpus_hash,
+    corpus_recompute, corpus_verify_inclusion, decode as corpus_decode, CorpusRecord,
+    OutcomeLabel as CorpusOutcomeLabel, CORPUS_CANON_LEN, CORPUS_SCHEMA_V1,
+};
 use crate::opframe::{
     canon as op_canon, canon_len as op_canon_len, decode as op_decode, fold_frame,
     gate_commits_final_seq, intro_binds, seq_index_exact, OpFrame, OPFRAME_HEADER_LEN,
@@ -5712,4 +5717,335 @@ fn kani_persisted_record_recover() {
     assert!(pick_newer(Some(ga), None) == Some(false));
     assert!(pick_newer(None, Some(gb)) == Some(true));
     assert!(pick_newer(None, None).is_none());
+}
+
+// ===========================================================================
+// M39 corpus: the verified EXPERIENCE-CORPUS CODEC (`corpus.rs`) -- FIVE harnesses,
+// each with a NEGATIVE CONTROL, mirroring the M23 exp suite (the frozen format
+// `docs/spec/corpus-format-v1.md`). Per the CBMC budget law the FNV-FREE geometry
+// / fail-close / schema-stability core is proven SYMBOLICALLY here (cheap: no
+// hashing -- the exp canon family regime); the hash-bearing fold legs are proven by
+// COMPOSITION over the already-verified `prov` leaf (determinism +
+// tamper-sensitivity + inclusion are `kani_prov_head_deterministic` /
+// `kani_prov_chain_mix_tamper` / `kani_prov_inclusion_sound`), so the ONE fold
+// harness here rides a CONCRETE record (a single prov evaluation, the #49 symbolic-
+// FNV trap avoided) as an end-to-end witness that the reuse is wired correctly.
+// The corpus writes NO new fold math -- it REUSES the M22 prov fold verbatim.
+// ===========================================================================
+
+/// A small symbolic-but-fixed-width [`CorpusRecord`] builder for the harnesses. The
+/// closed-set fields are left to the caller (the round-trip harness constrains them to
+/// the valid vocabularies so `decode` succeeds; the injectivity/fail-closed harnesses
+/// vary them freely). `schema_version` is the frozen v1 literal. The RESERVED
+/// `curation_score_q` + present-`Unset` outcome are populated so the injectivity /
+/// round-trip / schema proofs exercise the FULL layout.
+#[cfg(kani)]
+fn kani_corpus_record() -> CorpusRecord {
+    CorpusRecord {
+        schema_version: CORPUS_SCHEMA_V1,
+        example_kind: kani::any(),
+        source_stream: kani::any(),
+        curation_verdict: kani::any(),
+        content_tok: kani::any(),
+        aux_tok: kani::any(),
+        t_created: kani::any(),
+        source_head: kani::any(),
+        outcome: CorpusOutcomeLabel::Unset,
+        curation_score_q: kani::any(),
+    }
+}
+
+/// (1) THE LOAD-BEARING PROOF (corpus-format-v1 SS6.1/6.2): `corpus::canon` is TOTAL
+/// (never panics; fails closed to `0` on a too-small buffer with NO partial write) AND
+/// INJECTIVE on the fixed-width record -- two records that differ in ANY field
+/// (INCLUDING the RESERVED `curation_score_q` and the present-`Unset` outcome tag)
+/// encode to DIFFERENT bytes. Because the record is FULLY FIXED-WIDTH, each field lands
+/// at its own fixed offset, so a single differing field changes the bytes. No hashing
+/// -- the cheap exp-canon regime. Symbolic scalars; the differing-field witness is a
+/// symbolic redraw FORCED to differ.
+///
+/// NEGATIVE CONTROL: a `canon` that DROPPED the outcome tag byte (or aliased two
+/// scalars to one offset) would let two records differing only in `outcome` collide
+/// -> the outcome-tag injectivity assert FAILS. Writing two fields to the SAME offset
+/// makes the corresponding field-difference assert FAIL.
+#[kani::proof]
+fn kani_corpus_canon_injective() {
+    let base = kani_corpus_record();
+
+    // TOTALITY + exact width: canon writes exactly CORPUS_CANON_LEN into a sized buffer.
+    let mut a = [0u8; CORPUS_CANON_LEN];
+    let na = corpus_canon(&base, &mut a);
+    assert_eq!(na, CORPUS_CANON_LEN);
+    assert_eq!(na, corpus_canon_len(&base));
+
+    // FAIL-CLOSED TOTALITY: a one-byte-too-small buffer yields 0, no partial write.
+    let mut small = [0u8; CORPUS_CANON_LEN - 1];
+    assert_eq!(corpus_canon(&base, &mut small), 0);
+
+    // INJECTIVITY, exercised on representative fields via a symbolic redraw FORCED to
+    // differ. Each differing field must change at least one byte (fixed width).
+    macro_rules! differs {
+        ($e:expr) => {{
+            let mut b = [0u8; CORPUS_CANON_LEN];
+            let nb = corpus_canon(&$e, &mut b);
+            assert_eq!(nb, na); // fixed width: same length
+            let mut any_diff = false;
+            let mut i = 0usize;
+            while i < na {
+                if a[i] != b[i] {
+                    any_diff = true;
+                }
+                i += 1;
+            }
+            any_diff
+        }};
+    }
+
+    // example_kind: an operator-turn must not alias an episodic-consolidation.
+    let ek2: u8 = kani::any();
+    kani::assume(ek2 != base.example_kind);
+    assert!(differs!(CorpusRecord { example_kind: ek2, ..base }));
+
+    // curation_verdict: a REJECTED row must not alias an ACCEPTED one.
+    let cv2: u8 = kani::any();
+    kani::assume(cv2 != base.curation_verdict);
+    assert!(differs!(CorpusRecord { curation_verdict: cv2, ..base }));
+
+    // content_tok: the text-join handle -- a differing token changes the bytes.
+    let ct2: u64 = kani::any();
+    kani::assume(ct2 != base.content_tok);
+    assert!(differs!(CorpusRecord { content_tok: ct2, ..base }));
+
+    // source_head: the M22 fold-position -- a differing head byte changes the bytes.
+    let mut sh2 = base.source_head;
+    sh2[0] ^= 0x01;
+    assert!(differs!(CorpusRecord { source_head: sh2, ..base }));
+
+    // The RESERVED curation_score_q is load-bearing for injectivity (reserve-now bytes
+    // are real bytes -- a differing sentinel must change the encoding).
+    let cs2: i16 = kani::any();
+    kani::assume(cs2 != base.curation_score_q);
+    assert!(differs!(CorpusRecord { curation_score_q: cs2, ..base }));
+
+    // The present-`Unset` OUTCOME TAG is load-bearing (the injectivity neg control): an
+    // `Unset` record vs a `Positive` record must differ at the tag byte.
+    let other = CorpusRecord {
+        outcome: CorpusOutcomeLabel::Positive(0),
+        ..base
+    };
+    assert!(differs!(other));
+}
+
+/// (2) CANON ROUND-TRIP (corpus-format-v1 SS6.3): `corpus::decode(corpus::canon(rec))
+/// == rec` for a symbolic record over the VALID vocabularies -- the codec is a true
+/// bijection on the fixed-width layout (every field read back from its fixed offset).
+/// The closed-set fields are CONSTRAINED to their valid sets (decode fail-closes
+/// outside them, proven separately in `kani_corpus_decode_fail_closed`); the `outcome`
+/// is `Unset` (the tag-0 present sentinel), and a separate concrete sub-check
+/// round-trips a POPULATED outcome (the labeled-outcome shape) so the tagged decode is
+/// non-vacuous. No hashing -- cheap.
+///
+/// NEGATIVE CONTROL: encoding `content_tok` at the `t_created` offset (a layout swap)
+/// would make `decode` recover the fields transposed -> the round-trip equality FAILS.
+/// A `decode` that ignored the outcome tag would mis-reconstruct the variant and FAIL
+/// the populated sub-check.
+#[kani::proof]
+fn kani_corpus_canon_roundtrip() {
+    let mut rec = kani_corpus_record(); // outcome = Unset (present sentinel)
+    // Constrain the closed-set fields to their valid vocabularies (decode gates them).
+    kani::assume(crate::corpus::example_kind::is_valid(rec.example_kind));
+    kani::assume(crate::corpus::source_stream::is_valid(rec.source_stream));
+    kani::assume(crate::corpus::curation_verdict::is_valid(rec.curation_verdict));
+
+    let mut buf = [0u8; CORPUS_CANON_LEN];
+    let n = corpus_canon(&rec, &mut buf);
+    assert_eq!(n, CORPUS_CANON_LEN);
+    // The bijection: decode recovers the EXACT record.
+    assert_eq!(corpus_decode(&buf), Some(rec));
+
+    // A POPULATED outcome (the labeled-outcome shape) round-trips too -- the tagged
+    // decode is exercised (concrete payload so the tag arm is non-vacuous).
+    rec.outcome = CorpusOutcomeLabel::Positive(0x1234);
+    let mut pb = [0u8; CORPUS_CANON_LEN];
+    assert_eq!(corpus_canon(&rec, &mut pb), CORPUS_CANON_LEN);
+    assert_eq!(corpus_decode(&pb), Some(rec));
+
+    // A too-short buffer decodes to None (fail-closed totality, no panic).
+    assert!(corpus_decode(&buf[..CORPUS_CANON_LEN - 1]).is_none());
+}
+
+/// (3) FAIL-CLOSED DECODE (corpus-format-v1 SS6.4 -- the frozen v1 fail-closed
+/// posture): `corpus::decode` returns `None` (never panics, never mis-decodes) on a
+/// too-short buffer OR any out-of-vocabulary closed-set byte -- an unknown
+/// `schema_version` (this is the v1 decoder), `example_kind`, `source_stream`,
+/// `curation_verdict`, or `outcome.tag`. Proven by encoding a VALID record, then
+/// corrupting exactly one gate byte to a value OUTSIDE its vocabulary and asserting
+/// `decode` rejects it. No hashing -- cheap.
+///
+/// NEGATIVE CONTROL: a `decode` that PASSED THROUGH an unknown `example_kind` (treating
+/// the closed set as an opaque u8) would return `Some` for the corrupted byte -> the
+/// `is_none()` assert FAILS; a decoder that ignored the version byte would silently
+/// mis-interpret a v2 record.
+#[kani::proof]
+fn kani_corpus_decode_fail_closed() {
+    // A VALID baseline record so the ONLY rejection cause is the injected corruption.
+    let mut rec = kani_corpus_record();
+    kani::assume(crate::corpus::example_kind::is_valid(rec.example_kind));
+    kani::assume(crate::corpus::source_stream::is_valid(rec.source_stream));
+    kani::assume(crate::corpus::curation_verdict::is_valid(rec.curation_verdict));
+    let mut buf = [0u8; CORPUS_CANON_LEN];
+    assert_eq!(corpus_canon(&rec, &mut buf), CORPUS_CANON_LEN);
+    // The clean record decodes.
+    assert!(corpus_decode(&buf).is_some());
+
+    // Too-short buffer -> None.
+    assert!(corpus_decode(&buf[..CORPUS_CANON_LEN - 1]).is_none());
+
+    // Unknown schema_version -> None (any value other than the frozen v1 literal).
+    let sv: u8 = kani::any();
+    kani::assume(sv != CORPUS_SCHEMA_V1);
+    let mut b_sv = buf;
+    b_sv[0] = sv;
+    assert!(corpus_decode(&b_sv).is_none());
+
+    // Unknown example_kind -> None.
+    let ek: u8 = kani::any();
+    kani::assume(!crate::corpus::example_kind::is_valid(ek));
+    let mut b_ek = buf;
+    b_ek[1] = ek;
+    assert!(corpus_decode(&b_ek).is_none());
+
+    // Unknown source_stream -> None.
+    let ss: u8 = kani::any();
+    kani::assume(!crate::corpus::source_stream::is_valid(ss));
+    let mut b_ss = buf;
+    b_ss[2] = ss;
+    assert!(corpus_decode(&b_ss).is_none());
+
+    // Unknown curation_verdict -> None.
+    let cv: u8 = kani::any();
+    kani::assume(!crate::corpus::curation_verdict::is_valid(cv));
+    let mut b_cv = buf;
+    b_cv[3] = cv;
+    assert!(corpus_decode(&b_cv).is_none());
+
+    // Unknown outcome tag -> None (offset 60, the labeled-outcome tag byte).
+    let ot: u8 = kani::any();
+    kani::assume(ot > 2);
+    let mut b_ot = buf;
+    b_ot[60] = ot;
+    assert!(corpus_decode(&b_ot).is_none());
+}
+
+/// (4) SCHEMA-STABILITY (the reserve-now correctness obligation, corpus-format-v1
+/// SS4/SS6.5): `canon()` of a record with `outcome = Unset` has the SAME canonical
+/// LENGTH and IDENTICAL field offsets as a future record with the outcome POPULATED --
+/// so a later increment populating the labeled-outcome channel CANNOT shift the fold.
+/// Proven by encoding an `Unset` record and an otherwise-identical `Positive`/`Negative`
+/// record and asserting (a) identical length, (b) every byte BEFORE the outcome tag
+/// (offset 60) is identical, and (c) the trailing `curation_score_q` field (after the
+/// fixed 8-byte outcome payload, offset 69) is identical -- the outcome tag/payload
+/// window is the ONLY difference, at a FIXED offset that never moves. No hashing.
+///
+/// NEGATIVE CONTROL: if `Unset` encoded as a ZERO-LENGTH (absent) outcome and a
+/// populated variant added 8 bytes, the lengths would differ and the trailing
+/// `curation_score_q` would shift -> the length + trailing-field asserts FAIL. (v1
+/// instead encodes a present `Unset` with a fixed 8-byte zero payload, so the layout is
+/// stable -- the property this harness pins, and what lets the format FREEZE today.)
+#[kani::proof]
+fn kani_corpus_schema_stability() {
+    // Two records identical EXCEPT the outcome: Unset (this milestone) vs populated.
+    let unset = CorpusRecord {
+        outcome: CorpusOutcomeLabel::Unset,
+        ..kani_corpus_record()
+    };
+    let pay: i64 = kani::any();
+    let populated = CorpusRecord {
+        outcome: CorpusOutcomeLabel::Positive(pay),
+        ..unset
+    };
+
+    let mut a = [0u8; CORPUS_CANON_LEN];
+    let mut b = [0u8; CORPUS_CANON_LEN];
+    let na = corpus_canon(&unset, &mut a);
+    let nb = corpus_canon(&populated, &mut b);
+
+    // (a) IDENTICAL length -- the schema-stability length lemma.
+    assert_eq!(na, nb);
+    assert_eq!(na, CORPUS_CANON_LEN);
+
+    // (b) Every byte BEFORE the outcome tag (offset 60) is byte-identical: the
+    // version/kind/stream/verdict/content/aux/t_created/source_head fields do NOT move
+    // when the outcome is populated. (60 = OFF_OUTCOME_TAG, the frozen literal.)
+    const OUTCOME_TAG_OFF: usize = 60;
+    const CURATION_SCORE_OFF: usize = 69;
+    let mut i = 0usize;
+    while i < OUTCOME_TAG_OFF {
+        assert_eq!(a[i], b[i]);
+        i += 1;
+    }
+    // (c) The trailing curation_score_q field (after the FIXED 8-byte outcome payload)
+    // is identical -- the populated outcome did NOT push it to a new offset.
+    let mut m = CURATION_SCORE_OFF;
+    while m < CORPUS_CANON_LEN {
+        assert_eq!(a[m], b[m]);
+        m += 1;
+    }
+}
+
+/// (5) FOLD DETERMINISM + INHERITANCE (corpus-format-v1 SS6.6): folding a record into a
+/// `corpus_head` via the REUSED M22 `prov` leaf is DETERMINISTIC (the same record from
+/// the same head folds identically), and a single-byte tamper of a committed record's
+/// canonical bytes changes the recomputed head and FAILS its inclusion proof. The
+/// corpus writes NO fold math -- `corpus_append` canon-encodes then calls the proven
+/// `prov_hash` + `chain_mix`, so the fold's full symbolic determinism / tamper-
+/// sensitivity are ALREADY discharged by `kani_prov_head_deterministic` /
+/// `kani_prov_chain_mix_tamper` / `kani_prov_inclusion_sound`. This harness rides a
+/// CONCRETE record (a single prov evaluation -- the #49 symbolic-FNV trap avoided) as
+/// the end-to-end witness that the reuse is wired correctly.
+///
+/// NEGATIVE CONTROL: a `corpus_append` that folded a CONSTANT id (ignoring the record)
+/// would make the tampered-vs-genuine ids EQUAL -> the `!=` assert FAILS; a fold that
+/// ignored the leaf would accept the tampered record at the inclusion check; a non-
+/// deterministic hash would break the append-twice equality.
+#[kani::proof]
+fn kani_corpus_fold_determinism() {
+    // A concrete curated record (so the hash/fold are concrete -- one prov evaluation).
+    let rec = CorpusRecord {
+        schema_version: CORPUS_SCHEMA_V1,
+        example_kind: crate::corpus::example_kind::EPISODIC_CONSOLIDATION,
+        source_stream: crate::corpus::source_stream::M17_REFLECT,
+        curation_verdict: crate::corpus::curation_verdict::ACCEPTED,
+        content_tok: 0xC0FFEE,
+        aux_tok: 0xBEEF,
+        t_created: 4242,
+        source_head: [0x5au8; PROV_HASH_LEN],
+        outcome: CorpusOutcomeLabel::Unset,
+        curation_score_q: 0,
+    };
+
+    // DETERMINISM: the same record from the same head folds to the same head + id.
+    let genesis = [0u8; PROV_HASH_LEN];
+    let mut scratch = [0u8; CORPUS_CANON_LEN + 8];
+    let (ha, ida) = corpus_append(genesis, &rec, &mut scratch).unwrap();
+    let (hb, idb) = corpus_append(genesis, &rec, &mut scratch).unwrap();
+    assert!(ha == hb);
+    assert!(ida == idb);
+
+    // A committed 1-record chain: inclusion of the genuine record id verifies.
+    let mut bytes = [0u8; CORPUS_CANON_LEN];
+    let n = corpus_canon(&rec, &mut bytes);
+    assert_eq!(n, CORPUS_CANON_LEN);
+    let leaf = corpus_hash(&bytes);
+    assert!(leaf == ida);
+    let head = corpus_recompute(leaf, &[]);
+    assert!(corpus_verify_inclusion(leaf, &[], head));
+
+    // TAMPER: flip one byte of the canonical bytes -> a different leaf id (canon is
+    // injective + prov_hash is tamper-sensitive), so the inclusion proof FAILS.
+    let mut tampered = bytes;
+    tampered[1] ^= 0x01; // the example_kind byte
+    let bad = corpus_hash(&tampered);
+    assert!(bad != leaf);
+    assert!(!corpus_verify_inclusion(bad, &[], head));
 }

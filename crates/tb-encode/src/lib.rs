@@ -308,6 +308,7 @@ pub mod attest;
 pub mod bakeoff;
 pub mod blkfmt;
 pub mod conductor;
+pub mod corpus;
 pub mod el2_trap;
 pub mod exittel;
 pub mod exp;
