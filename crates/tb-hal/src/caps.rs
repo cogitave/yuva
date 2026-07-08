@@ -261,6 +261,14 @@ pub const M_BLOCK_READ: u32 = 31;
 /// address-space-dependent-body precedent); the number is registered HERE so
 /// the right is gate-checked at the chokepoint and the method space stays
 /// closed (33+ is still `BadMethod`).
+///
+/// **Yuva-ABI (stage A):** this is the HIGHEST registered method number, the
+/// append-only ceiling. It is no longer "highest by convention" -- it is pinned
+/// as `tb_encode::abi::METHOD_CEILING` and machine-checked against this live
+/// surface (numbers + `required_right()` mapping + `Rights` bits) by
+/// [`abi_registry_selfcheck`], the in-kernel boot self-test. A renumber, a
+/// relaxed right, or an addition past 32 reddens every boot. See
+/// `docs/spec/yuva-abi-v1.md` §4.
 pub const M_MODEL_INVOKE_BYTES: u32 = 32;
 
 /// Map a method number to the single right it requires, or `None` for an
