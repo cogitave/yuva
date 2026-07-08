@@ -5421,7 +5421,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ---- M39: the in-kernel EXPERIENCE-CORPUS seam (Phase-1 dataset moat) ------
     // The FLAGSHIP ungated Phase-1 move: turn Yuva's M17 CONSOLIDATION outcomes into
     // a GROWING, CURATED, tamper-evident EXPERIENCE CORPUS -- the dataset moat a future
-    // sovereign Cogi model would fine-tune on -- with NO live model, by REUSING the M22
+    // sovereign agent model would fine-tune on -- with NO live model, by REUSING the M22
     // prov fold verbatim under a SEPARATE `corpus_head`. Every boot the kernel drives
     // the REAL M17 `consolidation_cycle` over a seeded scenario: `distill()`'s survivor
     // + `reflect_inner()`'s insight are each CURATED by a DECLARED (not learned)
