@@ -1381,14 +1381,26 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     //       LABEL, not a GATE -- nothing consumes it to reject a peer at stage A).
     {
         use tb_hal::abi;
-        use tb_hal::caps::{self, ObjKind, Rights, SyscallArgs, SysStatus};
+        use tb_hal::caps::{self, AbiSelfcheck, ObjKind, Rights, SyscallArgs, SysStatus};
 
+        // The self-check NAMES the offending seam so a seeded drift reddens the
+        // boot with the offending index, not just a bare failure.
         let verified = match caps::abi_registry_selfcheck() {
-            Some(n) => n,
-            None => {
-                tb_hal::serial_write_str(
-                    "abi: FAIL registry drift -- frozen tb-encode::abi != live M11 seam\n",
-                );
+            AbiSelfcheck::Ok(n) => n,
+            drift => {
+                let (kind, index): (&str, u32) = match drift {
+                    AbiSelfcheck::MethodIdDrift(id) => ("method-id-renumber", id),
+                    AbiSelfcheck::RequiredRightDrift(id) => ("required-right-relaxed", id),
+                    AbiSelfcheck::CeilingDrift(m) => ("append-only-ceiling", m),
+                    AbiSelfcheck::MethodCountDrift(c) => ("method-added", c),
+                    AbiSelfcheck::RightsBitDrift(b) => ("rights-bit-changed", b),
+                    AbiSelfcheck::Ok(_) => ("none", 0),
+                };
+                tb_hal::serial_write_str("abi: FAIL registry drift -- frozen tb-encode::abi != live M11 seam kind=");
+                tb_hal::serial_write_str(kind);
+                tb_hal::serial_write_str(" index=");
+                write_hex_u64(u64::from(index));
+                tb_hal::serial_write_str("\n");
                 tb_hal::fail_exit();
             }
         };
