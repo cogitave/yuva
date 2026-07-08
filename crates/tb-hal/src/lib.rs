@@ -39,6 +39,10 @@ extern crate alloc;
 
 mod arch;
 pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
+// Yuva-ABI stage A: re-export the FROZEN ABI registry so the kernel reads the
+// version token + frozen literals through tb-hal (the facade), without taking a
+// direct tb-encode dep. The caps-side cross-check is `caps::abi_registry_selfcheck`.
+pub use tb_encode::abi;
 mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
 mod ipc; // M14: SAFE inter-agent IPC channel core (bounded ordered FIFO + cap move).
 mod blocks; // M15: SAFE shared-memory block core (pinned M6 frames + RECORD CAS).
