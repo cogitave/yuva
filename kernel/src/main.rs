@@ -54,6 +54,7 @@ extern crate alloc;
 // untouched machine-truth markers. DEFAULT-OFF; see the module header and
 // docs/proposals/industrial-boot.md.
 mod bootreport;
+mod profile;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -1724,6 +1725,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // slot assignment is unchanged from the green build (WITNESS A spawns nothing).
     let agent_c = tb_hal::agent_spawn(&MANIFEST_A, STACK_AGENT_C.take());
     let agent_d = tb_hal::agent_spawn(&MANIFEST_B, STACK_AGENT_D.take());
+    // Boot-Profiles stage A: M13 is an AGENT-ORGAN selftest — gated. The two
+    // spawns above stay UNCONDITIONAL (they are the M14 IPC peers, and M14 is
+    // core). In the substrate profile the memory-organ substrate is never
+    // exercised; the marker takes the honest skip form.
+    if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle, ObjKind, Rights, SysStatus};
 
@@ -1884,6 +1890,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M13: memory OK\n"); // <-- the M13 DoD marker
+    } else {
+        tb_hal::serial_write_str("M13: memory OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- M14: inter-agent IPC -- capability-passing channels + ordered streams --
     // Two agents communicate over an ORDERED, BOUNDED, BIDIRECTIONAL message
@@ -2631,6 +2640,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // names bind ONE mock contract = the backend-agnostic proof. Timer is
     // disarmed (single-core, interrupts masked). ZERO new unsafe. Marker:
     // "M16: infer OK".
+    // Boot-Profiles stage A: M16 inference-bridge is an agent organ — gated.
+    if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
 
@@ -2730,6 +2741,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M16: infer OK\n"); // <-- the M16 DoD marker
+    } else {
+        tb_hal::serial_write_str("M16: infer OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- M17: sleep-time consolidation / reflection / forgetting daemons ------
     // Three sleep-time memory daemons (CONSOLIDATE / REFLECT / FORGET) realized as
@@ -2739,6 +2753,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // marker drives the cycle SYNCHRONOUSLY over a WITNESS-A home (the M13 idiom);
     // ZERO new unsafe (all the M17 work is safe mutation of the M13 substrate).
     // DoD marker: "M17: consolidate OK".
+    // Boot-Profiles stage A: M17 consolidation is an agent organ — gated.
+    if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
 
@@ -2932,6 +2948,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M17: consolidate OK\n"); // <-- the M17 DoD marker
+    } else {
+        tb_hal::serial_write_str("M17: consolidate OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- M18: frozen-kernel self-improvement harness + held-out evaluator -----
     // An agent extends its OWN T4 skill library under a FROZEN-KERNEL /
@@ -2945,6 +2964,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // NOT method-numbered, so an agent literally cannot invoke it. The timer is
     // disarmed (single-core, interrupts masked -- the RefCell discipline holds);
     // ZERO new unsafe. DoD marker: "M18: evolve OK".
+    // Boot-Profiles stage A: M18 evolve is an organ-EXERCISING selftest (it
+    // drives M_MEM_WRITE_PROC skill writes expecting Ok) — gated so the §2.4
+    // chokepoint denial cannot fail-exit the boot. The admission MECHANISM
+    // (capability tiers + fail-closed deny path) stays compiled and active as
+    // the deny gate; only the exercise is skipped.
+    if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
 
@@ -3135,6 +3160,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M18: evolve OK\n"); // <-- the M18 DoD marker
+    } else {
+        tb_hal::serial_write_str("M18: evolve OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- M18.1: MANDATORY human-approval gate for the HIGH-IMPACT / -----------
     //     EMIT_EXTERNAL self-improvement class (SELF-IMPROVEMENT-SPEC §8). The
@@ -3152,6 +3180,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     //     unsafe; NO new ABI method (the high-impact propose rides the existing
     //     M_MEM_WRITE_PROC op-selector; the merge gate is a kernel-side facade,
     //     not method-numbered). DoD marker: "M18.1: approval-gate OK".
+    // Boot-Profiles stage A: M18.1 approval-gate is an organ-EXERCISING selftest
+    // (it drives M_MEM_WRITE_PROC skill writes) — gated. The admission mechanism
+    // itself stays as the deny gate (§2.3).
+    if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
 
@@ -3304,6 +3336,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     tb_hal::serial_write_str("M18.1: approval-gate OK\n"); // <-- the M18.1 DoD marker
+    } else {
+        tb_hal::serial_write_str("M18.1: approval-gate OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- M18.2: ROTATING HELD-OUT EVALUATOR PARTITION (anti-Goodhart) ----------
     //     SELF-IMPROVEMENT-SPEC ("Measurer-measured separation"): a SINGLE visible
@@ -3586,9 +3621,17 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             "mem: N>1 held-out partitions kernel-owned + unnameable, rotation (kernel counter) picks the hidden scorer != the visible partition, visible-tuned candidate rejected by the rotated scorer (anti-Goodhart decoupling == the M11 rights-mask invariant)\n",
         );
     }
-    m182_held_out_selftest();
-
-    tb_hal::serial_write_str("M18.2: held-out OK\n"); // <-- the M18.2 DoD marker
+    // Boot-Profiles stage A DEVIATION (noted): the proposal's explicit gated set
+    // (§2.3) lists ~17 blocks and predates M18.2; but M18.2 held-out drives
+    // M_MEM_WRITE_PROC skill writes expecting Ok (same class as M18/M18.1), which
+    // the §2.4 chokepoint denial would fail-exit — so it MUST be gated too. The
+    // fn stays DEFINED (free) and is called only on the agent arm.
+    if profile::agent_organs_enabled() {
+        m182_held_out_selftest();
+        tb_hal::serial_write_str("M18.2: held-out OK\n"); // <-- the M18.2 DoD marker
+    } else {
+        tb_hal::serial_write_str("M18.2: held-out OK (substrate profile, agent organ skipped)\n");
+    }
 
     // --- L2.0: VMX-root + 1-instruction nested guest + caught VM-exit --------
     // The FIRST rung of the L2 sovereignty track (tb-core, a from-scratch Type-1
@@ -4139,7 +4182,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ALL value computation is the host-verifiable `tb_encode::kancell` (no_std,
     // forbid(unsafe), NO float); this kernel stays zero-unsafe and only branches on
     // the returned `KanProof` bools. DoD: "M21: kan-policy OK".
-    {
+    if profile::agent_organs_enabled() {
         let kp = tb_hal::kan_selftest();
         // FAIL-CLOSED: both structural validators must pass AND the round-trip
         // deviation must be within the shipped bound. Any failure withholds the
@@ -4178,6 +4221,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // hollow pass without the loader/validators FAILS) and reject a future
         // `(no table, skipped)` variant.
         tb_hal::serial_write_str("M21: kan-policy OK (heuristic floor, gate-not-met)\n");
+    } else {
+        tb_hal::serial_write_str("M21: kan-policy OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M22: verified memory PROVENANCE LEDGER (mnemonic sovereignty) ---------
@@ -4199,7 +4244,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // The head is kept IN-RAM this milestone (it does NOT ride the M20 superblock),
     // so the M20 two-phase commit + persist_selftest gen-continuity stay byte-
     // identical (zero M20/M21 regression). DoD: "M22: provenance OK".
-    {
+    if profile::agent_organs_enabled() {
         let pp = tb_hal::prov_selftest();
         // FAIL-CLOSED: the clean ledger must verify (recompute==head + faithful
         // reconstruction) AND a genuine inclusion proof must verify AND the injected
@@ -4234,6 +4279,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // no device to be absent, so there is NO '(no ledger, skipped)' variant: a
         // skip is never legitimate here (the run-scripts reject one).
         tb_hal::serial_write_str("M22: provenance OK\n");
+    } else {
+        tb_hal::serial_write_str("M22: provenance OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M23: verified EXPERIENCE CODEC + counterfactual shadow-recording -------
@@ -4259,7 +4306,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // human-operator oracle is M25's). The honesty token
     // `oracle=DECLARED-PROXY-DEFERRED-M24` is machine-emitted so the marker
     // MECHANICALLY cannot overclaim. DoD: "M23: experience OK".
-    {
+    if profile::agent_organs_enabled() {
         let xp = tb_hal::exp_selftest();
         // FAIL-CLOSED: the clean log must verify (recompute==head) AND a genuine
         // inclusion proof must verify AND a recorded feats row must replay BIT-EXACTLY
@@ -4313,6 +4360,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // recorded / replay-deterministic / tamper-evident terminology (no
         // validated/evaluated -- the deterministic-logging honesty discipline).
         tb_hal::serial_write_str("M23: experience OK\n");
+    } else {
+        tb_hal::serial_write_str("M23: experience OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M24: the HONEST ACTIVATION GATE (the honest #72 resolution) ------------
@@ -4334,7 +4383,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // enum. The experience is kept IN-RAM (durable spill deferred -- the gate runs on
     // the in-RAM accumulated experience), so M20's two-phase commit + persist_selftest
     // stay byte-identical. DoD: "M24: bakeoff OK".
-    {
+    if profile::agent_organs_enabled() {
         let bo = tb_hal::bakeoff_selftest();
         // Render the witness fields + the marker. FAIL-CLOSED: only the Failed arm
         // withholds the marker + exits red (the machinery did not execute a required
@@ -4398,6 +4447,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 );
             }
         }
+    } else {
+        tb_hal::serial_write_str("M24: bakeoff OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M31 (part 1 of 2): the channel-free MOCK-DETERMINISTIC inference e2e ----
@@ -4423,7 +4474,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // M25 tx_head (the designed M31 displacement) + the M31 witness after M30.
     // This block prints NOTHING on success (the witness rides part 2); any fault
     // is a hard fail (#65 -- red NOW).
-    let (m31_req_id, m31_digest32, m31_prompt, m31_resp, m31_recalls) = {
+    // Boot-Profiles stage A (§2.3): M31-part-1 is the cognitive e2e — gated. Its
+    // function-scope tuple feeds m31_fold/M25 and M31-part-2, all themselves
+    // gated, so in substrate it is a dummy that is never consumed. M31-part-1
+    // prints NOTHING on success (the witness rides part 2), so there is no marker
+    // to skip here; the M31 skip marker is emitted by part 2.
+    let (m31_req_id, m31_digest32, m31_prompt, m31_resp, m31_recalls) = if profile::agent_organs_enabled() {
         use tb_hal::caps::{self, Handle};
 
         fn m31_fail(why: &str) -> ! {
@@ -4553,6 +4609,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         let req_id = tb_hal::infer_req_id_for(&prompt);
         let digest32 = tb_hal::infer_resp_digest(&resp);
         (req_id, digest32, prompt, resp, recalls)
+    } else {
+        // Substrate: dummy tuple, never consumed (all consumers are gated off).
+        (0u64, [0u8; 32], Vec::new(), Vec::new(), 0u64)
     };
     let m31_fold = tb_hal::infer_fold_payload(m31_req_id, &m31_digest32);
 
@@ -4588,7 +4647,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // DIGEST, never raw model bytes), so the committed final seq covers the
     // inference evidence (frames 4 -> 5; the tx_head displacement is the
     // designed M31 change -- every OTHER fold head stays byte-identical).
-    {
+    if profile::agent_organs_enabled() {
         let op = tb_hal::opframe_selftest(&m31_fold);
         // FAIL-CLOSED: the clean transcript must verify (recompute==head) AND a genuine
         // inclusion proof must verify AND the seq must be strictly monotone AND the
@@ -4645,6 +4704,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // tamper-evident / instance-binding terminology (no validated/evaluated -- the
         // honest discipline: the channel works, NOT that a policy was validated).
         tb_hal::serial_write_str("M25: operator OK\n");
+    } else {
+        tb_hal::serial_write_str("M25: operator OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M26: verified EL2 EXIT-TELEMETRY producer (the OS records its workload) -
@@ -4669,7 +4730,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // stay byte-identical. The token `signal=OBSERVATIONAL-NONCAUSAL` is machine-emitted
     // so the marker mechanically cannot claim a causal state-signal. DoD: "M26:
     // exit-telemetry OK".
-    {
+    if profile::agent_organs_enabled() {
         let et = tb_hal::exittel_selftest();
         // FAIL-CLOSED: every synthetic ESR must classify to an in-range, distinct class
         // AND the recorded buckets/counts must be exact AND the clean fold + inclusion
@@ -4723,6 +4784,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // marker uses ONLY recorded / observational terminology (no validated/causal/
         // learned -- the PRODUCER-only honesty discipline).
         tb_hal::serial_write_str("M26: exit-telemetry OK\n");
+    } else {
+        tb_hal::serial_write_str("M26: exit-telemetry OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M28: verified OPERATOR-INBOUND command (the exogenous-oracle CLOSURE) ----
@@ -4762,7 +4825,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // claims live ONLY in structured stripped tokens, so the run-scripts' bare-'crypto'
     // prose reject stays maximally strict). DoD: "M28: operator-cmd OK" then
     // "M29: khash-mac OK".
-    {
+    if profile::agent_organs_enabled() {
         let oc = tb_hal::opcmd_selftest();
         // FAIL-CLOSED: the valid command must be ACCEPTED AND each of the four attacks
         // (stale-nonce / wrong-head / single-credential / flipped-MAC) must be REJECTED
@@ -4850,6 +4913,22 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // verified khash leaf this boot (the KAT + the five gate legs above all held,
         // fail-closed). Deliberately NO 'crypto' substring in the marker text.
         tb_hal::serial_write_str("M29: khash-mac OK\n");
+    } else {
+        // Boot-Profiles stage A (§3.3): M28 operator-cmd is an agent organ —
+        // skipped. But the khash primitive (a keyed BLAKE2s-256 MAC) is a
+        // SUBSTRATE integrity feature, NOT an organ, so it stays live: the
+        // standalone RFC 7693 KAT emits the SAME khash: + M29: lines at this
+        // stream position. Exactly ONE KAT emission per boot on either profile
+        // (the agent arm's khash line rode opcmd_selftest, byte-identical).
+        tb_hal::serial_write_str("M28: operator-cmd OK (substrate profile, agent organ skipped)\n");
+        if !tb_hal::khash_kat_selftest() {
+            tb_hal::serial_write_str("M29: khash-mac FAIL kat=RFC7693\n");
+            tb_hal::fail_exit();
+        }
+        tb_hal::serial_write_str(
+            "khash: prim=BLAKE2S-256 keylen=32 tag=128 kat=RFC7693-PASS sec=ASSUMED-FROM-LITERATURE sidechannel=NOT-CLAIMED\n",
+        );
+        tb_hal::serial_write_str("M29: khash-mac OK\n");
     }
 
     // ---- M30: verified inference transport (the sovereignty A-chain channel) ----
@@ -4881,7 +4960,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // M31: a Proven channel hands its (slot, revealed key K, host nonce N)
     // forward so the M31 wire legs can MAC/verify under the NEW infer domain.
     let mut m31_chan: Option<(u32, [u8; 32], [u8; 16])> = None;
-    {
+    if profile::agent_organs_enabled() {
         match tb_hal::xport_selftest() {
             tb_hal::InferChanProof::Absent => {
                 // The LOUD graceful skip -- legitimate ONLY on lanes that attach no
@@ -4971,6 +5050,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 m31_chan = Some((slot, key, nonce));
             }
         }
+    } else {
+        tb_hal::serial_write_str("M30: infer-transport OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M31 (part 2 of 2): the inference-adapter WIRE legs + witness + marker --
@@ -5004,7 +5085,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // -- the skip variant deliberately LACKS the backend token, so it can never
     // satisfy the cumulative-tail grep; every peer-attached lane rejects it by
     // name. DoD: "M31: infer-e2e OK backend=MOCK-DETERMINISTIC".
-    {
+    if profile::agent_organs_enabled() {
         match m31_chan {
             None => {
                 // The LOUD graceful skip (no backend token -- structurally
@@ -5106,6 +5187,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                 }
             }
         }
+    } else {
+        tb_hal::serial_write_str("M31: infer-e2e OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M33 (stage B): the provenance-lineage PERSISTED SIGNED HEAD ----
@@ -5126,7 +5209,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // NOTHING against the host holding the key (`exclusivity=OFF-PLATFORM-ONLY`);
     // `key=SIMULATED-ENROLLED-CI-CUSTODIED`; `state=SIMULATED-REUSE-OK-NO-
     // SECURITY`. DoD (stage B): "M33: prov-lineage OK".
-    {
+    if profile::agent_organs_enabled() {
         let m = tb_hal::m33_prov_selftest();
         // FAIL-CLOSED (the #65 idiom): every KAT leg + BOTH regional tamper
         // controls + the compiled-in FULL-parameter signature verify + the
@@ -5190,6 +5273,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // The stage-B marker -- NO bare claim word (all claims live in the
         // stripped structured tokens above, the M29 marker discipline).
         tb_hal::serial_write_str("M33: prov-lineage OK\n");
+    } else {
+        tb_hal::serial_write_str("M33: prov-lineage OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- M38 (stage B): the kernel-integrated CONDUCTOR -- TRINITY ADOPT-1 ----
@@ -5220,7 +5305,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // identical except the new conductor activity. Any fault is a hard fail
     // (#65 -- red NOW). Offline + deterministic: NO network, NO secret, all organs
     // are mocks (the real M32 organ is the #90 follow-up).
-    {
+    if profile::agent_organs_enabled() {
         use tb_hal::caps::{self, Handle};
 
         fn m38_fail(why: &str) -> ! {
@@ -5475,6 +5560,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // observation implements the proposal's gate so the operator can flip
         // the line on later review.
         bootreport::observe_m38_ok();
+    } else {
+        // The substrate M38 skip form deliberately LACKS turns=/verdict=ACCEPT,
+        // so no required lane's pinned cumulative tail passes on a substrate
+        // stream (§2.3); the `skipped` suffix also trips the run-x86_64.sh:709
+        // regex tripwire if it ever leaked into a required lane.
+        tb_hal::serial_write_str("M38: conductor OK (substrate profile, agent organ skipped)\n");
     }
 
     // ---- aL2.4b: the FULL KERNEL as a stage-2-confined EL1 guest (the M34
@@ -5604,6 +5695,15 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     );
 
     // --- Industrial Boot (#106): paint the human boot presentation ----------
+    // Boot-Profiles stage A (§2.5): the substrate-profile witness + the anti-
+    // hollow, clean-exit-sited `PROFILE: substrate OK` tail — emitted ONLY when
+    // `yuva.profile=substrate` was selected (a NO-OP on the agent profile, so
+    // the default stream gains ZERO new bytes). Placed at the clean-exit site so
+    // a crash-before-organs cannot impersonate a clean omission; exercises the
+    // chokepoint denial + promotion refusal in-boot (DoD-3) against agent_c's
+    // born-with home before emitting the green tail.
+    profile::emit_substrate_witness(agent_c);
+
     // The SINGLE render site, at the end of the cumulative chain. Self-gates on
     // the runtime mode: a NO-OP in the DEFAULT raw mode (every CI lane, the
     // re-entrant EL1 guest, aarch64-host at stage A), so reaching here on a CI

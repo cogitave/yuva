@@ -36,6 +36,7 @@
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tb_caps_core::CapTable;
 
@@ -1259,6 +1260,44 @@ impl HandleTable {
     }
 }
 
+/// Boot-Profiles stage A (§2.4): the substrate-profile COGNITIVE-DENY latch.
+///
+/// DEFAULT `false` — the agent profile (every CI lane, the re-entrant EL1 guest,
+/// and EVERY boot with no `yuva.profile=substrate` cmdline token), so the
+/// dispatch chokepoint is byte-for-byte unchanged and the M0..M38 stream is
+/// identical. When the kernel parses `yuva.profile=substrate` it flips this to
+/// `true` via [`set_cognitive_deny`]; from then on the four AGENT-ORGAN method
+/// families ([`M_MEM_RECALL`], [`M_MEM_WRITE_PROC`], [`M_MODEL_INVOKE`],
+/// [`M_MODEL_INVOKE_BYTES`]) FAIL CLOSED with [`SysStatus::Denied`] at this
+/// single chokepoint — so an organ is not merely un-exercised (the gated
+/// selftests) but structurally NOT ADMITTED, even for future in-image code.
+static COGNITIVE_DENY: AtomicBool = AtomicBool::new(false);
+
+/// Latch (or clear) the substrate-profile cognitive-syscall denial. Called ONCE
+/// from the kernel's `yuva.profile=` parse (`kernel/src/profile.rs`) before any
+/// agent runs; never on the agent profile, so the default latch stays `false`.
+pub fn set_cognitive_deny(v: bool) {
+    COGNITIVE_DENY.store(v, Ordering::Relaxed);
+}
+
+/// Read the substrate-profile cognitive-deny latch (for the in-boot DoD-3
+/// negative check, which asserts a real `Denied` at the chokepoint).
+pub fn cognitive_deny() -> bool {
+    COGNITIVE_DENY.load(Ordering::Relaxed)
+}
+
+/// The four AGENT-ORGAN method families denied at the chokepoint in the
+/// substrate profile (§2.4). Deliberately NOT the plain M13 `M_MEM_WRITE`/
+/// `M_MEM_READ` verbs — those ride the (gated) M13 selftest; this set is the
+/// cognitive surface (procedural-memory write, ranked recall, model invoke,
+/// model invoke-bytes) an admitted agent organ reaches for.
+fn is_cognitive_family(method: u32) -> bool {
+    matches!(
+        method,
+        M_MEM_RECALL | M_MEM_WRITE_PROC | M_MODEL_INVOKE | M_MODEL_INVOKE_BYTES
+    )
+}
+
 /// THE one numbered, capability-checked dispatcher (pure, safe). Resolves
 /// `args.handle` against the CALLER's `table`, checks the right the method
 /// requires, runs the method, and returns a CLOSED [`SysReturn`]. This is the
@@ -1266,6 +1305,13 @@ impl HandleTable {
 /// acts ONLY on the presented capability's rights -- never ambient authority
 /// (the confused-deputy stop).
 pub fn dispatch(table: &mut HandleTable, args: &SyscallArgs) -> SysReturn {
+    // Boot-Profiles stage A (§2.4): in the substrate profile the cognitive
+    // families are refused at the chokepoint, fail-closed, BEFORE any handle
+    // resolution — organs are not admissible, not merely un-exercised. A no-op
+    // on the agent profile (the latch is `false`), so byte-identity holds.
+    if COGNITIVE_DENY.load(Ordering::Relaxed) && is_cognitive_family(args.method) {
+        return SysReturn::err(SysStatus::Denied);
+    }
     let need = match required_right(args.method) {
         Some(r) => r,
         None => return SysReturn::err(SysStatus::BadMethod),

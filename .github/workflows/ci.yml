@@ -217,3 +217,52 @@ jobs:
             -e QEMU_TIMEOUT="${QEMU_TIMEOUT}" \
             "${{ matrix.boot_in_container }}" \
             bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ${{ matrix.qemu_pkg }} xxd >/dev/null && qemu-system-aarch64 --version | head -1 && bash ${{ matrix.run }}"
+
+  # Boot Profiles stage A — the SUBSTRATE lane (an ADDITIONAL, opt-in x86_64 lane;
+  # the required build-and-boot lanes above are untouched and stay the
+  # byte-identical agent default). Boots the SAME x86 kernel with
+  # `-append yuva.profile=substrate` and asserts: the profile-scoped micro-VMM
+  # core RAN (M0..M12/M14/M15/M19/M20/M29/L2/M27/ABI), the M13..M38 chain is
+  # INTACT in the exact `(substrate profile, agent organ skipped)` skip form, the
+  # census-derived agent-organ witness families are ABSENT-BY-OMISSION (organs
+  # proven not to have run — the anti-hollow inversion, §8.2c), the M11 chokepoint
+  # denial + M18.1 promotion refusal were EXERCISED in-boot (DoD-3), and the
+  # profile witness + `PROFILE: substrate OK` tail are honest. Also runs the
+  # §8.2a default-boot tripwire (same binary, no cmdline ⇒ agent-complete, no
+  # profile/skip leakage) as a per-run guard against profile bleed into the
+  # default. x86_64-only: no EL2 there, so no stage-A substrate boot witnesses
+  # guest-running (guest-evidence=AARCH64-AGENT-LANE-ONLY).
+  substrate-boot:
+    name: boot & assert (substrate profile, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
+          components: rust-src, llvm-tools
+
+      - name: Install QEMU (headless)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo registry + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-substrate-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (x86_64)
+        run: cargo kbuild --target "targets/${TARGET_X86}.json"
+
+      - name: Boot substrate profile + assert (positive core + skip chain + negative census + DoD-3 + default tripwire)
+        env:
+          QEMU_TIMEOUT: 40
+        run: bash scripts/run-substrate-x86_64.sh

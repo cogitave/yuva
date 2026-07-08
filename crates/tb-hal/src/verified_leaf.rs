@@ -1498,6 +1498,20 @@ pub fn opcmd_selftest() -> OpcmdProof {
     mem::opcmd_selftest()
 }
 
+/// Boot-Profiles stage A (§3.3): the STANDALONE M29 khash KAT, hoisted out of
+/// [`opcmd_selftest`] for the SUBSTRATE arm only. The khash primitive is a
+/// substrate INTEGRITY feature (a keyed BLAKE2s-256 MAC), NOT an agent organ, so
+/// it stays live in the substrate profile. On the AGENT profile the KAT still
+/// runs INSIDE `opcmd_selftest` (`OpcmdProof::kat_ok`) exactly as before and the
+/// `khash:`/`M29:` lines emit from that path, BYTE-IDENTICAL — this function is
+/// reached ONLY from the gated M28 block's substrate `else` arm, so there is
+/// EXACTLY one KAT emission per boot on either profile (no duplicate line on the
+/// agent stream). Recomputes the official RFC 7693 vectors through the REAL
+/// compression, fail-closed; `true` earns the `kat=RFC7693-PASS` token.
+pub fn khash_kat_selftest() -> bool {
+    tb_encode::khash::kat_ok()
+}
+
 // ===========================================================================
 // M30: the verified INFERENCE-TRANSPORT self-test facade -- the sovereignty
 // A-chain's channel to a host model peer (transport ONLY; the adapter is M31).
