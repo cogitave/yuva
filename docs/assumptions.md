@@ -583,6 +583,48 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   ESC byte). The x86 PVH cmdline parse ships; the aarch64-host `/chosen/bootargs`
   knob and the M38 Cognitive-orchestrator boot line are named follow-ups.
 
+## 3e. Yuva-ABI stage-A residuals (the versioned agent-agnostic contract)
+
+- **The ABI is an in-repo SPEC + a frozen-literal snapshot cross-check, NOT a
+  semantically-complete freeze.** `crates/tb-encode/src/abi.rs` is a DELIBERATE
+  independent literal copy of the M11 method numbers + `required_right()` bits +
+  `Rights` bits + wire magics + domain labels + organ tags, cross-checked against
+  the LIVE seam. It catches a renumber, a relaxed right, an addition-past-ceiling,
+  a relabel, a renumbered organ -- NOT every semantic change under a stable
+  signature. `token=freeze=CROSSCHECK-CATCHES-SIGNATURE-BREAKS-NOT-ALL-SEMANTICS`.
+- **Enforcement is SPLIT by the crate boundary.** `tb-encode` is upstream of
+  `tb-hal::caps`, and `tb-hal` does not host-compile, so the wire/label/organ
+  half is a `tb-encode` host `#[test]` (the miri lane) and the method/rights half
+  is the in-kernel boot self-test `caps::abi_registry_selfcheck` (both arches,
+  reddens the required lane on drift). `token=enforcement=SPLIT-HOST-TEST(WIRE)+
+  IN-KERNEL-SELFTEST(CAPS)`.
+- **The version token is a discoverable LABEL, not a GATE.** `YUVA_ABI_VERSION`
+  (cap-plane `(1,0)` SEMVER + wire-plane `1`) is reported on the `abi:` boot
+  witness + via `M_OBJECT_INSPECT`; nothing at stage A consumes it to reject a
+  mismatched peer (no offer/accept/reject -- that is stage B). `token=version-
+  token=DISCOVERY-ONLY-LABEL-NOT-A-GATE`.
+- **The registry is keyless / tamper-evident, not signed.** A committed literal +
+  a cross-check, not a signed ABI-version attestation (the M33 successor).
+  `token=abi-attestation=UNSIGNED-KEYLESS`, `sec=ASSUMED-FROM-LITERATURE`.
+- **Conformance is a SKELETON demonstrating SPEAKABILITY, not extractability.**
+  The mini-agent runs IN-PROCESS in the same binary (the EL0 trap gate is
+  unbuilt), so it shows a non-resident in-process agent can SPEAK the contract --
+  NOT that a separately-privileged agent can bind, nor that the resident agent is
+  cleanly extractable. `token=conformance-ceiling=SPEAKABILITY-BY-IN-PROCESS-CODE
+  -NOT-EXTRACTABILITY`.
+- **The degraded / generic-host binding is schema-symmetry-only.** No runtime is
+  built; on a generic host the sovereign guarantees are surrendered by
+  construction. `token=substrate=YUVA-SOVEREIGN-REAL|HOST-DEGRADED-SPEC-ONLY`.
+- **Two named extraction blockers remain.** The `mem/` engine↔organ factorization
+  (shared with boot-profiles stage B) AND the unbuilt EL0 trap gate. The memory
+  seam is spec-able but not cuttable; a separately-privileged agent cannot bind.
+  `token=extraction-blockers=EL0-TRAP-GATE + MEM-FACTORIZATION`.
+- **The wire namespace is only PARTIALLY single-sourced.** Three magics
+  (`0x5956/57/58`) live in `brand`; `ATTEST_MAGIC=0x5959` is standalone in
+  `tb-encode::attest`. `abi.rs` is the first place all four sit together under an
+  enforced disjointness check. The domain labels are already `YUVA-*`.
+  `token=wire-magics=3-IN-BRAND+ATTEST-STANDALONE`, `wire-labels=ALREADY-YUVA`.
+
 ## 4. Status & review discipline
 
 These assumptions are LIVE and shrink as rungs land: A3 closes at L2.8 (SMMUv3),

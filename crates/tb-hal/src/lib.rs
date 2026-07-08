@@ -39,6 +39,74 @@ extern crate alloc;
 
 mod arch;
 pub mod caps; // M11: SAFE capability handle table + object model + dispatcher.
+// Yuva-ABI stage A: re-export the FROZEN ABI registry so the kernel reads the
+// version token + frozen literals through tb-hal (the facade), without taking a
+// direct tb-encode dep. The caps-side cross-check is `caps::abi_registry_selfcheck`.
+pub use tb_encode::abi;
+
+/// Yuva-ABI stage-A conformance -- Plane 2 (the wire codec). The mini-agent
+/// SPEAKS the wire: a frozen inferwire `ECHO_REQ` frame is canon-encoded, its
+/// pinned magic (`0x5958`) + version (`1`) + kind header bytes are asserted, and
+/// it is decoded back for field round-trip identity. Returns `true` on pass.
+/// (docs/spec/yuva-abi-v1.md §6; the caps-side Plane-1 vectors run in-kernel.)
+#[must_use]
+pub fn abi_conformance_wire_ok() -> bool {
+    use tb_encode::inferwire::{
+        canon, decode, kind, InferFrame, INFER_CHALLENGE_LEN, INFER_MAGIC, INFER_NONCE_LEN,
+        INFER_TAG_LEN, INFER_VER,
+    };
+    let payload: [u8; 4] = [0xAB, 0xCD, 0xEF, 0x01];
+    let mut challenge = [0u8; INFER_CHALLENGE_LEN];
+    for (i, c) in challenge.iter_mut().enumerate() {
+        *c = i as u8;
+    }
+    let frame = InferFrame {
+        kind: kind::ECHO_REQ,
+        req_id: 0x0102_0304_0506_0708,
+        challenge,
+        nonce: [0u8; INFER_NONCE_LEN],
+        peer_id: 0,
+        tag: [0u8; INFER_TAG_LEN],
+        payload: &payload,
+    };
+    let mut buf = [0u8; 128];
+    let n = canon(&frame, &mut buf);
+    if n == 0 {
+        return false;
+    }
+    // Pinned header bytes: magic (LE) + ver + kind.
+    let m = INFER_MAGIC.to_le_bytes();
+    if buf[0] != m[0] || buf[1] != m[1] || buf[2] != INFER_VER || buf[3] != kind::ECHO_REQ {
+        return false;
+    }
+    // Field round-trip identity.
+    match decode(&buf[..n]) {
+        Some(d) => {
+            d.kind == frame.kind
+                && d.req_id == frame.req_id
+                && d.challenge == frame.challenge
+                && d.payload == frame.payload
+        }
+        None => false,
+    }
+}
+
+/// Yuva-ABI stage-A conformance -- the spine (the M38 organ registry). The frozen
+/// closed-set contract of `conductor::Organ`: every registered tag decodes to its
+/// variant and round-trips, and the first UNregistered tag decodes to `None`
+/// (append-only, fail-closed). Returns `true` on pass. (docs/spec §6.)
+#[must_use]
+pub fn abi_conformance_conductor_ok() -> bool {
+    use tb_encode::abi::FROZEN_ORGANS;
+    use tb_encode::conductor::Organ;
+    for &(tag, _) in FROZEN_ORGANS {
+        match Organ::from_tag(tag) {
+            Some(o) if o.tag() == tag => {}
+            _ => return false,
+        }
+    }
+    Organ::from_tag(FROZEN_ORGANS.len() as u8).is_none()
+}
 mod mem; // M13: SAFE tiered per-agent memory substrate (T0..T3 + recall).
 mod ipc; // M14: SAFE inter-agent IPC channel core (bounded ordered FIFO + cap move).
 mod blocks; // M15: SAFE shared-memory block core (pinned M6 frames + RECORD CAS).

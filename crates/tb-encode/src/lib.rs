@@ -303,6 +303,7 @@
 //! identity, total/fail-closed decoding, and the page-table/EPT entry bit
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
+pub mod abi;
 pub mod attest;
 pub mod bakeoff;
 pub mod blkfmt;

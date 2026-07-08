@@ -1365,6 +1365,165 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
 
     tb_hal::serial_write_str("M11: caps OK\n"); // <-- the M11 DoD marker
 
+    // --- Yuva-ABI stage A: the version LABEL + the in-kernel registry self-test.
+    // docs/spec/yuva-abi-v1.md §4.2 / §5. ADDITIVE and stream-positioned OUTSIDE
+    // every required cumulative marker grep (no run-*.sh verifier greps `abi:`),
+    // so it never displaces the M0..M38 chain. Three things happen here:
+    //   (1) cross-check the FROZEN `tb-encode::abi` registry against the LIVE M11
+    //       method numbers + private `required_right()` + `Rights` bits. A
+    //       renumber, a relaxed right, a rights-bit change, or an addition
+    //       FAIL-CLOSES the boot via `fail_exit()` (no M38 tail is ever printed,
+    //       so the runner's grep fails loudly -- the caps-side half of the split
+    //       enforcement, stronger than a host unit test).
+    //   (2) prove `M_OBJECT_INSPECT=0` (the id-0 discovery verb) is reachable on
+    //       a root capability.
+    //   (3) emit the discoverable `abi:` witness carrying `YUVA_ABI_VERSION` (a
+    //       LABEL, not a GATE -- nothing consumes it to reject a peer at stage A).
+    {
+        use tb_hal::abi;
+        use tb_hal::caps::{self, AbiSelfcheck, ObjKind, Rights, SyscallArgs, SysStatus};
+
+        // The self-check NAMES the offending seam so a seeded drift reddens the
+        // boot with the offending index, not just a bare failure.
+        let verified = match caps::abi_registry_selfcheck() {
+            AbiSelfcheck::Ok(n) => n,
+            drift => {
+                let (kind, index): (&str, u32) = match drift {
+                    AbiSelfcheck::MethodIdDrift(id) => ("method-id-renumber", id),
+                    AbiSelfcheck::RequiredRightDrift(id) => ("required-right-relaxed", id),
+                    AbiSelfcheck::CeilingDrift(m) => ("append-only-ceiling", m),
+                    AbiSelfcheck::MethodCountDrift(c) => ("method-added", c),
+                    AbiSelfcheck::RightsBitDrift(b) => ("rights-bit-changed", b),
+                    AbiSelfcheck::Ok(_) => ("none", 0),
+                };
+                tb_hal::serial_write_str("abi: FAIL registry drift -- frozen tb-encode::abi != live M11 seam kind=");
+                tb_hal::serial_write_str(kind);
+                tb_hal::serial_write_str(" index=");
+                write_hex_u64(u64::from(index));
+                tb_hal::serial_write_str("\n");
+                tb_hal::fail_exit();
+            }
+        };
+
+        // (2) `M_OBJECT_INSPECT` on a fresh root capability -- the id-0 verb an
+        // agent reads the host ABI through before binding.
+        let mut root_abi = caps::HandleTable::with_capacity(2);
+        let h_abi = match root_abi.mint(ObjKind::Generic, Rights::READ) {
+            Some(h) => h,
+            None => {
+                tb_hal::serial_write_str("abi: FAIL could not mint the ABI root capability\n");
+                tb_hal::fail_exit();
+            }
+        };
+        let inspect_ok = caps::dispatch(
+            &mut root_abi,
+            &SyscallArgs::call(caps::M_OBJECT_INSPECT, h_abi),
+        )
+        .status
+            == SysStatus::Ok;
+
+        // Derive every discriminant from the frozen registry so the witness can
+        // never lie: the rights union (== 0x1fff today) and the frame-magic span.
+        let mut rights_union = 0u32;
+        for &(bits, _) in abi::FROZEN_RIGHTS {
+            rights_union |= bits;
+        }
+        let magic_lo = abi::FROZEN_WIRE_MAGICS[0].0;
+        let magic_hi = abi::FROZEN_WIRE_MAGICS[abi::FROZEN_WIRE_MAGICS.len() - 1].0;
+
+        tb_hal::serial_write_str("abi: cap-plane=");
+        write_dec_u64(u64::from(abi::YUVA_ABI_VERSION.cap_major));
+        tb_hal::serial_write_str(".");
+        write_dec_u64(u64::from(abi::YUVA_ABI_VERSION.cap_minor));
+        tb_hal::serial_write_str(" wire-plane=");
+        write_dec_u64(u64::from(abi::YUVA_ABI_VERSION.wire));
+        tb_hal::serial_write_str(" methods-verified=");
+        write_hex_u64(u64::from(verified));
+        tb_hal::serial_write_str(" method-ceiling=");
+        write_hex_u64(u64::from(abi::METHOD_CEILING));
+        tb_hal::serial_write_str(" rights=");
+        write_hex_u64(u64::from(rights_union));
+        tb_hal::serial_write_str(" magics=");
+        write_hex_u64(u64::from(magic_lo));
+        tb_hal::serial_write_str("..");
+        write_hex_u64(u64::from(magic_hi));
+        tb_hal::serial_write_str(" organs=");
+        write_hex_u64(abi::FROZEN_ORGANS.len() as u64);
+        tb_hal::serial_write_str(" planes=");
+        write_hex_u64(u64::from(abi::PLANES));
+        tb_hal::serial_write_str(" selfcheck=0x1 inspect-root=");
+        write_hex_u64(u64::from(inspect_ok));
+        tb_hal::serial_write_str(
+            " negotiation=NONE-AT-STAGE-A version-token=DISCOVERY-ONLY-LABEL-NOT-A-GATE\n",
+        );
+
+        if !inspect_ok {
+            tb_hal::serial_write_str("abi: FAIL M_OBJECT_INSPECT on the root capability was not Ok\n");
+            tb_hal::fail_exit();
+        }
+    }
+
+    // --- Yuva-ABI stage A: the conformance SKELETON (the mini-agent). A small
+    // in-kernel conformant agent -- sharing NO code with the resident agent's
+    // M12/M38 runtime -- binds through both planes and passes the FROZEN vectors
+    // (docs/spec/yuva-abi-v1.md §6). Plane 1: the cap-dispatch vectors run against
+    // the REAL `caps::dispatch` gate (a NEGATIVE `Denied` vector returning `Ok`
+    // would fail). Plane 2: the wire codec + the organ-registry contract. This
+    // emits an ADDITIVE `abi-conformance:` witness and NEVER fail-exits --
+    // conformance is adjudicated by the SEPARATE `abi-conformance` lane, not the
+    // required M0..M38 chain (no required verifier greps it). Honest ceiling: the
+    // mini-agent runs IN-PROCESS in the SAME binary (the EL0 trap gate is
+    // unbuilt), so it demonstrates SPEAKABILITY by non-resident in-process code,
+    // NOT extractability by a separately-privileged agent.
+    {
+        use tb_hal::abi;
+        use tb_hal::caps::{self, ObjKind, Rights, SyscallArgs, SysStatus};
+
+        let mut tbl = caps::HandleTable::with_capacity(8);
+        let mut cap_pass = 0u32;
+        let mut cap_neg = 0u32;
+        for &(method, rights_bits, expect) in abi::CONFORMANCE_CAP_VECTORS {
+            let h = match tbl.mint(ObjKind::Generic, Rights::from_bits(rights_bits)) {
+                Some(h) => h,
+                None => break,
+            };
+            let got = caps::dispatch(&mut tbl, &SyscallArgs::call(method, h)).status;
+            let ok = match expect {
+                abi::EXPECT_OK => got == SysStatus::Ok,
+                abi::EXPECT_DENIED => got == SysStatus::Denied,
+                abi::EXPECT_BADMETHOD => got == SysStatus::BadMethod,
+                _ => false,
+            };
+            if ok {
+                cap_pass += 1;
+                if expect == abi::EXPECT_DENIED {
+                    cap_neg += 1;
+                }
+            }
+        }
+        let cap_total = abi::CONFORMANCE_CAP_VECTORS.len() as u32;
+        let wire_ok = tb_hal::abi_conformance_wire_ok();
+        let conductor_ok = tb_hal::abi_conformance_conductor_ok();
+        let all_pass = cap_pass == cap_total && wire_ok && conductor_ok;
+        let vectors = cap_total + 2; // the cap family + the wire vector + the conductor vector
+
+        tb_hal::serial_write_str("abi-conformance: planes=0x2 vectors=");
+        write_hex_u64(u64::from(vectors));
+        tb_hal::serial_write_str(" cap-pass=");
+        write_hex_u64(u64::from(cap_pass));
+        tb_hal::serial_write_str(" cap-total=");
+        write_hex_u64(u64::from(cap_total));
+        tb_hal::serial_write_str(" cap-neg-denied=");
+        write_hex_u64(u64::from(cap_neg));
+        tb_hal::serial_write_str(" wire=");
+        write_hex_u64(u64::from(wire_ok));
+        tb_hal::serial_write_str(" conductor=");
+        write_hex_u64(u64::from(conductor_ok));
+        tb_hal::serial_write_str(" all-pass=");
+        write_hex_u64(u64::from(all_pass));
+        tb_hal::serial_write_str(" agent=MINI-IN-PROCESS-SKELETON\n");
+    }
+
     // --- M12: the agent runtime -- AgentProcess as a first-class OS entity ----
     // Root spawns TWO agents, each in its OWN address space (M10) holding ONLY
     // its manifest-declared handles (M11), scheduled PREEMPTIVELY in ring3/EL0

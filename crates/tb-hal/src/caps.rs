@@ -261,6 +261,14 @@ pub const M_BLOCK_READ: u32 = 31;
 /// address-space-dependent-body precedent); the number is registered HERE so
 /// the right is gate-checked at the chokepoint and the method space stays
 /// closed (33+ is still `BadMethod`).
+///
+/// **Yuva-ABI (stage A):** this is the HIGHEST registered method number, the
+/// append-only ceiling. It is no longer "highest by convention" -- it is pinned
+/// as `tb_encode::abi::METHOD_CEILING` and machine-checked against this live
+/// surface (numbers + `required_right()` mapping + `Rights` bits) by
+/// [`abi_registry_selfcheck`], the in-kernel boot self-test. A renumber, a
+/// relaxed right, or an addition past 32 reddens every boot. See
+/// `docs/spec/yuva-abi-v1.md` §4.
 pub const M_MODEL_INVOKE_BYTES: u32 = 32;
 
 /// Map a method number to the single right it requires, or `None` for an
@@ -296,6 +304,172 @@ fn required_right(method: u32) -> Option<Rights> {
         M_BUDGET_DELEGATE => Rights::DELEGATE_BUDGET,
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Yuva-ABI stage A -- the caps-side registry cross-check (the in-kernel boot
+// self-test half of the SPLIT enforcement; docs/spec/yuva-abi-v1.md §4.2).
+//
+// `tb-encode::abi` holds a FROZEN INDEPENDENT LITERAL copy of the M11 method
+// numbers + their `required_right()` bits + the `Rights` bit values. This module
+// is `tb-encode`'s DOWNSTREAM crate, and `required_right()` is private here, so
+// the method/rights half CANNOT be a `tb-encode` host test (that half is checked
+// there for the wire magics / labels / organs). Instead the kernel calls
+// [`abi_registry_selfcheck`] once at boot on BOTH arches and asserts it: a
+// renumber, a relaxed right, a rights-bit change, or an addition-past-ceiling
+// therefore reddens EVERY boot -- a strictly stronger enforcement than a host
+// unit test. This is a DELIBERATE independent copy; the comparison is genuine
+// (the frozen literals vs the LIVE named constants + the LIVE `required_right()`),
+// never a self-comparison.
+// ---------------------------------------------------------------------------
+
+/// The LIVE M11 method number for a frozen method NAME (the one explicit
+/// frozen-row -> live-symbol bridge the cross-check needs). A renumber of any
+/// method changes the returned live constant, so the caller's equality check
+/// FAILS. `None` for a name not in the live surface (a frozen typo / a removed
+/// method).
+fn live_method_id(name: &str) -> Option<u32> {
+    Some(match name {
+        "M_OBJECT_INSPECT" => M_OBJECT_INSPECT,
+        "M_HANDLE_DUP" => M_HANDLE_DUP,
+        "M_HANDLE_NARROW" => M_HANDLE_NARROW,
+        "M_HANDLE_TRANSFER" => M_HANDLE_TRANSFER,
+        "M_HANDLE_REVOKE" => M_HANDLE_REVOKE,
+        "M_HANDLE_CLOSE" => M_HANDLE_CLOSE,
+        "M_AGENT_SPAWN" => M_AGENT_SPAWN,
+        "M_MODEL_INVOKE" => M_MODEL_INVOKE,
+        "M_MEM_WRITE_PROC" => M_MEM_WRITE_PROC,
+        "M_MEM_RECALL" => M_MEM_RECALL,
+        "M_MEM_CONSOLIDATE" => M_MEM_CONSOLIDATE,
+        "M_EMIT_EXTERNAL" => M_EMIT_EXTERNAL,
+        "M_BUDGET_DELEGATE" => M_BUDGET_DELEGATE,
+        "M_MEM_WRITE" => M_MEM_WRITE,
+        "M_MEM_READ" => M_MEM_READ,
+        "M_CHAN_SEND" => M_CHAN_SEND,
+        "M_CHAN_RECV" => M_CHAN_RECV,
+        "M_CHAN_CLOSE" => M_CHAN_CLOSE,
+        "M_BLOCK_MAP" => M_BLOCK_MAP,
+        "M_BLOCK_UNMAP" => M_BLOCK_UNMAP,
+        "M_BLOCK_WRITE" => M_BLOCK_WRITE,
+        "M_BLOCK_READ" => M_BLOCK_READ,
+        "M_MODEL_INVOKE_BYTES" => M_MODEL_INVOKE_BYTES,
+        _ => return None,
+    })
+}
+
+/// The LIVE `Rights` bit value for a frozen right NAME. A change to any
+/// `Rights::*` bit changes the returned live value, so the cross-check FAILS.
+fn live_right_bits(name: &str) -> Option<u32> {
+    Some(match name {
+        "NONE" => Rights::NONE.bits(),
+        "READ" => Rights::READ.bits(),
+        "WRITE" => Rights::WRITE.bits(),
+        "TRANSFER" => Rights::TRANSFER.bits(),
+        "DUP" => Rights::DUP.bits(),
+        "REVOKE" => Rights::REVOKE.bits(),
+        "INVOKE_MODEL" => Rights::INVOKE_MODEL.bits(),
+        "SPAWN_AGENT" => Rights::SPAWN_AGENT.bits(),
+        "WRITE_PROCEDURAL" => Rights::WRITE_PROCEDURAL.bits(),
+        "RECALL" => Rights::RECALL.bits(),
+        "CONSOLIDATE" => Rights::CONSOLIDATE.bits(),
+        "EMIT_EXTERNAL" => Rights::EMIT_EXTERNAL.bits(),
+        "DELEGATE_BUDGET" => Rights::DELEGATE_BUDGET.bits(),
+        "APPROVE_HIGH_IMPACT" => Rights::APPROVE_HIGH_IMPACT.bits(),
+        _ => return None,
+    })
+}
+
+/// The outcome of [`abi_registry_selfcheck`]: either the verified method count,
+/// or the SPECIFIC drift found -- so the boot FAIL NAMES the offending seam (the
+/// "offending index" the enforcement is meant to surface). Every non-`Ok`
+/// variant means the FROZEN independent literal registry in `tb-encode::abi` no
+/// longer matches the LIVE M11 seam, and the boot MUST go red.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AbiSelfcheck {
+    /// All rows verified; the value is the method count (`23` today).
+    Ok(u32),
+    /// A frozen method id != its live named constant (a RENUMBER). The value is
+    /// the FROZEN id of the offending row.
+    MethodIdDrift(u32),
+    /// A frozen `required_right_bits` != live `required_right(id).bits()` (a
+    /// RELAXED / changed right). The value is the offending method id.
+    RequiredRightDrift(u32),
+    /// The append-only ceiling moved: `max(live id) != METHOD_CEILING`. The value
+    /// is the live max id found.
+    CeilingDrift(u32),
+    /// A live method exists over `0..=ceiling` that no frozen row covers (an
+    /// ADDITION). The value is the live method count.
+    MethodCountDrift(u32),
+    /// A frozen `Rights` bit != its live `Rights::*` value. The value is the
+    /// frozen bits of the offending right.
+    RightsBitDrift(u32),
+}
+
+/// Cross-check the FROZEN `tb-encode::abi` registry against the LIVE M11 seam
+/// (docs/spec/yuva-abi-v1.md §4.2). The two are INDEPENDENT sources of truth: the
+/// frozen side is hand-written literals in `tb-encode` (which cannot even see
+/// this crate), the live side is the actual `M_*` constants + the private
+/// [`required_right`] + the `Rights::*` bits. This compares them; drift on
+/// EITHER side is a non-`Ok` outcome (the boot then fail-exits). Checks:
+///
+/// 1. each frozen `(id, name)` matches the live named method constant -> a
+///    RENUMBER of an existing method is [`AbiSelfcheck::MethodIdDrift`];
+/// 2. each frozen `required_right_bits` equals `required_right(id).bits()` -> a
+///    RELAXED right (the most dangerous seam break) is
+///    [`AbiSelfcheck::RequiredRightDrift`];
+/// 3. the frozen ceiling equals `max(id)` ([`AbiSelfcheck::CeilingDrift`]) AND the
+///    live method count over `0..=ceiling` equals the frozen row count (an
+///    ADDITION is [`AbiSelfcheck::MethodCountDrift`]);
+/// 4. each frozen `Rights` bit equals its live `Rights::*` value
+///    ([`AbiSelfcheck::RightsBitDrift`]).
+#[must_use]
+pub fn abi_registry_selfcheck() -> AbiSelfcheck {
+    use tb_encode::abi::{FROZEN_METHODS, FROZEN_RIGHTS, METHOD_CEILING};
+
+    let mut max_id = 0u32;
+    for &(id, name, bits) in FROZEN_METHODS {
+        // (1) frozen id == live named constant.
+        match live_method_id(name) {
+            Some(live) if live == id => {}
+            _ => return AbiSelfcheck::MethodIdDrift(id),
+        }
+        // (2) frozen required_right bits == live required_right(id).bits().
+        match required_right(id) {
+            Some(r) if r.bits() == bits => {}
+            _ => return AbiSelfcheck::RequiredRightDrift(id),
+        }
+        if id > max_id {
+            max_id = id;
+        }
+    }
+
+    // (3a) the append-only ceiling.
+    if max_id != METHOD_CEILING {
+        return AbiSelfcheck::CeilingDrift(max_id);
+    }
+    // (3b) no EXTRA live method anywhere in 0..=ceiling (catches an addition at a
+    // previously-unused number BELOW the ceiling that no frozen row covers).
+    let mut live_count = 0u32;
+    let mut m = 0u32;
+    while m <= METHOD_CEILING {
+        if required_right(m).is_some() {
+            live_count += 1;
+        }
+        m += 1;
+    }
+    if live_count != FROZEN_METHODS.len() as u32 {
+        return AbiSelfcheck::MethodCountDrift(live_count);
+    }
+
+    // (4) each frozen Rights bit == its live Rights::* value.
+    for &(fbits, rname) in FROZEN_RIGHTS {
+        match live_right_bits(rname) {
+            Some(live) if live == fbits => {}
+            _ => return AbiSelfcheck::RightsBitDrift(fbits),
+        }
+    }
+
+    AbiSelfcheck::Ok(FROZEN_METHODS.len() as u32)
 }
 
 /// The per-principal handle table -- the unit of authority. A thin `tb-hal`
