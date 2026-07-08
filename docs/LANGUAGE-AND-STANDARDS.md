@@ -137,6 +137,34 @@ verifier — extends to the human boot presentation (`kernel/src/bootreport.rs`)
   no cmdline channel and stays raw; the renderer emits no ANSI color (a
   freestanding kernel has no `isatty`, and every lane hard-fails on a raw ESC).
 
+## 7b. The Yuva↔agent ABI (Yuva-ABI stage A)
+
+Yuva is AGENT-AGNOSTIC: it hosts ANY conformant agent through one numbered
+capability chokepoint (Plane 1) + a small versioned wire namespace (Plane 2). The
+contract is `docs/spec/yuva-abi-v1.md`; the frozen registry is
+`crates/tb-encode/src/abi.rs`. Three standing rules:
+
+- **Agent-neutral naming (lint-gated).** The specific resident-agent identity
+  name "Cogi" (the `cogitave/agent` project's identity) MUST NOT appear in
+  `kernel/src` or `crates/`. `scripts/check-agent-neutral.sh` fails closed on it.
+  The one named exception is the historical greeting FIXTURE in
+  `tools/xport-harness/src/live.rs` (host-side witness content, out of the lint's
+  `kernel/src`+`crates/` scope; neutralizing it is a deferred operator call). The
+  project namespace "cogitave" is allowed everywhere.
+- **Two-axis, append-only versioning.** `YUVA_ABI_VERSION` carries a cap-plane
+  SEMVER `(major, minor)` (Plane 1) and a wire-plane `u8` (Plane 2), evolving
+  INDEPENDENTLY (Firecracker discipline). A method / rights addition is
+  append-only → cap-plane MINOR (+ move `METHOD_CEILING`); a renumber / removed
+  method / RELAXED `required_right()` is breaking → cap-plane MAJOR; a new frame
+  `ver` → wire-plane. The frozen cross-check (§4 of the spec) FORCES the bump to
+  be explicit — it can never be silent.
+- **Spec + frozen-snapshot cross-check, not a semantic freeze.** The registry is a
+  committed independent literal copy cross-checked against the LIVE seam constants
+  (host test for the wire/label/organ half; in-kernel boot self-test for the
+  method/rights half). It catches a renumber, a relaxed right, an
+  addition-past-ceiling, a relabel — NOT every semantic change under a stable
+  signature. Claim exactly that, never "semantically frozen".
+
 ## 8. Open Topics → [OPEN-QUESTIONS §I](OPEN-QUESTIONS.md)
 
 - Kernel verification path: pure Rust+tiered-assurance, or seL4-under-node-image for certification?
