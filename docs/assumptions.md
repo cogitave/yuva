@@ -619,11 +619,13 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   (shared with boot-profiles stage B) AND the unbuilt EL0 trap gate. The memory
   seam is spec-able but not cuttable; a separately-privileged agent cannot bind.
   `token=extraction-blockers=EL0-TRAP-GATE + MEM-FACTORIZATION`.
-- **The wire namespace is only PARTIALLY single-sourced.** Three magics
-  (`0x5956/57/58`) live in `brand`; `ATTEST_MAGIC=0x5959` is standalone in
-  `tb-encode::attest`. `abi.rs` is the first place all four sit together under an
-  enforced disjointness check. The domain labels are already `YUVA-*`.
-  `token=wire-magics=3-IN-BRAND+ATTEST-STANDALONE`, `wire-labels=ALREADY-YUVA`.
+- **The wire namespace is now FULLY single-sourced (Yuva-ABI stage B).** All four
+  house frame magics (`0x5956/57/58/59`) live in `brand` — the former standalone
+  `ATTEST_MAGIC=0x5959` was unified into `brand::MAGIC_ATTEST` (byte-identical,
+  pinned by a `brand` KAT) and `tb-encode::attest::ATTEST_MAGIC` now re-exports it.
+  `abi.rs` still enumerates all four together under an enforced disjointness check.
+  The domain labels are already `YUVA-*`.
+  `token=wire-magics=ALL-FOUR-IN-BRAND-STAGE-B`, `wire-labels=ALREADY-YUVA`.
 
 ## 4. Status & review discipline
 

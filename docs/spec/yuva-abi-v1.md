@@ -62,15 +62,18 @@ byte, under `YUVA-*` domain-separator labels:
 | `0x5956` | `MAGIC_OPFRAME` | M25 operator transcript | `brand` |
 | `0x5957` | `MAGIC_OPFRAME_RX` | M28 operator inbound command | `brand` |
 | `0x5958` | `MAGIC_INFERWIRE` | M30 inference transport | `brand` |
-| `0x5959` | `ATTEST_MAGIC` | M33 attestation statement | `tb-encode::attest` |
+| `0x5959` | `MAGIC_ATTEST` | M33 attestation statement | `brand` |
 
-Three magics are single-sourced in `brand` (with a pairwise disjointness assert
-over the THREE); `ATTEST_MAGIC` is a standalone literal in `tb-encode::attest`
-whose disjointness from the brand three was, before this spec, only a comment.
-`abi::FROZEN_WIRE_MAGICS` is the FIRST place all four sit together under an
-enforced four-way disjointness check. Domain labels are frozen in
-`abi::FROZEN_DOMSEP` (`wire-labels=ALREADY-YUVA` — the historical "TABOS-*" leak
-is CLOSED). A conformant agent MUST use these magics and labels unchanged.
+As of Yuva-ABI **stage B**, ALL FOUR magics are single-sourced in `brand`: the
+former standalone `ATTEST_MAGIC=0x5959` literal in `tb-encode::attest` was unified
+into `brand::MAGIC_ATTEST` (byte-identical `0x5959`, `= MAGIC_OPFRAME + 3`, pinned
+by a `brand` known-answer test), and `tb-encode::attest::ATTEST_MAGIC` now
+RE-EXPORTS it. `brand`'s KAT covers all four (pairwise distinct + disjoint from the
+note-type half); `abi::FROZEN_WIRE_MAGICS` enumerates all four together with its own
+four-way disjointness const-assert and cross-checks each against the live `brand`
+constant. Domain labels are frozen in `abi::FROZEN_DOMSEP` (`wire-labels=
+ALREADY-YUVA` — the historical "TABOS-*" leak is CLOSED). A conformant agent MUST
+use these magics and labels unchanged.
 
 ### 2.3 The spine — the organ registry (M38)
 
@@ -116,14 +119,15 @@ halves are genuine drift detectors:
 ### 4.1 Site A — the `tb-encode` host cross-check (wire magics, labels, organs)
 
 `abi::abi_snapshot` (`#[cfg(test)]` in `abi.rs`) asserts each frozen wire magic
-equals its LIVE `brand::MAGIC_*` / `attest::ATTEST_MAGIC` constant, each frozen
-domain label equals its LIVE `brand::DOMSEP_*` bytes, and each frozen organ tag
-equals the LIVE `conductor::Organ` tag/decode (and count `== N_ORGANS`), plus the
-four-way live-magic disjointness. It runs under `cargo test -p tb-encode` /
-`cargo miri test -p tb-encode` — the existing CI host-test lane (`miri.yml`). A
-renumbered magic, a relabelled separator, or a renumbered organ FAILS it.
-(Verified: FAILS on a seeded live-`ATTEST_MAGIC` renumber and on a seeded frozen
-relabel.)
+equals its LIVE `brand::MAGIC_*` constant (all four, incl. `brand::MAGIC_ATTEST` —
+stage B; it also asserts the `attest::ATTEST_MAGIC` re-export resolves to the same
+`brand` source), each frozen domain label equals its LIVE `brand::DOMSEP_*` bytes,
+and each frozen organ tag equals the LIVE `conductor::Organ` tag/decode (and count
+`== N_ORGANS`), plus the four-way live-magic disjointness. It runs under `cargo test
+-p tb-encode` / `cargo miri test -p tb-encode` — the existing CI host-test lane
+(`miri.yml`). A renumbered magic, a relabelled separator, or a renumbered organ
+FAILS it. (Verified: FAILS on a seeded live-`MAGIC_ATTEST` renumber and on a seeded
+frozen relabel.)
 
 ### 4.2 Site B — the in-kernel boot self-test (methods, `required_right`, rights)
 
@@ -136,10 +140,15 @@ LIVE `caps` constants + the private `required_right()` + the live `Rights::*`
 bits: (1) each frozen method id equals its live named constant (a renumber
 FAILS); (2) each frozen `required_right_bits` equals `required_right(id).bits()`
 (a RELAXED right — e.g. `M_EMIT_EXTERNAL` weakened to `NONE` — FAILS); (3) the
-frozen ceiling equals `max(id) == 32` (an addition-past-ceiling FAILS); (4) each
-frozen right bit equals its live `Rights::*`. The kernel calls it once at boot on
-BOTH arches, asserts success, and emits the `abi:` witness (§5). A drift therefore
-reddens EVERY boot on both arches — a STRONGER enforcement than a host unit test.
+frozen ceiling equals `max(id) == 32`, the live method count over `0..=ceiling`
+matches the frozen row count, AND — the stage-B `required_right` pin
+(`AbiSelfcheck::CeilingOpen`) — no live method is registered in a bounded window
+ABOVE the ceiling, so an addition-past-ceiling (`ceiling+k`, invisible to both the
+`0..=ceiling` count scan and the frozen-side `max(id)` check) now FAILS on the LIVE
+side too; (4) each frozen right bit equals its live `Rights::*`. The kernel calls it
+once at boot on BOTH arches, asserts success, and emits the `abi:` witness (with the
+`ceiling-closed=0x1` discovery field, §5). A drift therefore reddens EVERY boot on
+both arches — a STRONGER enforcement than a host unit test.
 
 > **Deviation from the proposal (§3.2), noted.** The proposal specified the whole
 > cross-check as a single host `#[test]`. The crate boundary + `tb-hal`'s
@@ -163,15 +172,21 @@ behavioral change to a method that keeps its number and right).
 
 An agent discovers the host ABI version over two zero-risk surfaces:
 
-- The boot witness line `abi: cap-plane=1.0 wire-plane=1 methods=0x21
-  rights=0x1fff magics=0x5956..0x5959 organs=0x3 planes=2
-  negotiation=NONE-AT-STAGE-A`, emitted at a stream position that is OUTSIDE
-  every required cumulative marker grep.
+- The boot witness line `abi: cap-plane=1.0 wire-plane=1 methods-verified=0x17
+  method-ceiling=0x20 rights=0x1fff magics=0x5956..0x5959 organs=0x3 planes=2
+  selfcheck=0x1 ceiling-closed=0x1 inspect-root=0x1
+  negotiation=SPEC-DEFINED-RUNTIME-DEFERRED
+  version-token=DISCOVERY-ONLY-LABEL-NOT-A-GATE`, emitted at a stream position that
+  is OUTSIDE every required cumulative marker grep. As of stage B the `negotiation`
+  token reads `SPEC-DEFINED-RUNTIME-DEFERRED` (the offer/accept/reject protocol is
+  now specified in `docs/spec/yuva-abi-negotiation-v1.md`, but NO runtime gate is
+  built), and `ceiling-closed=0x1` certifies the closed-method-space pin (§4.2).
 - `M_OBJECT_INSPECT=0` on the root capability, wired to REPORT
   `YUVA_ABI_VERSION`.
 
-Stage A ships DISCOVERY only. Nothing consumes the token to REJECT a mismatched
-agent — there is one version and no rejection path. A version cannot GATE until
+Stage A ships DISCOVERY only, and stage B keeps it discovery-only: nothing consumes
+the token to REJECT a mismatched agent — there is one version and no rejection path.
+A version cannot GATE until
 there is an offer/accept + reject mechanism (stage B).
 `version-token=DISCOVERY-ONLY-LABEL-NOT-A-GATE`.
 
@@ -274,8 +289,12 @@ unit test + an in-kernel boot self-test, not Kani harnesses
 
 ## 11. Successors (named, not blocked-on)
 
-- Runtime feature-negotiation + version GATING (offer/accept bitsets + a
-  rejection path) — stage B.
+- **Version-negotiation SPEC — stage B, LANDED as a spec** (the offer/accept/reject
+  protocol + the two-axis compatibility predicate + reject reason codes):
+  `docs/spec/yuva-abi-negotiation-v1.md`. The runtime GATE it targets stays DEFERRED
+  (`negotiation=SPEC-DEFINED-RUNTIME-DEFERRED`) — no gate consumes the token, which
+  remains a discoverable LABEL. The gate's own blockers are the unbuilt handshake
+  frame + the M18.1 admission precondition + the EL0 trap gate.
 - The generic-host DEGRADED runtime — `backends=DEFERRED`.
 - The `cogitave/agent` repo split + code move — `extraction=DEFERRED-SEPARATE-MILESTONE`,
   gated on BOTH the `mem/` factorization AND the EL0 trap gate.

@@ -159,10 +159,13 @@ pub const BOOT_MAGIC: u64 = u64::from_le_bytes(BOOT_MAGIC_BYTES);
 //
 // DERIVATION: high byte = the brand initial 'Y' (0x59); low byte counts up
 // from the brand's SECOND letter + 1 ('U'+1 = 'V', 0x56) -- so the family is
-// 'Y''V'/'Y''W'/'Y''X' = 0x5956/0x5957/0x5958, mirroring the TABOS-era
-// 'T''B'/'T''C'/'T''D' (initial + ascending-from-second-letter) shape while
-// staying DISJOINT from the note type's 'Y''U' (0x5955) top half: a u16 frame
-// magic can never alias the note-type's brand half.
+// 'Y''V'/'Y''W'/'Y''X'/'Y''Y' = 0x5956/0x5957/0x5958/0x5959, mirroring the
+// TABOS-era 'T''B'/'T''C'/'T''D' (initial + ascending-from-second-letter) shape
+// while staying DISJOINT from the note type's 'Y''U' (0x5955) top half: a u16
+// frame magic can never alias the note-type's brand half. The fourth member's
+// low byte 'Y' (0x59) also equals the brand initial itself -- 'Y''Y' -- which is
+// how `attest.rs` historically described its once-standalone `ATTEST_MAGIC`; the
+// two derivations coincide on 0x5959 (pinned below).
 
 /// The M25 operator-TRANSCRIPT frame magic (`0x5956`). CONSUMER:
 /// `tb-encode::opframe::OPFRAME_MAGIC`.
@@ -176,6 +179,15 @@ pub const MAGIC_OPFRAME_RX: u16 = MAGIC_OPFRAME + 1;
 /// The M30 inference-transport frame magic (`0x5958` -- family +2). CONSUMER:
 /// `tb-encode::inferwire::INFER_MAGIC` (also the `FrameAccum` resync scan).
 pub const MAGIC_INFERWIRE: u16 = MAGIC_OPFRAME + 2;
+
+/// The M33 attestation-statement codec magic (`0x5959` -- family +3, the
+/// brand-initial-twice 'Y''Y'). CONSUMER: `tb-encode::attest::ATTEST_MAGIC`
+/// (which now RE-EXPORTS this rather than spelling the literal). Unified here by
+/// Yuva-ABI stage B so all FOUR house frame magics are single-sourced in this
+/// crate -- the standalone `attest.rs` literal was the last magic living outside
+/// `brand`. Disjoint from the other three (distinct low byte) and from the
+/// note-type half by the same family invariant.
+pub const MAGIC_ATTEST: u16 = MAGIC_OPFRAME + 3;
 
 // ===========================================================================
 // The M20 disk superblock magic
@@ -198,6 +210,7 @@ const _: () = assert!(BOOT_MAGIC == 0x3056_544F_4F42_5900);
 const _: () = assert!(MAGIC_OPFRAME == 0x5956);
 const _: () = assert!(MAGIC_OPFRAME_RX == 0x5957);
 const _: () = assert!(MAGIC_INFERWIRE == 0x5958);
+const _: () = assert!(MAGIC_ATTEST == 0x5959);
 
 #[cfg(test)]
 mod tests {
@@ -261,12 +274,24 @@ mod tests {
 
     #[test]
     fn wire_magic_family_distinct_and_disjoint_from_note_type() {
-        assert_ne!(MAGIC_OPFRAME, MAGIC_OPFRAME_RX);
-        assert_ne!(MAGIC_OPFRAME, MAGIC_INFERWIRE);
-        assert_ne!(MAGIC_OPFRAME_RX, MAGIC_INFERWIRE);
+        // The FOUR house frame magics (all single-sourced here as of Yuva-ABI
+        // stage B) are pairwise distinct.
+        let family = [MAGIC_OPFRAME, MAGIC_OPFRAME_RX, MAGIC_INFERWIRE, MAGIC_ATTEST];
+        for (i, a) in family.iter().enumerate() {
+            for b in family.iter().skip(i + 1) {
+                assert_ne!(a, b, "wire-magic family collision");
+            }
+        }
+        // The exact bytes, PINNED as known-answer literals (the Yuva-ABI stage-B
+        // KAT: the brand-derived values must equal the frozen wire-magic
+        // namespace `tb-encode::abi::FROZEN_WIRE_MAGICS` cross-checks against).
+        assert_eq!(MAGIC_OPFRAME, 0x5956);
+        assert_eq!(MAGIC_OPFRAME_RX, 0x5957);
+        assert_eq!(MAGIC_INFERWIRE, 0x5958);
+        assert_eq!(MAGIC_ATTEST, 0x5959);
         // High byte = brand initial; the family never aliases the note type's
         // brand half ('Y''U' = 0x5955).
-        for m in [MAGIC_OPFRAME, MAGIC_OPFRAME_RX, MAGIC_INFERWIRE] {
+        for m in family {
             assert_eq!((m >> 8) as u8, BRAND.as_bytes()[0]);
             assert_ne!(m, (NOTE_TYPE_ENTRY64 >> 16) as u16);
         }

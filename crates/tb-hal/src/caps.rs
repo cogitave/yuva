@@ -404,6 +404,13 @@ pub enum AbiSelfcheck {
     /// A frozen `Rights` bit != its live `Rights::*` value. The value is the
     /// frozen bits of the offending right.
     RightsBitDrift(u32),
+    /// The method space is not CLOSED at the ceiling: a LIVE method
+    /// `required_right()` accepts a number ABOVE `METHOD_CEILING` (an
+    /// addition-past-ceiling that the `0..=ceiling` count scan structurally
+    /// cannot see, and that the frozen-side ceiling check cannot see either). The
+    /// value is the first live method id found past the ceiling. `Yuva-ABI stage
+    /// B` closed this gap: without it an append at `ceiling+k` was UNCAUGHT.
+    CeilingOpen(u32),
 }
 
 /// Cross-check the FROZEN `tb-encode::abi` registry against the LIVE M11 seam
@@ -418,9 +425,12 @@ pub enum AbiSelfcheck {
 /// 2. each frozen `required_right_bits` equals `required_right(id).bits()` -> a
 ///    RELAXED right (the most dangerous seam break) is
 ///    [`AbiSelfcheck::RequiredRightDrift`];
-/// 3. the frozen ceiling equals `max(id)` ([`AbiSelfcheck::CeilingDrift`]) AND the
+/// 3. the frozen ceiling equals `max(id)` ([`AbiSelfcheck::CeilingDrift`]), the
 ///    live method count over `0..=ceiling` equals the frozen row count (an
-///    ADDITION is [`AbiSelfcheck::MethodCountDrift`]);
+///    ADDITION below the ceiling is [`AbiSelfcheck::MethodCountDrift`]), AND no
+///    live method is registered in a bounded window ABOVE the ceiling (an
+///    addition-PAST-ceiling is [`AbiSelfcheck::CeilingOpen`] -- the Yuva-ABI
+///    stage-B `required_right` pin that closes the append-at-`ceiling+k` gap);
 /// 4. each frozen `Rights` bit equals its live `Rights::*` value
 ///    ([`AbiSelfcheck::RightsBitDrift`]).
 #[must_use]
@@ -460,6 +470,21 @@ pub fn abi_registry_selfcheck() -> AbiSelfcheck {
     }
     if live_count != FROZEN_METHODS.len() as u32 {
         return AbiSelfcheck::MethodCountDrift(live_count);
+    }
+    // (3c) the method space is CLOSED past the ceiling. The (3b) scan stops AT
+    // `METHOD_CEILING` and `max_id`/CeilingDrift are computed from the FROZEN
+    // rows, so a LIVE `required_right()` arm registered ABOVE the ceiling (the
+    // canonical append site, `ceiling+1`, or any near number) is invisible to
+    // both. Scan a bounded window past the ceiling and require every number to be
+    // rejected -- a `required_right` pin that makes the spec's "addition-past-
+    // ceiling FAILS" claim (§4.2) true on the LIVE side, not just the frozen one.
+    let mut over = METHOD_CEILING + 1;
+    let over_end = METHOD_CEILING + 16;
+    while over <= over_end {
+        if required_right(over).is_some() {
+            return AbiSelfcheck::CeilingOpen(over);
+        }
+        over += 1;
     }
 
     // (4) each frozen Rights bit == its live Rights::* value.

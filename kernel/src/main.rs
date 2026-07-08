@@ -1395,6 +1395,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
                     AbiSelfcheck::CeilingDrift(m) => ("append-only-ceiling", m),
                     AbiSelfcheck::MethodCountDrift(c) => ("method-added", c),
                     AbiSelfcheck::RightsBitDrift(b) => ("rights-bit-changed", b),
+                    AbiSelfcheck::CeilingOpen(m) => ("method-added-past-ceiling", m),
                     AbiSelfcheck::Ok(_) => ("none", 0),
                 };
                 tb_hal::serial_write_str("abi: FAIL registry drift -- frozen tb-encode::abi != live M11 seam kind=");
@@ -1452,10 +1453,19 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         write_hex_u64(abi::FROZEN_ORGANS.len() as u64);
         tb_hal::serial_write_str(" planes=");
         write_hex_u64(u64::from(abi::PLANES));
-        tb_hal::serial_write_str(" selfcheck=0x1 inspect-root=");
+        // `selfcheck=0x1` is only reached because `abi_registry_selfcheck()`
+        // returned `Ok` above (a drift fail-exits before here); it now also
+        // certifies the method space is CLOSED past the ceiling (the stage-B
+        // `required_right` pin). `ceiling-closed=0x1` names that guarantee on the
+        // wire so a future gating peer can read it as a discovery field.
+        tb_hal::serial_write_str(" selfcheck=0x1 ceiling-closed=0x1 inspect-root=");
         write_hex_u64(u64::from(inspect_ok));
+        // Stage B ADDS the offer/accept/reject negotiation SPEC
+        // (docs/spec/yuva-abi-negotiation-v1.md) but builds NO runtime gate: the
+        // version token stays a discoverable LABEL, nothing consumes it to reject
+        // a peer. `negotiation=SPEC-DEFINED-RUNTIME-DEFERRED`.
         tb_hal::serial_write_str(
-            " negotiation=NONE-AT-STAGE-A version-token=DISCOVERY-ONLY-LABEL-NOT-A-GATE\n",
+            " negotiation=SPEC-DEFINED-RUNTIME-DEFERRED version-token=DISCOVERY-ONLY-LABEL-NOT-A-GATE\n",
         );
 
         if !inspect_ok {
