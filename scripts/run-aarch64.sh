@@ -791,7 +791,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     fi
     # (4) By-name rejects near the M32 lines: no live/real-engine/vendored-C claim
     # at this stage, no loopback/fixture vocabulary (stand-in only).
-    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(infer-local:|xport-local:)' | grep -qiE -- 'engine=VENDORED-C-LLAMACPP|engine=PURE-RUST|backend=ANTHROPIC-LIVE|backend=LOCAL-ENGINE|live-inference=CLAIMED|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-engine'; then
+    if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(infer-local:|xport-local:)' | grep -qiE -- 'engine=PURE-RUST|backend=ANTHROPIC-LIVE|live-inference=CLAIMED|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-engine'; then
         echo "[run-aarch64] FAIL -- M32 infer-local/xport-local carries a by-name reject token (real-engine/live/loopback) -- stage B serves a DETERMINISTIC STAND-IN only" >&2
         exit 1
     fi

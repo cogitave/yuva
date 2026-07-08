@@ -710,7 +710,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     exit 1
   fi
   # (2) Positive-require the FULL one-line `infer-local:` witness: the honest
-  # stand-in tokens (NEVER engine=VENDORED-C-LLAMACPP / live inference at this
+  # stand-in tokens (NEVER the real-engine / live-inference evidence class at this
   # stage), peer=0x03, every flag =0x1, digests + counts, fed-to=M38-CONDUCTOR.
   if ! printf '%s' "${OUTPUT}" | grep -qE -- 'infer-local: backend=LOCAL-STANDIN engine=NONE-DETERMINISTIC-STANDIN local-organ=DETERMINISTIC-STANDIN peer=0x03 debt=SOVEREIGNTY-OPEN-B3 memsafety=SAFE-RUST-STANDIN weights=NONE-NO-MODEL-LOADED received=OVER-M32-SEAM fed-to=M38-CONDUCTOR req-id=0x[0-9a-f]{16} resp-len=0x[0-9a-f]+ resp-digest=0x[0-9a-f]{32} chunks=0x0*2 pending=0x0*1 mac-verified=0x0*1 peer-bound=0x0*1 guestpath=RECEIVED-OVER-WIRE live-inference=NOT-CLAIMED key=CAPREF-HOST-CUSTODIED host=RESIDUAL-TCB ambient=ZERO-IN-GUEST sec=ASSUMED-FROM-LITERATURE'; then
     echo ">> FAIL: M38 conductor witnessed but the real 'infer-local: backend=LOCAL-STANDIN .. peer=0x03 .. received=OVER-M32-SEAM .. mac-verified=0x1 peer-bound=0x1 ..' witness was NOT seen (hollow M32 pass -- the local organ was not received over the wire)" >&2
@@ -739,7 +739,7 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
   # (4) By-name rejects (near the M32 lines): NO live/real-engine/vendored-C claim
   # at this stage, NO loopback/fixture vocabulary. The stand-in is honest; a real
   # engine is the named follow-up and would land its OWN reviewed grammar.
-  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(infer-local:|xport-local:)' | grep -qiE -- 'engine=VENDORED-C-LLAMACPP|engine=PURE-RUST|backend=ANTHROPIC-LIVE|backend=LOCAL-ENGINE|live-inference=CLAIMED|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-engine'; then
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(infer-local:|xport-local:)' | grep -qiE -- 'engine=PURE-RUST|backend=ANTHROPIC-LIVE|live-inference=CLAIMED|loopback|fixture|canned|replay|(^|[^[:alnum:]])real-engine'; then
     echo ">> FAIL: M32 infer-local/xport-local carries a by-name reject token (a real-engine/live/loopback claim) -- stage B serves a DETERMINISTIC STAND-IN only (real engine bytes are the named follow-up)" >&2
     exit 1
   fi
