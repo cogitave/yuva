@@ -1155,6 +1155,68 @@ pub fn corpus_persist() -> CorpusPersistProof {
 }
 
 // ===========================================================================
+// M40: the verified LEXICAL RECALL-SCORING self-test facade -- the research-skill
+// foundation. The proof exercises the Kani-proven `tb_encode::recall` BM25-family
+// leaf (term-frequency saturation + inverse document frequency + document-length
+// normalization, ALL no-float fixed-point integer math -- the M21 KAN leaf's
+// discipline) over a DETERMINISTIC query->ranking scenario, AND drives the REAL
+// `mem::MemSubstrate::recall` production path (whose BM25+ IDF is now the SAME leaf
+// via `recall::bm25_idf`) so the marker proves the leaf genuinely scored a real
+// query into a real ranking. HONEST: this is LEXICAL term-overlap retrieval, NOT
+// semantic -- NO embeddings, NO vectors, NO learned weights (`retrieval=LEXICAL-
+// BM25-NO-FLOAT`, `semantic=NONE`); it sharpens WHICH memory a query surfaces, it
+// does not understand meaning. The verdict is a pure-data struct the
+// `#![forbid(unsafe_code)]` kernel matches on (mirroring [`CorpusProof`]).
+// ===========================================================================
+
+/// M40 lexical-recall self-test outcome (returned to the kernel for marker
+/// rendering). A closed, pure-data verdict -- mirroring [`CorpusProof`]. Every field
+/// is EARNED this boot by the real leaf scoring + the real organ recall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecallProof {
+    /// The deterministic query->ranking produced the EXPECTED ordering: the document
+    /// matching the RARE query term outranks the one matching only a COMMON term, and
+    /// a length-inflated near-duplicate ranks BELOW the average-length original (the
+    /// load-bearing BM25 idf + length-normalization properties). The kernel requires it.
+    pub ranking_ok: bool,
+    /// MONOTONICITY held on real inputs: adding a matching query term (or raising a
+    /// term's tf) never LOWERED a document's score (more evidence never hurts). The
+    /// kernel requires it (rendered `monotone-ok=0x1`).
+    pub monotone_ok: bool,
+    /// Every score produced this boot stayed in the proven non-negative bounded window
+    /// (no overflow, no negative relevance). The kernel requires it.
+    pub bounded_ok: bool,
+    /// The top ranked hit round-tripped through the injective, fail-closed
+    /// [`tb_encode::recall::hit_canon`]/`hit_decode` codec (the ranking is a
+    /// replay-deterministic record). The kernel requires it.
+    pub canon_ok: bool,
+    /// The REAL `MemSubstrate::recall` production path (whose IDF is the SAME leaf)
+    /// returned a genuine hit for a seeded query token -- the anti-hollow tie between
+    /// the proven leaf and the live organ. The kernel requires it (`organ-ok=0x1`).
+    pub organ_ok: bool,
+    /// The winning record id of the deterministic ranking (anti-hollow: a real
+    /// query->ranking result, rendered `top-id=<hex16>`).
+    pub top_id: u64,
+    /// The winning record's BM25 lexical score (fixed point; rendered `top-score=<hex>`).
+    pub top_score: i64,
+    /// The number of candidate documents genuinely SCORED this boot (rendered
+    /// `scored=<n>`, MUST be `> 0` -- anti-hollow). The kernel requires it.
+    pub scored: u64,
+    /// Whether the retrieval used any semantic/embedding path. ALWAYS `false` -- the
+    /// recall is LEXICAL term-overlap only (no float, no vectors). The run-scripts
+    /// REQUIRE `semantic=0x0`; a `true` here is a structural overclaim guard.
+    pub semantic: bool,
+}
+
+/// M40: run the lexical-recall round-trip self-test (both arches) and report the
+/// outcome. See [`RecallProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::recall` BM25 leaf + the REAL `mem::MemSubstrate::recall` organ path;
+/// touches NO device and NO scheduler. No float, no embeddings, no learned weights.
+pub fn recall_selftest() -> RecallProof {
+    mem::recall_selftest()
+}
+
+// ===========================================================================
 // M24: the verified HONEST ACTIVATION GATE self-test facade. The honest
 // resolution of the M21 activation gate (#72): shielded epsilon-greedy
 // exploration (restores statistical overlap, populating the M23-reserved

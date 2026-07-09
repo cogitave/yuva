@@ -48,6 +48,10 @@ use crate::kancell::{
     GRID_LO, GRID_STEP_LOG2, KAN_FEATURES, KAN_KNOTS, KAN_KNOT_MAX, KnotTable,
 };
 use crate::memscore::{bla_raw, ln_fixed, log2_fixed, minmax};
+use crate::recall::{
+    bm25_doc_score, bm25_idf, bm25_term_score, bm25_tf_norm, hit_canon, hit_decode, RankedHit,
+    ENVELOPE_MAX, HIT_CANON_LEN, TF_NORM_CEIL,
+};
 use crate::smmuv3::{
     cmd_cfgi_ste, cmd_sync, cmd_tlbi_s12_vmall, ste_cfg, ste_s2, ste_s2ttb, ste_s2vmid, ste_v,
     ste_vtcr, ste_vtcr_from_vtcr_el2, CMD_OP_CFGI_STE, CMD_OP_CMD_SYNC, CMD_OP_TLBI_S12_VMALL,
@@ -472,6 +476,173 @@ fn kani_minmax_in_scale_range() {
     let r = minmax(&vals, i);
     assert!(r >= 0);
     assert!(r <= 1000); // SCALE
+}
+
+// ===========================================================================
+// M40: the LEXICAL RECALL-SCORING leaf (`recall.rs`) -- the BM25-family no-float
+// fixed-point relevance kernel that sharpens memory retrieval. Mirroring the
+// `memscore` discipline EXACTLY: Kani proves PANIC-FREEDOM + BOUNDS over the
+// documented reachable envelope (`ENVELOPE_MAX`) + the codec's injectivity /
+// fail-closed decode + the accumulation-monotonicity invariant (which stands on
+// each term being non-negative, NOT on `ln_fixed` monotonicity, so it is sound
+// and boundary-safe). STRICT monotonicity in `df`/`tf` stays a CONCRETE host test
+// (the #49 over-quantification trap: fixed-point division can break strict
+// monotonicity at rounding boundaries, so it is sampled, never symbolically
+// over-quantified -- the exact `memscore` `bla_raw` precedent). No float, ever.
+// ===========================================================================
+
+/// `bm25_idf` (the rarer-term-scores-higher inverse document frequency) is
+/// panic-free and `0 <= r < 34_000` over the reachable envelope. `df`/`n_docs` are
+/// bounded to `< 2^40` (a corpus holds far fewer than a trillion documents), so the
+/// `ln_fixed(2N + 2)` argument stays `< 2^41 < 2^48` -- inside the proven `ln_fixed`
+/// domain; the result is a difference of two `[0, 34_000)` logarithms clamped
+/// non-negative.
+///
+/// NEGATIVE CONTROL: dropping the `.max(0)` clamp lets a universal term (`df == N`)
+/// where numerical noise makes `ln_fixed(2df+1) > ln_fixed(2N+2)` go negative and
+/// turns the `r >= 0` assertion RED.
+#[kani::proof]
+fn kani_recall_idf_panic_free_bounded() {
+    let df: u64 = kani::any();
+    let n_docs: u64 = kani::any();
+    kani::assume(df < (1u64 << 40));
+    kani::assume(n_docs < (1u64 << 40));
+    let r = bm25_idf(df, n_docs);
+    assert!(r >= 0);
+    assert!(r < 34_000);
+}
+
+/// `bm25_tf_norm` (term-frequency saturation + document-length normalization) is
+/// panic-free -- no divide-by-zero (the length factor `norm >= (1-b) > 0` keeps the
+/// denominator positive) and no `i64` overflow over the envelope -- and its result
+/// lies in `[0, TF_NORM_CEIL)` (the saturation ceiling `k1 + 1` scaled). `tf`,
+/// `doc_len`, `avg_len` are bounded to `< ENVELOPE_MAX` (a document holds fewer than
+/// `2^20` interned tokens), the sound reachable slice.
+///
+/// NEGATIVE CONTROL: replacing `avg_len.max(1)` with `avg_len` lets `avg_len == 0`
+/// reach a divide-by-zero and turns this harness RED.
+#[kani::proof]
+fn kani_recall_tf_norm_panic_free_bounded() {
+    let tf: u64 = kani::any();
+    let doc_len: u64 = kani::any();
+    let avg_len: u64 = kani::any();
+    kani::assume(tf < ENVELOPE_MAX);
+    kani::assume(doc_len < ENVELOPE_MAX);
+    kani::assume(avg_len < ENVELOPE_MAX);
+    let r = bm25_tf_norm(tf, doc_len, avg_len);
+    assert!(r >= 0);
+    assert!(r < TF_NORM_CEIL);
+}
+
+/// `bm25_term_score` (one query term's full BM25 contribution, `idf * tf_norm /
+/// SCALE`) is panic-free and non-negative + bounded over the envelope: `idf <
+/// 34_000` and `tf_norm < TF_NORM_CEIL (2200)`, so the product `/ SCALE` stays well
+/// under `34_000 * 2200 / 1000 < 75_000` and never overflows `i64`.
+///
+/// NEGATIVE CONTROL: removing the `/ SCALE` (so `idf * tf_norm` is returned raw)
+/// blows the `< 100_000` bound and turns this harness RED.
+#[kani::proof]
+fn kani_recall_term_score_panic_free_bounded() {
+    let tf: u64 = kani::any();
+    let df: u64 = kani::any();
+    let n_docs: u64 = kani::any();
+    let doc_len: u64 = kani::any();
+    let avg_len: u64 = kani::any();
+    kani::assume(tf < ENVELOPE_MAX);
+    kani::assume(df < (1u64 << 40));
+    kani::assume(n_docs < (1u64 << 40));
+    kani::assume(doc_len < ENVELOPE_MAX);
+    kani::assume(avg_len < ENVELOPE_MAX);
+    let r = bm25_term_score(tf, df, n_docs, doc_len, avg_len);
+    assert!(r >= 0);
+    assert!(r < 100_000);
+}
+
+/// A term that does NOT occur in the document (`tf == 0`) contributes EXACTLY `0` to
+/// the score -- the absent-term identity the multi-term accumulation relies on (an
+/// absent query term neither helps nor hurts). Proven for symbolic `df`/`n_docs`/
+/// `doc_len`/`avg_len` over the envelope.
+///
+/// NEGATIVE CONTROL: a `+ 1` bias in `bm25_tf_norm`'s numerator would make an absent
+/// term score non-zero and turn this harness RED.
+#[kani::proof]
+fn kani_recall_term_score_absent_is_zero() {
+    let df: u64 = kani::any();
+    let n_docs: u64 = kani::any();
+    let doc_len: u64 = kani::any();
+    let avg_len: u64 = kani::any();
+    kani::assume(df < (1u64 << 40));
+    kani::assume(n_docs < (1u64 << 40));
+    kani::assume(doc_len < ENVELOPE_MAX);
+    kani::assume(avg_len < ENVELOPE_MAX);
+    assert_eq!(bm25_term_score(0, df, n_docs, doc_len, avg_len), 0);
+}
+
+/// The load-bearing recall invariant, proven SOUNDLY without over-quantifying a
+/// fixed-point division: ADDING a matching query term never LOWERS a document's
+/// accumulated score. Because every `bm25_term_score` is non-negative (proven above)
+/// and the accumulation uses `saturating_add`, the two-term score is `>= 0` and `>=`
+/// the one-term prefix -- "more query-term evidence never hurts". A tiny 2-element
+/// symbolic query keeps the proof cheap (`unwind(3)`).
+///
+/// NEGATIVE CONTROL: changing `saturating_add` to `saturating_sub` in `bm25_doc_score`
+/// makes the second term LOWER the score and turns the prefix assertion RED.
+#[kani::proof]
+#[kani::unwind(3)]
+fn kani_recall_doc_score_accumulation_monotone() {
+    let tf0: u64 = kani::any();
+    let df0: u64 = kani::any();
+    let tf1: u64 = kani::any();
+    let df1: u64 = kani::any();
+    let doc_len: u64 = kani::any();
+    let avg_len: u64 = kani::any();
+    kani::assume(tf0 < ENVELOPE_MAX && tf1 < ENVELOPE_MAX);
+    kani::assume(df0 < (1u64 << 40) && df1 < (1u64 << 40));
+    kani::assume(doc_len < ENVELOPE_MAX && avg_len < ENVELOPE_MAX);
+    let query = [(tf0, df0), (tf1, df1)];
+    let one = bm25_doc_score(&query[..1], 1u64 << 40, doc_len, avg_len);
+    let two = bm25_doc_score(&query[..2], 1u64 << 40, doc_len, avg_len);
+    assert!(one >= 0);
+    assert!(two >= one); // adding a matching term never lowers the score
+}
+
+/// `hit_canon` -> `hit_decode` is a lossless round-trip over the FULL symbolic
+/// `(rank, id, score)` range: `hit_decode(hit_canon(h)) == Some(h)`. The fixed
+/// 18-byte layout is therefore INJECTIVE (distinct hits -> distinct bytes), so a
+/// ranking result is a replay-deterministic record.
+///
+/// NEGATIVE CONTROL: narrowing the `score` field to `i32` in the codec drops the high
+/// bytes and turns the round-trip RED for `score > i32::MAX`.
+#[kani::proof]
+fn kani_recall_hit_canon_roundtrip() {
+    let hit = RankedHit {
+        rank: kani::any(),
+        id: kani::any(),
+        score: kani::any(),
+    };
+    let mut buf = [0u8; HIT_CANON_LEN];
+    let wrote = hit_canon(&hit, &mut buf);
+    assert_eq!(wrote, HIT_CANON_LEN);
+    assert_eq!(hit_decode(&buf), Some(hit));
+}
+
+/// `hit_decode` is TOTAL and FAIL-CLOSED: it returns `None` (never panics, never
+/// reads out of bounds) on any buffer shorter than `HIT_CANON_LEN`, and `hit_canon`
+/// writes NOTHING (returns `0`) into a too-small buffer. Proven over a symbolic
+/// length in `[0, HIT_CANON_LEN)`.
+///
+/// NEGATIVE CONTROL: removing the `if buf.len() < HIT_CANON_LEN` guard makes the
+/// fixed-slice copies panic on a short buffer and turns this harness RED.
+#[kani::proof]
+#[kani::unwind(19)]
+fn kani_recall_hit_decode_fail_closed() {
+    let len: usize = kani::any();
+    kani::assume(len < HIT_CANON_LEN);
+    let buf = [0u8; HIT_CANON_LEN];
+    assert!(hit_decode(&buf[..len]).is_none());
+    let hit = RankedHit { rank: 1, id: 2, score: 3 };
+    let mut out = [0u8; HIT_CANON_LEN];
+    assert_eq!(hit_canon(&hit, &mut out[..len]), 0);
 }
 
 // ===========================================================================

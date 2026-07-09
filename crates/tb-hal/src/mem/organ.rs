@@ -29,7 +29,12 @@ use alloc::vec::Vec;
 // over untrusted memory metadata); the kernel CALLS the exact same functions, so
 // the M13 recall ranking / M17 FORGET decay / M18 frozen evaluator stay
 // byte-identical to the in-line copies these imports replaced.
-use tb_encode::memscore::{bla_raw, ln_fixed, minmax, skill_transform};
+use tb_encode::memscore::{bla_raw, minmax, skill_transform};
+// M40: the LEXICAL recall-scoring leaf. The production BM25+ IDF term is computed by
+// the Kani-proven `tb_encode::recall::bm25_idf` -- the EXACT expression this file used
+// inline, hoisted verbatim (the `memscore`/`route` precedent) so the recall ranking is
+// byte-identical (no drift; the M38 conduct head unchanged) while the value is proven.
+use tb_encode::recall::bm25_idf;
 // M21: the verified fixed-point ADDITIVE-policy leaf (a piecewise-LINEAR integer
 // GAM) for the forget/demote decision, lifted into the host-verifiable
 // `tb-encode::kancell` exactly like the memscore ranking math. SHIPS DORMANT:
@@ -122,7 +127,8 @@ mod selftests;
 pub(crate) use selftests::{
     bakeoff_selftest, conductor_selftest, corpus_persist, corpus_selftest, exittel_selftest,
     exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
-    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, xport_selftest,
+    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, recall_selftest,
+    xport_selftest,
 };
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
@@ -1179,8 +1185,10 @@ impl MemSubstrate {
         // STAGE 2 -- compose the additive default score over the candidate set.
         let n_docs = self.t3.num_docs.max(1) as i64;
         let df = postings.len() as i64;
-        // Non-negative Lucene/BM25+ IDF: ln(1 + (N-df+0.5)/(df+0.5)).
-        let idf = (ln_fixed((2 * n_docs + 2) as u64) - ln_fixed((2 * df + 1) as u64)).max(0);
+        // Non-negative Lucene/BM25+ IDF: ln(1 + (N-df+0.5)/(df+0.5)), computed by the
+        // M40 Kani-proven `recall::bm25_idf` leaf (identical value to the former inline
+        // expression -- the production recall path now CALLS the verified leaf).
+        let idf = bm25_idf(df as u64, n_docs as u64);
         let mut bla: Vec<i64> = Vec::new();
         let mut rel: Vec<i64> = Vec::new();
         let mut imp: Vec<i64> = Vec::new();

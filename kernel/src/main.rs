@@ -5550,6 +5550,79 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         tb_hal::serial_write_str("M39: corpus OK (substrate profile, agent organ skipped)\n");
     }
 
+    // ---- M40: the verified LEXICAL RECALL-SCORING leaf (research-skill foundation) --
+    // Sharpens Cogi's memory retrieval with classic LEXICAL term-overlap scoring: the
+    // Kani-proven `tb_encode::recall` BM25-family leaf -- term frequency (saturating) +
+    // inverse document frequency (rarer term scores higher) + document-length
+    // normalization -- ALL no-float fixed-point integer math (the M21 KAN leaf's
+    // discipline). The production M13 recall path now COMPUTES its BM25+ IDF via this
+    // SAME leaf (`recall::bm25_idf`, the exact former inline value -> ranking byte-
+    // identical, the M38 conduct head SP#4 unchanged). Each boot the kernel scores a
+    // DETERMINISTIC query->ranking (a rare + a common term over three candidate docs)
+    // and drives the REAL organ recall, then fail-closes unless the ranking, the
+    // monotonicity (more matches never lowers), the bound, the injective codec
+    // round-trip, and the real-organ hit ALL hold. HONEST (machine-tokened so the
+    // marker cannot overclaim): this is LEXICAL, NOT semantic -- NO embeddings, NO
+    // vectors, NO learned weights (`retrieval=LEXICAL-BM25-NO-FLOAT`, `semantic=NONE`);
+    // it decides WHICH memory a query surfaces, it does not understand meaning. DoD:
+    // "M40: recall OK". Boot-Profiles: AGENT-profile organ -- gated; the substrate
+    // profile takes the skip form and emits NO `recall:` witness (the census-forbidden
+    // prefix). M40 folds on NO head -- it displaces nothing (M38 below stays the tail).
+    if profile::agent_organs_enabled() {
+        let rc = tb_hal::recall_selftest();
+        // FAIL-CLOSED (the #65 idiom): the deterministic ranking, the monotonicity, the
+        // score bound, the injective codec round-trip, the REAL-organ hit, a NON-ZERO
+        // scored count (anti-hollow), and the structural NOT-SEMANTIC flag must ALL hold,
+        // else withhold the marker (a FAIL line with NO 'recall OK' substring) + red NOW.
+        if !rc.ranking_ok
+            || !rc.monotone_ok
+            || !rc.bounded_ok
+            || !rc.canon_ok
+            || !rc.organ_ok
+            || rc.scored == 0
+            || rc.semantic
+        {
+            tb_hal::serial_write_str("M40: recall FAIL ranking=");
+            write_hex_u64(rc.ranking_ok as u64);
+            tb_hal::serial_write_str(" monotone=");
+            write_hex_u64(rc.monotone_ok as u64);
+            tb_hal::serial_write_str(" bounded=");
+            write_hex_u64(rc.bounded_ok as u64);
+            tb_hal::serial_write_str(" canon=");
+            write_hex_u64(rc.canon_ok as u64);
+            tb_hal::serial_write_str(" organ=");
+            write_hex_u64(rc.organ_ok as u64);
+            tb_hal::serial_write_str(" scored=");
+            write_hex_u64(rc.scored);
+            tb_hal::serial_write_str(" semantic=");
+            write_hex_u64(rc.semantic as u64);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit();
+        }
+        // The witness line (census prefix `recall:`). Every flag EARNED this boot through
+        // the real leaf scoring + the real organ recall; the honesty tokens are STRUCTURAL
+        // so the marker mechanically cannot overclaim (no "semantic", no "embedding", no
+        // "learned"). `k1`/`b` are the frozen fixed-point BM25 params (0x4b0=1200=1.2,
+        // 0x2ee=750=0.75), evidence the scoring is pinned, not learned.
+        tb_hal::serial_write_str("recall: top-id=");
+        write_hex_u64(rc.top_id);
+        tb_hal::serial_write_str(" top-score=");
+        write_hex_u64(rc.top_score as u64);
+        tb_hal::serial_write_str(" scored=");
+        write_hex_u64(rc.scored);
+        tb_hal::serial_write_str(" ranking-ok=0x1 monotone-ok=0x1 bounded-ok=0x1 canon-ok=0x1 organ-ok=0x1 semantic=");
+        write_hex_u64(rc.semantic as u64);
+        tb_hal::serial_write_str(
+            " retrieval=LEXICAL-BM25-NO-FLOAT recall=DETERMINISTIC idf-source=VERIFIED-LEAF k1=0x4b0 b=0x2ee embedding=NONE weights=NONE-FROZEN-FIXED-POINT sec=ASSUMED-FROM-LITERATURE\n",
+        );
+        // The marker -- NO bare claim word (all claims live in the structured tokens
+        // above, the M29/M33/M39 marker discipline). NOT the cumulative tail: M38 below
+        // stays the tail (this leaf folds on no head).
+        tb_hal::serial_write_str("M40: recall OK\n");
+    } else {
+        tb_hal::serial_write_str("M40: recall OK (substrate profile, agent organ skipped)\n");
+    }
+
     // ---- M38 (stage B): the kernel-integrated CONDUCTOR -- TRINITY ADOPT-1 ----
     // The in-kernel selftest agent DRIVES the Verifier-gated organ loop FROM THE
     // GUEST, through the SAME capability chokepoint M31 uses: M_MEM_RECALL (the

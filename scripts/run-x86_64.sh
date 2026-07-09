@@ -809,6 +809,51 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     exit 1
   fi
 
+  # M40 GUARDS -- the verified LEXICAL RECALL-SCORING leaf (the research-skill
+  # foundation). The BM25-family no-float leaf scores a DETERMINISTIC query->ranking
+  # and the REAL organ recall runs on the SAME leaf's IDF. House order: skip-reject,
+  # positive-require [the anti-hollow core: a real query was scored + the real organ
+  # hit], anti-overclaim [LEXICAL, never semantic], direct-assert. M40 folds on NO
+  # head -- it displaces nothing (M38 below stays the cumulative tail).
+  #
+  # (1) Skip-reject: honest-skip-is-FAILURE on the agent lane -- the substrate skip
+  # form may NOT carry the marker here (the recall leaf IS admitted).
+  if printf '%s' "${OUTPUT}" | grep -qF -- 'M40: recall OK (substrate profile, agent organ skipped)'; then
+    echo ">> FAIL: M40 ran in SKIP mode (substrate form) on an AGENT lane -- the lexical recall leaf was NOT exercised (a skip is never legitimate here)" >&2
+    exit 1
+  fi
+  # (2) Positive-require the FULL one-line `recall:` witness: the earned scoring flags
+  # (ranking/monotone/bounded/canon/organ all =0x1), a scored count, a real top hit,
+  # AND every honesty token literal -- retrieval=LEXICAL-BM25-NO-FLOAT, semantic=0x0,
+  # embedding=NONE, weights=NONE-FROZEN-FIXED-POINT -- so a marker printed WITHOUT
+  # running the leaf (or one that overclaims a semantic/embedding retrieval) FAILS.
+  if ! printf '%s' "${OUTPUT}" | grep -qE -- 'recall: top-id=0x[0-9a-f]+ top-score=0x[0-9a-f]+ scored=0x[0-9a-f]+ ranking-ok=0x0*1 monotone-ok=0x0*1 bounded-ok=0x0*1 canon-ok=0x0*1 organ-ok=0x0*1 semantic=0x0+ retrieval=LEXICAL-BM25-NO-FLOAT recall=DETERMINISTIC idf-source=VERIFIED-LEAF k1=0x4b0 b=0x2ee embedding=NONE weights=NONE-FROZEN-FIXED-POINT sec=ASSUMED-FROM-LITERATURE'; then
+    echo ">> FAIL: M40 marker present but the real scoring witness 'recall: top-id=.. ranking-ok=0x1 monotone-ok=0x1 bounded-ok=0x1 canon-ok=0x1 organ-ok=0x1 semantic=0x0 retrieval=LEXICAL-BM25-NO-FLOAT recall=DETERMINISTIC idf-source=VERIFIED-LEAF k1=0x4b0 b=0x2ee embedding=NONE weights=NONE-FROZEN-FIXED-POINT ..' was NOT seen (hollow M40 pass or a semantic overclaim)" >&2
+    exit 1
+  fi
+  # (3) ANTI-HOLLOW: the scored count MUST be > 0 (a real query was genuinely scored
+  # into a ranking -- not a stub printing a zero-candidate marker).
+  RECALL_LINE="$(printf '%s\n' "${OUTPUT}" | grep -E -- '^recall: top-id=0x' | head -1)"
+  M40_SCORED_HEX="$(printf '%s' "${RECALL_LINE}" | sed -E 's/.* scored=0x0*([0-9a-f]+) .*/\1/')"
+  if [[ -z "${M40_SCORED_HEX}" ]] || (( 16#${M40_SCORED_HEX} < 1 )); then
+    echo ">> FAIL: M40 scored=0x${M40_SCORED_HEX} < 0x1 (no real candidate was scored -- an anti-hollow stub)" >&2
+    exit 1
+  fi
+  # (4) Anti-overclaim: the M40 marker/witness lines may NOT claim a semantic /
+  # embedding / learned retrieval. The honest tokens spell the NEGATIONS (semantic=0x0,
+  # embedding=NONE, NO-FLOAT), so reject only POSITIVE overclaims.
+  if printf '%s' "${OUTPUT}" | grep -E -- '(^|[^[:alnum:]])(M40:|recall:)' | grep -qiE -- 'semantic=0x0*1|embedding=(LEXICAL|BM25|ACTIVE|USED|ON|VECTOR)|retrieval=SEMANTIC|understood|reasoned|meaning-vector|learned-weights|weights-updated'; then
+    echo ">> FAIL: M40 marker/witness carries an overclaim (semantic/embedding/learned retrieval) -- the recall is LEXICAL BM25 term-overlap only, no embeddings, no float, no learned weights" >&2
+    exit 1
+  fi
+  # (5) Direct-assert the marker is present (M40 is not the top-level grep -- M38
+  # displaces it as the cumulative tail; assert directly so M40 -> M38 order stays
+  # fail-closed + traceable).
+  if ! printf '%s' "${OUTPUT}" | grep -qF -- 'M40: recall OK'; then
+    echo ">> FAIL: final marker present but 'M40: recall OK' missing (M40 displaced/regressed)" >&2
+    exit 1
+  fi
+
   # M38 (stage B) GUARDS (proposal §8 -- house order: skip-reject, positive-
   # require [the anti-hollow core + the §8.6 CROSS-PROCESS independent recompute],
   # by-name rejects, lane cross-pin, inherited tripwires, strip-then-reject). The

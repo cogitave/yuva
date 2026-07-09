@@ -529,6 +529,111 @@ pub(crate) fn corpus_selftest() -> crate::CorpusProof {
     }
 }
 
+// --- M40: the verified LEXICAL recall-scoring self-test (the marker body) ------
+//
+// Exercises the Kani-proven `tb_encode::recall` BM25-family leaf over a DETERMINISTIC
+// query->ranking scenario AND drives the REAL `MemSubstrate::recall` production path
+// (whose BM25+ IDF is now the SAME `recall::bm25_idf` leaf), so the marker proves the
+// leaf genuinely scored a real query into a real ranking. LEXICAL term-overlap only --
+// NO embeddings, NO float, NO learned weights (`retrieval=LEXICAL-BM25-NO-FLOAT`,
+// `semantic=NONE`). 100% SAFE, no device, no scheduler -- pure value computation.
+
+/// M40: run the lexical-recall round-trip and report a [`crate::RecallProof`] the
+/// `#![forbid(unsafe_code)]` kernel matches on. Leg 1 is a fixed KAT: a 2-term query
+/// (a RARE term + a COMMON term) scored over three candidate documents with known
+/// `(tf, df, doc_len)` profiles, asserting the load-bearing BM25 properties (the
+/// rare-term doc wins; the length-inflated near-duplicate ranks below its original;
+/// adding a matching term never lowers a score; every score stays bounded; the top
+/// hit round-trips the injective codec). Leg 2 drives the REAL organ recall so the
+/// marker is anti-hollow (the proven leaf is on the live path). No float, ever.
+pub(crate) fn recall_selftest() -> crate::RecallProof {
+    use tb_encode::recall::{bm25_doc_score, hit_canon, hit_decode, RankedHit, HIT_CANON_LEN};
+
+    // (Leg 1) The DETERMINISTIC pure-leaf query->ranking (a KAT over a fixed corpus
+    // profile). A 2-term query -- a RARE term (df=5) + a COMMON term (df=500) -- scored
+    // over three candidate documents. n_docs=1000, avg_len=20.
+    const N_DOCS: u64 = 1000;
+    const AVG_LEN: u64 = 20;
+    const DF_RARE: u64 = 5;
+    const DF_COMMON: u64 = 500;
+
+    // Doc A (id 101, the intended winner): matches the RARE term (tf=2) AND the common
+    // term (tf=1), average length. Doc B (id 102): matches ONLY the common term (tf=2)
+    // -- weaker, no rare term. Doc C (id 103): SAME content as A but length-inflated 10x
+    // -> penalized below A by document-length normalization.
+    let doc_a = bm25_doc_score(&[(2, DF_RARE), (1, DF_COMMON)], N_DOCS, AVG_LEN, AVG_LEN);
+    let doc_b = bm25_doc_score(&[(0, DF_RARE), (2, DF_COMMON)], N_DOCS, AVG_LEN, AVG_LEN);
+    let doc_c = bm25_doc_score(&[(2, DF_RARE), (1, DF_COMMON)], N_DOCS, 10 * AVG_LEN, AVG_LEN);
+
+    let ids = [101u64, 102, 103];
+    let scores = [doc_a, doc_b, doc_c];
+    // Argmax with ascending-id tie-break (the recall convention).
+    let mut top_k = 0usize;
+    let mut i = 1usize;
+    while i < scores.len() {
+        if scores[i] > scores[top_k] {
+            top_k = i;
+        }
+        i += 1;
+    }
+    let top_id = ids[top_k];
+    let top_score = scores[top_k];
+
+    // ranking_ok: A is the unique winner AND the load-bearing lexical properties hold --
+    // the rare-term doc A beats the common-only doc B, and the length-inflated
+    // near-duplicate C ranks below its average-length original A.
+    let ranking_ok = top_k == 0 && doc_a > doc_b && doc_a > doc_c && doc_b > 0;
+
+    // monotone_ok: adding a matching RARE term to doc B (tf 0 -> 2) never lowers its
+    // score (more query-term evidence never hurts -- the recall invariant).
+    let b_plus = bm25_doc_score(&[(2, DF_RARE), (2, DF_COMMON)], N_DOCS, AVG_LEN, AVG_LEN);
+    let monotone_ok = b_plus >= doc_b;
+
+    // bounded_ok: every score is non-negative and inside a generous proven ceiling.
+    const SCORE_CEIL: i64 = 1 << 40;
+    let bounded_ok = doc_a >= 0
+        && doc_b >= 0
+        && doc_c >= 0
+        && b_plus >= 0
+        && doc_a < SCORE_CEIL
+        && doc_b < SCORE_CEIL
+        && doc_c < SCORE_CEIL;
+
+    // canon_ok: the top hit round-trips through the injective, fail-closed codec, and a
+    // short buffer fail-closes.
+    let hit = RankedHit { rank: 0, id: top_id, score: top_score };
+    let mut buf = [0u8; HIT_CANON_LEN];
+    let roundtrip = hit_canon(&hit, &mut buf) == HIT_CANON_LEN && hit_decode(&buf) == Some(hit);
+    let short = [0u8; HIT_CANON_LEN - 1];
+    let canon_ok = roundtrip && hit_decode(&short).is_none();
+
+    // (Leg 2) The REAL organ: drive `MemSubstrate::recall` (whose BM25+ IDF is now the
+    // SAME `recall::bm25_idf` leaf) over seeded single-token records and confirm a
+    // genuine hit -- the anti-hollow tie between the proven leaf and the live organ.
+    const RECALL_TOK: u64 = 0x0000_0000_00E5_0001;
+    let mut sub = MemSubstrate::new();
+    let mut organ_ok = false;
+    if sub.push_record(RECALL_TOK, RECALL_TOK, 5, 0, Vec::new()).is_some()
+        && sub.push_record(RECALL_TOK, RECALL_TOK, 5, 0, Vec::new()).is_some()
+    {
+        // A distractor under a DIFFERENT token so the inverted index has >1 posting list.
+        let _ = sub.push_record(RECALL_TOK ^ 0xFF, RECALL_TOK ^ 0xFF, 3, 0, Vec::new());
+        organ_ok = sub.recall(RECALL_TOK, 0, 1, 0).is_some();
+    }
+
+    crate::RecallProof {
+        ranking_ok,
+        monotone_ok,
+        bounded_ok,
+        canon_ok,
+        organ_ok,
+        top_id,
+        top_score,
+        scored: scores.len() as u64,
+        semantic: false,
+    }
+}
+
 // --- M39 (inc-3): the DURABLE experience-corpus persist round-trip ------------
 //
 // Makes the corpus SURVIVE + ACCUMULATE across reboots -- the dataset moat. It

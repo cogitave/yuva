@@ -17,6 +17,7 @@ opcmd:
 opframe:
 prov-sig:
 prov:
+recall:
 xport:
 # Non-prefix decision tokens the substrate boot must also never carry:
 verdict=ACCEPT

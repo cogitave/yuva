@@ -72,9 +72,9 @@
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=128
+EXPECTED_HARNESSES_TOTAL=135
 
-# Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (62): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -99,6 +99,15 @@ SHARD_A=(
   kani_ln_fixed_panic_free_bounded
   kani_bla_raw_panic_free_bounded
   kani_minmax_in_scale_range
+  # M40 recall (BM25 lexical scoring) x7 (trivial -- panic-free/bounds + codec +
+  # accumulation-monotone; same fixed-point family as memscore, no hashing)
+  kani_recall_idf_panic_free_bounded
+  kani_recall_tf_norm_panic_free_bounded
+  kani_recall_term_score_panic_free_bounded
+  kani_recall_term_score_absent_is_zero
+  kani_recall_doc_score_accumulation_monotone
+  kani_recall_hit_canon_roundtrip
+  kani_recall_hit_decode_fail_closed
   # L2.1 stage-2/el2_trap x5 (trivial)
   kani_s2_leaf_wellformed
   kani_s2_table_and_vttbr
