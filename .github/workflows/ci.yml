@@ -264,7 +264,13 @@ jobs:
 
       - name: Boot substrate profile + assert (positive core + skip chain + negative census + DoD-3 + default tripwire)
         env:
-          QEMU_TIMEOUT: 40
+          # 40s flaked twice on 2026-07-09 on slow shared runners (TCG single-thread):
+          # once mid-early-boot, once on the default-profile leg (the FULL organ chain,
+          # heavier than the substrate leg) — while the same HEAD's build&boot lane
+          # reached the M38 tail fine. 90s matches the compile-out PoC lane's ceiling.
+          # A ceiling is a wall-clock guard, not an assertion: raising it cannot mask
+          # a real regression (the marker greps stay fail-closed).
+          QEMU_TIMEOUT: 90
         run: bash scripts/run-substrate-x86_64.sh
 
   # Boot Profiles stage-B PROOF-OF-CONCEPT — the ONE-ORGAN COMPILE-OUT lane (an
