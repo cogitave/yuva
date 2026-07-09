@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "Yuva Architecture Draft"
+description: "Yuva architecture draft: capability-microkernel + unikernel + exokernel design, with a maintained as-built landed-vs-proposal status map."
+tags: ["architecture", "kernel-design", "capability-microkernel", "memory-centric", "self-improvement"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva Architecture Draft
 
 > Status: v1.0 design draft — decision items are marked **[DECISION]**, strong recommendations **[PROPOSAL]**, open issues **[OPEN]**. Much of this design is now **built and CI-green**: the M0→M38 agent-native milestone chain plus the full sovereignty-L2 aarch64 chain (L2.0→L2.6) are implemented on both architectures — see **[Implementation status (as built)](#implementation-status-as-built)** below for the design→reality map and what is still proposal-stage.

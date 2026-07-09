@@ -1,3 +1,13 @@
+---
+type: Roadmap
+title: "Yuva Sovereignty Roadmap"
+description: "Decision roadmap: sovereignty lands at L2 (own hypervisor), not L3 (drivers); GPU/CUDA stays permanently quarantined in a Linux VM."
+tags: ["sovereignty", "hypervisor", "roadmap", "iommu", "gpu-passthrough"]
+timestamp: 2026-06-07T15:28:03+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva Sovereignty Roadmap
 
 > Status: v1.0 — all items are **[DECISION]** (no open "should we"); resolved from

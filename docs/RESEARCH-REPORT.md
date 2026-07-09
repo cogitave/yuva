@@ -1,3 +1,13 @@
+---
+type: Explanation
+title: "Yuva Research Report — Planning-Phase Deep Research Synthesis"
+description: "v1.0 planning-phase literature synthesis (147 subagents, mixed verified/unverified claims) behind Yuva's design, plus retired TABOS naming history."
+tags: ["research-report", "literature-review", "agent-os", "kernel-design", "memory-architecture", "naming-history"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: locked
+diataxis: explanation
+---
+
 # Yuva Research Report
 
 **Turkiye's Agent Based Operating System — Planning Phase Deep Research**

@@ -1,3 +1,13 @@
+---
+type: How-to
+title: "M14 Blocking-Recv + Runnable-on-Send: Scheduler/IPC Integration Plan"
+description: "Decision-closed forward plan (not yet built per its own framing) to replace M14's synchronous WouldBlock recv with real scheduler block/wake-on-send."
+tags: ["scheduler", "ipc", "blocking-recv", "kernel", "tabos-plan"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: how-to
+---
+
 # M14 blocking-recv + runnable-on-send: wire the empty-channel receiver to deschedule off the M9 run queue and be woken, lost-wakeup-free, by a sender
 
 > **Task #51** · DoD marker: `M14.1: blocking-recv OK` · Effort: **M** · Slug: `m14-blocking-recv-sched-integration`

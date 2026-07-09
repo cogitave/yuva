@@ -2,7 +2,7 @@
 # Yuva-ABI stage A — the agent-neutrality lint (DoD-6).
 #
 # Yuva is AGENT-AGNOSTIC: the OS hosts ANY conformant agent, so the specific
-# resident-agent identity name "Cogi" (the cogitave/agent project's identity)
+# resident-agent identity name "Cogi" (the cogitave/cogi project's identity)
 # MUST NOT appear in the load-bearing OS surfaces. This lint FAILS CLOSED if
 # "Cogi" reappears in `kernel/src` or `crates/` (both clean today, after the
 # merged agent-terminology neutralization of `kernel/src/bootreport.rs`).

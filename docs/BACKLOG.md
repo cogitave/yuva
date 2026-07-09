@@ -1,3 +1,13 @@
+---
+type: Roadmap
+title: "Yuva Forward Backlog"
+description: "30-row dependency-ordered task backlog from 2026-06-08, layered with a 2026-07-08 status note showing most rows already DONE/LANDED."
+tags: ["backlog", "roadmap", "task-tracking", "prioritization", "yuva", "dependency-graph"]
+timestamp: 2026-06-08T18:07:14+03:00
+status: active
+diataxis: reference
+---
+
 # Yuva Forward Backlog
 
 > Prioritized, dependency-ordered task plan produced by an ultracode mine+synthesize workflow (2026-06-08), after the v2 agent-native chain M5–M18 went fully CI-green and the L2 sovereignty track started at L2.0. Raw: [research/raw/forward-backlog.json](research/raw/forward-backlog.json).
@@ -6,7 +16,7 @@
 >
 > **#1 (Fix M8 LAPIC/timer fault under QEMU-microvm+KVM) is DONE** (2026-06-08, commits `80e6ce3` + `2de01c2`): root cause was `lapic_enable()` leaving the non-timer LVTs unmasked, so the first `sti` took a stray ExtINT → `#DE` on `microvm` (no 8259 PIC). The microvm+KVM lane now reaches `M18: evolve OK`. See [`tabos-overnight-autonomous-run`] memory + the l2-nested-vmx CI lane.
 >
-> **Status update (2026-07-08 — the M0..M38 chain + the stage-A separability wave landed).** Since this backlog was mined (2026-06-08) the chain has grown to **M0..M38** (M19 device I/O, M20 durable persistence, M21/M22 dormant-policy + provenance, M23–M31 the learning-loop arc + verified inference transport/adapter, M33 the persistent signed prov head — #91 closed, M38 the Kani-verified Conductor). **The local inference daemon LANDED as M32 stage A (#46) + stage B (#68, closes #90)** — the deferred LOCAL inference path in row #24 is discharged (`model:local/llama` over the M30/M31 framing, the Conductor's deterministic local organ). The **Yuva⟷`cogitave/agent` separability wave** LANDED: agent-terminology (#61), Yuva-ABI stage A (#65), boot-profiles stage A (#66), and the [extraction plan](proposals/extraction-plan.md) (#67 — a PLAN, NOT executed); the forward route is the research-first forward plan (`docs/proposals/forward-plan.md`, PR #69), whose ungated flagship is the Phase-1 experience corpus (dataset moat) with Cogi's own model a Phase-2 BRAIN-gated step. **The x86 L2.1–L2.9 rows (#6–#16) stay OPERATOR-GATED** on the nested-VMX hardware substrate (#2 / F1 / the #37 nested-VMX-substrate task — a self-hosted `kvm_intel nested=1` runner or a bare-metal procedure on Arda's hardware); the aarch64 L2 chain (#18) advances CI-green under pure TCG instead. These rows are RETAINED, not deleted.
+> **Status update (2026-07-08 — the M0..M38 chain + the stage-A separability wave landed).** Since this backlog was mined (2026-06-08) the chain has grown to **M0..M38** (M19 device I/O, M20 durable persistence, M21/M22 dormant-policy + provenance, M23–M31 the learning-loop arc + verified inference transport/adapter, M33 the persistent signed prov head — #91 closed, M38 the Kani-verified Conductor). **The local inference daemon LANDED as M32 stage A (#46) + stage B (#68, closes #90)** — the deferred LOCAL inference path in row #24 is discharged (`model:local/llama` over the M30/M31 framing, the Conductor's deterministic local organ). The **Yuva⟷`cogitave/cogi` separability wave** LANDED: agent-terminology (#61), Yuva-ABI stage A (#65), boot-profiles stage A (#66), and the [extraction plan](proposals/extraction-plan.md) (#67 — a PLAN, NOT executed); the forward route is the research-first forward plan (`docs/proposals/forward-plan.md`, PR #69), whose ungated flagship is the Phase-1 experience corpus (dataset moat) with Cogi's own model a Phase-2 BRAIN-gated step. **The x86 L2.1–L2.9 rows (#6–#16) stay OPERATOR-GATED** on the nested-VMX hardware substrate (#2 / F1 / the #37 nested-VMX-substrate task — a self-hosted `kvm_intel nested=1` runner or a bare-metal procedure on Arda's hardware); the aarch64 L2 chain (#18) advances CI-green under pure TCG instead. These rows are RETAINED, not deleted.
 
 ## Summary
 

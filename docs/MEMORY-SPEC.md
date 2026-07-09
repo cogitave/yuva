@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "Yuva Memory Specification (Default Memory Structure)"
+description: "Draft v1.0 spec for Yuva's tiered agent memory (T0-T5+BLOCKS, schema, ABI, quotas) — mostly PROPOSAL/OPEN, not confirmed built."
+tags: ["memory", "architecture", "spec", "agent-os", "kernel-abi"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: draft
+diataxis: explanation
+---
+
 # Yuva Memory Specification (Default Memory Structure)
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.

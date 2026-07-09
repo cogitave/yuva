@@ -1,3 +1,13 @@
+---
+type: Runbook
+title: "Run the Hello — the First Real Model Call"
+description: "Runbook: two gh commands fire M31's one live Anthropic call per dispatch; guest wire stays mocked/deterministic; no secret = loud skip."
+tags: ["runbook", "m31", "real-infer", "anthropic-api", "ci-workflow", "operator-triggered"]
+timestamp: 2026-06-12T10:05:31+03:00
+status: active
+diataxis: how-to
+---
+
 # Run the hello — the first real model call (M31 stage C, operator-triggered)
 
 > TL;DR: **two commands and the OS's inference channel speaks to a real model

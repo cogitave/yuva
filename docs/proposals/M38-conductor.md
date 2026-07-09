@@ -330,4 +330,4 @@ Every load-bearing code anchor the proposal cites was re-checked against `origin
 
 ## Terminology note (2026-07-08)
 
-Yuva is agent-agnostic: the OS never names a specific agent, and its surfaces say "the agent". "Cogi" is the identity of the SEPARATE `cogitave/agent` project, not part of Yuva. The references above to "the cogi-doc" / `docs/research/cogi-cognitive-architecture.md` / the `cogi-arch-research` branch are cross-references to a preserved historical research record (its filename is intentionally unchanged so the links do not break) and to git history — they are left verbatim by design.
+Yuva is agent-agnostic: the OS never names a specific agent, and its surfaces say "the agent". "Cogi" is the identity of the SEPARATE `cogitave/cogi` project, not part of Yuva. The references above to "the cogi-doc" / `docs/research/cogi-cognitive-architecture.md` / the `cogi-arch-research` branch are cross-references to a preserved historical research record (its filename is intentionally unchanged so the links do not break) and to git history — they are left verbatim by design.

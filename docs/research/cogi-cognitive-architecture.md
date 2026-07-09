@@ -1,6 +1,6 @@
 # Cogi's Cognitive Architecture: Reasoning Core + Retrieval + Continual Learning, vs. the Embed-a-Giant-Model Logic
 
-> Terminology (2026-07-08): "Cogi" herein refers to what is now the separate cogitave/agent project; the Yuva OS itself is agent-agnostic ("the agent"). Preserved as written.
+> Terminology (2026-07-08): "Cogi" herein refers to what is now the separate cogitave/cogi project; the Yuva OS itself is agent-agnostic ("the agent"). Preserved as written.
 
 > Companion: [TRINITY coordinator analysis](trinity-coordinator-analysis.md) — an empirical small-orchestrator result this position synthesizes.
 

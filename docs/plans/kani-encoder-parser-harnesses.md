@@ -1,3 +1,13 @@
+---
+type: How-to
+title: "Kani Bounded-Model-Checking Harnesses for Silicon-Unsafe Encoders and Protocol Parsers"
+description: "Plan to split VMX/EPT/PTE encoders into a tb-encode crate + 17 Kani proof harnesses; landed status unclear; IPC codec is pre-consumer."
+tags: ["kani", "formal-verification", "encoders", "vmx-ept-pte", "ipc-codec", "implementation-plan"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: how-to
+---
+
 # Kani bounded-model-checking harnesses for the silicon-unsafe encoders and protocol parsers (VMX/EPT/PTE encoders, TbBootInfo parser, IPC frame codec)
 
 > **Task #49** · DoD marker: `V1: kani-encoders OK` · Effort: **L** · Slug: `kani-encoder-parser-harnesses`

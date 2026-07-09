@@ -354,4 +354,4 @@ This section records the adversarial verdicts (both `SOUND-WITH-AMENDMENTS`) and
 
 ## Terminology note (2026-07-08)
 
-Yuva is agent-agnostic: the OS never names a specific agent. "Cogi" is the identity of the SEPARATE `cogitave/agent` project, not part of Yuva; the neutral term on every Yuva surface is "the agent" (e.g. `yuva.view=agent`, the "Agent inference" row, "The agent runtime is resident"). Occurrences of "Cogi" that survive in per-landing history, run quotes, or the research records are preserved as written.
+Yuva is agent-agnostic: the OS never names a specific agent. "Cogi" is the identity of the SEPARATE `cogitave/cogi` project, not part of Yuva; the neutral term on every Yuva surface is "the agent" (e.g. `yuva.view=agent`, the "Agent inference" row, "The agent runtime is resident"). Occurrences of "Cogi" that survive in per-landing history, run quotes, or the research records are preserved as written.

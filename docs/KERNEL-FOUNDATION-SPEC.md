@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "Yuva Kernel Foundation & Assembly Specification"
+description: "Locked v1.0 spec: tb-hal is the sole asm/unsafe crate; defines boot path (PVH bootstrap to tb-boot), ABI, traps, MMU, and M0-M4/MV WBS."
+tags: ["kernel", "assembly", "boot", "hal", "abi", "milestones"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: locked
+diataxis: explanation
+---
+
 # Yuva Kernel Foundation & Assembly Specification
 
 > Status: v1.0 · **All items [DECISION]** — this document deliberately contains no open decisions (locked to scenario).

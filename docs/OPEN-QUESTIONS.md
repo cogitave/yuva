@@ -1,3 +1,13 @@
+---
+type: Reference
+title: "Yuva Open Questions"
+description: "Tracker of 60 open P0-P2 design questions across kernel/security/memory/scheduling/sovereignty specs; several already resolved inline."
+tags: ["open-questions", "tracker", "kernel", "sovereignty", "spec-freeze", "decisions"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: active
+diataxis: reference
+---
+
 # Yuva Open Questions
 
 > Status: v1.0 · Priority: **P0** = must close before spec freeze · **P1** = before the Phase-1 prototype · **P2** = before the relevant phase starts

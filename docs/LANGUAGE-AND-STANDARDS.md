@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "Yuva Language and Industry Standards Decision"
+description: "Per-layer Rust-first language allowlist for Yuva, backed by 32-agent research and adversarial verification of key claims."
+tags: ["rust", "language-decision", "standards", "verification", "architecture", "compliance"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva Language and Industry Standards Decision
 
 > Status: v1.0 · Question: *"What language do you write an agent-native kernel from scratch in; what are serious organizations actually doing in 2026?"*
@@ -145,7 +155,7 @@ contract is `docs/spec/yuva-abi-v1.md`; the frozen registry is
 `crates/tb-encode/src/abi.rs`. Three standing rules:
 
 - **Agent-neutral naming (lint-gated).** The specific resident-agent identity
-  name "Cogi" (the `cogitave/agent` project's identity) MUST NOT appear in
+  name "Cogi" (the `cogitave/cogi` project's identity) MUST NOT appear in
   `kernel/src` or `crates/`. `scripts/check-agent-neutral.sh` fails closed on it.
   The one named exception is the historical greeting FIXTURE in
   `tools/xport-harness/src/live.rs` (host-side witness content, out of the lint's

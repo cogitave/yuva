@@ -1,3 +1,13 @@
+---
+type: Reference
+title: "Yuva Benchmarks — Boot Time"
+description: "Methodology + measured boot-time comparisons (Yuva vs Unikraft/Firecracker/etc); x86_64 KVM figures measured, aarch64 perf still blocked on no Arm-KVM CI host."
+tags: ["benchmarks", "boot-time", "kvm-vs-tcg", "methodology", "performance", "world-switch"]
+timestamp: 2026-06-07T18:51:02+03:00
+status: active
+diataxis: reference
+---
+
 # Yuva Benchmarks — boot time
 
 > Why an agent-native OS measures boot time at all: an agent's cold-start

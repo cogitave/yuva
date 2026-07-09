@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M29 Stage C: the prov_hash → khash::uhash Cutover Landing Plan (#99)"
+description: "Landed plan swapping prov_hash from FNV-1a-64 to khash::uhash (BLAKE2s-256), restructuring six Kani harnesses to hit CI's 45-min budget."
+tags: ["m29", "khash", "kani-proofs", "provenance-hash", "cbmc-budget", "landing-plan"]
+timestamp: 2026-06-11T18:44:09+03:00
+status: locked
+diataxis: explanation
+---
+
 # M29 stage C — the `prov_hash` → `khash::uhash` cutover: landing plan (#99)
 
 **Status:** LANDED (#99 — the restructure + swap + doc fan-out shipped as one PR; per-harness measurements and the mutation matrix recorded in the landing PR). **Pillar:** memory (the #74 provenance-hash first half). **Depends on:** M29 stages A+B (LANDED — `tb-encode::khash` leaf + the M28 MAC cutover), M22 fold, the M30 inferwire harness additions (in flight in PARALLEL — see §6 lockstep). **Closes:** the #74 hash half + the M22 `NOT cryptographic` structural-digest concession. **Companion docs:** [`docs/proposals/M29-crypto-mac.md`](../proposals/M29-crypto-mac.md) §4/§5(C)/§6.3 (the protocol + the split-out decision), [`m29-stage-c-kani-budget-plan.md`](m29-stage-c-kani-budget-plan.md) (study 2 — the option analysis this plan adopts).

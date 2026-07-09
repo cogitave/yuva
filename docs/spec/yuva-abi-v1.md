@@ -9,7 +9,7 @@ disagree, THIS document is as-built and wins. Keywords **MUST / MUST NOT / SHALL
 This is the versioned, agent-agnostic contract across which a conformant agent
 speaks to Yuva. It is FORMALIZED from the existing seams — it invents no new
 mechanism, moves no code, and rewrites nothing. It is the PRECONDITION for the
-future `cogitave/agent` extraction, NOT the extraction.
+future `cogitave/cogi` extraction, NOT the extraction.
 
 ---
 
@@ -251,7 +251,7 @@ is resident"). The only residual "Cogi" is the host-side greeting fixture in
 The in-repo neutral term is **agent**. A lint (`scripts/check-agent-neutral.sh`)
 bans `Cogi` in `kernel/src` + `crates/` (both already clean), with the `live.rs`
 greeting fixture a NAMED historical-witness exception (an operator judgment call;
-neutralizing it is deferred). The `cogitave/agent` project MAY be discussed by
+neutralizing it is deferred). The `cogitave/cogi` project MAY be discussed by
 name; the in-repo neutral term is never "Cogi".
 
 ---
@@ -296,7 +296,7 @@ unit test + an in-kernel boot self-test, not Kani harnesses
   remains a discoverable LABEL. The gate's own blockers are the unbuilt handshake
   frame + the M18.1 admission precondition + the EL0 trap gate.
 - The generic-host DEGRADED runtime — `backends=DEFERRED`.
-- The `cogitave/agent` repo split + code move — `extraction=DEFERRED-SEPARATE-MILESTONE`,
+- The `cogitave/cogi` repo split + code move — `extraction=DEFERRED-SEPARATE-MILESTONE`,
   gated on BOTH the `mem/` factorization AND the EL0 trap gate.
 - A signed/keyed ABI-version attestation — the M33 successor.
 - aarch64 `/chosen/bootargs` + tb-vmm cmdline version pass-through.

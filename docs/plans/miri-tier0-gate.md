@@ -1,3 +1,13 @@
+---
+type: Roadmap
+title: "Wire Miri into CI as a Mandatory Tier-0 UB Gate (tb-boot + tb-core)"
+description: "Plan to extract tb-hal's pure logic into a new tb-core crate and add a blocking cargo-miri CI gate (marker T0: miri OK)."
+tags: ["miri", "ci-gate", "tb-core", "unsafe-rust", "framekernel", "undefined-behavior"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: how-to
+---
+
 # Wire Miri into CI as a mandatory, blocking Tier-0 UB gate over the host-testable pure-logic crates (tb-boot + new tb-core)
 
 > **Task #39** · DoD marker: `T0: miri OK` · Effort: **L** · Slug: `miri-tier0-gate`

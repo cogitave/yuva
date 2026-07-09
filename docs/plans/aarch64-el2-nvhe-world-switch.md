@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "aarch64 EL2 (nVHE) World-Switch Smoke Proof — \"L2.0: el2 OK\" Under Pure-TCG QEMU virt"
+description: "Task #48 plan for aarch64 EL2 nVHE world-switch smoke proof; landed as `L2.0: el2 OK`, genuinely executes under pure TCG."
+tags: ["aarch64", "el2", "nvhe", "hypervisor", "world-switch", "qemu-tcg"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: explanation
+---
+
 # aarch64 EL2 (nVHE) world-switch smoke proof — "L2.0: el2 OK" under pure-TCG QEMU virt
 
 > **Task #48** · DoD marker: `L2.0: el2 OK` · Effort: **L** · Slug: `aarch64-el2-nvhe-world-switch`
