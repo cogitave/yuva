@@ -266,3 +266,57 @@ jobs:
         env:
           QEMU_TIMEOUT: 40
         run: bash scripts/run-substrate-x86_64.sh
+
+  # Boot Profiles stage-B PROOF-OF-CONCEPT — the ONE-ORGAN COMPILE-OUT lane (an
+  # ADDITIONAL, opt-in x86_64 lane; every job above is untouched and stays the
+  # byte-identical agent default). Builds the kernel `--no-default-features` (the
+  # kernel-crate-local `agent-organs` feature OFF, so ONLY the M26 exit-telemetry
+  # block is `#[cfg]`-removed), boots it under `-append yuva.profile=substrate`,
+  # and asserts M26 is ABSENT-BY-OMISSION from BOTH the serial stream (no marker,
+  # no skip form, no `exittel:` witness) AND the compiled ELF (a strict anchored
+  # byte-search), while the profile-scoped micro-VMM core RAN to the clean
+  # `PROFILE: substrate OK` tail and the ~18 OTHER organs stayed built + shown in
+  # the stage-A skip form (M25/M28 bracket the hole). This proves the stage-B
+  # compile-out MECHANISM for ONE organ — NOT a reduced-TCB product (the witness
+  # is `organs=NOT-BUILT scope=ONE-ORGAN-ONLY`, no minimal/secure/tcb claim). Full
+  # stage B (every organ + the mem/ engine/organ factorization + an image-size
+  # delta) is the open, named successor. A more generous 90s ceiling than the
+  # substrate lane's 40s (which flaked on slow runners today).
+  compileout-poc-boot:
+    name: boot & assert (compile-out PoC, --no-default-features, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (rust-src, llvm-tools)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
+          components: rust-src, llvm-tools
+
+      - name: Install QEMU (headless)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Cache cargo registry + build-std artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Distinct cache key: this lane builds the feature-OFF artifact into the
+          # same target path, so it keeps its own cache to avoid churning the
+          # default/substrate (feature-ON) caches. (cargo rebuilds on the feature
+          # change regardless — the key just keeps the lanes' caches separate.)
+          key: ${{ runner.os }}-cargo-compileout-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Build kernel (x86_64, --no-default-features → agent-organs OFF)
+        run: cargo kbuild --no-default-features --target "targets/${TARGET_X86}.json"
+
+      - name: Boot compile-out PoC + assert (M26 ABSENT in stream + ELF; core ran; neighbors intact in skip form)
+        env:
+          QEMU_TIMEOUT: 90
+        run: bash scripts/run-compileout-poc-x86_64.sh
