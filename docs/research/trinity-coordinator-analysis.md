@@ -2,7 +2,7 @@
 
 # TRINITY (arXiv:2512.04695v3) — A Critical Reading for the Yuva/Cogi Architecture
 
-> Terminology (2026-07-08): "Cogi" herein refers to what is now the separate cogitave/agent project; the Yuva OS itself is agent-agnostic ("the agent"). Preserved as written.
+> Terminology (2026-07-08): "Cogi" herein refers to what is now the separate cogitave/cogi project; the Yuva OS itself is agent-agnostic ("the agent"). Preserved as written.
 
 *Honest analysis. Not flattery for Cogi, not a takedown of TRINITY. Where Cogi's answer is dormant or aspirational, it is labeled as such.*
 

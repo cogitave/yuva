@@ -994,7 +994,7 @@ mod tests {
         // preserved verbatim as a historical record -- the greeting text is
         // incidental, only the reversal drives acceptance.
         // Terminology (2026-07-08): "Cogi" is now the identity of the separate
-        // cogitave/agent project; Yuva surfaces say "agent". Historical reply
+        // cogitave/cogi project; Yuva surfaces say "agent". Historical reply
         // preserved verbatim.
         let challenge: [u8; 16] = [
             0x8c, 0x3f, 0x1a, 0x58, 0x72, 0x75, 0xa8, 0xd8, 0x56, 0x7b, 0x73, 0xb8, 0x92, 0x6c,
@@ -1043,7 +1043,7 @@ mod tests {
         // so v3 returned matched=NONE / TRANSFORM-MISS. v4's Perm arm accepts
         // it: all four fresh groups present, not the forward order.
         // Terminology (2026-07-08): "Cogi" is now the identity of the separate
-        // cogitave/agent project; Yuva surfaces say "agent". Historical reply
+        // cogitave/cogi project; Yuva surfaces say "agent". Historical reply
         // preserved verbatim.
         let challenge: [u8; 16] = [
             0xee, 0x86, 0xe9, 0x5a, 0x22, 0x66, 0x92, 0x2c, 0x45, 0x85, 0xd8, 0xbc, 0xae, 0xc1,
