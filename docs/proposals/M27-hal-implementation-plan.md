@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M27 — HAL Implementation Plan (aarch64 EL2 Two-VMID CNTHP Sovereign Scheduler)"
+description: "Build spec to wire M27's first async EL2 timer IRQ (0x480) preempting two EL1 guests; cooperative M27a floor, real preemptive M27b."
+tags: ["m27", "hal", "aarch64", "el2", "scheduler", "interrupts"]
+timestamp: 2026-06-10T22:23:48+03:00
+status: locked
+diataxis: explanation
+---
+
 # M27 HAL implementation plan — the aarch64 EL2 two-VMID CNTHP sovereign scheduler
 
 **Status:** design-complete (build spec) · companion to [`M27-sovereign-scheduler.md`](M27-sovereign-scheduler.md) · derived from an ultracode design workflow (4 Explore studies of the world-switch / timer-IRQ-at-EL2 / two-guest-harness / boot-hang-history + synthesis). The **verified `tpsched` leaf + 5 Kani harnesses are already built** (branch `m27-sovereign-scheduler`); this plan is the **EL2 HAL runtime** that remains.

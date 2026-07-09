@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M20 — Durable Persistence"
+description: "Proposes a poll-mode virtio-blk BackingStore with log-structured superblock/record format so per-agent memory survives reboot."
+tags: ["m20", "persistence", "virtio-blk", "single-level-store", "storage"]
+timestamp: 2026-06-10T03:59:12+03:00
+status: locked
+diataxis: explanation
+---
+
 # M20 — Durable Persistence: `VirtioBlkStore` behind the M13 `BackingStore` seam
 
 **Status:** PROPOSED (build-ready) · **Marker:** `M20: persist OK` · **Size:** L (BACKLOG #22) · **Depends on:** M19 virtio-mmio transport (landed), M13 substrate (landed) · **Blocks unlocked:** agent hibernate/restore, persistent skill lineage (M18 follow-up), `.taf` checkpoint images

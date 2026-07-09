@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "Industrial Boot — human-meaningful boot presentation over machine-truth markers"
+description: "Opt-in systemd-style pretty boot layer gated on yuva.console=pretty; default stays raw so CI markers stay byte-identical. Nothing landed."
+tags: ["boot", "presentation", "ci", "honesty", "sovereignty", "proposal"]
+timestamp: 2026-07-07T14:34:46+03:00
+status: draft
+diataxis: explanation
+---
+
 # Industrial Boot — the human-meaningful boot presentation over the untouched machine-truth markers
 
 > **Dated correction (2026-07-08, from the Boot-Profiles landing).** Two claims

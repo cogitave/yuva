@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M28 — The operator inbound channel (opframe RX + enrolled-key activation)"
+description: "Inbound operator command channel: nonce-fresh, head-bound, dual-authorized, non-crypto keyed MAC, necessary-not-sufficient for M24 gate."
+tags: ["m28", "communication", "learning-loop", "authentication", "verified-leaf", "dual-custody"]
+timestamp: 2026-06-10T23:30:14+03:00
+status: locked
+diataxis: explanation
+---
+
 # M28 — The operator INBOUND channel (opframe RX + enrolled-key activation): the exogenous-oracle CAPSTONE
 
 **Status:** proposed (build) · **Pillar:** communication (the INBOUND half) — and the **closure of the learning loop** · **Depends on:** M22 (provenance fold + live head), M24 (the honest gate + `KAN_ACTIVE`), M25 (the `opframe` TX transcript) · **Marker:** `M28: operator-cmd OK`

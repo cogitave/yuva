@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M22 — Verified Memory Provenance"
+description: "Proposes a per-agent hash-chain memory-provenance ledger (Kani-proven FNV fold) giving structural — not cryptographic — tamper-evidence."
+tags: ["m22", "provenance", "memory", "tamper-evidence", "hash-chain", "kani"]
+timestamp: 2026-06-10T08:42:16+03:00
+status: locked
+diataxis: explanation
+---
+
 # M22 — Verified memory provenance (mnemonic sovereignty)
 
 **Status:** proposed (build-as-designed, autonomously buildable) · **Depends on:** M13 (memory substrate), M11 (writer capability), M17 (forget/tombstone), M20 (durable head) · **Marker:** `M22: provenance OK`

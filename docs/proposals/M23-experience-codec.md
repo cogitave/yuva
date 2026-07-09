@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M23 — Verified experience codec + counterfactual shadow-recording"
+description: "Logs each forget/recall decision as a tamper-evident, replayable record with a dormant cell's shadow score; validates no policy."
+tags: ["m23", "continuous-learning", "off-policy-evaluation", "tamper-evidence", "shadow-mode", "kani"]
+timestamp: 2026-06-10T12:36:50+03:00
+status: locked
+diataxis: explanation
+---
+
 # M23 — Verified experience codec + counterfactual shadow-recording
 
 **Status:** proposed (build-refined) · **Pillar:** continuous learning (the DATA layer) · **Depends on:** M13 (memory), M17 (forget/recall), M21 (kancell grid + dormant cell), M22 (provenance fold) · **Marker:** `M23: experience OK`

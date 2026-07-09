@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "aL2.4b — Full M0..M28 Kernel as the EL1 Guest"
+description: "Runs the unmodified full M0..M28 kernel as a stage-2-confined EL1 guest under EL2; stages 1+2 landed, stage-3 preemption deferred."
+tags: ["al2.4b", "sovereignty", "aarch64", "el2", "virtualization", "m34"]
+timestamp: 2026-06-11T15:22:53+03:00
+status: locked
+diataxis: explanation
+---
+
 # aL2.4b — the LITERAL full M0..M28 kernel as the EL1 guest under our stage-2 (the M34 hard prerequisite)
 
 **Status:** **STAGES 1+2 LANDED** (2026-06-12 — confined boot + guestlog + the in-guest acceptance profile; the first green `L2.4b: el1-kernel-guest OK`; Stage 3 monitor-preemption deferred) · **Pillar:** sovereignty ("replace Firecracker" — and the substrate M34 stands on) · **Tracker:** #88 in [`docs/plans/sovereignty-plan.md`](../plans/sovereignty-plan.md) (Phase-C prerequisite; gates #92/M34; runnable in parallel with the Phase-A arc) · **Track:** B (aarch64-EL2) of [`SOVEREIGNTY-L2-ROADMAP.md`](../SOVEREIGNTY-L2-ROADMAP.md) §7 · **Arch:** **aarch64-only** (x86 Track A `L2.4: tabos-guest OK` stays parked on #37; the x86 lane prints the loud `(aarch64-only, hardware-gated #37, skipped)` token) · **Depends on:** aL2.4-v1 (the two-stage-MMU primitive), aL2.3 (the `device_mmio` trap seam), aL2.5 (the vGIC `GICH_LR` machinery), M27 (CNTHP EL2 deadline + two-VMID world-switch + monitor-counted progress cells), `tb_boot::aarch64::build_handoff` (the frozen, host-tested splice contract) · **Marker:** `L2.4b: el1-kernel-guest OK` · **Effort:** **XL, multi-iteration, boot-hang-aware** (Stages 1+2 each ~M-sized, LANDED together; Stage 3 is the XL half, deferred)

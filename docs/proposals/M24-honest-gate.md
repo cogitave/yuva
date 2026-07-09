@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M24 — Honest Oracle, Durable Spill, and Gated Bake-off"
+description: "Gates M21 kancell activation on a no-float lower-bound OPE test with ε-greedy overlap and a survival label; synthetic traces stay dormant."
+tags: ["m24", "continuous-learning", "off-policy-evaluation", "activation-gate", "no-float", "kani"]
+timestamp: 2026-06-10T13:56:10+03:00
+status: locked
+diataxis: explanation
+---
+
 # M24 — Honest oracle + durable spill + gated bake-off (the honest #72 resolution)
 
 **Status:** proposed (build-reshaped) · **Pillar:** continuous learning (the GATE) · **Depends on:** M21 (kancell + envelope-no-widening proof), M23 (experience codec + reserved propensity/outcome fields), M20 (durable store), M18.2 (rotating held-out) · **Marker:** `M24: bakeoff OK`

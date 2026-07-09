@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M26 — Verified EL2 exit-telemetry producer"
+description: "Verified EL2 exit-telemetry: folds each guest exit into a no-float histogram record on the M23 experience stream; producer-only, non-causal."
+tags: ["m26", "el2", "telemetry", "learning", "kani"]
+timestamp: 2026-06-10T18:00:11+03:00
+status: locked
+diataxis: explanation
+---
+
 # M26 — Verified EL2 exit-telemetry producer (the OS records its own virtualization workload)
 
 **Status:** proposed (build) · **Pillar:** learning (the experience stream's second PRODUCER) + a bridge to sovereignty · **Depends on:** M22 (provenance fold), M23 (experience stream + xp_head), L2.2 (`el2_trap` ESR_EL2.EC classifier) · **Marker:** `M26: exit-telemetry OK`

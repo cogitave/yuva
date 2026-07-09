@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M21 — Verified fixed-point policy seam for the M17 forget/demote decision"
+description: "Build a Kani-proven fixed-point additive policy cell inside M17's forget/demote envelope, shipped dormant until it beats a linear baseline."
+tags: ["m21", "eviction-policy", "kani", "fixed-point", "memory", "safety-envelope"]
+timestamp: 2026-06-10T07:46:18+03:00
+status: locked
+diataxis: explanation
+---
+
 # M21 — Verified fixed-point policy seam for the M17 forget/demote decision
 
 **Status:** proposed (build-reshaped) · **Depends on:** M13 (memory substrate), M17 (forget/demote daemon), `tb-encode::memscore` · **Marker:** `M21: kan-policy OK`
