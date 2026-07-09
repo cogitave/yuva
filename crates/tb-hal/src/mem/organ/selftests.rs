@@ -1,10 +1,12 @@
 //! M20..M26 boot self-tests (the marker bodies), extracted from the `MemSubstrate`
 //! core for readability. Each `*_selftest()` runs the verified-leaf round-trip the
 //! kernel renders a milestone marker from -- pure value computation, no `unsafe`, no
-//! device, no scheduler. As a CHILD of `mem`, this module sees every `super`-private
-//! substrate item (the `MemSubstrate` core, the M13/M17/M21 consts, the tier types)
-//! via `use super::*`, so this is a 100% BEHAVIOUR-PRESERVING code move: the kernel
-//! still calls `mem::*_selftest()` through the `pub(crate) use` re-export in `mod.rs`.
+//! device, no scheduler. As a CHILD of `mem::organ`, this module sees every
+//! `super`-private organ item (the `MemSubstrate` core, the M13/M17/M21 consts,
+//! the tier types) AND the engine types the organ re-exposes (`Region`,
+//! `VirtioBlkStore`, `region_index`) via `use super::*`, so this is a 100%
+//! BEHAVIOUR-PRESERVING code move: the kernel still calls `mem::*_selftest()`
+//! through the `pub(crate) use` re-export chain (`organ` -> `mod.rs`).
 #![allow(unused_imports)]
 use super::*;
 
