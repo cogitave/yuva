@@ -74,7 +74,7 @@
 # milestone adds/removes a harness.
 EXPECTED_HARNESSES_TOTAL=135
 
-# Shard A (62): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -99,15 +99,6 @@ SHARD_A=(
   kani_ln_fixed_panic_free_bounded
   kani_bla_raw_panic_free_bounded
   kani_minmax_in_scale_range
-  # M40 recall (BM25 lexical scoring) x7 (trivial -- panic-free/bounds + codec +
-  # accumulation-monotone; same fixed-point family as memscore, no hashing)
-  kani_recall_idf_panic_free_bounded
-  kani_recall_tf_norm_panic_free_bounded
-  kani_recall_term_score_panic_free_bounded
-  kani_recall_term_score_absent_is_zero
-  kani_recall_doc_score_accumulation_monotone
-  kani_recall_hit_canon_roundtrip
-  kani_recall_hit_decode_fail_closed
   # L2.1 stage-2/el2_trap x5 (trivial)
   kani_s2_leaf_wellformed
   kani_s2_table_and_vttbr
@@ -169,7 +160,7 @@ SHARD_A=(
   kani_attest_decode_fail_closed        # 22s
 )
 
-# Shard B (59): the learning-loop codec families (M21 kancell, M22 prov canon,
+# Shard B (71): the learning-loop codec families (M21 kancell, M22 prov canon,
 # M23 exp, M24 explore/bakeoff, M25 opframe, M26 exittel, M27 tpsched, M28 cmd
 # -- measured ~6.5s average, NOT trivial) + the heavy iff/determinism fold
 # legs (inclusion_sound, head_deterministic, bakeoff_replay), the thinned
@@ -271,6 +262,22 @@ SHARD_B=(
   kani_corpus_decode_fail_closed
   kani_corpus_schema_stability
   kani_corpus_fold_determinism          # concrete record, one prov evaluation
+  # M40 recall (BM25 lexical scoring) x7 -- panic-free/bounds + injective codec +
+  # accumulation-monotone, the fixed-point-division family. Routed HERE (shard B),
+  # NOT shard A: the ONE-TOUCH rule balances by MEASURED COST, and shard A is the
+  # time-HEAVIEST shard (799.6s heavy-sum: exp_fold_tamper 174s + the khash family
+  # ~300s), which timed out at 50m on a COLD tb-encode-changing push with +7 codegen
+  # units. Shard B (620.0s, finished ~32m cold with headroom) absorbs these; they
+  # sit next to the corpus/exp codec family. No hashing; the tf-norm/term/doc-score
+  # harnesses bound inputs to the small reachable envelope to keep the symbolic
+  # 64-bit divisions cheap (the #49 envelope discipline).
+  kani_recall_idf_panic_free_bounded
+  kani_recall_tf_norm_panic_free_bounded
+  kani_recall_term_score_panic_free_bounded
+  kani_recall_term_score_absent_is_zero
+  kani_recall_doc_score_accumulation_monotone
+  kani_recall_hit_canon_roundtrip
+  kani_recall_hit_decode_fail_closed
 )
 
 # Shard C (8): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
