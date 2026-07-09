@@ -5551,7 +5551,7 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     }
 
     // ---- M40: the verified LEXICAL RECALL-SCORING leaf (research-skill foundation) --
-    // Sharpens Cogi's memory retrieval with classic LEXICAL term-overlap scoring: the
+    // Sharpens the agent's memory retrieval with classic LEXICAL term-overlap scoring: the
     // Kani-proven `tb_encode::recall` BM25-family leaf -- term frequency (saturating) +
     // inverse document frequency (rarer term scores higher) + document-length
     // normalization -- ALL no-float fixed-point integer math (the M21 KAN leaf's
