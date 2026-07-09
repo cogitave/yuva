@@ -1,3 +1,13 @@
+---
+type: Explanation
+title: "Yuva Process and Methodology Document"
+description: "2026-06-06 audit mapping Yuva's planning process to Design Thinking/Success-by-Design; risk register, personas, gates; some items pending."
+tags: ["process-audit", "methodology", "design-thinking", "risk-register", "personas", "review-gates"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva Process and Methodology Document
 
 > Status: v1.0 · Purpose: an **auditable record** of the process the planning phase actually followed, an honest mapping against two recognized frameworks (**Design Thinking**, **Microsoft Success by Design**), and the closing of gaps.

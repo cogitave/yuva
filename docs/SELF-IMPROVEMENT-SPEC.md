@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "Yuva Self-Improvement Specification"
+description: "Draft v1.0 spec for Yuva's self-improvement subsystem (Three Laws, evolution API, skill tier) — items tagged DECISION/PROPOSAL/OPEN, unimplemented."
+tags: ["self-improvement", "agent-architecture", "kernel-design", "evolution", "safety", "skills"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: draft
+diataxis: explanation
+---
+
 # Yuva Self-Improvement Specification
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.

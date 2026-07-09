@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "Yuva Sovereignty and Clean-Slate Decision"
+description: "Decision record: Yuva's kernel is 100% from-scratch/non-Linux; boots today via a temporary Firecracker+PVH+A0-trampoline scaffold pending tb-vmm."
+tags: ["sovereignty", "clean-slate", "boot-handoff", "linux-heritage", "virtio", "decision-record"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: locked
+diataxis: explanation
+---
+
 # Yuva Sovereignty and Clean-Slate Decision
 
 > Status: v1.0 · **All [DECISION]** — no open decisions.

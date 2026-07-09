@@ -1,3 +1,13 @@
+---
+type: Explanation
+title: "Yuva Vision Document"
+description: "Planning-phase (v1.0) vision for Yuva: an OS where agent mind+sandbox are one kernel object; roadmap phases are non-committal drafts."
+tags: ["vision", "agent-os", "planning-phase", "capabilities", "memory", "roadmap"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva Vision Document
 
 **Turkiye's Agent Based Operating System**

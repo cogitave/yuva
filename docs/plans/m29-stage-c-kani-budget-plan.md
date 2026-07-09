@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M29 Stage C Kani Prove-Encode Budget Plan (prov_hash to khash::uhash cutover)"
+description: "Plan weighing 5 options to keep the stage-C khash cutover's Kani proof lane under 45 min; adopts harness shrinking, later Option 4 sharding also landed per an inline update."
+tags: ["kani", "formal-verification", "m29", "ci-budget", "khash"]
+timestamp: 2026-06-11T18:44:57+03:00
+status: locked
+diataxis: explanation
+---
+
 # M29 Stage C (#99) — prove-encode budget plan for the `prov_hash` → `khash::uhash` cutover
 
 **Status:** PLAN (study 2 — budget options). **Scope:** restructure the fold-harness

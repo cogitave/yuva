@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "aarch64 tb-boot producer + _tb_start EL1 entry: KVM register-file handoff via X0=TbBootInfo*"
+description: "Not-yet-landed plan (task #47): add aarch64 _tb_start EL1 entry + tb-vmm KVM producer for X0=TbBootInfo* boot handoff."
+tags: ["aarch64", "kvm", "tb-vmm", "boot-protocol", "kernel-entry", "forward-plan"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: how-to
+---
+
 # aarch64 tb-boot producer + `_tb_start` EL1 entry: boot the kernel under tb-vmm via an X0=TbBootInfo* register-file handoff (KVM_ARM)
 
 > **Task #47** · DoD marker: `tb-boot: contract v0 OK` · Effort: **L** · Slug: `aarch64-tb-boot-producer`

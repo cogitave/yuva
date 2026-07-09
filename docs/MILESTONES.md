@@ -1,3 +1,13 @@
+---
+type: Reference
+title: "Yuva Milestones & Development Pipeline"
+description: "Records Yuva kernel's M0-M38 milestone chain: DoD markers, Kani/Miri proofs, and honest mock/dormant flags (M21 dormant, M31/M32 mock)."
+tags: ["kernel", "milestones", "ci-verification", "kani-proofs", "boot-markers"]
+timestamp: 2026-06-07T15:01:37+03:00
+status: active
+diataxis: reference
+---
+
 # Yuva Milestones & Development Pipeline
 
 > Status: the agent-native milestone chain **M0 → M38 is complete and CI-green on
@@ -710,14 +720,14 @@ complete and CI-green; **L2.0** (the first **L2** rung) has landed. What remains
 is the rest of the L2 track plus a set of named debts:
 
 - **The forward plan + the stage-A separability wave (LANDED).** The
-  Yuva⟷`cogitave/agent` split is now under way: **agent-terminology** (#61 —
+  Yuva⟷`cogitave/cogi` split is now under way: **agent-terminology** (#61 —
   `Cogi` retired from Yuva's active surfaces for the neutral `agent`),
   **Yuva-ABI stage A** (#65 — the normative [`spec/yuva-abi-v1.md`](spec/yuva-abi-v1.md) +
   the frozen `tb-encode::abi` registry cross-checked by an in-kernel
   fail-closed `abi_registry_selfcheck`), **boot-profiles stage A** (#66 —
   `yuva.profile=substrate|agent` as a real execution GATE, the substrate profile
   boots with the organs provably not run), and the **extraction plan** (#67 —
-  a PLAN, not executed) map the physical `cogitave/agent` cut. The convergent
+  a PLAN, not executed) map the physical `cogitave/cogi` cut. The convergent
   route from here is the research-first **forward plan**
   (`docs/proposals/forward-plan.md`, PR #69): its ungated
   flagship is the **Phase-1 experience corpus** (the dataset moat; M39, sibling

@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "Prove M11 Capability Rights-Subset / No-Confused-Deputy with Kani (tb-caps-core), Optional Verus Model"
+description: "Task plan for a Kani-proven M11 rights-subset/no-confused-deputy invariant (tb-caps-core), plus an optional non-blocking Verus model."
+tags: ["kani", "formal-verification", "capabilities", "m11", "tb-caps-core"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: how-to
+---
+
 # Prove M11 capability rights-subset / no-confused-deputy with Kani (reused-code, host-verifiable tb-caps-core) plus an optional Verus unbounded model
 
 > **Task #38** · DoD marker: `M11: caps-subset PROVEN` · Effort: **L** · Slug: `m11-kani-rights-subset`

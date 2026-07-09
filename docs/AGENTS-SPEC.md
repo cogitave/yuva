@@ -1,3 +1,13 @@
+---
+type: Architecture
+title: "Yuva Agent Specification (Single/Multi-Agent, Scheduling, IPC)"
+description: "v1.0 draft spec: Yuva agent process, lifecycle, spawn, scheduling, IPC, identity — largely PROPOSAL/OPEN, not implemented."
+tags: ["agent-process", "scheduling", "ipc", "multi-agent", "capability-model", "draft-spec"]
+timestamp: 2026-06-07T01:48:32+03:00
+status: draft
+diataxis: explanation
+---
+
 # Yuva Agent Specification (Single/Multi-Agent, Scheduling, IPC)
 
 > Status: v1.0 draft — marked **[DECISION] / [PROPOSAL] / [OPEN]**.

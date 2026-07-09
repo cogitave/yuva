@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M14 byte-payload IPC: copy_to_user/copy_from_user bounce-buffer round-trip across two agent address spaces"
+description: "Pre-implementation plan for M14 byte-payload IPC (copy_to/from_user bounce buffers); landed per BACKLOG row 20, doc unchanged."
+tags: ["m14", "ipc", "uaccess", "tb-hal", "copy-to-user", "kernel-plan"]
+timestamp: 2026-06-08T18:57:37+03:00
+status: locked
+diataxis: explanation
+---
+
 # M14 byte-payload IPC: copy_to_user/copy_from_user bounce-buffer round-trip across two agent address spaces
 
 > **Task #50** · DoD marker: `M14.1: payload OK` · Effort: **L** · Slug: `m14-byte-payload-ipc`

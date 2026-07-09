@@ -1,3 +1,13 @@
+---
+type: How-to
+title: "Try It — Booting Yuva Yourself (and Why There Is No .iso)"
+description: "WSL2 walkthrough for booting Yuva via demo.sh (pretty vs. raw marker views) and why there's no installable .iso; flags agent inference as a MOCK."
+tags: ["boot", "demo", "wsl", "qemu", "iso", "honesty-markers"]
+timestamp: 2026-06-12T00:21:56+03:00
+status: active
+diataxis: how-to
+---
+
 # Try it — booting Yuva yourself (and why there is no .iso)
 
 > TL;DR: **two commands in WSL and you are watching it boot.** Yuva is a

@@ -1,3 +1,13 @@
+---
+type: Reference
+title: "Yuva L2 Residual Assumptions — the EL2 Trusted Base the Proofs Do NOT Discharge"
+description: "seL4-style ledger of what Yuva's L2.0-L2.6 Kani/Miri proofs discharge vs. the residual EL2 TCB assumptions (A1-A6)."
+tags: ["assumptions", "trusted-computing-base", "formal-verification", "el2-hypervisor", "aarch64", "kani-proofs"]
+timestamp: 2026-06-09T12:25:52+03:00
+status: active
+diataxis: reference
+---
+
 # Yuva L2 Residual Assumptions — the EL2 trusted base the proofs do NOT discharge
 
 > An EXPLICIT assumption set, in the seL4 / SeKVM tradition: a formally-verified

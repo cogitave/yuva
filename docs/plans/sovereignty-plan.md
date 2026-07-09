@@ -1,3 +1,13 @@
+---
+type: Roadmap
+title: "The full-sovereignty plan — reconciled roadmap (M29 → M37 + phases B/D)"
+description: "Reconciled M29-M37 sovereignty roadmap: mocked-inference, vendored-llama.cpp debt named; per-milestone DoD/markers/deps graph."
+tags: ["roadmap", "sovereignty", "milestones", "kernel", "provenance", "attestation"]
+timestamp: 2026-06-11T14:39:26+03:00
+status: active
+diataxis: reference
+---
+
 # The full-sovereignty plan — reconciled roadmap (M29 → M37 + phases B/D)
 
 **Status:** adopted (operator plan, adversarially reviewed) · **Origin:** the operator's directive document (`TABOS-EGEMENLIK-PLANI.md`, 2026-06-11) reconciled against the repo by a 3-reviewer ultracode audit (feasibility vs codebase / conflict+numbering / risk+honesty) — verdict **sound-with-amendments**; every amendment below is baked in. · **Tracker:** tasks #86–#98 carry this plan with the dependency graph. · **Discipline:** every milestone goes through the standard pipeline (research proposal → tb-encode verified leaf (Kani) → adversarial review → both-arch build+boot → docs/scripts → PR-loop, 2× green). No step is skipped.
