@@ -45,12 +45,32 @@
 //! The fixed-point scheme multiplies intermediates by [`SCALE`] (1000), so the
 //! arithmetic is panic-free only over the values the recall path can actually feed:
 //! a document has a BOUNDED token count and the corpus a BOUNDED document count. The
-//! Kani harnesses `assume` a documented envelope ([`ENVELOPE_MAX`]) and prove
-//! panic-freedom + monotonicity + bounds WITHIN it. At astronomically large `tf` /
-//! `doc_len` (beyond ~`2^40`) the `numer * SCALE` term could overflow `i64`; neither
-//! is reachable from the interned-token memory (a document holds far fewer than
-//! `2^20` tokens). An unconstrained full-range harness would be UNSOUND and turn the
+//! Kani harnesses `assume` a documented envelope and prove panic-freedom + bounds
+//! WITHIN it. At astronomically large `tf` / `doc_len` (beyond ~`2^40`) the
+//! `numer * SCALE` term could overflow `i64`; neither is reachable from the interned-
+//! token memory. An unconstrained full-range harness would be UNSOUND and turn the
 //! lane RED -- the #49 over-quantification trap the `memscore` leaf documents.
+//!
+//! ## Two distinct envelopes -- and WHY the document one is `2^8` (a TRACTABILITY +
+//! REACHABLE-BOUND note, deliberate, NOT a silent coverage cut)
+//!
+//! The DOCUMENT-size fields (`tf`, `doc_len`, `avg_len`) enter a SYMBOLIC integer
+//! DIVISION (`numer * SCALE / denom`, `dl / avgl`), which CBMC bit-blasts into a
+//! costly 64-bit divider circuit -- so the harnesses bound them to [`ENVELOPE_MAX`]
+//! (`256`). This is the REACHABLE document-token count, not a convenience clamp:
+//! Yuva's memory records are SINGLE-TOKEN by the MEMORY-SPEC design (`mem/mod.rs`
+//! `content_tok`/`token`/`body_tok`), so a recall "document" has `tf == 1` and
+//! `doc_len == 1` today; `256` leaves 256x headroom for any future short multi-token
+//! record. The `denom > 0`, saturation, and non-negativity properties the harnesses
+//! prove hold IDENTICALLY at every scale, so bounding to the reachable slice removes
+//! only wasted over-provisioned range -- every mutation-table mutant (div-by-zero at
+//! `avg_len==0`, the dropped `.max(0)`, `saturating_add`->`sub`, the removed `/SCALE`)
+//! still fires WITHIN `2^8`, so no harness is made vacuous. The CORPUS-size fields
+//! (`df`, `n_docs`) enter only [`bm25_idf`], whose logarithm reuses the CHEAP proven
+//! `ln_fixed`, so those stay bounded much wider (`< 2^20`, a million-document corpus)
+//! at no tractability cost. This split -- narrow the division-bearing document
+//! envelope to the reachable slice, keep the cheap corpus envelope wide -- is the
+//! exact CBMC-budget discipline the M31/M33-B proofs follow.
 
 use crate::memscore::ln_fixed;
 
@@ -68,11 +88,15 @@ pub const BM25_K1: i64 = 1200;
 /// it fully. `0.75` is the Lucene default. FROZEN, not learned.
 pub const BM25_B: i64 = 750;
 
-/// The upper bound of the reachable input envelope for `tf` / `doc_len` / `avg_len`:
-/// a document holds fewer than `2^20` interned tokens and the corpus holds fewer
-/// than `2^20` documents. The Kani harnesses `assume` inputs below this (the sound
-/// reachable slice); the fixed-point `numer * SCALE` terms stay well inside `i64`.
-pub const ENVELOPE_MAX: u64 = 1 << 20;
+/// The reachable-input envelope for the DOCUMENT-size fields (`tf` / `doc_len` /
+/// `avg_len`): a recall document holds fewer than `256` interned tokens. This is the
+/// REACHABLE bound, not a convenience clamp -- Yuva's memory records are single-token
+/// (`tf == doc_len == 1` today), so `256` is 256x headroom. The Kani harnesses
+/// `assume` these fields below this so the SYMBOLIC integer division stays tractable
+/// (see the module-level two-envelope note); the fixed-point `numer * SCALE` terms
+/// stay well inside `i64`. The corpus-size fields (`df` / `n_docs`) are bounded
+/// separately and wider (they feed only the cheap [`bm25_idf`]).
+pub const ENVELOPE_MAX: u64 = 1 << 8;
 
 /// The exclusive upper bound on [`bm25_tf_norm`]: the term-frequency saturation term
 /// `(tf*(k1+1))/(tf + k1*norm)` tends to `k1 + 1` as `tf -> inf`, so scaled by
@@ -206,10 +230,11 @@ pub fn hit_decode(buf: &[u8]) -> Option<RankedHit> {
 mod tests {
     use super::*;
 
-    // The largest input the recall callers can actually produce stays well inside the
-    // panic-free envelope: a document holds far fewer than 2^20 tokens and the corpus
-    // far fewer than 2^20 documents. 2^20 is the smoke ceiling used throughout.
-    const SMOKE: u64 = ENVELOPE_MAX;
+    // The host tests EXECUTE concrete vectors (no CBMC cost), so they smoke a much
+    // wider ceiling than the Kani ENVELOPE_MAX (2^8): 2^20 exercises the function far
+    // beyond any reachable document size while staying inside the fixed-point overflow
+    // point -- concrete evidence the panic-freedom holds well past the proof envelope.
+    const SMOKE: u64 = 1 << 20;
 
     // -----------------------------------------------------------------------
     // bm25_idf: the rarer-term-scores-higher invariant + known points. The Miri

@@ -492,11 +492,13 @@ fn kani_minmax_in_scale_range() {
 // ===========================================================================
 
 /// `bm25_idf` (the rarer-term-scores-higher inverse document frequency) is
-/// panic-free and `0 <= r < 34_000` over the reachable envelope. `df`/`n_docs` are
-/// bounded to `< 2^40` (a corpus holds far fewer than a trillion documents), so the
-/// `ln_fixed(2N + 2)` argument stays `< 2^41 < 2^48` -- inside the proven `ln_fixed`
-/// domain; the result is a difference of two `[0, 34_000)` logarithms clamped
-/// non-negative.
+/// panic-free and `0 <= r < 34_000` over the reachable envelope. `df`/`n_docs` (the
+/// CORPUS-size fields) are bounded WIDE to `< 2^20` (a million-document corpus), so
+/// the `ln_fixed(2N + 2)` argument stays `< 2^21 < 2^48` -- inside the proven
+/// `ln_fixed` domain; the result is a difference of two `[0, 34_000)` logarithms
+/// clamped non-negative. idf reuses the CHEAP `ln_fixed` (no symbolic 64-bit
+/// division), so the wide corpus bound costs no tractability (unlike the tf-norm
+/// document envelope, tightened to `2^8` -- see the module two-envelope note).
 ///
 /// NEGATIVE CONTROL: dropping the `.max(0)` clamp lets a universal term (`df == N`)
 /// where numerical noise makes `ln_fixed(2df+1) > ln_fixed(2N+2)` go negative and
@@ -505,8 +507,8 @@ fn kani_minmax_in_scale_range() {
 fn kani_recall_idf_panic_free_bounded() {
     let df: u64 = kani::any();
     let n_docs: u64 = kani::any();
-    kani::assume(df < (1u64 << 40));
-    kani::assume(n_docs < (1u64 << 40));
+    kani::assume(df < (1u64 << 20));
+    kani::assume(n_docs < (1u64 << 20));
     let r = bm25_idf(df, n_docs);
     assert!(r >= 0);
     assert!(r < 34_000);
@@ -516,11 +518,14 @@ fn kani_recall_idf_panic_free_bounded() {
 /// panic-free -- no divide-by-zero (the length factor `norm >= (1-b) > 0` keeps the
 /// denominator positive) and no `i64` overflow over the envelope -- and its result
 /// lies in `[0, TF_NORM_CEIL)` (the saturation ceiling `k1 + 1` scaled). `tf`,
-/// `doc_len`, `avg_len` are bounded to `< ENVELOPE_MAX` (a document holds fewer than
-/// `2^20` interned tokens), the sound reachable slice.
+/// `doc_len`, `avg_len` (the DOCUMENT-size fields, which enter the SYMBOLIC 64-bit
+/// division) are bounded to `< ENVELOPE_MAX` (256 -- the reachable document-token
+/// count; Yuva records are single-token, so this is 256x headroom, and tight enough
+/// that CBMC's divider search converges fast).
 ///
-/// NEGATIVE CONTROL: replacing `avg_len.max(1)` with `avg_len` lets `avg_len == 0`
-/// reach a divide-by-zero and turns this harness RED.
+/// NEGATIVE CONTROL (still fires WITHIN 2^8 -- not vacuous): replacing `avg_len.max(1)`
+/// with `avg_len` lets `avg_len == 0` (in `[0, 256)`) reach a divide-by-zero and turns
+/// this harness RED.
 #[kani::proof]
 fn kani_recall_tf_norm_panic_free_bounded() {
     let tf: u64 = kani::any();
@@ -549,8 +554,8 @@ fn kani_recall_term_score_panic_free_bounded() {
     let doc_len: u64 = kani::any();
     let avg_len: u64 = kani::any();
     kani::assume(tf < ENVELOPE_MAX);
-    kani::assume(df < (1u64 << 40));
-    kani::assume(n_docs < (1u64 << 40));
+    kani::assume(df < (1u64 << 20));
+    kani::assume(n_docs < (1u64 << 20));
     kani::assume(doc_len < ENVELOPE_MAX);
     kani::assume(avg_len < ENVELOPE_MAX);
     let r = bm25_term_score(tf, df, n_docs, doc_len, avg_len);
@@ -571,8 +576,8 @@ fn kani_recall_term_score_absent_is_zero() {
     let n_docs: u64 = kani::any();
     let doc_len: u64 = kani::any();
     let avg_len: u64 = kani::any();
-    kani::assume(df < (1u64 << 40));
-    kani::assume(n_docs < (1u64 << 40));
+    kani::assume(df < (1u64 << 20));
+    kani::assume(n_docs < (1u64 << 20));
     kani::assume(doc_len < ENVELOPE_MAX);
     kani::assume(avg_len < ENVELOPE_MAX);
     assert_eq!(bm25_term_score(0, df, n_docs, doc_len, avg_len), 0);
@@ -597,11 +602,11 @@ fn kani_recall_doc_score_accumulation_monotone() {
     let doc_len: u64 = kani::any();
     let avg_len: u64 = kani::any();
     kani::assume(tf0 < ENVELOPE_MAX && tf1 < ENVELOPE_MAX);
-    kani::assume(df0 < (1u64 << 40) && df1 < (1u64 << 40));
+    kani::assume(df0 < (1u64 << 20) && df1 < (1u64 << 20));
     kani::assume(doc_len < ENVELOPE_MAX && avg_len < ENVELOPE_MAX);
     let query = [(tf0, df0), (tf1, df1)];
-    let one = bm25_doc_score(&query[..1], 1u64 << 40, doc_len, avg_len);
-    let two = bm25_doc_score(&query[..2], 1u64 << 40, doc_len, avg_len);
+    let one = bm25_doc_score(&query[..1], 1u64 << 20, doc_len, avg_len);
+    let two = bm25_doc_score(&query[..2], 1u64 << 20, doc_len, avg_len);
     assert!(one >= 0);
     assert!(two >= one); // adding a matching term never lowers the score
 }
