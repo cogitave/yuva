@@ -527,6 +527,239 @@ pub(crate) fn corpus_selftest() -> crate::CorpusProof {
     }
 }
 
+// --- M39 (inc-3): the DURABLE experience-corpus persist round-trip ------------
+//
+// Makes the corpus SURVIVE + ACCUMULATE across reboots -- the dataset moat. It
+// REUSES the M33 `provhead` MULTI-SECTOR, TORN-WRITE-SAFE codec VERBATIM (no new
+// codec/fold math): the record `head` slot carries the tamper-evident M22
+// `corpus_head`, the `sig` slot carries the packed fixed-width `CorpusRecord`
+// canonical bytes, and the 16-byte `i_id` slot carries the `CORPUS_PERSIST_DOMAIN`
+// tag. The corpus lives in its OWN disk region ABOVE both the M20 partition and the
+// M33 signed-head slots, so the two-boot flow (which resets ONLY M20's low-4-MiB
+// region between boots) leaves the corpus SURVIVING. HONEST: NO LMS signature is
+// added -- the head's tamper-evidence is the M22 fold; the FNV checksums are
+// torn-write detection ONLY; it persists PROVENANCE SKELETONS + trains nothing.
+
+/// The first DURABLE-corpus slot sector -- ABOVE both the M20 fixed partition
+/// (sectors 0..8192) AND the M33 signed-head slots (8192..8204), at the 6-MiB
+/// boundary, so the three subsystems never alias and the two-boot flow (which
+/// resets ONLY M20's low-4-MiB region between boots) leaves the corpus SURVIVING.
+/// Slot A at `[BASE .. BASE+MAX_SECTORS)`, slot B at `[BASE+MAX_SECTORS .. BASE+2*MAX)`.
+const CORPUS_PERSIST_BASE: u64 = 12288;
+
+/// M39 (inc-3): SEED the deterministic two-cluster corpus scenario, run the REAL M17
+/// consolidation, and return ONLY this boot's freshly curated corpus records (the
+/// [`corpus::CORPUS_CANON_LEN`]-byte canonical rows) + the running `corpus_head` (the
+/// 32-byte M22 fold) -- the exact seeding [`corpus_selftest`] uses, factored so the
+/// durable persist seam curates the IDENTICAL deterministic records (so the in-RAM
+/// self-test head + the persisted head coincide each boot). `None` on a seed failure.
+///
+/// STACK DISCIPLINE (#65): the ~3 KiB [`MemSubstrate`] (its inline `xp_ring` POD
+/// dominates the frame) lives and DIES inside THIS frame -- we return the extracted
+/// heap `Vec` + the 32-byte head, NEVER the substrate by value, so it never enters the
+/// caller's [`corpus_persist`] frame (which then descends into the slab-write + SHA-
+/// fold call chain on the tight aarch64 boot stack). Returning the substrate by value
+/// would reserve its 3 KiB slot in `corpus_persist`'s frame for the whole persist path
+/// and breach the boot-stack red-zone.
+#[allow(clippy::type_complexity)]
+fn corpus_seed_and_consolidate(
+) -> Option<(Vec<[u8; tb_encode::corpus::CORPUS_CANON_LEN]>, [u8; tb_encode::corpus::PROV_HASH_LEN])>
+{
+    let mut sub = MemSubstrate::new();
+    sub.push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())?;
+    sub.push_record(CORPUS_TOK_HIGH, CORPUS_TOK_HIGH, CORPUS_IMP_HIGH, 0, Vec::new())?;
+    sub.push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())?;
+    sub.push_record(CORPUS_TOK_LOW, CORPUS_TOK_LOW, CORPUS_IMP_LOW, 0, Vec::new())?;
+    let _ = sub.consolidation_cycle();
+    Some((sub.corpus_records().to_vec(), sub.corpus_head()))
+}
+
+/// M39 increment-3: the DURABLE experience-corpus persist round-trip (both arches).
+/// Curates the deterministic scenario (the SAME records [`corpus_selftest`] verifies),
+/// then -- if a large-enough virtio-blk disk is present -- REUSES the M33 `provhead`
+/// multi-sector torn-write-safe codec VERBATIM to (a) READ BACK any prior boot's
+/// persisted corpus from the SEPARATE disk region ABOVE the M20 + M33 partitions,
+/// fail-closed-decoding it and re-folding the read records to confirm the stored
+/// `corpus_head` (survival + integrity), and (b) RE-PERSIST the ACCUMULATED corpus
+/// (prior ++ this boot's records, ring-bounded to [`CORPUS_PERSIST_MAX_RECORDS`]) at
+/// `gen+1` into the STALER ping-pong slot (a torn write leaves the prior slot intact).
+/// All big buffers are heap-boxed (the #65 no-large-stack-array discipline). FAIL-
+/// CLOSED: a torn / mixed-gen / wrong-domain / undecodable read-back never counts as
+/// survived (never a partial read). HONEST: NO LMS signature -- the head's tamper-
+/// evidence is the M22 fold (reused verbatim); the FNV checksums are torn-write
+/// detection ONLY, never a security property; it persists PROVENANCE SKELETONS (token
+/// ids + metadata) and TRAINS NOTHING (`corpus=PROVENANCE-SKELETON`,
+/// `training=NONE-PHASE2-GATED`).
+pub(crate) fn corpus_persist() -> crate::CorpusPersistProof {
+    use alloc::boxed::Box;
+    use tb_encode::corpus::{
+        self, corpus_hash, corpus_head_witness, corpus_recompute, CORPUS_CANON_LEN,
+        CORPUS_PERSIST_DOMAIN, CORPUS_PERSIST_MAX_RECORDS, PROV_HASH_LEN,
+    };
+    use tb_encode::provhead::{self, MAX_SECTORS, OFF_SIG, SLAB_BYTES};
+
+    let mut r = crate::CorpusPersistProof {
+        present: false,
+        persisted: false,
+        survived: false,
+        head_matches: false,
+        head_disk: 0,
+        records_disk: 0,
+        records_total: 0,
+    };
+
+    // The re-entrant aL2.4b EL1 guest has NO virtio disk (virtio=OPEN-BUS-ABSENT) and
+    // its stage-2-confined carve is torn down at teardown, so persisting there is
+    // pointless -- AND the guest boot stack is the tightest in the system. Skip the
+    // whole durable seam in-guest (other disk/organ paths already skip in-guest); the
+    // host boot does the real persist and the guest witness honestly renders the all-
+    // zero (skipped) form. Guarded: `in_guest` is aarch64-only.
+    #[cfg(target_arch = "aarch64")]
+    if crate::arch::in_guest() {
+        return r;
+    }
+
+    // (curate) The deterministic scenario -> this boot's freshly curated records +
+    // running corpus_head (the SAME the in-RAM self-test verifies). The helper returns
+    // ONLY the heap `Vec` + the 32-byte head and drops its ~3 KiB `MemSubstrate` in its
+    // OWN frame,
+    // so the substrate never lands in THIS frame ahead of the slab-write + SHA-fold
+    // call chain below (the #65 no-deep-stack discipline; the aarch64 boot stack is
+    // tight, and m33_read_slab/m33_write_slab each stack a 512-byte sector buffer on
+    // top of the persist frame).
+    let (cur_records, cur_head) = match corpus_seed_and_consolidate() {
+        Some(x) => x,
+        None => return r,
+    };
+    if cur_records.is_empty() {
+        return r; // no curated record this boot -> nothing to persist (anti-hollow)
+    }
+    // Default witness head = the head we are about to persist this boot (the M33-B
+    // "boot 1 witnesses the just-persisted head" idiom); OVERWRITTEN on survival with
+    // the PRIOR head read FROM DISK, so boot-1's persisted head string-equals boot-2's
+    // read-back head (the cross-boot equality the run-script checks).
+    r.head_disk = corpus_head_witness(cur_head);
+
+    // A modern virtio-blk device with room for both corpus slots, or a graceful skip.
+    let (slot, cap) = match crate::arch::blk_probe() {
+        Some(x) => x,
+        None => return r,
+    };
+    if cap < CORPUS_PERSIST_BASE + 2 * (MAX_SECTORS as u64) {
+        return r; // disk too small for the corpus slots -> graceful skip
+    }
+    r.present = true;
+
+    // (read-back) Both ping-pong slots -> pick the newer CONSISTENT prior corpus.
+    let mut slab_a: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let mut slab_b: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let read_a = m33_read_slab(slot, CORPUS_PERSIST_BASE, &mut slab_a[..]);
+    let read_b = m33_read_slab(slot, CORPUS_PERSIST_BASE + MAX_SECTORS as u64, &mut slab_b[..]);
+    let mut blob_a: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let mut blob_b: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let da = if read_a { provhead::decode(&slab_a[..], &mut blob_a[..]) } else { None };
+    let db = if read_b { provhead::decode(&slab_b[..], &mut blob_b[..]) } else { None };
+    let winner = provhead::pick_newer(da.map(|x| x.gen), db.map(|x| x.gen));
+
+    // The prior accumulated records (validated on survival) + prior gen.
+    let mut prior_records: Vec<[u8; CORPUS_CANON_LEN]> = Vec::new();
+    let mut prior_gen = 0u64;
+    if let Some(is_b) = winner {
+        let (rec, blob) = if is_b { (db, &blob_b) } else { (da, &blob_a) };
+        if let Some(rec) = rec {
+            prior_gen = rec.gen;
+            // Domain gate (defense-in-depth on top of the region split): a slab whose
+            // i_id is not the corpus tag is NOT ours -> ignore (fresh-region posture).
+            let count = rec.q as usize;
+            let siglen = rec.siglen as usize;
+            if rec.i_id == CORPUS_PERSIST_DOMAIN
+                && count > 0
+                && count <= CORPUS_PERSIST_MAX_RECORDS
+                && count * CORPUS_CANON_LEN == siglen
+            {
+                // Unpack the packed records from the reused signature slot + fail-closed
+                // decode each; re-fold to confirm the stored corpus_head (integrity).
+                let mut ok = true;
+                let mut recs: Vec<[u8; CORPUS_CANON_LEN]> = Vec::new();
+                let mut ids: Vec<[u8; PROV_HASH_LEN]> = Vec::new();
+                let mut i = 0usize;
+                while i < count {
+                    let base = OFF_SIG + i * CORPUS_CANON_LEN;
+                    let mut rb = [0u8; CORPUS_CANON_LEN];
+                    rb.copy_from_slice(&blob[base..base + CORPUS_CANON_LEN]);
+                    // fail-closed: a byte pattern corpus::decode rejects -> not a
+                    // faithful record -> survival fails (never a partial read).
+                    if corpus::decode(&rb).is_none() {
+                        ok = false;
+                        break;
+                    }
+                    ids.push(corpus_hash(&rb));
+                    recs.push(rb);
+                    i += 1;
+                }
+                if ok && !ids.is_empty() && corpus_recompute(ids[0], &ids[1..]) == rec.head {
+                    // A tamper-evident (M22-folded) corpus SURVIVED a genuine reboot.
+                    r.survived = true;
+                    r.head_matches = true;
+                    r.records_disk = count as u64;
+                    r.head_disk = corpus_head_witness(rec.head); // the head FROM DISK
+                    prior_records = recs;
+                }
+            }
+        }
+    }
+
+    // (accumulate) prior (survived) ++ this boot's records, ring-bounded to the slab
+    // cap (keep the MOST-RECENT records). The moat GROWS across boots.
+    let mut acc: Vec<[u8; CORPUS_CANON_LEN]> = prior_records;
+    for rb in &cur_records {
+        acc.push(*rb);
+    }
+    if acc.len() > CORPUS_PERSIST_MAX_RECORDS {
+        let drop = acc.len() - CORPUS_PERSIST_MAX_RECORDS;
+        acc.drain(0..drop);
+    }
+    // The accumulated corpus_head = re-fold over the accumulated record ids (the SAME
+    // M22 fold, verbatim). This is what a LATER boot recomputes + confirms on read-back.
+    let mut acc_ids: Vec<[u8; PROV_HASH_LEN]> = Vec::with_capacity(acc.len());
+    for rb in &acc {
+        acc_ids.push(corpus_hash(rb));
+    }
+    let acc_head = corpus_recompute(acc_ids[0], &acc_ids[1..]);
+    r.records_total = acc.len() as u64;
+
+    // (pack) the accumulated records into the reused provhead signature slot.
+    let mut sig: Vec<u8> = Vec::with_capacity(acc.len() * CORPUS_CANON_LEN);
+    for rb in &acc {
+        sig.extend_from_slice(rb);
+    }
+
+    // (re-persist) encode at gen+1 into the STALER slot (ping-pong torn-write safety).
+    let target = match winner {
+        Some(false) => CORPUS_PERSIST_BASE + MAX_SECTORS as u64, // A newer -> write B
+        Some(true) => CORPUS_PERSIST_BASE,                       // B newer -> write A
+        None => CORPUS_PERSIST_BASE,                             // fresh -> write A
+    };
+    let new_gen = prior_gen.wrapping_add(1);
+    let zero_root = [0u8; provhead::ROOT_LEN];
+    let mut wblob: Box<[u8; provhead::BLOB_CAP]> = Box::new([0u8; provhead::BLOB_CAP]);
+    let mut wslab: Box<[u8; SLAB_BYTES]> = Box::new([0u8; SLAB_BYTES]);
+    let n = provhead::encode(
+        new_gen,
+        acc.len() as u32,
+        &acc_head,
+        &CORPUS_PERSIST_DOMAIN,
+        &zero_root,
+        &sig,
+        &mut wblob[..],
+        &mut wslab[..],
+    );
+    if n > 0 && m33_write_slab(slot, target, &wslab[..n]) && crate::arch::blk_flush(slot) {
+        r.persisted = true;
+    }
+    r
+}
+
 // --- M24: the honest activation-gate bake-off self-test (the marker body) -----
 
 /// M24: run the HONEST ACTIVATION-GATE bake-off self-test and report a

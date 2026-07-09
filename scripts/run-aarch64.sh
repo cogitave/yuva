@@ -812,8 +812,12 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     # (clean/inclusion/tamper-caught/predicate-two-sided =0x1), a records count, the
     # accept/reject counts, kan_active=0, AND every honesty token (so a hollow or
     # overclaiming marker FAILS).
-    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} records=0x[0-9a-f]+ accepted=0x[0-9a-f]+ rejected=0x[0-9a-f]+ clean=0x0*1 inclusion=0x0*1 tamper-caught=0x0*1 predicate-two-sided=0x0*1 kan_active=0x0+ corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE'; then
-        echo "[run-aarch64] FAIL -- M39 marker present but the real 'corpus: head=.. records=.. clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=0x0 corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED ..' witness was NOT seen (hollow M39 pass)" >&2
+    # inc-3: the witness now also carries the DURABILITY tokens. BOOT 1 (this OUTPUT) is
+    # the FRESH-region control: present=0x1 + persisted=0x1 but reboot-survived=0x0 +
+    # head-matches=0x0 + records-disk=0x0 (nothing survives a fresh region -- the anti-
+    # hollow negative control). BOOT 2 (below) requires survived=0x1 + a matching head.
+    if ! printf '%s' "${OUTPUT}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} records=0x[0-9a-f]+ accepted=0x[0-9a-f]+ rejected=0x[0-9a-f]+ clean=0x0*1 inclusion=0x0*1 tamper-caught=0x0*1 predicate-two-sided=0x0*1 kan_active=0x0+ corpus-present=0x0*1 corpus-persisted=0x0*1 corpus-reboot-survived=0x0+ corpus-head-matches=0x0+ corpus-head-disk=0x[0-9a-f]{16} corpus-records-disk=0x0+ corpus-records-total=0x[0-9a-f]+ durability=TORN-WRITE-SAFE-PING-PONG-FNV head-integrity=M22-FOLD-VERBATIM lms-signature=NONE-THIS-INCREMENT corpus=PROVENANCE-SKELETON curation=PREDICATE-DECLARED-NOT-LEARNED training=NONE-PHASE2-GATED reuse=M22-FOLD-VERBATIM sec=ASSUMED-FROM-LITERATURE'; then
+        echo "[run-aarch64] FAIL -- M39 marker present but the real round-trip + durability witness (.. corpus-present=0x1 corpus-persisted=0x1 corpus-reboot-survived=0x0 corpus-head-matches=0x0 corpus-head-disk=.. corpus-records-disk=0x0 corpus-records-total=.. durability=TORN-WRITE-SAFE-PING-PONG-FNV ..) was NOT seen on BOOT 1 (hollow M39 pass or a fresh region falsely claiming survival)" >&2
         exit 1
     fi
     # (3) ANTI-HOLLOW: the records-appended count MUST be > 0 (a real consolidation
@@ -822,6 +826,18 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
     M39_REC_HEX="$(printf '%s' "${CORPUS_LINE}" | sed -E 's/.* records=0x0*([0-9a-f]+) .*/\1/')"
     if [[ -z "${M39_REC_HEX}" ]] || (( 16#${M39_REC_HEX} < 1 )); then
         echo "[run-aarch64] FAIL -- M39 records=0x${M39_REC_HEX} < 0x1 (no real corpus record flowed -- an anti-hollow stub)" >&2
+        exit 1
+    fi
+    # (3b) DURABILITY anti-hollow: capture BOOT 1's persisted corpus-head-disk (for the
+    # cross-boot check in BOOT 2) + records-total (the accumulated count, > 0).
+    CORPUS_BOOT1_HEAD="$(printf '%s' "${CORPUS_LINE}" | grep -oE 'corpus-head-disk=0x[0-9a-f]{16}' | head -1)"
+    CORPUS_BOOT1_TOTAL_HEX="$(printf '%s' "${CORPUS_LINE}" | sed -E 's/.* corpus-records-total=0x0*([0-9a-f]+) .*/\1/')"
+    if [[ -z "${CORPUS_BOOT1_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- could not capture BOOT 1 corpus-head-disk for the M39 cross-boot check" >&2
+        exit 1
+    fi
+    if [[ -z "${CORPUS_BOOT1_TOTAL_HEX}" ]] || (( 16#${CORPUS_BOOT1_TOTAL_HEX} < 1 )); then
+        echo "[run-aarch64] FAIL -- M39 corpus-records-total=0x${CORPUS_BOOT1_TOTAL_HEX} < 0x1 on BOOT 1 (nothing accumulated -- an anti-hollow persist stub)" >&2
         exit 1
     fi
     # (4) Anti-overclaim: no live-learning / training-happened / text-bearing claim on
@@ -1326,6 +1342,33 @@ if printf '%s' "${OUTPUT}" | grep -qF -- "${MARKER}"; then
         exit 1
     fi
     echo "[run-aarch64] M33 stage B: signed head SURVIVED the reboot (${M33_BOOT2_HEAD} == ${M33_BOOT1_HEAD}, head-reboot-survived=0x1) -- #91 closed" >&2
+
+    # ---- M39 (inc-3) BOOT 2: the DURABLE-CORPUS CROSS-BOOT SURVIVAL witness. The
+    # corpus region lives ABOVE M20's low-4-MiB (the ONLY region BOOT 2 zeroed), so it
+    # survives alongside the M33 head. BOOT 2 must read the corpus back + re-fold it to
+    # the stored head (survived=0x1 + head-matches=0x1), read >= 1 record off disk, and
+    # ACCUMULATE (records-total > boot 1's); its corpus-head-disk must equal boot 1's.
+    if ! printf '%s' "${OUTPUT2}" | grep -qE -- 'corpus: head=0x[0-9a-f]{16} .* corpus-present=0x0*1 corpus-persisted=0x0*1 corpus-reboot-survived=0x0*1 corpus-head-matches=0x0*1 corpus-head-disk=0x[0-9a-f]{16} corpus-records-disk=0x[0-9a-f]+ corpus-records-total=0x[0-9a-f]+ durability=TORN-WRITE-SAFE-PING-PONG-FNV'; then
+        echo "[run-aarch64] FAIL -- M39 BOOT 2 present but the corpus witness with corpus-reboot-survived=0x1 + corpus-head-matches=0x1 was NOT seen (the durable corpus did NOT survive the reboot -- hollow inc-3)" >&2
+        exit 1
+    fi
+    CORPUS_BOOT2_LINE="$(printf '%s\n' "${OUTPUT2}" | grep -E -- '^corpus: head=0x' | head -1)"
+    CORPUS_BOOT2_HEAD="$(printf '%s' "${CORPUS_BOOT2_LINE}" | grep -oE 'corpus-head-disk=0x[0-9a-f]{16}' | head -1)"
+    if [[ -z "${CORPUS_BOOT2_HEAD}" || "${CORPUS_BOOT2_HEAD}" != "${CORPUS_BOOT1_HEAD}" ]]; then
+        echo "[run-aarch64] FAIL -- M39 cross-boot corpus head mismatch -- boot 1 persisted '${CORPUS_BOOT1_HEAD}' but boot 2 read back '${CORPUS_BOOT2_HEAD}' (the corpus did not survive intact)" >&2
+        exit 1
+    fi
+    CORPUS_B2_DISK_HEX="$(printf '%s' "${CORPUS_BOOT2_LINE}" | sed -E 's/.* corpus-records-disk=0x0*([0-9a-f]+) .*/\1/')"
+    if [[ -z "${CORPUS_B2_DISK_HEX}" ]] || (( 16#${CORPUS_B2_DISK_HEX} < 1 )); then
+        echo "[run-aarch64] FAIL -- M39 boot 2 corpus-records-disk=0x${CORPUS_B2_DISK_HEX} < 0x1 (claimed survival but read ZERO records off disk -- hollow)" >&2
+        exit 1
+    fi
+    CORPUS_B2_TOTAL_HEX="$(printf '%s' "${CORPUS_BOOT2_LINE}" | sed -E 's/.* corpus-records-total=0x0*([0-9a-f]+) .*/\1/')"
+    if [[ -z "${CORPUS_B2_TOTAL_HEX}" ]] || (( 16#${CORPUS_B2_TOTAL_HEX} <= 16#${CORPUS_BOOT1_TOTAL_HEX} )); then
+        echo "[run-aarch64] FAIL -- M39 corpus did not ACCUMULATE across the reboot -- boot 2 records-total=0x${CORPUS_B2_TOTAL_HEX} <= boot 1 records-total=0x${CORPUS_BOOT1_TOTAL_HEX} (the dataset moat must grow)" >&2
+        exit 1
+    fi
+    echo "[run-aarch64] M39 inc-3: durable corpus SURVIVED + GREW across the reboot (head-disk ${CORPUS_BOOT2_HEAD} == ${CORPUS_BOOT1_HEAD}, records-total 0x${CORPUS_BOOT1_TOTAL_HEX} -> 0x${CORPUS_B2_TOTAL_HEX}, corpus-reboot-survived=0x1)" >&2
 
     echo "[run-aarch64] PASS -- observed DoD marker: '${MARKER}' (and 'M31: infer-e2e OK backend=MOCK-DETERMINISTIC' + 'M30: infer-transport OK' + 'M29: khash-mac OK' + 'M28: operator-cmd OK' + 'M26: exit-telemetry OK' + 'M25: operator OK' + 'M24: bakeoff OK' gate-not-met + 'M23: experience OK' + 'M22: provenance OK' + 'M21: kan-policy OK' + 'M20: persist OK' + 'M19: virtio OK' + 'L2.0: el2 OK' + 'L2.1: stage2 OK' + 'L2.2: el2-exits OK' + 'L2.3: el2-trap OK' + 'L2.4: el2-guest OK' + 'L2.5: vgic OK' + 'L2.6: smmu OK' + 'M27: sched OK' + 'M14.2: blocking-recv OK' + 'L2.4b: el1-kernel-guest OK' [full M0..M38 kernel as a stage-2-confined EL1 guest]; M30 cross-process challenge/tag equality held; M31 mock e2e witnessed; M33 stage-B signed head survived a reboot (two-boot cross-boot); M38 conductor loop witnessed + the guest trace independently re-folded host-side (${GUEST_HEAD} == ${HOST_HEAD}))"
     exit 0

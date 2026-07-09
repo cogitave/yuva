@@ -1,0 +1,132 @@
+# Yuva M39 (increment-3) — the corpus-export host lane (the Phase-2 dataset hand-off).
+#
+# WHAT THIS IS (M39 proposal §7.3): a CPU-only, zero-network, zero-secret,
+# autonomously-buildable lane that proves the host `corpus-export` tool reads the
+# DURABLE experience-corpus region out of a Yuva disk image, fail-closed-decodes the
+# persisted records (REUSING the SAME Kani-proven tb-encode::{provhead,corpus} leaves
+# the KERNEL persists with — never a second decoder), verifies the M22 fold head over
+# the read rows, and emits the PROVENANCE SKELETON (token ids + metadata) as JSONL.
+#
+# THE ROUND-TRIP proof is the host #[test] suite: it synthesizes disk images EXACTLY as
+# the kernel persist seam does (the identical provhead::encode call with the corpus
+# domain tag + the packed fixed-width records) and asserts extract/re-fold/emit round-
+# trips and that a fresh / torn / domain-mismatched / short region FAIL-CLOSES. The
+# full kernel-disk -> tool lane (exporting the ACTUAL QEMU disk after a boot) is a named
+# follow-up; the tool's format matches the kernel's BY CONSTRUCTION (same tb-encode
+# functions + the same packing constants shared from tb-encode::corpus).
+#
+# HONEST: the export is a PROVENANCE SKELETON, not training text (the emitted rows carry
+# u64 interned token ids + metadata; the text join is the agent-side dictionary's job).
+# It reads no secret, opens no socket, and trains nothing.
+
+name: corpus-export
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  corpus-export:
+    name: M39 inc-3 — the host corpus exporter (round-trip + fail-closed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The repo-root rust-toolchain.toml PINS nightly-2026-07-06 (needed for the
+      # kernel's -Zbuild-std) and would OVERRIDE a plain @stable for every cargo
+      # command in the tree -- and that pinned nightly ships NO clippy component.
+      # Install the SAME pinned nightly WITH clippy (the clippy.yml / miri.yml
+      # pattern) and pin RUSTUP_TOOLCHAIN on the clippy step so the toml cannot
+      # strip it. Bump this date in lockstep with rust-toolchain.toml + the other lanes.
+      - name: Install nightly + clippy
+        id: toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-06
+          components: clippy
+
+      # The env-ABSENCE assertion (the zero-secret lane's leak negative): no operator
+      # / API secret is defined on this lane at all.
+      - name: Env-absence assertion (zero-secret lane)
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is defined on the zero-secret corpus-export lane (it must be absent)"
+            exit 1
+          fi
+          echo ">> env-absence OK: no ANTHROPIC_API_KEY on this lane"
+
+      # The lockfile-cleanliness rule: corpus-export path-deps tb-encode ALONE — zero
+      # network deps, zero serde, zero unlanded-crate dep (the conductor-host precedent).
+      - name: Dep-clean assertion (zero network deps in the corpus-export lockfile)
+        run: |
+          set -euo pipefail
+          if grep -iE 'ureq|reqwest|hyper|tokio|rustls|serde_json' tools/corpus-export/Cargo.lock; then
+            echo "::error::a network/serde dependency is in tools/corpus-export/Cargo.lock — the exporter must be zero-network, tb-encode-only"
+            exit 1
+          fi
+          echo ">> dep-clean OK: corpus-export links tb-encode alone (no network deps)"
+
+      - name: Clippy (deny warnings)
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: cargo clippy --manifest-path tools/corpus-export/Cargo.toml --all-targets -- -D warnings
+
+      # THE ROUND-TRIP + FAIL-CLOSED proof: extract/re-fold/emit over kernel-identical
+      # synthetic images + the fresh/torn/domain/short fail-close negatives.
+      - name: Host round-trip + fail-closed tests
+        run: cargo test --manifest-path tools/corpus-export/Cargo.toml -- --nocapture
+
+      - name: Build the corpus-export (release)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release --manifest-path tools/corpus-export/Cargo.toml
+
+      # CLI-level FAIL-CLOSED negatives (a fresh/all-zero disk carries NO corpus region,
+      # a missing file / no args is a usage error) — the tool must exit non-zero and
+      # emit NO JSONL, never a partial/hollow export.
+      - name: CLI fail-closed negatives (fresh disk / missing file / no args)
+        run: |
+          set -uo pipefail
+          BIN=tools/corpus-export/target/release/corpus-export
+          # (a) an all-zero 8-MiB disk (no persisted corpus) -> non-zero, no rows.
+          dd if=/dev/zero of=fresh.img bs=1M count=8 status=none
+          set +e
+          OUT="$("$BIN" fresh.img 2>fresh.err)"; rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::corpus-export ACCEPTED a fresh (all-zero) disk (must fail-close on no consistent corpus region)"
+            exit 1
+          fi
+          if [ -n "$OUT" ]; then
+            echo "::error::corpus-export emitted JSONL on a fresh disk (a fail-closed run must emit NO rows)"
+            exit 1
+          fi
+          echo ">> fresh-disk fail-close OK (rc=${rc}): $(cat fresh.err)"
+          # (b) a missing file -> non-zero.
+          set +e
+          "$BIN" /no/such/image.img >/dev/null 2>miss.err; rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "::error::corpus-export accepted a missing image"; exit 1; }
+          # (c) no args -> usage error, non-zero.
+          set +e
+          "$BIN" >/dev/null 2>noargs.err; rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "::error::corpus-export accepted no arguments"; exit 1; }
+          echo ">> CLI fail-closed negatives all REJECTED"
+
+      - name: Summary
+        run: |
+          {
+            echo '## M39 inc-3 corpus-export: OK'
+            echo 'The host exporter reads the durable corpus region, fail-closed-decodes + re-folds it to the stored M22 head, and emits the provenance skeleton (token ids + metadata) as JSONL — reusing the SAME verified tb-encode leaves the kernel persists with. The round-trip is proven over kernel-identical synthetic images; a fresh / torn / domain-mismatched / short region fail-closes. Honest: a provenance skeleton, not training text; zero-network, zero-secret, trains nothing.'
+          } >> "$GITHUB_STEP_SUMMARY"

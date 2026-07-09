@@ -1,0 +1,43 @@
+# corpus-export -- the M39 (increment-3) HOST corpus exporter.
+#
+# The Phase-2 dataset hand-off (proposal §7.3): this std, host-side, zero-network,
+# zero-secret binary reads the DURABLE experience-corpus region out of a Yuva disk
+# IMAGE FILE, fail-closed-decodes the persisted records (REUSING the SAME Kani-proven
+# `tb-encode::{provhead,corpus}` leaves the kernel persists with -- NEVER a second
+# decoder in shell/python, the same-math rule as tools/prov-signer + tools/xport-
+# harness), verifies the M22 fold head over the read rows, and emits the PROVENANCE
+# SKELETON as JSONL (token ids + metadata).
+#
+# HONEST: a corpus record is a PROVENANCE SKELETON, not text -- the emitted rows carry
+# u64 INTERNED TOKEN IDS + metadata; the text JOIN is the agent-side dictionary's job,
+# NOT this tool's (`corpus=PROVENANCE-SKELETON`, `export=SKELETON-NOT-TRAINING-TEXT`).
+# It reads no secret, opens no socket, and trains nothing.
+#
+# Its OWN nested workspace (the empty [workspace] below), auto-excluded from the root
+# no_std workspace, so the kernel kbuild lanes + -Zbuild-std are entirely unaffected.
+
+[package]
+name = "corpus-export"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Yuva M39 host corpus exporter: reads the durable experience-corpus region from a disk image, fail-closed-decodes + verifies the M22 fold head, and emits the provenance skeleton (token ids + metadata) as JSONL."
+license = "Apache-2.0"
+
+# An independent nested workspace (the tools/prov-signer precedent): cargo auto-
+# excludes it from the parent workspace; it keeps its own Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "corpus-export"
+path = "src/main.rs"
+
+[dependencies]
+# The SAME verified provhead (torn-write-safe multi-sector) + corpus (fixed-width
+# record) leaves the kernel persists with. NO `signer` feature -- the exporter only
+# DECODES + VERIFIES, it never signs. Zero external deps (hand-rolled JSONL, the
+# prov-signer discipline).
+tb-encode = { path = "../../crates/tb-encode" }
+
+[profile.release]
+panic = "abort"
