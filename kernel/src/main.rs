@@ -4740,6 +4740,18 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // stay byte-identical. The token `signal=OBSERVATIONAL-NONCAUSAL` is machine-emitted
     // so the marker mechanically cannot claim a causal state-signal. DoD: "M26:
     // exit-telemetry OK".
+    //
+    // BOOT-PROFILES STAGE-B PoC (compile-out, docs/proposals/boot-profiles.md
+    // §11): this ENTIRE organ — BOTH the agent path AND the runtime
+    // substrate-skip `else` arm — is gated behind the default-ON `agent-organs`
+    // kernel feature. With `--no-default-features` the whole block is removed at
+    // compile time, so NEITHER the `M26: exit-telemetry OK` marker NOR its skip
+    // form is emitted OR present in the image (the absent-by-omission grammar,
+    // §1.4), and `tb_hal::exittel_selftest` + `tb_encode::exittel` become
+    // unreferenced + DCE-eligible. Default-ON keeps the byte-identical agent
+    // boot (SP#4). One-organ PoC of the mechanism; the other organs are still
+    // built. Proven by scripts/run-compileout-poc-x86_64.sh.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let et = tb_hal::exittel_selftest();
         // FAIL-CLOSED: every synthetic ESR must classify to an in-range, distinct class

@@ -14,6 +14,23 @@ publish = false
 # so the ELF lands at target/<triple>/<profile>/yuva-kernel — the path the
 # scripts/run-*.sh runners receive as $1.
 
+# Boot Profiles stage-B PROOF-OF-CONCEPT (docs/proposals/boot-profiles.md §11):
+# `agent-organs` is a kernel-crate-local feature, DEFAULT-ON. Because it is on by
+# default, EVERY existing build/CI invocation (`cargo kbuild` with no --features
+# flag) is byte-identical — the SP#4 M38 conduct head is preserved by
+# construction. Building `--no-default-features` compiles OUT exactly ONE gated
+# agent organ (M26 exit-telemetry): the `#[cfg(feature = "agent-organs")]` in
+# kernel/src/main.rs removes its whole block, so the M26 marker literal is ABSENT
+# from the image (no skip form either) and its `tb_hal::exittel_selftest` +
+# `tb_encode::exittel` compute path becomes unreferenced and DCE-eligible. This
+# is a ONE-ORGAN proof of the compile-out MECHANISM — the other ~18 organs are
+# still built and still run; the string-absence proof is in
+# scripts/run-compileout-poc-x86_64.sh. Full stage B (every organ + the mem/
+# engine/organ factorization) remains the open, named successor.
+[features]
+default = ["agent-organs"]
+agent-organs = []
+
 [dependencies]
 tb-hal = { path = "../crates/tb-hal" }
 # MV / tb-boot v0: the shared boot-ABI crate (no_std, forbid(unsafe_code)).
