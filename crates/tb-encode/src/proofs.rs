@@ -481,14 +481,46 @@ fn kani_minmax_in_scale_range() {
 // ===========================================================================
 // M40: the LEXICAL RECALL-SCORING leaf (`recall.rs`) -- the BM25-family no-float
 // fixed-point relevance kernel that sharpens memory retrieval. Mirroring the
-// `memscore` discipline EXACTLY: Kani proves PANIC-FREEDOM + BOUNDS over the
-// documented reachable envelope (`ENVELOPE_MAX`) + the codec's injectivity /
-// fail-closed decode + the accumulation-monotonicity invariant (which stands on
-// each term being non-negative, NOT on `ln_fixed` monotonicity, so it is sound
-// and boundary-safe). STRICT monotonicity in `df`/`tf` stays a CONCRETE host test
-// (the #49 over-quantification trap: fixed-point division can break strict
-// monotonicity at rounding boundaries, so it is sampled, never symbolically
-// over-quantified -- the exact `memscore` `bla_raw` precedent). No float, ever.
+// `memscore` discipline EXACTLY: Kani proves PANIC-FREEDOM + BOUNDS + the codec's
+// injectivity / fail-closed decode + the accumulation-monotonicity invariant
+// (which stands on each term being non-negative, NOT on `ln_fixed` monotonicity,
+// so it is sound and boundary-safe). STRICT monotonicity in `df`/`tf` stays a
+// CONCRETE host test (the #49 over-quantification trap: fixed-point division can
+// break strict monotonicity at rounding boundaries, so it is sampled, never
+// symbolically over-quantified -- the exact `memscore` `bla_raw` precedent). No
+// float, ever.
+//
+// ## The two-tier CBMC budget (#76 shard-D fix -- read before touching a harness)
+//
+// The recall math has TWO classes of integer division and CBMC pays for them very
+// differently -- the SAME lesson `log2_fixed` teaches (its `/pow` is a POWER of
+// two, so symbolic-`x` `ln_fixed` proves in seconds in shard A), applied to BM25:
+//
+//   * The CORPUS dimension (`df`, `n_docs`) enters ONLY `bm25_idf`, whose sole
+//     division lives inside the REUSED `ln_fixed` (divide by `pow == 1 << ip`, a
+//     power of two -- the cheap case CBMC already proves fast). So `df`/`n_docs`
+//     stay FULLY SYMBOLIC across the whole reachable `< 2^20` corpus at no
+//     tractability cost -- genuine unbounded-over-a-million-documents coverage.
+//   * The DOCUMENT dimension (`tf`, `doc_len`, `avg_len`) enters two GENERAL
+//     (non-power-of-two) symbolic divisions -- `dl / avgl` and the tf-saturation
+//     `numer * SCALE / denom`. A general symbolic-dividend / symbolic-divisor
+//     64-bit divide is the CBMC state-explosion case: `kani::assume(x < 256)`
+//     bounds the VALUE but NOT the divider circuit, and BM25 couples the dividend
+//     and the divisor through the SAME variables (`tf` sits in both `numer` and
+//     `denom`; `dl` sits in `denom` via `norm`), so no "concrete divisor x
+//     symbolic dividend" split can collapse the second divide while any of the
+//     three stays symbolic. Left symbolic, this recall family ran the shard PAST
+//     the 65-min cap (it was cancelled). So the document fields are proven over a
+//     CONCRETE LADDER (`RECALL_DOC_LADDER`) that pins each general divisor to a
+//     boundary/interior value spanning the reachable envelope -- the `memscore`
+//     `bla_raw` SAMPLED-not-symbolic precedent this module already cites, here
+//     extended from monotonicity to panic-freedom/bounds. Every ladder point runs
+//     the REAL production function under CBMC's overflow/panic instrumentation, so
+//     it is a genuine (sampled-document, symbolic-corpus) proof, not vacuous:
+//     every documented mutant still fires (see each harness's NEGATIVE CONTROL).
+//     The ladder INCLUDES `avg_len == 0` (the divide-by-zero mutant trigger), the
+//     single-token reachable point (`tf == doc_len == 1`), and the `ENVELOPE_MAX-1`
+//     boundary corner.
 // ===========================================================================
 
 /// `bm25_idf` (the rarer-term-scores-higher inverse document frequency) is
@@ -514,101 +546,158 @@ fn kani_recall_idf_panic_free_bounded() {
     assert!(r < 34_000);
 }
 
+/// The `ENVELOPE_MAX - 1` boundary value (`255`) -- the top of the reachable
+/// document-token envelope, pinned once for the ladders below.
+const RECALL_HI: u64 = ENVELOPE_MAX - 1;
+
+/// The concrete DOCUMENT-field ladder `(tf, doc_len, avg_len)` that the
+/// division-bearing recall harnesses iterate INSTEAD of leaving these fields
+/// symbolic (the #76 shard-D CBMC-budget fix -- see the module two-tier note). Each
+/// row pins the GENERAL (non-power-of-two) symbolic divisors -- `avg_len` in
+/// `dl/avgl`, and `tf`/`doc_len` which couple into the tf-saturation denominator
+/// `numer*SCALE/denom` -- to a boundary or interior value of the reachable
+/// `< ENVELOPE_MAX` envelope, so CBMC never bit-blasts a general symbolic-divisor
+/// divide; the CORPUS fields (`df`/`n_docs`) stay symbolic in the harnesses that
+/// carry them (their only division is the cheap power-of-two `ln_fixed`). The rows
+/// span: the absent term (`tf == 0`), the single-token reachable record
+/// (`tf == doc_len == 1`), `avg_len == 0` (the divide-by-zero mutant trigger,
+/// guarded by `avg_len.max(1)`), a doc longer than average (the length-penalty
+/// direction), tf-saturation near the ceiling (`tf == RECALL_HI`), and the
+/// all-boundary corner.
+const RECALL_DOC_LADDER: [(u64, u64, u64); 8] = [
+    (0, 1, 1),                         // absent term, single-token reachable doc
+    (1, 1, 1),                         // THE reachable single-token record (tf==doc_len==1)
+    (1, 1, 0),                         // avg_len==0 -> exercises the .max(1) divide-by-zero guard
+    (2, 8, 3),                         // short multi-token interior, doc longer than average
+    (RECALL_HI, 1, RECALL_HI),         // max tf, short doc, large avg -> tf-saturation near ceiling
+    (1, RECALL_HI, 1),                 // long doc, min avg -> strongest length penalty
+    (RECALL_HI, RECALL_HI, RECALL_HI), // the all-boundary corner
+    (0, 0, 0),                         // all-zero degenerate (avg_len==0 guard + tf==0 + doc_len==0)
+];
+
 /// `bm25_tf_norm` (term-frequency saturation + document-length normalization) is
 /// panic-free -- no divide-by-zero (the length factor `norm >= (1-b) > 0` keeps the
-/// denominator positive) and no `i64` overflow over the envelope -- and its result
-/// lies in `[0, TF_NORM_CEIL)` (the saturation ceiling `k1 + 1` scaled). `tf`,
-/// `doc_len`, `avg_len` (the DOCUMENT-size fields, which enter the SYMBOLIC 64-bit
-/// division) are bounded to `< ENVELOPE_MAX` (256 -- the reachable document-token
-/// count; Yuva records are single-token, so this is 256x headroom, and tight enough
-/// that CBMC's divider search converges fast).
+/// denominator positive) and no `i64` overflow -- and its result lies in
+/// `[0, TF_NORM_CEIL)` (the saturation ceiling `k1 + 1` scaled), proven over the
+/// concrete `RECALL_DOC_LADDER`. This function carries NO corpus field, so EVERY
+/// input is a ladder point: its two divisions (`dl/avgl` and `numer*SCALE/denom`)
+/// are GENERAL symbolic-divisor divides coupled through `tf`/`dl`, so no
+/// concrete-divisor/symbolic-dividend split stays tractable while any of the three
+/// is symbolic -- the ladder is the `memscore` `bla_raw` SAMPLED precedent this
+/// module cites. Every row runs the REAL function under CBMC's overflow/panic
+/// instrumentation (concrete arithmetic -- no symbolic divider, so fast) and the
+/// rows are boundary-covering.
 ///
-/// NEGATIVE CONTROL (still fires WITHIN 2^8 -- not vacuous): replacing `avg_len.max(1)`
-/// with `avg_len` lets `avg_len == 0` (in `[0, 256)`) reach a divide-by-zero and turns
+/// NEGATIVE CONTROL (still fires -- the ladder pins `avg_len == 0`): replacing
+/// `avg_len.max(1)` with `avg_len` reaches a divide-by-zero at that row and turns
 /// this harness RED.
 #[kani::proof]
+#[kani::unwind(9)]
 fn kani_recall_tf_norm_panic_free_bounded() {
-    let tf: u64 = kani::any();
-    let doc_len: u64 = kani::any();
-    let avg_len: u64 = kani::any();
-    kani::assume(tf < ENVELOPE_MAX);
-    kani::assume(doc_len < ENVELOPE_MAX);
-    kani::assume(avg_len < ENVELOPE_MAX);
-    let r = bm25_tf_norm(tf, doc_len, avg_len);
-    assert!(r >= 0);
-    assert!(r < TF_NORM_CEIL);
+    let mut i = 0;
+    while i < RECALL_DOC_LADDER.len() {
+        let (tf, doc_len, avg_len) = RECALL_DOC_LADDER[i];
+        let r = bm25_tf_norm(tf, doc_len, avg_len);
+        assert!(r >= 0);
+        assert!(r < TF_NORM_CEIL);
+        i += 1;
+    }
 }
 
 /// `bm25_term_score` (one query term's full BM25 contribution, `idf * tf_norm /
-/// SCALE`) is panic-free and non-negative + bounded over the envelope: `idf <
-/// 34_000` and `tf_norm < TF_NORM_CEIL (2200)`, so the product `/ SCALE` stays well
-/// under `34_000 * 2200 / 1000 < 75_000` and never overflows `i64`.
+/// SCALE`) is panic-free and non-negative + bounded: `idf < 34_000` and
+/// `tf_norm < TF_NORM_CEIL (2200)`, so the product `/ SCALE` stays well under
+/// `34_000 * 2200 / 1000 < 75_000` and never overflows `i64`. The document fields
+/// iterate `RECALL_DOC_LADDER` (the general symbolic divides inside `tf_norm`) while
+/// the CORPUS fields `df`/`n_docs` stay FULLY SYMBOLIC over the reachable `< 2^20`
+/// corpus -- their only division is the cheap power-of-two `ln_fixed` inside
+/// `bm25_idf`, and `idf * tf_norm / SCALE` divides by the CONCRETE `SCALE`. So idf
+/// is proven for EVERY corpus size, tf_norm for the sampled document geometry.
 ///
 /// NEGATIVE CONTROL: removing the `/ SCALE` (so `idf * tf_norm` is returned raw)
-/// blows the `< 100_000` bound and turns this harness RED.
+/// blows the `< 100_000` bound -- CBMC drives the symbolic `df`/`n_docs` to a large
+/// `idf` at the near-ceiling `tf_norm` ladder row and turns this harness RED.
 #[kani::proof]
+#[kani::unwind(9)]
 fn kani_recall_term_score_panic_free_bounded() {
-    let tf: u64 = kani::any();
     let df: u64 = kani::any();
     let n_docs: u64 = kani::any();
-    let doc_len: u64 = kani::any();
-    let avg_len: u64 = kani::any();
-    kani::assume(tf < ENVELOPE_MAX);
     kani::assume(df < (1u64 << 20));
     kani::assume(n_docs < (1u64 << 20));
-    kani::assume(doc_len < ENVELOPE_MAX);
-    kani::assume(avg_len < ENVELOPE_MAX);
-    let r = bm25_term_score(tf, df, n_docs, doc_len, avg_len);
-    assert!(r >= 0);
-    assert!(r < 100_000);
+    let mut i = 0;
+    while i < RECALL_DOC_LADDER.len() {
+        let (tf, doc_len, avg_len) = RECALL_DOC_LADDER[i];
+        let r = bm25_term_score(tf, df, n_docs, doc_len, avg_len);
+        assert!(r >= 0);
+        assert!(r < 100_000);
+        i += 1;
+    }
 }
 
 /// A term that does NOT occur in the document (`tf == 0`) contributes EXACTLY `0` to
 /// the score -- the absent-term identity the multi-term accumulation relies on (an
-/// absent query term neither helps nor hurts). Proven for symbolic `df`/`n_docs`/
-/// `doc_len`/`avg_len` over the envelope.
+/// absent query term neither helps nor hurts). `tf` is pinned to `0`; the document
+/// geometry (`doc_len`/`avg_len`) iterates `RECALL_DOC_LADDER`, and `df`/`n_docs`
+/// stay FULLY SYMBOLIC over the corpus.
 ///
-/// NEGATIVE CONTROL: a `+ 1` bias in `bm25_tf_norm`'s numerator would make an absent
-/// term score non-zero and turn this harness RED.
+/// NEGATIVE CONTROL: a `+ 1` bias in `bm25_tf_norm`'s numerator makes an absent term
+/// score non-zero -- CBMC finds a symbolic `df`/`n_docs` with `idf > 0` so the
+/// product is non-zero and turns this harness RED.
 #[kani::proof]
+#[kani::unwind(9)]
 fn kani_recall_term_score_absent_is_zero() {
     let df: u64 = kani::any();
     let n_docs: u64 = kani::any();
-    let doc_len: u64 = kani::any();
-    let avg_len: u64 = kani::any();
     kani::assume(df < (1u64 << 20));
     kani::assume(n_docs < (1u64 << 20));
-    kani::assume(doc_len < ENVELOPE_MAX);
-    kani::assume(avg_len < ENVELOPE_MAX);
-    assert_eq!(bm25_term_score(0, df, n_docs, doc_len, avg_len), 0);
+    let mut i = 0;
+    while i < RECALL_DOC_LADDER.len() {
+        // tf pinned to 0 (the ABSENT term); the ladder's (doc_len, avg_len) span the
+        // reachable document geometry (incl. avg_len == 0).
+        let (_, doc_len, avg_len) = RECALL_DOC_LADDER[i];
+        assert_eq!(bm25_term_score(0, df, n_docs, doc_len, avg_len), 0);
+        i += 1;
+    }
 }
 
 /// The load-bearing recall invariant, proven SOUNDLY without over-quantifying a
 /// fixed-point division: ADDING a matching query term never LOWERS a document's
 /// accumulated score. Because every `bm25_term_score` is non-negative (proven above)
 /// and the accumulation uses `saturating_add`, the two-term score is `>= 0` and `>=`
-/// the one-term prefix -- "more query-term evidence never hurts". A tiny 2-element
-/// symbolic query keeps the proof cheap (`unwind(3)`).
+/// the one-term prefix -- "more query-term evidence never hurts". The
+/// term-frequencies + document geometry iterate a small `(tf0, tf1, doc_len,
+/// avg_len)` ladder (the general symbolic divides), while the two corpus
+/// document-frequencies `df0`/`df1` stay FULLY SYMBOLIC (cheap `ln_fixed`).
 ///
 /// NEGATIVE CONTROL: changing `saturating_add` to `saturating_sub` in `bm25_doc_score`
-/// makes the second term LOWER the score and turns the prefix assertion RED.
+/// makes the second term LOWER the score -- at a row with `tf1 > 0` and a symbolic
+/// `df1` giving a positive contribution, the prefix assertion turns RED.
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(6)]
 fn kani_recall_doc_score_accumulation_monotone() {
-    let tf0: u64 = kani::any();
+    // (tf0, tf1, doc_len, avg_len): the term-frequencies + document geometry pinned to
+    // boundary/interior values (the general symbolic divides); df0/df1 stay symbolic.
+    const MONO_LADDER: [(u64, u64, u64, u64); 5] = [
+        (1, 1, 1, 1),                                 // both single-token reachable
+        (2, 3, 8, 3),                                 // interior, both terms present
+        (RECALL_HI, RECALL_HI, RECALL_HI, RECALL_HI), // the all-boundary corner
+        (1, RECALL_HI, RECALL_HI, 1),                 // 2nd term high tf, long doc / min avg
+        (0, 1, 1, 0),                                 // 1st absent + avg_len==0 guard
+    ];
     let df0: u64 = kani::any();
-    let tf1: u64 = kani::any();
     let df1: u64 = kani::any();
-    let doc_len: u64 = kani::any();
-    let avg_len: u64 = kani::any();
-    kani::assume(tf0 < ENVELOPE_MAX && tf1 < ENVELOPE_MAX);
-    kani::assume(df0 < (1u64 << 20) && df1 < (1u64 << 20));
-    kani::assume(doc_len < ENVELOPE_MAX && avg_len < ENVELOPE_MAX);
-    let query = [(tf0, df0), (tf1, df1)];
-    let one = bm25_doc_score(&query[..1], 1u64 << 20, doc_len, avg_len);
-    let two = bm25_doc_score(&query[..2], 1u64 << 20, doc_len, avg_len);
-    assert!(one >= 0);
-    assert!(two >= one); // adding a matching term never lowers the score
+    kani::assume(df0 < (1u64 << 20));
+    kani::assume(df1 < (1u64 << 20));
+    let mut i = 0;
+    while i < MONO_LADDER.len() {
+        let (tf0, tf1, doc_len, avg_len) = MONO_LADDER[i];
+        let query = [(tf0, df0), (tf1, df1)];
+        let one = bm25_doc_score(&query[..1], 1u64 << 20, doc_len, avg_len);
+        let two = bm25_doc_score(&query[..2], 1u64 << 20, doc_len, avg_len);
+        assert!(one >= 0);
+        assert!(two >= one); // adding a matching term never lowers the score
+        i += 1;
+    }
 }
 
 /// `hit_canon` -> `hit_decode` is a lossless round-trip over the FULL symbolic
