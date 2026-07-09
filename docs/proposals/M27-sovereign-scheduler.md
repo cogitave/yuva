@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M27 — Two-VMID Sovereign Time-Partition Scheduler"
+description: "Proposes a two-slot major-frame scheduler multiplexing two guest VMIDs off the EL2 physical timer; observational, not real-time."
+tags: ["m27", "scheduler", "sovereignty", "el2", "aarch64", "kani"]
+timestamp: 2026-06-10T18:59:15+03:00
+status: locked
+diataxis: explanation
+---
+
 # M27 — Two-VMID sovereign time-partition scheduler (the sovereignty pillar advances)
 
 **Status:** proposed (build) · **Pillar:** sovereignty ("replace Firecracker") + a bridge to learning · **Depends on:** L2.0–L2.6 (the EL2 nVHE world-switch + stage-2 + VMID machinery), M22/M23 (the experience fold), M26 (the exit-telemetry producer pattern) · **Marker:** `M27: sched OK`

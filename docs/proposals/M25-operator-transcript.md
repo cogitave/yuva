@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M25 — Verified operator transcript (the exogenous-oracle channel)"
+description: "Proposes a TX-only, keyless tamper-evident serial transcript leaf surfacing borderline decisions; no crypto auth, no real human oracle."
+tags: ["m25", "communication", "tamper-evident", "attestation", "active-learning", "serial"]
+timestamp: 2026-06-10T16:47:56+03:00
+status: locked
+diataxis: explanation
+---
+
 # M25 — Verified operator transcript (the exogenous-oracle channel)
 
 **Status:** proposed (build) · **Pillar:** communication ("an OS that talks with its operator") · **Depends on:** M22 (provenance fold + head), M23 (experience records), M24 (gate verdict + held-out partition) · **Marker:** `M25: operator OK`

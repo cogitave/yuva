@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "Model-path Phase 2 — Cogi's own model (corpus→QLoRA→GGUF, DESIGN ONLY)"
+description: "Design-only, BRAIN-gated pipeline to fine-tune an open ≥7B model on Cogi's corpus (QLoRA→GGUF→golden-measure→pin); nothing trained yet."
+tags: ["model-path", "fine-tuning", "qlora", "gguf", "brain-gated", "sovereignty"]
+timestamp: 2026-07-08T11:29:25+03:00
+status: draft
+diataxis: explanation
+---
+
 # Model-path Phase 2 — Cogi's own model: corpus → QLoRA → merge → GGUF → the golden-measure run → the pinned local organ (BRAIN-gated; DESIGN ONLY)
 
 **Status:** **DESIGN ONLY — nothing is trained, acquired, or spent by this document.** The execution is **BRAIN-gated** (`forward-plan.md §4.2`): it waits on the operator's **go + a fine-tune-sufficient corpus + spend/hardware**. This doc is the Track-D deliverable of the forward plan (`docs/proposals/forward-plan.md §2.3` + §3 row D + §4.2); that plan IS the binding scope and this file adds no new commitment beyond it. It writes DOWN the Phase-2 pipeline so that when the gate opens the path is a known sequence and not a research scramble, and it proves — with a runnable-TODAY runbook (§5) — that the one non-trivial post-training step (the golden-measure run into the landed M32 load seam) is cheap and already exercisable. · **Pillar:** the MODEL frontier (no live sovereign occupant yet) + honesty (the capability ceiling and the two distinct sovereignties are stated sharply, never conflated). · **Depends on (for EXECUTION, not for this doc):** Phase-1 corpus (`forward-plan.md §2.2` / the M39 track — the real prerequisite), the landed M32-B receive seam + `tools/infer-daemon/` load plumbing (`M32-local-infer.md`), the B3 debt note (`docs/research/b3-pure-rust-engine.md`), and the competence-floor finding (`docs/research/cogi-cognitive-architecture.md §1.2b`). · **Operator decisions honored:** tinygrad **DEFERRED**, Namzu **DEFERRED**, the pragmatic path is llama.cpp/GGUF inference (plumbing built) + a host-side PyTorch/Unsloth-or-axolotl QLoRA fine-tune. · **Does NOT touch `docs/ROADMAP-V2.md`** — the roadmap row is handed to Track F (§9). `token=doc=DESIGN-ONLY-BRAIN-GATED`, `token=scope=ONE-NEW-FILE-ROADMAP-ROW-TO-F`.

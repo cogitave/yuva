@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M39 — Phase-1 Experience Corpus (dataset moat)"
+description: "Freezes corpus-format-v1 (token provenance skeleton, not text) + verified codec leaf + 5 Kani proofs; no dataset, no training yet."
+tags: ["m39", "corpus", "provenance", "codec", "kani", "proposal"]
+timestamp: 2026-07-08T11:43:52+03:00
+status: locked
+diataxis: explanation
+---
+
 # M39 — the Phase-1 EXPERIENCE CORPUS (the dataset moat)
 
 **Status:** **PROPOSAL — research-first. Stage A (this increment) LANDS the frozen

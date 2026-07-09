@@ -1,3 +1,13 @@
+---
+type: Roadmap
+title: "Yuva/Cogi Forward Plan — the phased road to a learning, model-bearing agent-OS"
+description: "Research-first roadmap sequencing eight parallel tracks toward a two-phase model endgame; flagship is a no-live-model experience corpus."
+tags: ["roadmap", "corpus", "fine-tune", "m39", "parallel-tracks", "sovereignty"]
+timestamp: 2026-07-08T11:21:29+03:00
+status: active
+diataxis: explanation
+---
+
 # Yuva/Cogi FORWARD PLAN — the phased road from a mature sovereign substrate to a learning, model-bearing agent-OS, with the parallel-track schedule the operator drives
 
 **Status:** **PLAN (research-first; nothing landed by this document). The convergent forward map that sequences the three landed sibling milestones (boot-profiles stage A, Yuva-ABI stage A, agent-terminology) and the mature M0..M38 substrate toward the four-pillar vision, honoring the 2026-07-08 operator decisions (tinygrad DEFERRED, Namzu DEFERRED, the model endgame is TWO PHASES with the CORPUS as the real prerequisite, and the three GATES stay operator-owned).** · **Pillars & their honest state:** sovereignty (**STRONG** — kernel + M11/M18 caps + M22/M33 provenance-EXCLUSIVITY, zero-unsafe kernel, Kani-verified leaves), memory (**STRONG for storage/recall** — M13-M20 tiered, LEXICAL/BM25 recall NOT embeddings, durable, reboot-surviving), continuous-learning (**DORMANT** — KAN_ACTIVE=false, the M24 Seldonian gate correctly gate-not-met AND the no-gradient substrate structurally cannot weight-learn; the biggest OPEN pillar — and it STAYS dormant through Phase 1, since a dataset build is a prerequisite, not a capability advance), operator-communication (**GOOD** — M25/M28, industrial-boot, the hello). · **Discipline:** every witness carries honesty tokens; a mock is a mock, dormant is standby, a stand-in is a stand-in, a provenance skeleton is not text. · **Terminology:** agent-agnostic throughout (Yuva = the OS; Cogi = the future resident agent's identity, home = `cogitave/agent`; no assumption of any specific model provider or agent framework as the occupant). · **The load-bearing deliverable is §3, the parallel-track table.** `token=plan=RESEARCH-FIRST-NOTHING-LANDED`, `token=pillars=SOV-STRONG/MEM-STRONG/LEARN-DORMANT-THROUGH-PHASE1/COMMS-GOOD`.

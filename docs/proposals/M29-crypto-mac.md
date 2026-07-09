@@ -1,3 +1,13 @@
+---
+type: Design Decision
+title: "M29 — the KEYED-CRYPTO MAC (verified khash leaf)"
+description: "Replaces M28's non-cryptographic FNV MAC with a BLAKE2s-256 keyed leaf; Kani proves correctness/tamper only, security assumed."
+tags: ["m29", "cryptography", "mac", "blake2s", "formal-verification"]
+timestamp: 2026-06-11T12:53:51+03:00
+status: locked
+diataxis: explanation
+---
+
 # M29 — the KEYED-CRYPTO MAC (verified `tb-encode::khash` leaf): the M28 named successor lands
 
 **Status:** LANDED (all three stages — A+B: the leaf + the M28 MAC cutover; **stage C: the #74 `prov_hash` → `khash::uhash` cutover, LANDED (#99)** with the compression-budgeted fold-harness restructuring per [`docs/plans/m29-stage-c-plan.md`](../plans/m29-stage-c-plan.md)). Historical note: stage C was first implemented as a scratch swap, MEASURED, and split out per the §5/§8 budget gate — the measured deltas (the cheapest fold-tamper harness alone went 29s → 185s; `kani_prov_chain_mix_tamper`'s 66-fold concrete unroll projects ~20 min at the measured ~9s per concrete BLAKE2s compression) put the prove-encode lane far past the ~42-min target; the per-harness numbers are recorded in the landing PR. · **Pillar:** communication (the M28 MAC honesty upgrade) + memory (the #74 provenance-hash first half) · **Depends on:** M22 (provenance fold), M28 (`opframe_rx` + the `mac=KEYED-NONCRYPTO` concession) · **Tasks:** the M28 §5 named successor; #74 (hash half); #75 (enabler) · **Marker:** `M29: khash-mac OK`
