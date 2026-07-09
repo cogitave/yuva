@@ -8,17 +8,22 @@
 # jobs; trigger: the first post-M29-stage-C CI pass measured 41m22s of the
 # 45-min cap; the #76 four-way rebalance added shard D when the count reached
 # 135 and the 3-way shard B ran past the 65-min job cap):
-#   SHARD=all   (default) -- the single full counted pass, local-workflow
-#              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
-#              pinned EXPECTED_HARNESSES_TOTAL (135), marker `V1: kani-encoders OK`.
-#   SHARD=a|b|c|d -- run ONLY that shard's pinned harness list (repeated
-#              `--harness <name>` + `--exact` -- exact-name matching, never
-#              substring, so e.g. kani_kan_envelope_no_widening can never
-#              shadow ..._m24), SUCCESSFUL must equal that shard's pinned
-#              count (the list length), marker `V1-shard-a: kani-encoders OK`
-#              / `V1-shard-b: kani-encoders OK` / `V1-shard-c: kani-encoders OK`
-#              / `V1-shard-d: kani-encoders OK`
+#   SHARD=all   (default) -- the full counted pass over the UNION of all four
+#              shard lists: every harness, SUCCESSFUL must equal the pinned
+#              EXPECTED_HARNESSES_TOTAL (135), marker `V1: kani-encoders OK`.
+#   SHARD=a|b|c|d -- run ONLY that shard's pinned harness list, SUCCESSFUL must
+#              equal that shard's pinned count (the list length), marker
+#              `V1-shard-a: kani-encoders OK` / `V1-shard-b: kani-encoders OK` /
+#              `V1-shard-c: kani-encoders OK` / `V1-shard-d: kani-encoders OK`
 #              (DISTINCT tokens -- a shard marker never claims the full 135).
+# Since the #76 shard-D fix EVERY mode runs each harness as its OWN `cargo kani
+# --exact --harness proofs::<name>` invocation under a PER-HARNESS `timeout` cap
+# (exact-name matching, never substring, so e.g. kani_kan_envelope_no_widening
+# can never shadow ..._m24), after a one-time cap-free codegen warm-up. A harness
+# that exceeds the cap FAILS THE SHARD BY NAME (`HARNESS-TIMEOUT: <name>`) instead
+# of silently consuming the 65-min job cap the way the M40 recall division
+# blow-up did. The crate->goto codegen is compiled once (warm-up + cargo cache),
+# so per-harness invocation re-runs only the CBMC solve, not the ~15-min build.
 # The shard lists + per-shard counts + the total live in ONE place,
 # scripts/kani-shards.sh (sourced below) -- consumed by this script in all
 # modes and by kani.yml only via SHARD=a|b|c. EVERY mode first runs the
@@ -411,57 +416,119 @@ esac
 # '#[kani::proof]' count in proofs.rs.
 shards_assert_complete
 
-# Select the harness set, its pinned count, and its DoD marker. Shard modes
-# pass every shard harness as `--harness <fully-qualified-name>` with
-# `--exact` (exact matching -- cargo-kani's default filter is SUBSTRING
-# matching, which could silently over-match a prefix-named sibling harness,
-# e.g. kani_kan_envelope_no_widening also matches ..._m24). `--exact`
-# requires the fully-qualified path: every tb-encode harness lives flat in
-# the `proofs` module (verified via `cargo kani list`), so the module prefix
-# is pinned ONCE here; if proofs.rs ever re-modularizes, the shard run match
-# fails and the SUCCESSFUL count mismatch fails the gate closed.
+# Select the harness set, its pinned count, and its DoD marker. Every harness is
+# run as its OWN `cargo kani` invocation (the per-harness cap below) with
+# `--exact` (exact matching -- cargo-kani's default filter is SUBSTRING matching,
+# which could silently over-match a prefix-named sibling harness, e.g.
+# kani_kan_envelope_no_widening also matches ..._m24). `--exact` requires the
+# fully-qualified path: every tb-encode harness lives flat in the `proofs` module
+# (verified via `cargo kani list`), so the module prefix is pinned ONCE here; if
+# proofs.rs ever re-modularizes, the shard run match fails and the SUCCESSFUL
+# count mismatch fails the gate closed.
 HARNESS_PATH_PREFIX="proofs::"
-KANI_ARGS=()
+
+# The harness set for this mode: a single shard list, or the union of all four
+# for the local full pass. ONE code path (the per-harness loop below) drives
+# every mode.
+SELECTED=()
 case "$SHARD" in
   all)
+    SELECTED=("${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}" "${SHARD_D[@]}")
     EXPECTED="$EXPECTED_HARNESSES_TOTAL"
     MARKER="V1: kani-encoders OK"
     ;;
   a)
+    SELECTED=("${SHARD_A[@]}")
     EXPECTED="${#SHARD_A[@]}"
     MARKER="V1-shard-a: kani-encoders OK"
-    KANI_ARGS+=(--exact)
-    for h in "${SHARD_A[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
   b)
+    SELECTED=("${SHARD_B[@]}")
     EXPECTED="${#SHARD_B[@]}"
     MARKER="V1-shard-b: kani-encoders OK"
-    KANI_ARGS+=(--exact)
-    for h in "${SHARD_B[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
   c)
+    SELECTED=("${SHARD_C[@]}")
     EXPECTED="${#SHARD_C[@]}"
     MARKER="V1-shard-c: kani-encoders OK"
-    KANI_ARGS+=(--exact)
-    for h in "${SHARD_C[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
   d)
+    SELECTED=("${SHARD_D[@]}")
     EXPECTED="${#SHARD_D[@]}"
     MARKER="V1-shard-d: kani-encoders OK"
-    KANI_ARGS+=(--exact)
-    for h in "${SHARD_D[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
 esac
 
-echo "==> Running Kani over tb-encode (SHARD=$SHARD, expecting $EXPECTED harnesses) ..."
-# Capture both streams; --output-format=terse prints one VERIFICATION line per
-# harness. `|| true` so a non-zero Kani exit (a real proof failure) is handled by
-# the explicit checks below rather than aborting under `set -e`.
-OUT="$(cargo kani -p tb-encode --output-format=terse ${KANI_ARGS[@]+"${KANI_ARGS[@]}"} 2>&1 || true)"
-printf '%s\n' "$OUT"
+# #76 shard-D fix -- PER-HARNESS wall-clock cap. The old gate ran the WHOLE shard
+# as ONE `cargo kani` invocation, so a single harness that regressed into a CBMC
+# state-explosion (the M40 recall symbolic-division blow-up) produced ZERO output
+# and ran until the 65-min JOB cap CANCELLED the shard -- with no culprit named
+# (run 29013149304: shard D's main invocation was silent for 64 min around a live
+# cbmc). Now every harness runs as its OWN bounded invocation: `timeout` SIGTERMs
+# it at the cap and a timed-out harness FAILS THE SHARD BY NAME (fail-closed),
+# never silently eating the job again. The cap is sized ABOVE the heaviest LEGIT
+# harness (shard C's kani_lms_verify_total ~355s LOCAL -> ~600s on the slower CI
+# runner, the ~1.4-1.7x local->CI delta the #101 header records) with headroom,
+# while still bounding a RUNAWAY harness to ~15 min, far under the 65-min job cap.
+# Overridable via KANI_HARNESS_TIMEOUT (e.g. a tighter value for a local bisect).
+KANI_HARNESS_TIMEOUT="${KANI_HARNESS_TIMEOUT:-900}"
 
-FAILED="$(printf '%s\n' "$OUT" | grep -c 'VERIFICATION:- FAILED' || true)"
-SUCCEEDED="$(printf '%s\n' "$OUT" | grep -c 'VERIFICATION:- SUCCESSFUL' || true)"
+# Codegen -- compiling tb-encode to a CBMC goto program -- is the ~15-min
+# cold-cache cost the shard header documents. It is SHARED by every harness
+# (harness selection is a driver-level FILTER, not a compiler flag) and MUST be
+# paid OUTSIDE the per-harness cap, or the first harness's `timeout` would measure
+# the one-time build instead of its solve and false-fail on a cold cache. In CI
+# the kani-github-action smoke step already warmed it; this idempotent warm-up
+# (near-free on a hot cache) makes a LOCAL `SHARD=x` run self-warming too. It runs
+# WITHOUT a cap -- codegen is bounded + deterministic, and the job-level 65-min
+# cap stays the backstop for a genuinely stuck build. Its result is discarded (it
+# is not part of the counted gate; kani_adjust_within_allowed is the same trivial
+# warm-up harness the CI smoke step uses).
+echo "==> Warming tb-encode -> CBMC goto codegen (SHARD=$SHARD; cap-free) ..."
+cargo kani -p tb-encode --output-format=terse --exact \
+  --harness "${HARNESS_PATH_PREFIX}kani_adjust_within_allowed" >/dev/null 2>&1 || true
+
+echo "==> Running Kani over tb-encode PER-HARNESS (SHARD=$SHARD, expecting $EXPECTED harnesses, cap ${KANI_HARNESS_TIMEOUT}s/harness) ..."
+FAILED=0
+SUCCEEDED=0
+TIMED_OUT=""
+for h in "${SELECTED[@]}"; do
+  H_START="$(date +%s)"
+  # Unbuffered progress marker -- shell echo flushes, so the CI log always shows
+  # WHICH harness is in flight even while its cbmc solves silently (the exact
+  # blind spot that hid the #76 runaway).
+  echo "==> [kani] START $h (cap ${KANI_HARNESS_TIMEOUT}s)"
+  # Capture both streams; `--output-format=terse` prints one VERIFICATION line.
+  # set +e around the timeout|cargo pipeline so a non-zero exit (a real proof
+  # failure OR a timeout) is handled by the checks below, not `set -e`.
+  set +e
+  HOUT="$(timeout --kill-after=30 "$KANI_HARNESS_TIMEOUT" \
+    cargo kani -p tb-encode --output-format=terse --exact \
+    --harness "${HARNESS_PATH_PREFIX}${h}" 2>&1)"
+  H_RC=$?
+  set -e
+  H_ELAPSED=$(( $(date +%s) - H_START ))
+  printf '%s\n' "$HOUT"
+  # `timeout` exits 124 when it SIGTERMs at the cap, 137 (128+9) if --kill-after
+  # then had to SIGKILL -- either is a per-harness timeout: NAME it and fail the
+  # shard closed (never let one harness silently consume the job).
+  if [ "$H_RC" -eq 124 ] || [ "$H_RC" -eq 137 ]; then
+    echo "HARNESS-TIMEOUT: $h after ${KANI_HARNESS_TIMEOUT}s (killed at ${H_ELAPSED}s, rc=$H_RC)"
+    TIMED_OUT="$TIMED_OUT $h"
+    continue
+  fi
+  h_ok="$(printf '%s\n' "$HOUT" | grep -c 'VERIFICATION:- SUCCESSFUL' || true)"
+  h_bad="$(printf '%s\n' "$HOUT" | grep -c 'VERIFICATION:- FAILED' || true)"
+  SUCCEEDED=$((SUCCEEDED + h_ok))
+  FAILED=$((FAILED + h_bad))
+  echo "==> [kani] DONE  $h -> SUCCESSFUL=$h_ok FAILED=$h_bad in ${H_ELAPSED}s"
+done
+
+# Fail-closed, in priority order, each NAMING the culprit(s):
+if [ -n "$TIMED_OUT" ]; then
+  echo "ENCODE PROOF GATE: FAIL -- harness(es) exceeded the ${KANI_HARNESS_TIMEOUT}s per-harness cap (SHARD=$SHARD):$TIMED_OUT" >&2
+  exit 1
+fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "ENCODE PROOF GATE: FAIL -- $FAILED harness(es) reported VERIFICATION:- FAILED (SHARD=$SHARD)" >&2
@@ -469,7 +536,7 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 if [ "$SUCCEEDED" -ne "$EXPECTED" ]; then
-  echo "ENCODE PROOF GATE: FAIL -- expected $EXPECTED successful harnesses for SHARD=$SHARD, saw $SUCCEEDED (regression / tamper / build error)" >&2
+  echo "ENCODE PROOF GATE: FAIL -- expected $EXPECTED successful harnesses for SHARD=$SHARD, saw $SUCCEEDED (regression / tamper / timeout / build error)" >&2
   exit 1
 fi
 
