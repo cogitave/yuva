@@ -4,19 +4,21 @@
 # encoders, the 16-byte IPC frame codec + bounded ring) with Kani over the
 # host-verifiable `tb-encode` crate, FAIL CLOSED.
 #
-# SHARD MODES (#101 -- the prove-encode lane is sharded into 2 parallel CI
+# SHARD MODES (#101 -- the prove-encode lane is sharded into 4 parallel CI
 # jobs; trigger: the first post-M29-stage-C CI pass measured 41m22s of the
-# 45-min cap and M31 stage A adds +6 harnesses):
+# 45-min cap; the #76 four-way rebalance added shard D when the count reached
+# 135 and the 3-way shard B ran past the 65-min job cap):
 #   SHARD=all   (default) -- the single full counted pass, local-workflow
 #              behavior UNCHANGED: every harness, SUCCESSFUL must equal the
-#              pinned EXPECTED_HARNESSES_TOTAL (120), marker `V1: kani-encoders OK`.
-#   SHARD=a|b|c -- run ONLY that shard's pinned harness list (repeated
+#              pinned EXPECTED_HARNESSES_TOTAL (135), marker `V1: kani-encoders OK`.
+#   SHARD=a|b|c|d -- run ONLY that shard's pinned harness list (repeated
 #              `--harness <name>` + `--exact` -- exact-name matching, never
 #              substring, so e.g. kani_kan_envelope_no_widening can never
 #              shadow ..._m24), SUCCESSFUL must equal that shard's pinned
 #              count (the list length), marker `V1-shard-a: kani-encoders OK`
 #              / `V1-shard-b: kani-encoders OK` / `V1-shard-c: kani-encoders OK`
-#              (DISTINCT tokens -- a shard marker never claims the full 120).
+#              / `V1-shard-d: kani-encoders OK`
+#              (DISTINCT tokens -- a shard marker never claims the full 135).
 # The shard lists + per-shard counts + the total live in ONE place,
 # scripts/kani-shards.sh (sourced below) -- consumed by this script in all
 # modes and by kani.yml only via SHARD=a|b|c. EVERY mode first runs the
@@ -32,8 +34,8 @@
 #     never a static grep -- (so a silently deleted / renamed / vacuous
 #     harness can never let the gate pass -- the marker is tamper-evident).
 #
-# Run by .github/workflows/kani.yml (the `prove-encode-a` / `prove-encode-b`
-# jobs, SHARD=a|b) AFTER the model-checking/kani-github-action step has
+# Run by .github/workflows/kani.yml (the `prove-encode-a` / `-b` / `-c` / `-d`
+# jobs, SHARD=a|b|c|d) AFTER the model-checking/kani-github-action step has
 # installed Kani's own pinned toolchain (so `cargo kani` is on PATH). Kani is
 # NOT invoked through the `kbuild` alias and NEVER via `--workspace` (that
 # would drag tb-hal's inline asm into CBMC), only the per-package
@@ -397,9 +399,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SHARD="${SHARD:-all}"
 case "$SHARD" in
-  a|b|c|all) ;;
+  a|b|c|d|all) ;;
   *)
-    echo "ENCODE PROOF GATE: FAIL -- unknown SHARD='$SHARD' (must be a, b, c, or all)" >&2
+    echo "ENCODE PROOF GATE: FAIL -- unknown SHARD='$SHARD' (must be a, b, c, d, or all)" >&2
     exit 1
     ;;
 esac
@@ -442,6 +444,12 @@ case "$SHARD" in
     MARKER="V1-shard-c: kani-encoders OK"
     KANI_ARGS+=(--exact)
     for h in "${SHARD_C[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
+    ;;
+  d)
+    EXPECTED="${#SHARD_D[@]}"
+    MARKER="V1-shard-d: kani-encoders OK"
+    KANI_ARGS+=(--exact)
+    for h in "${SHARD_D[@]}"; do KANI_ARGS+=(--harness "${HARNESS_PATH_PREFIX}${h}"); done
     ;;
 esac
 
