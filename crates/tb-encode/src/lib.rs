@@ -325,6 +325,7 @@ pub mod opframe_rx;
 pub mod paging;
 pub mod prov;
 pub mod provhead;
+pub mod recall;
 pub mod route;
 pub mod sha256;
 pub mod smmuv3;

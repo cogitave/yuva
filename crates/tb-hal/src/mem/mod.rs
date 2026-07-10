@@ -38,6 +38,6 @@ mod organ;
 pub(crate) use organ::{
     bakeoff_selftest, conductor_selftest, corpus_persist, corpus_selftest, exittel_selftest,
     exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
-    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, xport_selftest,
-    MemSubstrate,
+    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, recall_selftest,
+    xport_selftest, MemSubstrate,
 };

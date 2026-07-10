@@ -1,60 +1,55 @@
 #!/usr/bin/env bash
-# #101 -- THE single source of truth for the prove-encode 2-way shard split.
+# #101 / #106 / M33 / #76 -- THE single source of truth for the prove-encode
+# shard split (now FOUR-WAY: A / B / C / D).
 #
 # Sourced (never executed) by scripts/verify-encode.sh, which is in turn the
-# only thing .github/workflows/kani.yml's prove-encode-a / prove-encode-b jobs
+# only thing .github/workflows/kani.yml's prove-encode-a / -b / -c / -d jobs
 # run -- the lists, the per-shard pinned counts (derived from the list lengths)
 # and the pinned total all live HERE and nowhere else. No duplicated lists.
 #
 # WHY SHARDED (the option-4 trigger, docs/plans/m29-stage-c-kani-budget-plan.md):
 # the pre-agreed escape-hatch trigger was "shard when a measured full pass
-# exceeds ~38 min". The first post-M29-stage-C CI pass measured 41m22s of the
-# 45-min cap (local WSL: 29.2 min / 1752s -- the runner delta is real), and M31
-# stage A adds +6 harnesses. Sharding splits SOLVING time only (codegen is
-# duplicated per shard; the #77 cache reclaims it on unchanged-crate pushes),
-# so the split below balances by MEASURED per-harness cost, not by count.
+# exceeds ~38 min". #101 split the single pass into TWO jobs (A/B); M33 added a
+# THIRD (shard C, the crypto-verify leaves); the #76 rebalance below adds a
+# FOURTH (shard D). Sharding splits SOLVING time only -- codegen (~15 min
+# building tb-encode for CBMC) is DUPLICATED per shard, and the #77 cache
+# reclaims it ONLY on pushes that do NOT touch crates/tb-encode/**; a
+# tb-encode-touching push pays that ~15 min COLD in every shard ON TOP of its
+# solving. So a shard's COLD wall ~= ~15 min codegen + its per-harness
+# model-build + solve.
 #
-# COST SOURCE (local WSL seconds, measured per the M29 discipline; recorded in
-# the PR #27 / #30 / #32 bodies + docs/plans/m29-stage-c-plan.md SS2): the 21
-# post-cutover khash/BLAKE2s-bearing harnesses are annotated inline below; the
-# other 69 were assumed FNV-era-trivial, then the #101 per-shard timed runs
-# CORRECTED that assumption: shard B's nominally-trivial families (the kan
-# unwind loops, frame_conserved's symbolic plan, the canon-injectivity proofs)
-# average ~6.5s vs ~1s for shard A's POD encoders, so the first 45/45
-# cost-greedy split measured A=13m24 / B=16m36 and
-# kani_khash_total_deterministic (90.3s) was moved B->A to rebalance ON THE
-# MEASUREMENT (a side benefit: the whole M29 khash family now lives
-# coherently in shard A). Balance is by measured COST, not count.
+# WHY A FOURTH SHARD (#76 -- the M40 recall-leaf capacity fix): the harness
+# count grew to 135. On a COLD cache the 3-way split put shard B at 71 harnesses
+# whose wall ran PAST the 65-min job cap and was cancelled -- three shards
+# genuinely cannot hold 135 harnesses cold under a reasonable cap. The FOURTH
+# shard D takes ~half of shard B: B's learning-loop CODEC families (M23 exp,
+# M24 explore/bakeoff, M27 tpsched, the M30 inferwire req-binding + the M31
+# inferwire adapter six, M39 corpus, M40 recall) move to D, leaving B the
+# M21 kancell / M22 prov / M25 opframe / M26 exittel / M28 cmd / M38 conductor
+# families. A and C are UNCHANGED (A ~25m warm / ~40m cold, C ~29m / ~44m --
+# both already comfortably under cap); the split targets all four at ~25-28m
+# warm / ~40-44m cold, ~20m of headroom under the 65-min cap.
 #
-# #106 REBALANCE (post-M38, pre-M33): once the M31 six + the M38 conductor ten
-# landed in shard B it grew to 60 harnesses and drifted to the cap -- MEASURED
-# CI wall on main (5650a1f / df322d0e, cold cache): shard B 28m23s / 28m47s vs
-# shard A 24m2s / 24m51s, a ~4-min imbalance under the 30-min per-job timeout,
-# with M33's encoder harnesses still to come. To restore symmetric headroom,
-# kani_inferwire_peer_label_bound (83s local) is moved B->A -- the single move
-# that both relieves the near-cap shard by ~2 min CI and CONSOLIDATES the whole
-# M30 inferwire family in shard A (the same coherence side benefit as the khash
-# move above). Projection: both shards ~26 min, ~4 min of headroom each for the
-# M33 additions (which follow the one-touch rule into the then-lighter shard).
-# Note: editing THIS file does not change crates/tb-encode/** so the #77 codegen
-# cache still HITS on this PR -- the PR's CI shows the WARM split (the direction
-# and the fail-closed guard), while the absolute cold numbers project from the
-# main baseline above.
-#   measured-heavy sum:  shard A = 799.6s (46 names), shard B = 620.0s (44)
-#   measured local wall: see the #101 PR (one timed pass per final shard,
-#                        guard + duplicated codegen included, ~15 min each)
-#   projected CI:        ~21-24 min per shard (x1.42 runner delta + the fixed
-#                        checkout/cache/smoke steps), vs the 30-min timeout
+# COST SOURCE (local WSL seconds, measured per the M29/#49 discipline; recorded
+# in the PR #27 / #30 / #32 bodies + docs/plans/m29-stage-c-plan.md and carried
+# inline below). Balance is by measured COST **and** by COUNT: each harness
+# carries a fixed CBMC model-build cost on top of its solve, so B and D balance
+# by COUNT first (~36 / ~35) and heavy-solve-sum second.
+#   measured heavy-solve sums (the inline annotations below):
+#     A ~908s (55 harnesses) · B ~496s (36) · C ~917s (9) · D ~398s (35)
+#   projected CI wall vs the 65-min per-job cap: all four ~40-44 min COLD
+#   (~15 min duplicated codegen + solving), ~25-28 min WARM (#77 cache hit).
 #
 # THE COMPLETENESS GUARD (MANDATORY, fail-closed -- the M29 count-gate lesson):
 # shards_assert_complete below is run by verify-encode.sh in EVERY mode (a, b,
-# all) BEFORE Kani, and asserts
-#   (1) len(SHARD_A) + len(SHARD_B) == EXPECTED_HARNESSES_TOTAL (the pin),
+# c, d, all) BEFORE Kani, and asserts
+#   (1) len(A)+len(B)+len(C)+len(D) == EXPECTED_HARNESSES_TOTAL (the pin),
 #   (2) grep -c '#[kani::proof]' crates/tb-encode/src/proofs.rs == the pin
-#       (a harness ADDED to proofs.rs but to neither list, or DROPPED from
-#       proofs.rs with stale lists, FAILS the gate -- it can never silently
-#       vanish from coverage),
-#   (3) the two lists are DISJOINT (no harness proven "twice" hiding a gap),
+#       (a harness ADDED to proofs.rs but to NO list, or DROPPED from proofs.rs
+#       with stale lists, FAILS the gate -- it can never silently vanish from
+#       coverage),
+#   (3) the four lists are pairwise DISJOINT (no harness proven "twice" hiding
+#       a gap; also catches a duplicate within one list),
 #   (4) every listed name exists as a fn in proofs.rs (a RENAME with stale
 #       lists fails here, statically and loudly).
 # The static grep is the LIST<->SOURCE lockstep check only; the proof gate
@@ -65,20 +60,22 @@
 # EXACTLY ONE shard list below (pick the lighter shard -- the projections
 # above; annotate the measured local time if >~20s) AND EXPECTED_HARNESSES_TOTAL
 # is bumped by 1. Nothing else: the per-shard counts are the list lengths,
-# verify-encode.sh sources this file, and kani.yml only sets SHARD=a|b. Any
+# verify-encode.sh sources this file, and kani.yml only sets SHARD=a|b|c|d. Any
 # mismatch (forgotten list add, forgotten bump, rename, dup) fails closed in
-# shards_assert_complete on BOTH CI jobs and on every local run.
+# shards_assert_complete on ALL FOUR CI jobs and on every local run.
 
 # The pinned total -- MUST equal the '#[kani::proof]' count in
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
-# milestone adds/removes a harness.
-EXPECTED_HARNESSES_TOTAL=128
+# milestone adds/removes a harness. (#76 REDISTRIBUTES the existing 135 across
+# four shards -- the total is UNCHANGED.)
+EXPECTED_HARNESSES_TOTAL=135
 
 # Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
-# family, and the M30 codec + echo-soundness legs.
+# family, and the M30 codec + echo-soundness legs. UNCHANGED by the #76
+# four-way rebalance.
 SHARD_A=(
   # VMX x4 (trivial)
   kani_adjust_within_allowed
@@ -155,22 +152,19 @@ SHARD_A=(
   # M33 attest codec x2 (the CHEAP layout harnesses -- no hashing; routed to
   # the lighter existing shard per the #106 one-touch rule. pae_injective ~3.8s,
   # decode_fail_closed ~22s local WSL). The M33 crypto-verify harnesses live in
-  # the NEW shard C below (the compression budget).
+  # shard C below (the compression budget).
   kani_attest_pae_injective             # 3.8s
   kani_attest_decode_fail_closed        # 22s
 )
 
-# Shard B (59): the learning-loop codec families (M21 kancell, M22 prov canon,
-# M23 exp, M24 explore/bakeoff, M25 opframe, M26 exittel, M27 tpsched, M28 cmd
-# -- measured ~6.5s average, NOT trivial) + the heavy iff/determinism fold
-# legs (inclusion_sound, head_deterministic, bakeoff_replay), the thinned
-# per-milestone fold leaves, key_evolve, the M30 peer-binding legs, the
-# M31 inference-adapter six, and the M38 conductor TEN (placed HERE per the
-# one-touch rule -- shard B was the lighter shard by measured cost, 620.0s vs
-# A's 799.6s, and the conductor ten measure light: nine ALGEBRA harnesses are
-# cheap closed-set proofs (~1-2s each) and only kani_conduct_fold_tamper is a
-# budget event (~28.5s local WSL, the prov/khash pinned-vector one-execution
-# shape -- the kani_tpsched_fold_tamper sibling cost ~25.6s)).
+# Shard B (36): the operator/policy/ledger codec families that STAY after the
+# #76 four-way rebalance -- M21 kancell, M22 prov (canon pair + the heavy
+# inclusion/head-determinism fold legs), M25 opframe, M26 exittel, M28 cmd, and
+# the M38 conductor ten (nine cheap closed-set ALGEBRA proofs + the one budget
+# fold event). The learning-loop CODEC families that used to sit here (M23 exp,
+# M24 bakeoff, M27 tpsched, the M30/M31 inferwire adapter, M39 corpus, M40
+# recall) moved to the NEW shard D -- see below. Balance target: ~36 harnesses,
+# measured heavy-sum ~496s.
 SHARD_B=(
   # M21 kancell x6 (trivial)
   kani_kan_spline_eval_total_bounded
@@ -184,19 +178,6 @@ SHARD_B=(
   kani_prov_inclusion_sound             # 147.9s
   kani_prov_canon_roundtrip
   kani_prov_head_deterministic          # 106.2s
-  # M23 exp x5 (trivial; the fold witness lives in shard A)
-  kani_exp_canon_injective
-  kani_exp_replay_determinism
-  kani_exp_ring_total
-  kani_exp_canon_roundtrip
-  kani_exp_schema_stability
-  # M24 explore/bakeoff x6 -- replay heavy (PR #32 measured)
-  kani_explore_propensity_total_positivity
-  kani_bakeoff_label_partition
-  kani_bakeoff_bound_sound_rounddown
-  kani_bakeoff_replay_determinism       # 141.5s
-  kani_kan_envelope_no_widening_m24
-  kani_bakeoff_schema_stability
   # M25 opframe x6 -- truncation fold thinned but khash-bearing (PR #32)
   kani_opframe_canon_injective
   kani_opframe_partition_leak
@@ -210,31 +191,12 @@ SHARD_B=(
   kani_exittel_class_total
   kani_exittel_histogram_saturates
   kani_exittel_fold_tamper              # 26.1s
-  # M27 tpsched x5 (PR #32 measured fold leaf)
-  kani_tpsched_next_slot_roundrobin
-  kani_tpsched_frame_conserved
-  kani_tpsched_canon_injective
-  kani_tpsched_canon_roundtrip
-  kani_tpsched_fold_tamper              # 25.6s
   # M28 cmd x5 -- key_evolve heavy (PR #27 measured; mac_tamper in shard A)
   kani_cmd_canon_injective
   kani_cmd_stale_nonce
   kani_cmd_head_binding
   kani_cmd_dual_custody
   kani_cmd_key_evolve                   # 45s
-  # M30 inferwire x1 (PR #30 measured; peer_label_bound moved to shard A on the
-  # #106 rebalance -- see the header)
-  kani_inferwire_req_binding            # 2s
-  # M31 inferwire adapter x6 (measured locally at landing, WSL seconds -- the
-  # khash-bearing pair runs the PINNED-VECTOR one-khash-execution shape: a
-  # 90-byte M31 MAC message measured ~70s per CBMC execution, so each harness
-  # holds exactly one; ladder record in the harness docs + the M31 PR)
-  kani_inferwire_kind_ext               # 12s
-  kani_infer_subhdr_total               # 4s
-  kani_infer_assembler                  # 46s
-  kani_infer_resp_binding               # 89s
-  kani_infer_domain_sep                 # 75s
-  kani_infer_err_closed                 # 3s
   # M38 conductor x10 (measured locally at landing, WSL seconds -- nine cheap
   # closed-set ALGEBRA proofs run as a group in ~7.9s wall; the ONE budget event
   # kani_conduct_fold_tamper is the prov/khash pinned-vector one-execution shape
@@ -250,36 +212,24 @@ SHARD_B=(
   kani_conduct_canon_injective
   kani_conduct_canon_roundtrip
   kani_conduct_fold_tamper              # 28.5s
-  # M39 corpus x5 (the experience-corpus codec -- mirrors the M23 exp family, which
-  # lives in shard B; routed HERE per the one-touch rule -- shard B was the lighter
-  # shard by measured cost, 620.0s vs A's 799.6s. Four are FNV-FREE geometry/fail-
-  # close/schema proofs (the cheap exp-canon regime, ~2-7s each); the ONE fold leg
-  # kani_corpus_fold_determinism rides a CONCRETE record = a single prov evaluation,
-  # NOT the 174s symbolic-index shape of kani_exp_fold_tamper -- the corpus writes NO
-  # new fold math, it REUSES the M22 prov fold under a separate corpus_head.)
-  kani_corpus_canon_injective
-  kani_corpus_canon_roundtrip
-  kani_corpus_decode_fail_closed
-  kani_corpus_schema_stability
-  kani_corpus_fold_determinism          # concrete record, one prov evaluation
 )
 
-# Shard C (8): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
+# Shard C (9): the M33 provenance-lineage CRYPTO-VERIFY harnesses -- the SHA-256
 # leaf (D2, RFC 8554-pinned) + the LMS verify leaf (RFC 8554, the `w=1` TOY
-# instance). PRE-REGISTERED as a THIRD SHARD by the M33 proposal §9: a full-
-# parameter LMS verify is ~1062 SHA-256 compressions (INFEASIBLE in CBMC), so
-# the toy is proven here at a khash-regime budget (~6-8 concrete compressions
-# per verify, SHA-256 MEASURED ~11s/compression local WSL -- close to BLAKE2s's
-# ~9s, NOT the feared 2x). The cheap attest layout harnesses (no hashing) live
-# in shard A; only the compression-bearing crypto leaves land here so the split
-# is by MEASURED cost, not by module. Measured local WSL seconds annotated.
-# Measured local WSL solve times (SHA-256 ~11s/compression): crypto sum = 917.3s,
-# plus the 2 M33-B codec harnesses (3.1s decode + 1.8s recover, measured) => ~922s
-# (~16 min solving); projected CI ~19-21 min (x1.42 runner delta + fixed
-# checkout/cache/smoke), well under the bumped 40-min cap. The streaming SHA-256
-# (crate::sha256::Sha256) is what keeps these tractable -- the one-shot over the
-# 32*67-byte LM-OTS buffer blew CBMC to 20GB, streaming holds only the 64-byte
-# block (measured 8-20% mem).
+# instance) + the 2 M33-B persisted-head codec harnesses + the M32-B infer-local
+# peer-bound decode harness. PRE-REGISTERED as a THIRD SHARD by the M33 proposal
+# §9: a full-parameter LMS verify is ~1062 SHA-256 compressions (INFEASIBLE in
+# CBMC), so the toy is proven here at a khash-regime budget (~6-8 concrete
+# compressions per verify, SHA-256 MEASURED ~11s/compression local WSL -- close
+# to BLAKE2s's ~9s, NOT the feared 2x). The cheap attest layout harnesses (no
+# hashing) live in shard A; only the compression-bearing crypto leaves land here
+# so the split is by MEASURED cost, not by module. Measured local WSL seconds
+# annotated. Crypto sum = 917.3s, plus the 2 M33-B codec harnesses (3.1s decode +
+# 1.8s recover) => ~922s (~16 min solving); projected CI ~40-44 min COLD (the
+# ~15 min duplicated codegen + solving), well under the 65-min cap. The streaming
+# SHA-256 (crate::sha256::Sha256) is what keeps these tractable -- the one-shot
+# over the 32*67-byte LM-OTS buffer blew CBMC to 20GB, streaming holds only the
+# 64-byte block (measured 8-20% mem). UNCHANGED by the #76 four-way rebalance.
 SHARD_C=(
   kani_sha256_total                     # 56.2s (~6 concrete compressions)
   kani_sha256_kat                       # 22.0s (the FIPS 180-4 "abc" KAT)
@@ -292,8 +242,79 @@ SHARD_C=(
   kani_inferwire_infer_peer_bound       # M32-B: infer_tag peer-pair 0x02/0x03/0x04 distinctness, 3 concrete khash, ~4s
 )
 
-# The fail-closed completeness/disjointness guard (#101 -- see the header).
-# Runs in EVERY verify-encode.sh mode; any exit here fails the CI job.
+# Shard D (35): the NEW fourth shard (#76 four-way rebalance). ~Half of the old
+# shard B -- the learning-loop CODEC families, moved OFF B to bring both under
+# the 65-min cold cap. These are the M23 exp codec, the M24 explore/bakeoff
+# honest-gate math, the M27 tpsched scheduler math, the M30 inferwire request
+# binding + the M31 inferwire INFERENCE-ADAPTER six (the khash-bearing
+# pinned-vector harnesses), the M39 experience-corpus codec, and the M40 recall
+# BM25 lexical-scoring family. Whole families move together (no family is split
+# across B and D). Balance target: ~35 harnesses, measured heavy-sum ~398s (the
+# M31 adapter six ~229s + bakeoff_replay 141.5s dominate; the recall/corpus/exp
+# families are cheap-to-medium). NB the M23 exp fold e2e witness
+# (kani_exp_fold_tamper) stays in shard A -- only the exp CODEC family moves here.
+SHARD_D=(
+  # M23 exp x5 (trivial; the kept-FULL fold witness kani_exp_fold_tamper lives
+  # in shard A)
+  kani_exp_canon_injective
+  kani_exp_replay_determinism
+  kani_exp_ring_total
+  kani_exp_canon_roundtrip
+  kani_exp_schema_stability
+  # M24 explore/bakeoff x6 -- replay heavy (PR #32 measured)
+  kani_explore_propensity_total_positivity
+  kani_bakeoff_label_partition
+  kani_bakeoff_bound_sound_rounddown
+  kani_bakeoff_replay_determinism       # 141.5s
+  kani_kan_envelope_no_widening_m24
+  kani_bakeoff_schema_stability
+  # M27 tpsched x5 (PR #32 measured fold leaf)
+  kani_tpsched_next_slot_roundrobin
+  kani_tpsched_frame_conserved
+  kani_tpsched_canon_injective
+  kani_tpsched_canon_roundtrip
+  kani_tpsched_fold_tamper              # 25.6s
+  # M30 inferwire x1 (PR #30 measured; peer_label_bound moved to shard A on the
+  # #106 rebalance -- see the shard-A header)
+  kani_inferwire_req_binding            # 2s
+  # M31 inferwire adapter x6 (measured locally at landing, WSL seconds -- the
+  # khash-bearing pair runs the PINNED-VECTOR one-khash-execution shape: a
+  # 90-byte M31 MAC message measured ~70s per CBMC execution, so each harness
+  # holds exactly one; ladder record in the harness docs + the M31 PR)
+  kani_inferwire_kind_ext               # 12s
+  kani_infer_subhdr_total               # 4s
+  kani_infer_assembler                  # 46s
+  kani_infer_resp_binding               # 89s
+  kani_infer_domain_sep                 # 75s
+  kani_infer_err_closed                 # 3s
+  # M39 corpus x5 (the experience-corpus codec -- mirrors the M23 exp family.
+  # Four are FNV-FREE geometry/fail-close/schema proofs (the cheap exp-canon
+  # regime, ~2-7s each); the ONE fold leg kani_corpus_fold_determinism rides a
+  # CONCRETE record = a single prov evaluation, NOT the 174s symbolic-index shape
+  # of kani_exp_fold_tamper -- the corpus writes NO new fold math, it REUSES the
+  # M22 prov fold under a separate corpus_head.)
+  kani_corpus_canon_injective
+  kani_corpus_canon_roundtrip
+  kani_corpus_decode_fail_closed
+  kani_corpus_schema_stability
+  kani_corpus_fold_determinism          # concrete record, one prov evaluation
+  # M40 recall (BM25 lexical scoring) x7 -- panic-free/bounds + injective codec +
+  # accumulation-monotone, the fixed-point-division family. No hashing; the
+  # tf-norm/term/doc-score harnesses bound inputs to the small reachable envelope
+  # to keep the symbolic 64-bit divisions cheap (the #49 envelope discipline).
+  # Routed to shard D with the rest of the learning-loop codec families (#76).
+  kani_recall_idf_panic_free_bounded
+  kani_recall_tf_norm_panic_free_bounded
+  kani_recall_term_score_panic_free_bounded
+  kani_recall_term_score_absent_is_zero
+  kani_recall_doc_score_accumulation_monotone
+  kani_recall_hit_canon_roundtrip
+  kani_recall_hit_decode_fail_closed
+)
+
+# The fail-closed completeness/disjointness guard (#101, extended to FOUR-WAY at
+# #76 -- see the header). Runs in EVERY verify-encode.sh mode; any exit here
+# fails the CI job.
 shards_assert_complete() {
   local shards_dir proofs
   shards_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -304,29 +325,31 @@ shards_assert_complete() {
     return 1
   fi
 
-  local a_len b_len c_len list_total src_count
+  local a_len b_len c_len d_len list_total src_count
   a_len="${#SHARD_A[@]}"
   b_len="${#SHARD_B[@]}"
   c_len="${#SHARD_C[@]}"
-  list_total=$((a_len + b_len + c_len))
+  d_len="${#SHARD_D[@]}"
+  list_total=$((a_len + b_len + c_len + d_len))
   src_count="$(grep -c '#\[kani::proof\]' "$proofs")"
 
-  # (1) the three lists together must equal the pinned total.
+  # (1) the four lists together must equal the pinned total.
   if [ "$list_total" -ne "$EXPECTED_HARNESSES_TOTAL" ]; then
-    echo "SHARD GUARD: FAIL -- shard lists sum to $list_total (A=$a_len + B=$b_len + C=$c_len) but EXPECTED_HARNESSES_TOTAL=$EXPECTED_HARNESSES_TOTAL (a harness was added/removed without the lockstep list edit in scripts/kani-shards.sh)" >&2
+    echo "SHARD GUARD: FAIL -- shard lists sum to $list_total (A=$a_len + B=$b_len + C=$c_len + D=$d_len) but EXPECTED_HARNESSES_TOTAL=$EXPECTED_HARNESSES_TOTAL (a harness was added/removed without the lockstep list edit in scripts/kani-shards.sh)" >&2
     return 1
   fi
 
   # (2) the pinned total must equal the #[kani::proof] count in the source --
-  # a harness assigned to NEITHER shard can never silently vanish.
+  # a harness assigned to NO shard can never silently vanish.
   if [ "$src_count" -ne "$EXPECTED_HARNESSES_TOTAL" ]; then
     echo "SHARD GUARD: FAIL -- proofs.rs has $src_count '#[kani::proof]' harnesses but EXPECTED_HARNESSES_TOTAL=$EXPECTED_HARNESSES_TOTAL (bump scripts/kani-shards.sh in lockstep: add the harness to exactly ONE shard list + the total)" >&2
     return 1
   fi
 
-  # (3) the lists must be disjoint (also catches a duplicate within one list).
+  # (3) the lists must be pairwise disjoint (also catches a duplicate within one
+  # list).
   local dups
-  dups="$(printf '%s\n' "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}" | sort | uniq -d)"
+  dups="$(printf '%s\n' "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}" "${SHARD_D[@]}" | sort | uniq -d)"
   if [ -n "$dups" ]; then
     echo "SHARD GUARD: FAIL -- harness(es) listed more than once across/within shards:" >&2
     printf '%s\n' "$dups" >&2
@@ -337,7 +360,7 @@ shards_assert_complete() {
   # or a typo statically; the execution gate would also catch it via the
   # SUCCESSFUL-count mismatch, but this fails earlier and names the culprit).
   local h missing=0
-  for h in "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}"; do
+  for h in "${SHARD_A[@]}" "${SHARD_B[@]}" "${SHARD_C[@]}" "${SHARD_D[@]}"; do
     if ! grep -qE "fn ${h}\b" "$proofs"; then
       echo "SHARD GUARD: FAIL -- listed harness '$h' not found as a fn in proofs.rs (renamed/removed without the lockstep list edit)" >&2
       missing=1
@@ -345,6 +368,6 @@ shards_assert_complete() {
   done
   [ "$missing" -eq 0 ] || return 1
 
-  echo "SHARD GUARD: OK -- A=$a_len + B=$b_len + C=$c_len == $EXPECTED_HARNESSES_TOTAL == proofs.rs count, disjoint, all names resolve"
+  echo "SHARD GUARD: OK -- A=$a_len + B=$b_len + C=$c_len + D=$d_len == $EXPECTED_HARNESSES_TOTAL == proofs.rs count, disjoint, all names resolve"
   return 0
 }

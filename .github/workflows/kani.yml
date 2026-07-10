@@ -331,7 +331,7 @@ jobs:
     # only ~1.5-2.5 min headroom under the old 30-min cap; the agreed headroom
     # fix that accompanies the M33 shard-C addition -- a 3-way split PLUS more
     # headroom -- a finer split is a named later follow-up).
-    timeout-minutes: 50
+    timeout-minutes: 65
     permissions:
       contents: read
     steps:
@@ -402,7 +402,7 @@ jobs:
     # Shard B (the learning-loop codec families + M31/M38); same margin
     # rationale as shard A. Timeout bumped 30 -> 40 with the M33 shard-C
     # addition (the #106 headroom fix).
-    timeout-minutes: 50
+    timeout-minutes: 65
     permissions:
       contents: read
     steps:
@@ -465,7 +465,7 @@ jobs:
     # Six crypto-verify harnesses; SHA-256 ~11s/compression, LMS toy ~6-8
     # compressions/verify -- projected well under the 40-min cap (the same
     # headroom-fix timeout as A/B).
-    timeout-minutes: 50
+    timeout-minutes: 65
     permissions:
       contents: read
     steps:
@@ -513,3 +513,65 @@ jobs:
         run: bash scripts/verify-encode.sh
         env:
           SHARD: c
+
+  # The D shard -- the #76 four-way rebalance. ~Half of the old shard B: the
+  # learning-loop CODEC families (M23 exp, M24 explore/bakeoff, M27 tpsched, the
+  # M30 inferwire req-binding + the M31 inferwire adapter six, M39 corpus, M40
+  # recall) moved OFF B so that neither B (now 36) nor D (35) runs past the
+  # 65-min job cap on a COLD tb-encode-touching push (the 3-way split put shard B
+  # at 71 harnesses, which was cancelled). Identical steps to A/B/C; only SHARD
+  # differs. The four lists live in scripts/kani-shards.sh, guarded disjoint +
+  # exhaustive in ALL jobs.
+  prove-encode-d:
+    name: "prove #49 encoders shard D (Kani)"
+    runs-on: ubuntu-latest
+    # ~35 learning-loop codec harnesses; measured heavy-sum ~398s -- projected
+    # ~40-44 min COLD (~15 min duplicated codegen + solving), ~25-28 min WARM,
+    # under the 65-min cap with headroom (same rationale as A/B/C).
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # #77 cache -- same key as prove-encode-a/b/c (shared compilation artifacts;
+      # proof results are never cached).
+      - name: Cache Kani toolchain + build artifacts (encode)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/registry
+            target/kani
+          key: kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/tb-encode/**') }}
+          restore-keys: |
+            kani-encode-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      # One-harness smoke -- same role as in shard A/B/C (toolchain install only,
+      # never part of the counted gate).
+      - name: Install Kani toolchain (one-harness smoke)
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: '-p tb-encode --harness kani_adjust_within_allowed --output-format=terse'
+
+      # THE gate: the counted shard-D pass -- FAILS CLOSED unless the #101
+      # completeness guard holds, every shard-D harness verifies, AND the
+      # SUCCESSFUL count matches shard D's pinned list length, then emits
+      # `V1-shard-d: kani-encoders OK`.
+      # CBMC peak-memory headroom (see shard-A rationale).
+      - name: Add swap headroom for CBMC
+        run: |
+          # ubuntu-latest already has an active /swapfile (can't resize -> "Text
+          # file busy"); add a fresh, larger swapfile on the big /mnt ephemeral
+          # disk instead (~74 GiB free) so we never touch the busy one.
+          sudo fallocate -l 14G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "swap enabled:"; free -h
+
+      - name: Assert encoder proof marker (shard D, fail-closed harness count)
+        run: bash scripts/verify-encode.sh
+        env:
+          SHARD: d
