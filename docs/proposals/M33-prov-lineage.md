@@ -256,3 +256,5 @@ One round, three reviewers, all SOUND-WITH-AMENDMENTS. Every must_fix applied; s
 - **W1 count looked low (~275 vs recount ~541).** APPLIED via the §9 "re-MEASURED before any pin moves" discipline and the §13 corrected-table requirement; the specific W1/W2/W4 figures are superseded by the co-landed survey's table-derived counts, conclusion unchanged.
 
 **Not adopted (with reason):** none rejected outright; the only should_fix deliberately compressed rather than expanded is the W1 numeric recount, folded into the "re-measure against the corrected table" discipline rather than printing a third candidate number in the body (printing competing un-landed estimates would bloat without adding rigor — the survey's table is the single source).
+
+> **Errata (2026-07-10, docs-reconcile):** every "M35" reference herein names `docs/plans/sovereignty-plan.md`'s M35 (A/B slots + rollback, #93), whose DoD now explicitly includes the leaf-index-counter custody this document defers to it. One milestone, not two.

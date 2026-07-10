@@ -137,3 +137,5 @@ Phase-1 kernel foundation in 5 milestones; each tied to the asm units above and 
 
 ### Verification note
 Of 16 hard facts including boot register values, ABI register sets, `naked_asm!` stabilization (1.88.0 / 2025-06-26), PSTATE=0x3c5, and the Image header, 14 were confirmed 2-0; 2 with corrections (source attribution of the zero-page fields; aarch64 serial = NS16550A, not PL011) — the corrections are folded into this spec. The PVH-vs-LinuxBoot conflict was resolved in favor of LinuxBoot based on verified facts (§0). [DECISION] units will be tested with executable DoD in prototype M-gates.
+
+> **Errata (2026-07-10, docs-reconcile):** this note predates the §0 revision. Arda's 2026-06-07 directive ("entirely our own build, no Linux") shifted the boot-path decision AFTER this note was written; §0 is the current, binding text — canonical = `tb-boot v0` (owned handoff, no Linux), with stock Firecracker + PVH kept only as the temporary M0 bootstrap. This note is retained as historical record, not as the landed truth.
