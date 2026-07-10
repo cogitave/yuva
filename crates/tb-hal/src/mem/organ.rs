@@ -108,28 +108,27 @@ use tb_encode::bakeoff::{
 
 // --- engine (substrate-side storage) the organ builds on ---------------------
 // The organ tiers persist through the substrate-side durability seam in the
-// sibling `engine` module (the M20 store). Imported here -- and re-exported for
-// the `selftests` child's M20 round-trip -- so the organ-over-engine layering is
-// explicit and one direction only (the engine never names an organ type).
-use super::engine::{BackingStore, RamStore, Region, VirtioBlkStore};
-/// Re-exported for the organ-side `selftests` child: the M20 `persist_selftest`
-/// round-trip maps a [`Region`] to its on-disk extent index via this fn.
-pub(crate) use super::engine::region_index;
+// sibling `engine` module (the M20 store), so the organ-over-engine layering is
+// explicit and one direction only (the engine never names an organ type). Only
+// the seam trait + the RAM default + the tier-tagged `Region` are pulled in:
+// `VirtioBlkStore`/`region_index` are NOT, because the sole code that named the
+// raw store -- the M20 `persist_selftest` -- now lives ON the engine (it drives
+// the store directly), so the organ no longer touches concrete storage at all.
+use super::engine::{BackingStore, RamStore, Region};
 
-// --- M20..M40 boot self-tests: the `selftests` child (organ-side) ------------
+// --- M13..M40 boot self-tests: the `selftests` child (organ-side) ------------
 // Behaviour-preserving move; the kernel calls these via the re-export chain up
-// through `mem`. NOTE: `persist_selftest` (M20, a SUBSTRATE row) lives here
-// because it drives `MemSubstrate::write` -- the DoD-6 organ/engine entanglement
-// flagged in docs/proposals/boot-profiles.md §3.4. A stage-B compile-out must
-// first refactor that selftest onto the engine directly (or gate it); the
-// factorization itself does not change its behaviour.
+// through `mem`. NOTE: the M20 `persist_selftest` (a SUBSTRATE row) is NOT here
+// -- it lives on the engine (`super::engine::persist_selftest`), driving the
+// VirtioBlkStore directly with no organ tier in the loop, so a stage-B compile-
+// out can gate this child out without dragging the M20 round-trip with it (the
+// DoD-6 organ/engine entanglement, docs/proposals/boot-profiles.md §3.4).
 mod selftests;
 pub(crate) use selftests::{
     bakeoff_selftest, conductor_selftest, corpus_labeled_outcome_selftest,
     corpus_operator_turn_selftest, corpus_persist, corpus_selftest, exittel_selftest,
     exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
-    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, recall_selftest,
-    xport_selftest,
+    opcmd_selftest, opframe_selftest, prov_selftest, recall_selftest, xport_selftest,
 };
 
 /// Fixed-point scale: every normalized score component lives in `[0, SCALE]`.
@@ -713,17 +712,6 @@ impl MemSubstrate {
             corpus_accepted: 0,
             corpus_rejected: 0,
         }
-    }
-
-    /// M20: a fresh, empty substrate over an INJECTED backing store (the
-    /// durable [`VirtioBlkStore`]). Identical to [`new`](Self::new) but the
-    /// caller supplies the type-erased backing -- every existing agent keeps the
-    /// `RamStore` default; only the M20 persist selftest injects a blk store.
-    #[allow(dead_code)]
-    pub(crate) fn new_with_backing(backing: Box<dyn BackingStore>) -> Self {
-        let mut s = Self::new();
-        s.backing = backing;
-        s
     }
 
     /// The current freshness epoch of the backing store (T3 staleness marker).

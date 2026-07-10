@@ -1,12 +1,13 @@
-//! M20..M26 boot self-tests (the marker bodies), extracted from the `MemSubstrate`
-//! core for readability. Each `*_selftest()` runs the verified-leaf round-trip the
-//! kernel renders a milestone marker from -- pure value computation, no `unsafe`, no
-//! device, no scheduler. As a CHILD of `mem::organ`, this module sees every
-//! `super`-private organ item (the `MemSubstrate` core, the M13/M17/M21 consts,
-//! the tier types) AND the engine types the organ re-exposes (`Region`,
-//! `VirtioBlkStore`, `region_index`) via `use super::*`, so this is a 100%
+//! M22..M40 organ boot self-tests (the marker bodies), extracted from the
+//! `MemSubstrate` core for readability. Each `*_selftest()` runs the verified-leaf
+//! round-trip the kernel renders a milestone marker from -- pure value computation,
+//! no `unsafe`, no device, no scheduler. As a CHILD of `mem::organ`, this module
+//! sees every `super`-private organ item (the `MemSubstrate` core, the M13/M17/M21
+//! consts, the tier types) via `use super::*`, so this is a 100%
 //! BEHAVIOUR-PRESERVING code move: the kernel still calls `mem::*_selftest()`
-//! through the `pub(crate) use` re-export chain (`organ` -> `mod.rs`).
+//! through the `pub(crate) use` re-export chain (`organ` -> `mod.rs`). NOTE: the
+//! M20 `persist_selftest` (a SUBSTRATE row) does NOT live here -- it moved onto the
+//! engine (`super::engine`), driving the store directly with no organ tier.
 #![allow(unused_imports)]
 use super::*;
 
@@ -3013,118 +3014,6 @@ pub(crate) fn infer_local_wire_selftest(
         resp_len: body_len as u64,
     }
 }
-
-// --- M20: the durable-persistence self-test (the marker body) ----------------
-
-/// The number of known-token sentinel records the round-trip writes + replays.
-const PERSIST_SENTINELS: u64 = 3;
-
-/// M20: run the single-boot durability round-trip + report a [`PersistProof`].
-///
-/// probe -> mount (capture the PRIOR gen) -> write N sentinel records through a
-/// REAL [`Region`] behind the [`VirtioBlkStore`] (so `push_record`'s
-/// `backing.append` exercises the real staged append) -> two-phase flush -> DROP
-/// the substrate (all RAM state destroyed) + the device is reset -> RE-MOUNT the
-/// SAME disk image -> replay the Region log -> assert the replayed sentinel bytes
-/// == what was written AND `gen` bumped by exactly 1. A true durability round-
-/// trip: the bytes left the kernel's RAM, hit the device, and came back from the
-/// device on a fresh mount that dropped all prior in-RAM state.
-///
-/// Absent / LegacyUnsupported are graceful skips. All scratch is heap/Vec or a
-/// single reusable 512-byte sector buffer inside [`VirtioBlkStore`] -- NO large
-/// stack arrays (#65 discipline).
-pub(crate) fn persist_selftest() -> crate::PersistProof {
-    use crate::PersistProof;
-
-    // 1. Probe for a MODERN virtio-blk (DeviceID==2).
-    let (slot, _cap) = match crate::arch::blk_probe() {
-        Some(x) => x,
-        None => {
-            return if crate::arch::blk_saw_legacy() {
-                PersistProof::LegacyUnsupported
-            } else {
-                PersistProof::Absent
-            };
-        }
-    };
-
-    // 2. Mount the store on the (freshly-attached) disk; capture the prior gen.
-    let store = match VirtioBlkStore::mount(slot) {
-        Ok(s) => s,
-        Err(_) => return PersistProof::Failed { stage: 0x3 },
-    };
-    let prior = store.gen;
-
-    // 3. Write N sentinel records through a real Region via the substrate's
-    //    normal write path (push_record -> backing.append(Region::Episodic, ..)).
-    let mut substrate = MemSubstrate::new_with_backing(Box::new(store));
-    // Known tokens; the stored ids are the 8-byte payloads the journal appends.
-    let mut written_ids: [u64; PERSIST_SENTINELS as usize] = [0; PERSIST_SENTINELS as usize];
-    let mut n = 0u64;
-    while n < PERSIST_SENTINELS {
-        let token = 0xA11CE_u64 + n; // distinct known token per sentinel
-        match substrate.write(0, token, 0xB0B0_0000 + n, 5) {
-            Some(id) => written_ids[n as usize] = id,
-            None => return PersistProof::Failed { stage: 0x4 },
-        }
-        n += 1;
-    }
-
-    // 4. Two-phase flush (records -> FLUSH -> superblock gen+1 -> FLUSH).
-    if substrate.backing.flush().is_err() {
-        return PersistProof::Failed { stage: 0x4 };
-    }
-    // The committed generation after the flush (the high half of epoch).
-    let committed_gen = substrate.epoch() >> 32;
-    if committed_gen != prior.wrapping_add(1) {
-        return PersistProof::Failed { stage: 0x6 };
-    }
-
-    // 5. DROP the substrate (destroys ALL in-RAM tier state + the store image)
-    //    and re-mount the SAME disk image -- a fresh read-from-device.
-    drop(substrate);
-    let remount = match VirtioBlkStore::mount(slot) {
-        Ok(s) => s,
-        Err(_) => return PersistProof::Failed { stage: 0x5 },
-    };
-
-    // 6. Assert generation continuity + replay equality. The re-mount must see
-    //    the committed gen, and the replayed Episodic image must equal the
-    //    concatenated id bytes the sentinels appended (byte-for-byte).
-    if remount.gen != committed_gen {
-        return PersistProof::Failed { stage: 0x6 };
-    }
-    let ep = region_index(Region::Episodic);
-    let replayed = remount.record_count[ep];
-    if replayed != PERSIST_SENTINELS {
-        return PersistProof::Failed { stage: 0x6 };
-    }
-    // Each sentinel appended exactly `id.to_le_bytes()` (8 bytes), so the image
-    // is the 24-byte concatenation; verify it matches what we wrote, in order.
-    let mut k = 0u64;
-    while k < PERSIST_SENTINELS {
-        let base = (k as usize) * 8;
-        let mut got = [0u8; 8];
-        if remount
-            .read_at(Region::Episodic, base as u64, &mut got)
-            .unwrap_or(0)
-            != 8
-        {
-            return PersistProof::Failed { stage: 0x6 };
-        }
-        if u64::from_le_bytes(got) != written_ids[k as usize] {
-            return PersistProof::Failed { stage: 0x6 };
-        }
-        k += 1;
-    }
-
-    PersistProof::Proven {
-        gen: remount.gen,
-        replayed,
-        prior,
-    }
-}
-
 
 // ===========================================================================
 // M33 STAGE B -- the PERSISTED SIGNED-HEAD two-boot path (proposal §6/§8). The

@@ -5,11 +5,14 @@
 //! recall + learning above it = composable agent capabilities).
 //!
 //!   * [`engine`] -- the SUBSTRATE half: the tier-tagged durability seam, the
-//!     RAM default, and the M20 durable virtio-blk store. Depends on nothing in
-//!     the organ; a substrate-profile boot exercises exactly this (M20 persist).
+//!     RAM default, the M20 durable virtio-blk store, AND the M20
+//!     `persist_selftest` that drives it directly. Depends on nothing in the
+//!     organ; a substrate-profile boot exercises exactly this (M20 persist).
 //!   * [`organ`] -- the AGENT half: the M13 [`MemSubstrate`] (T0..T4 tiers +
-//!     recall/consolidation/learning) and the M13/M16../M40 boot self-tests
-//!     (its `selftests` child). This is what boot-profiles stage B compiles out.
+//!     recall/consolidation/learning) and the M22..M40 organ boot self-tests
+//!     (its `selftests` child; the substrate M20 `persist_selftest` is NOT among
+//!     them -- it lives on the engine). This is what boot-profiles stage B
+//!     compiles out.
 //!
 //! This module is a THIN COORDINATOR: it wires the two halves and re-exports the
 //! crate-facing surface (`crate::mem::{MemSubstrate, VirtioBlkStore, *_selftest}`
@@ -30,15 +33,18 @@ mod organ;
 
 // --- crate-facing re-export surface (paths preserved byte-for-byte) -----------
 // The ONLY external real-code consumers are `crate::caps` (MemSubstrate) and
-// `crate::verified_leaf` (MemSubstrate + the 15 self-tests); re-exported here so
+// `crate::verified_leaf` (MemSubstrate + the self-tests); re-exported here so
 // every existing `crate::mem::X` path resolves unchanged. `VirtioBlkStore` is
-// deliberately NOT re-exported: its sole callers are inside `mem` (the organ's
-// M20 `persist_selftest`), so a `crate::mem::VirtioBlkStore` re-export would be
-// dead. It stays `pub(crate)` in `engine`, reachable within the subsystem.
+// deliberately NOT re-exported: its sole caller is now in-module in `engine` (the
+// engine's M20 `persist_selftest`), so a `crate::mem::VirtioBlkStore` re-export
+// would be dead. It stays `pub(crate)` in `engine`, reachable within the subsystem.
+// The organ self-tests come up through `organ`; the substrate M20
+// `persist_selftest` comes straight off `engine` (both resolve as `crate::mem::X`).
+pub(crate) use engine::persist_selftest;
 pub(crate) use organ::{
     bakeoff_selftest, conductor_selftest, corpus_labeled_outcome_selftest,
     corpus_operator_turn_selftest, corpus_persist, corpus_selftest, exittel_selftest,
     exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
-    opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, recall_selftest,
+    opcmd_selftest, opframe_selftest, prov_selftest, recall_selftest,
     xport_selftest, MemSubstrate,
 };
