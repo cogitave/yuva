@@ -5480,6 +5480,59 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
             tb_hal::serial_write_byte(b'\n');
             tb_hal::fail_exit();
         }
+        // ---- M39 (DoD-6): the two remaining EXPERIENCE-CORPUS channels ------------
+        // OPERATOR_TURN (M25/M28 operator turns -- the FORGET_DECISION decision_id from
+        // the M25 EXPERIENCE_DIGEST as content_tok, the REAL M28 accept/reject legs as
+        // the verdict) + LABELED_OUTCOME (per RESOLVED survival label -- Positive
+        // true-forget / Negative false-forget grading the DECISION'S CORRECTNESS;
+        // Censored rows carry no label and are NOT emitted). Each channel folds its rows
+        // into a SEPARATE fresh corpus_head and reports the SAME example_kind-agnostic
+        // gate as the consolidation seam. HONEST (machine-tokened below): the operator
+        // oracle is a SIMULATED enrolled key, NOT a human; the labeled-outcome source is
+        // DECLARED right-censored survival, NOT a learned signal; neither trains anything.
+        let op = tb_hal::corpus_operator_turn_selftest();
+        let lo = tb_hal::corpus_labeled_outcome_selftest();
+        // FAIL-CLOSED (the #65 idiom, per channel): the clean re-fold, the genuine
+        // inclusion proof, the single-byte tamper catch, the genuinely TWO-SIDED channel
+        // (>=1 ACCEPT + >=1 REJECT for operator turns; >=1 Positive + >=1 Negative for
+        // labeled outcomes), a NON-ZERO record count (anti-hollow), and a DORMANT learned
+        // cell must ALL hold on BOTH channels, else withhold the marker and exit red NOW.
+        if !op.clean_ok
+            || !op.inclusion_ok
+            || !op.tamper_caught
+            || !op.two_sided
+            || op.records == 0
+            || op.kan_active
+            || !lo.clean_ok
+            || !lo.inclusion_ok
+            || !lo.tamper_caught
+            || !lo.two_sided
+            || lo.records == 0
+            || lo.kan_active
+        {
+            tb_hal::serial_write_str("M39: corpus FAIL operator-turn-clean=");
+            write_hex_u64(op.clean_ok as u64);
+            tb_hal::serial_write_str(" operator-turn-inclusion=");
+            write_hex_u64(op.inclusion_ok as u64);
+            tb_hal::serial_write_str(" operator-turn-tamper-caught=");
+            write_hex_u64(op.tamper_caught as u64);
+            tb_hal::serial_write_str(" operator-turn-two-sided=");
+            write_hex_u64(op.two_sided as u64);
+            tb_hal::serial_write_str(" operator-turn-records=");
+            write_hex_u64(op.records);
+            tb_hal::serial_write_str(" labeled-outcome-clean=");
+            write_hex_u64(lo.clean_ok as u64);
+            tb_hal::serial_write_str(" labeled-outcome-inclusion=");
+            write_hex_u64(lo.inclusion_ok as u64);
+            tb_hal::serial_write_str(" labeled-outcome-tamper-caught=");
+            write_hex_u64(lo.tamper_caught as u64);
+            tb_hal::serial_write_str(" labeled-outcome-two-sided=");
+            write_hex_u64(lo.two_sided as u64);
+            tb_hal::serial_write_str(" labeled-outcome-records=");
+            write_hex_u64(lo.records);
+            tb_hal::serial_write_byte(b'\n');
+            tb_hal::fail_exit();
+        }
         // ---- M39 (inc-3): make the corpus DURABLE -- survive + accumulate across
         // reboots (the dataset moat). REUSES the M33 `provhead` torn-write-safe codec
         // VERBATIM over a SEPARATE disk region (ABOVE the M20 + M33 partitions); reads
@@ -5519,6 +5572,18 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         write_hex_u64(c.rejected);
         tb_hal::serial_write_str(" clean=0x1 inclusion=0x1 tamper-caught=0x1 predicate-two-sided=0x1 kan_active=");
         write_hex_u64(c.kan_active as u64);
+        // M39 (DoD-6) the two remaining channels' record counts + their MANDATORY
+        // honesty tokens (folded onto the SAME `corpus:` line, EARNED this boot through
+        // the per-channel round-trip the fail-closed gate above required). The oracle
+        // token mirrors M28's own `oracle=SIMULATED-ENROLLED-KEY`: an operator turn was
+        // adjudicated by a SIMULATED enrolled key, never a human. The labeled-outcome
+        // tokens spell that its source is a DECLARED right-censored survival label (not
+        // a learned signal) and its semantics grade the DECISION'S CORRECTNESS.
+        tb_hal::serial_write_str(" operator-turn-records=");
+        write_hex_u64(op.records);
+        tb_hal::serial_write_str(" labeled-outcome-records=");
+        write_hex_u64(lo.records);
+        tb_hal::serial_write_str(" operator-turn-oracle=SIMULATED-ENROLLED-KEY-NOT-HUMAN labeled-outcome-source=DECLARED-CENSORING-NOT-LEARNED labeled-outcome-semantics=DECISION-CORRECTNESS");
         // M39 (inc-3) DURABILITY tokens (folded onto the SAME `corpus:` line -- no new
         // census prefix). `corpus-reboot-survived` is the anti-hollow cross-boot signal:
         // 0x0 on a fresh disk (boot 1), 0x1 once a prior boot's corpus is read back +

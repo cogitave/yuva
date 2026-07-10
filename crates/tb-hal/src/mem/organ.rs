@@ -125,7 +125,8 @@ pub(crate) use super::engine::region_index;
 // factorization itself does not change its behaviour.
 mod selftests;
 pub(crate) use selftests::{
-    bakeoff_selftest, conductor_selftest, corpus_persist, corpus_selftest, exittel_selftest,
+    bakeoff_selftest, conductor_selftest, corpus_labeled_outcome_selftest,
+    corpus_operator_turn_selftest, corpus_persist, corpus_selftest, exittel_selftest,
     exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
     opcmd_selftest, opframe_selftest, persist_selftest, prov_selftest, recall_selftest,
     xport_selftest,
@@ -917,6 +918,95 @@ impl MemSubstrate {
             } else {
                 self.corpus_rejected = self.corpus_rejected.saturating_add(1);
             }
+        }
+    }
+
+    /// M39 (DoD-6): fold ONE M25/M28 OPERATOR-TURN into the SEPARATE per-agent
+    /// [`corpus_head`](Self::corpus_head) as a curated `OPERATOR_TURN`
+    /// [`corpus::CorpusRecord`] (a PROVENANCE SKELETON in interned tokens, not text),
+    /// REUSING the M22 prov fold verbatim (`corpus::corpus_append` -- NO new fold
+    /// math). A near-identical sibling of
+    /// [`corpus_emit_consolidation`](Self::corpus_emit_consolidation): the
+    /// `example_kind` is `OPERATOR_TURN`, the `source_stream` is `M25_OPERATOR`, and
+    /// the `outcome` is present-`Unset` (NO per-turn quality label exists yet --
+    /// honest, the reserve-now discipline). Unlike the consolidation path, the
+    /// `curation_verdict` is NOT the salience predicate here -- it is the REAL M28
+    /// operator-verifier outcome the caller passes in (`ACCEPTED` from `oc.accepted`,
+    /// `REJECTED` from an `oc.*_rejected` leg), so the byte genuinely records whether
+    /// the enrolled verifier ADMITTED the turn.
+    ///
+    /// STRICTLY DOWNSTREAM / OBSERVATIONAL (the M23 `xp_record` discipline): mutates
+    /// ONLY the M39 corpus state (`corpus_head`/`corpus_ids`/`corpus_records`/the
+    /// counts) and READS -- never writes -- `clock`/`chain_head`, so recall output
+    /// (the M38 conductor input, SP#4) and every prior fold witness stay
+    /// BYTE-IDENTICAL. FAIL-SOFT: a scratch overflow (unreachable for the fixed-width
+    /// record) leaves `corpus_head` un-advanced rather than panicking.
+    fn corpus_emit_operator_turn(&mut self, content_tok: u64, aux_tok: u64, verdict: u8) {
+        let rec = corpus::CorpusRecord {
+            schema_version: corpus::CORPUS_SCHEMA_V1,
+            example_kind: corpus::example_kind::OPERATOR_TURN,
+            source_stream: corpus::source_stream::M25_OPERATOR,
+            curation_verdict: verdict,
+            content_tok,
+            aux_tok,
+            t_created: self.clock,
+            source_head: self.chain_head,
+            // RESERVED present-`Unset` this milestone -- NO per-turn quality label
+            // exists yet (a later increment may populate it WITHOUT shifting the fold).
+            outcome: corpus::OutcomeLabel::Unset,
+            curation_score_q: 0,
+        };
+        let mut scratch = [0u8; corpus::CORPUS_CANON_LEN];
+        if let Some((new_head, id)) = corpus::corpus_append(self.corpus_head, &rec, &mut scratch) {
+            self.corpus_head = new_head;
+            self.corpus_ids.push(id);
+            self.corpus_records.push(scratch);
+            if verdict == corpus::curation_verdict::ACCEPTED {
+                self.corpus_accepted = self.corpus_accepted.saturating_add(1);
+            } else {
+                self.corpus_rejected = self.corpus_rejected.saturating_add(1);
+            }
+        }
+    }
+
+    /// M39 (DoD-6): fold ONE resolved LABELED-OUTCOME into the SEPARATE per-agent
+    /// [`corpus_head`](Self::corpus_head) as a curated `LABELED_OUTCOME`
+    /// [`corpus::CorpusRecord`], REUSING the M22 prov fold verbatim (NO new fold math).
+    /// A near-identical sibling of
+    /// [`corpus_emit_consolidation`](Self::corpus_emit_consolidation): the
+    /// `example_kind` is `LABELED_OUTCOME`, the `source_stream` is `M13_MEM` (the
+    /// demoted `MemRecord` the decision was about), the `content_tok` is the
+    /// FORGET_DECISION's `decision_id`, and the RESERVED `outcome` is now POPULATED
+    /// with the caller's resolved [`corpus::OutcomeLabel`] (`Positive`/`Negative`) --
+    /// the schema-stability lemma guarantees this fills the reserved `[60..69)` window
+    /// WITHOUT shifting any live offset. The `curation_verdict` is `ACCEPTED`: a
+    /// resolved (non-censored) survival label is a genuine labeled example admitted
+    /// into the corpus (the Positive/Negative split lives in the OUTCOME tag).
+    ///
+    /// STRICTLY DOWNSTREAM / OBSERVATIONAL: mutates ONLY the M39 corpus state and READS
+    /// -- never writes -- `clock`/`chain_head` (SP#4 byte-identical). FAIL-SOFT on a
+    /// scratch overflow (unreachable for the fixed-width record).
+    fn corpus_emit_labeled_outcome(&mut self, decision_id: u64, outcome: corpus::OutcomeLabel) {
+        let rec = corpus::CorpusRecord {
+            schema_version: corpus::CORPUS_SCHEMA_V1,
+            example_kind: corpus::example_kind::LABELED_OUTCOME,
+            source_stream: corpus::source_stream::M13_MEM,
+            curation_verdict: corpus::curation_verdict::ACCEPTED,
+            content_tok: decision_id,
+            aux_tok: 0,
+            t_created: self.clock,
+            source_head: self.chain_head,
+            outcome,
+            curation_score_q: 0,
+        };
+        let mut scratch = [0u8; corpus::CORPUS_CANON_LEN];
+        if let Some((new_head, id)) = corpus::corpus_append(self.corpus_head, &rec, &mut scratch) {
+            self.corpus_head = new_head;
+            self.corpus_ids.push(id);
+            self.corpus_records.push(scratch);
+            // Every labeled-outcome row is ACCEPTED (a resolved label is admitted); the
+            // Positive/Negative split lives in the outcome tag, tracked by the selftest.
+            self.corpus_accepted = self.corpus_accepted.saturating_add(1);
         }
     }
 

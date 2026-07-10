@@ -1112,6 +1112,69 @@ pub fn corpus_selftest() -> CorpusProof {
     mem::corpus_selftest()
 }
 
+/// M39 (DoD-6): a per-CHANNEL experience-corpus self-test outcome for the two
+/// remaining Phase-1 channels (OPERATOR_TURN, LABELED_OUTCOME). A closed, pure-data
+/// verdict mirroring [`CorpusProof`]'s example_kind-AGNOSTIC gate legs -- the
+/// fold/inclusion/tamper round-trip is IDENTICAL across channels; only the record's
+/// `example_kind` / `source_stream` / `outcome` differ. Each channel's selftest emits
+/// its rows into a SEPARATE fresh `corpus_head` (the M22/M23/M38 heads untouched --
+/// SP#4 stays byte-identical) and reports this verdict; the kernel gates on it and
+/// renders the per-channel record count into the `corpus:` witness line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CorpusChannelProof {
+    /// CLEAN: the independently re-folded committed record ids equal the running
+    /// `corpus_head` AND the FIRST committed record's RETAINED canonical bytes hash
+    /// back to its committed id (so the tamper leg hits a REAL record). Kernel-required.
+    pub clean_ok: bool,
+    /// A genuine inclusion proof for a known committed record verified against the
+    /// clean `corpus_head`. Kernel-required.
+    pub inclusion_ok: bool,
+    /// A single-byte tamper of a committed record's canonical bytes was caught on BOTH
+    /// legs (head-mismatch AND inclusion-fail) -- the load-bearing tamper-evidence
+    /// claim, inherited from the proven `prov` fold. Kernel-required.
+    pub tamper_caught: bool,
+    /// The channel is genuinely TWO-SIDED this boot -- OPERATOR_TURN: `>= 1` ACCEPTED
+    /// turn AND `>= 1` REJECTED turn (from the real M28 verdict legs); LABELED_OUTCOME:
+    /// `>= 1` Positive AND `>= 1` Negative resolved survival label. Proof the channel is
+    /// not a constant. Kernel-required.
+    pub two_sided: bool,
+    /// The number of curated rows that genuinely FLOWED into this channel (anti-hollow
+    /// -- rendered `operator-turn-records=<n>` / `labeled-outcome-records=<n>`; MUST be
+    /// `> 0`). Kernel-required.
+    pub records: u64,
+    /// A u64 WITNESS folded from the 32-byte committed per-channel `corpus_head` (every
+    /// byte contributes). Retained for parity/debugging; the rendered base `corpus:`
+    /// head remains the M17 consolidation head (the channels fold on fresh heads).
+    pub head: u64,
+    /// Whether the learned cell is on the decision path. `false` this milestone (these
+    /// channels train nothing). The kernel requires `kan_active == false`.
+    pub kan_active: bool,
+}
+
+/// M39 (DoD-6): run the OPERATOR_TURN channel self-test (both arches) and report the
+/// outcome. See [`CorpusChannelProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::corpus` leaf, the REAL M25 EXPERIENCE_DIGEST scenario (its FORGET_
+/// DECISION `decision_id` is the turn's `content_tok`), and the REAL M28 operator-
+/// verifier legs (`oc.accepted` admits an ACCEPTED turn; a reject leg records a
+/// REJECTED turn). Touches NO device and NO scheduler; folds on a SEPARATE fresh
+/// `corpus_head`. HONEST: the M28 oracle is a SIMULATED enrolled test key, not a human.
+pub fn corpus_operator_turn_selftest() -> CorpusChannelProof {
+    mem::corpus_operator_turn_selftest()
+}
+
+/// M39 (DoD-6): run the LABELED_OUTCOME channel self-test (both arches) and report the
+/// outcome. See [`CorpusChannelProof`]. Pure value computation over the Kani-proven
+/// `tb_encode::corpus` leaf and the REAL forget / read-touch survival path -- mirrors
+/// `bakeoff_selftest`'s deterministic scenario, computes `bakeoff::survival_label`
+/// VERBATIM per RESOLVED FORGET_DECISION, and emits ONE `LABELED_OUTCOME` row whose
+/// outcome encodes the DECISION'S CORRECTNESS (Positive true-forget -> Positive;
+/// Negative false-forget -> Negative; Censored -> not emitted). Touches NO device and
+/// NO scheduler; folds on a SEPARATE fresh `corpus_head`. HONEST: the label is a
+/// DECLARED right-censored survival outcome, not a learned signal.
+pub fn corpus_labeled_outcome_selftest() -> CorpusChannelProof {
+    mem::corpus_labeled_outcome_selftest()
+}
+
 /// M39 (increment-3) DURABLE-corpus persist outcome (returned to the kernel for the
 /// `corpus:` witness). A closed, pure-data verdict -- mirroring the M33 persist result
 /// for the corpus lane. Every field is EARNED by the real read-back / re-fold / write.
