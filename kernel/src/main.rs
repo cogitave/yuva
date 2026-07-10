@@ -1739,6 +1739,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // spawns above stay UNCONDITIONAL (they are the M14 IPC peers, and M14 is
     // core). In the substrate profile the memory-organ substrate is never
     // exercised; the marker takes the honest skip form.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle, ObjKind, Rights, SysStatus};
@@ -2651,6 +2656,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // disarmed (single-core, interrupts masked). ZERO new unsafe. Marker:
     // "M16: infer OK".
     // Boot-Profiles stage A: M16 inference-bridge is an agent organ — gated.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
@@ -2764,6 +2774,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ZERO new unsafe (all the M17 work is safe mutation of the M13 substrate).
     // DoD marker: "M17: consolidate OK".
     // Boot-Profiles stage A: M17 consolidation is an agent organ — gated.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
@@ -2979,6 +2994,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // chokepoint denial cannot fail-exit the boot. The admission MECHANISM
     // (capability tiers + fail-closed deny path) stays compiled and active as
     // the deny gate; only the exercise is skipped.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
@@ -3193,6 +3213,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // Boot-Profiles stage A: M18.1 approval-gate is an organ-EXERCISING selftest
     // (it drives M_MEM_WRITE_PROC skill writes) — gated. The admission mechanism
     // itself stays as the deny gate (§2.3).
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
     {
         use tb_hal::caps::{self, Handle};
@@ -3377,6 +3402,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     //     lexical block's locals coexist in that single frame, so this self-test
     //     lives in its OWN `#[inline(never)]` function to keep rust_main's frame
     //     from growing past the aarch64 boot stack.
+    // BOOT-PROFILES STAGE-B compile-out (§11): CO-GATED with its call site below
+    // so `--no-default-features` removes the fn's body (its witness/FAIL literals)
+    // too -- an un-gated uncalled fn would leave dead literals in the -O0 ELF.
+    #[cfg(feature = "agent-organs")]
     #[inline(never)]
     fn m182_held_out_selftest() {
         use tb_hal::caps::{self, Handle};
@@ -3634,8 +3663,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // Boot-Profiles stage A DEVIATION (noted): the proposal's explicit gated set
     // (§2.3) lists ~17 blocks and predates M18.2; but M18.2 held-out drives
     // M_MEM_WRITE_PROC skill writes expecting Ok (same class as M18/M18.1), which
-    // the §2.4 chokepoint denial would fail-exit — so it MUST be gated too. The
-    // fn stays DEFINED (free) and is called only on the agent arm.
+    // the §2.4 chokepoint denial would fail-exit — so it MUST be gated too.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ (this if/else + its co-gated
+    // `m182_held_out_selftest` fn above) is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form). Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         m182_held_out_selftest();
         tb_hal::serial_write_str("M18.2: held-out OK\n"); // <-- the M18.2 DoD marker
@@ -4192,6 +4226,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // ALL value computation is the host-verifiable `tb_encode::kancell` (no_std,
     // forbid(unsafe), NO float); this kernel stays zero-unsafe and only branches on
     // the returned `KanProof` bools. DoD: "M21: kan-policy OK".
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::kan_selftest`. Full
+    // rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let kp = tb_hal::kan_selftest();
         // FAIL-CLOSED: both structural validators must pass AND the round-trip
@@ -4254,6 +4294,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // The head is kept IN-RAM this milestone (it does NOT ride the M20 superblock),
     // so the M20 two-phase commit + persist_selftest gen-continuity stay byte-
     // identical (zero M20/M21 regression). DoD: "M22: provenance OK".
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::prov_selftest`. Full
+    // rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let pp = tb_hal::prov_selftest();
         // FAIL-CLOSED: the clean ledger must verify (recompute==head + faithful
@@ -4316,6 +4362,12 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // human-operator oracle is M25's). The honesty token
     // `oracle=DECLARED-PROXY-DEFERRED-M24` is machine-emitted so the marker
     // MECHANICALLY cannot overclaim. DoD: "M23: experience OK".
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::exp_selftest`. Full
+    // rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let xp = tb_hal::exp_selftest();
         // FAIL-CLOSED: the clean log must verify (recompute==head) AND a genuine
@@ -4393,6 +4445,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // enum. The experience is kept IN-RAM (durable spill deferred -- the gate runs on
     // the in-RAM accumulated experience), so M20's two-phase commit + persist_selftest
     // stay byte-identical. DoD: "M24: bakeoff OK".
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ (this if/else + its co-gated
+    // `bakeoff_witness` helper) is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::bakeoff_selftest`. Full
+    // rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let bo = tb_hal::bakeoff_selftest();
         // Render the witness fields + the marker. FAIL-CLOSED: only the Failed arm
@@ -4750,7 +4809,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // §1.4), and `tb_hal::exittel_selftest` + `tb_encode::exittel` become
     // unreferenced + DCE-eligible. Default-ON keeps the byte-identical agent
     // boot (SP#4). One-organ PoC of the mechanism; the other organs are still
-    // built. Proven by scripts/run-compileout-poc-x86_64.sh.
+    // built. Proven (with the other self-contained organs) by
+    // scripts/run-compileout-x86_64.sh.
     #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let et = tb_hal::exittel_selftest();
@@ -5231,6 +5291,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // NOTHING against the host holding the key (`exclusivity=OFF-PLATFORM-ONLY`);
     // `key=SIMULATED-ENROLLED-CI-CUSTODIED`; `state=SIMULATED-REUSE-OK-NO-
     // SECURITY`. DoD (stage B): "M33: prov-lineage OK".
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::m33_prov_selftest` (the
+    // substrate profile already skips its disk persist, so no persist regression).
+    // Full rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let m = tb_hal::m33_prov_selftest();
         // FAIL-CLOSED (the #65 idiom): every KAT leg + BOTH regional tamper
@@ -5451,6 +5518,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // SP#4) stays byte-identical. DoD: "M39: corpus OK". Boot-Profiles: AGENT-profile
     // organ -- gated; in the substrate profile it is NOT admitted and emits NO `corpus:`
     // witness (the census-forbidden prefix).
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs the corpus selftests (the substrate
+    // profile already skips its disk persist, so no persist regression). Full
+    // rationale on the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let c = tb_hal::corpus_selftest();
         // FAIL-CLOSED (the #65 idiom): the clean re-fold + faithful reconstruction, the
@@ -5633,6 +5707,13 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // "M40: recall OK". Boot-Profiles: AGENT-profile organ -- gated; the substrate
     // profile takes the skip form and emits NO `recall:` witness (the census-forbidden
     // prefix). M40 folds on NO head -- it displaces nothing (M38 below stays the tail).
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11):
+    // this whole SELF-CONTAINED organ is `#[cfg]`-gated behind the default-ON
+    // `agent-organs` feature -- `--no-default-features` removes it ABSENT-BY-
+    // OMISSION (no marker/skip form) + DCEs `tb_hal::recall_selftest` (the M13
+    // production recall path is a SEPARATE call, unaffected). Full rationale on
+    // the M26 PoC block.
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let rc = tb_hal::recall_selftest();
         // FAIL-CLOSED (the #65 idiom): the deterministic ranking, the monotonicity, the
@@ -6503,6 +6584,10 @@ fn write_hex_bytes(bytes: &[u8]) {
 /// Pure safe Rust (no `core::fmt`, no allocation).
 /// Render a u32 as `0x` + exactly 8 lowercase hex nibbles (the `i-id=0x<8hex>`
 /// witness grammar, proposal §8). Pure safe Rust, bounded.
+// BOOT-PROFILES STAGE-B: M33 is this helper's only caller; when M33 is compiled
+// out (`--no-default-features`) it is unreferenced. The default build is
+// unaffected (the cfg_attr is inert when the feature is on -- SP#4 byte-identical).
+#[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
 fn write_hex_u32(value: u32) {
     tb_hal::serial_write_str("0x");
     let mut shift: i32 = 28;
@@ -6564,6 +6649,10 @@ fn write_dec_u64(value: u64) {
 /// signed `vlo_kan`/`vhi_heur`/`margin` are rendered as two's-complement hex (the
 /// witness is a deterministic non-vacuity proof, not a decoded value). `cleared=0` is
 /// the synthetic-trace outcome (the cell stays DORMANT). Pure safe Rust.
+// BOOT-PROFILES STAGE-B compile-out (§11): CO-GATED with M24 (its only caller)
+// so `--no-default-features` removes this helper's `bakeoff:` witness literals
+// from the ELF too -- an un-gated uncalled fn would leave dead literals at -O0.
+#[cfg(feature = "agent-organs")]
 #[allow(clippy::too_many_arguments)]
 fn bakeoff_witness(
     vlo_kan: i64,
