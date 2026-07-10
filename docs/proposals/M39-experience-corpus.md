@@ -160,3 +160,51 @@ Per `forward-plan.md` §2.2 DoD and the Track A′ scope:
 > Learning pillar STAYS DORMANT (prerequisite, not advance); no training (Phase-2
 > gated). Later increments: in-kernel emit seam + SP#4 head re-verify, durable growing
 > region, `tools/corpus-export/`, labeled-outcome/operator-turn channels.
+
+---
+
+## Addendum — DoD-6 landing (2026-07-10): the OPERATOR_TURN + LABELED_OUTCOME channels
+
+*Appended after the locked text above; the §1–§8 spec is unchanged. This records the
+landing of §7 later-increment #4 ("Labeled-outcome + operator-turn channels
+populated"), the LAST open Phase-1 dataset-moat item.*
+
+The two remaining example channels are now POPULATED from the real substrate streams,
+REUSING the frozen `corpus-format-v1` schema VERBATIM — `example_kind` `OPERATOR_TURN(2)`
+/ `LABELED_OUTCOME(3)`, `source_stream` `M25_OPERATOR(3)`, and the reserved
+`OutcomeLabel::{Positive,Negative}` were pre-reserved unreached code paths, NOT a schema
+change (so the 135-harness `tb-encode` proof budget and every committed `corpus_head`
+stay untouched). Two new `MemSubstrate` emit seams (`corpus_emit_operator_turn`,
+`corpus_emit_labeled_outcome`) fold each row into a SEPARATE fresh `corpus_head` via the
+M22 prov fold (no new fold math), strictly downstream/observational — they READ but never
+mutate `clock`/`chain_head`, so the M38 conduct head `0x066855300c57557b` stays
+byte-identical (SP#4).
+
+* **OPERATOR_TURN** — seeded from the REAL M25/M28 self-test path: `content_tok` is the
+  `decision_id` of the FORGET_DECISION carried in the M25 `EXPERIENCE_DIGEST` frame
+  (decoded via `exp::decode`); the `curation_verdict` is the REAL M28 verifier outcome
+  (`ACCEPTED` from `oc.accepted`, one `REJECTED` from `oc.stale_rejected`), giving a
+  genuinely two-sided predicate. `outcome` is present-`Unset` (no per-turn quality label
+  exists yet — honest).
+* **LABELED_OUTCOME** — mirrors `bakeoff_selftest`'s deterministic forget/read_touch
+  scenario; per RESOLVED (non-Censored) FORGET_DECISION it computes
+  `bakeoff::survival_label(...)` VERBATIM (no new censoring math) and emits one row.
+
+**Polarity (LOCKED DECISION):** the outcome labels **THE DECISION'S CORRECTNESS**, not
+the memory. `SurvivalLabel::Positive` (true-forget: the record stayed cold, so the forget
+decision was VALIDATED) → `OutcomeLabel::Positive`; `SurvivalLabel::Negative` (false-forget:
+re-touched inside the window, so the decision was WRONG) → `OutcomeLabel::Negative`.
+`Censored` rows (the survival window is still open — no label exists yet) are **NOT
+emitted**.
+
+**Mandatory honesty tokens** (machine-emitted on the `corpus:` witness line so the marker
+cannot overclaim): `operator-turn-oracle=SIMULATED-ENROLLED-KEY-NOT-HUMAN` (mirroring
+M28's own oracle token — a simulated enrolled test key adjudicated the turn, never a
+human), `labeled-outcome-source=DECLARED-CENSORING-NOT-LEARNED`, and
+`labeled-outcome-semantics=DECISION-CORRECTNESS`. The witness line also carries the
+per-channel counts `operator-turn-records=<n>` / `labeled-outcome-records=<n>`; the
+per-channel fail-closed gate requires the clean re-fold, the inclusion proof, a
+single-byte tamper catch, a genuinely two-sided channel, a non-zero record count, and a
+dormant learned cell (`kan_active=0`) on BOTH channels. Marker unchanged: `M39: corpus OK`.
+Only the AGENT-profile boots emit these channels; the substrate profile still
+runtime-skips the M39 organ (census/skip expectations unchanged).

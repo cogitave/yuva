@@ -529,6 +529,292 @@ pub(crate) fn corpus_selftest() -> crate::CorpusProof {
     }
 }
 
+// --- M39 (DoD-6): the two remaining corpus channels -- OPERATOR_TURN + LABELED_OUTCOME
+
+/// M39 (DoD-6): the SHARED per-channel corpus round-trip verifier, over a substrate
+/// that has emitted `>= 1` row into its SEPARATE `corpus_head`. Independently re-folds
+/// the committed record ids to confirm the running `corpus_head` (CLEAN) + a genuine
+/// inclusion proof, then flips ONE byte of the FIRST committed record's RETAINED
+/// canonical bytes (`corpus_records()[0]`, faithful by construction:
+/// `corpus_hash(records[0]) == ids[0]`) and confirms the tamper is CAUGHT on BOTH legs
+/// (head-mismatch AND inclusion-fail). Returns `(clean_ok, inclusion_ok, tamper_caught)`
+/// -- the example_kind-AGNOSTIC gate legs the two new channels share with the M17
+/// consolidation self-test. Pure value computation over the Kani-proven `tb_encode::
+/// corpus` fold (REUSED verbatim); NO new fold math is written here.
+fn corpus_channel_roundtrip(sub: &MemSubstrate) -> (bool, bool, bool) {
+    use tb_encode::corpus::{corpus_hash, corpus_recompute, corpus_verify_inclusion, PROV_HASH_LEN};
+    let committed = sub.corpus_head();
+    let ids = sub.corpus_ids();
+    let records = sub.corpus_records();
+    if ids.is_empty() || records.len() != ids.len() {
+        return (false, false, false);
+    }
+    let leaf = ids[0];
+    let siblings: alloc::vec::Vec<[u8; PROV_HASH_LEN]> = ids[1..].to_vec();
+    let clean_ok = corpus_recompute(leaf, &siblings) == committed;
+    let inclusion_ok = corpus_verify_inclusion(leaf, &siblings, committed);
+    // TAMPER over the RETAINED first record's canonical bytes. `recon_faithful` guards
+    // against a hollow pass: the tamper must hit a REAL committed record (its bytes
+    // hash to its committed id).
+    let mut committed_bytes = records[0];
+    let recon_faithful = corpus_hash(&committed_bytes) == leaf;
+    let mut tamper_caught = false;
+    if recon_faithful {
+        committed_bytes[3] ^= 0x01; // flip the curation_verdict byte (a real field, not padding)
+        let bad_leaf = corpus_hash(&committed_bytes);
+        tamper_caught = bad_leaf != leaf
+            && corpus_recompute(bad_leaf, &siblings) != committed
+            && !corpus_verify_inclusion(bad_leaf, &siblings, committed);
+    }
+    (clean_ok && recon_faithful, inclusion_ok, tamper_caught)
+}
+
+/// M39 (DoD-6): run the OPERATOR_TURN channel self-test and report a
+/// [`crate::CorpusChannelProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::corpus` leaf, the REAL M25 transcript
+/// scenario, and the REAL M28 operator-verifier legs.
+///
+/// It (a) SEEDS the M25/M28 memory-pressure scenario (writes -> recall -> aged sweep)
+/// so the substrate carries `>= 1` FORGET_DECISION, then surfaces the MOST-BORDERLINE
+/// one exactly as `opframe_selftest`'s EXPERIENCE_DIGEST payload (Settles margin
+/// sampling) and DECODES it via `exp::decode` -- its `decision_id` becomes the
+/// operator-turn `content_tok` (the provenance skeleton linking the turn to the exact
+/// decision it adjudicated). It (b) runs the REAL `opcmd_selftest` (M28) and REUSES its
+/// verdict legs: the ACCEPT (`oc.accepted`) admits an `OPERATOR_TURN` row with an
+/// `ACCEPTED` verdict, and ONE reject leg (`oc.stale_rejected`) records a `REJECTED`
+/// row (RECORDED, not dropped -- the M22 tombstone discipline). Reusing an existing
+/// reject boolean makes the DECLARED predicate genuinely TWO-SIDED for free. It (c)
+/// verifies the shared corpus round-trip (clean re-fold + inclusion + a single-byte
+/// tamper catch). The marker is withheld unless every leg holds.
+///
+/// HONEST: the M28 oracle is a SIMULATED enrolled TEST key, NOT a human
+/// (`operator-turn-oracle=SIMULATED-ENROLLED-KEY-NOT-HUMAN`, mirroring M28's own token);
+/// the outcome is present-`Unset` (no per-turn quality label exists yet); `KAN_ACTIVE`
+/// stays `false` (this channel trains nothing).
+pub(crate) fn corpus_operator_turn_selftest() -> crate::CorpusChannelProof {
+    let fail = |head: u64, records: u64| crate::CorpusChannelProof {
+        clean_ok: false,
+        inclusion_ok: false,
+        tamper_caught: false,
+        two_sided: false,
+        records,
+        head,
+        kan_active: KAN_ACTIVE,
+    };
+
+    // (a) SEED the M25/M28 scenario (identical shape to opframe_selftest/opcmd_selftest).
+    let mut sub = MemSubstrate::new();
+    let mut w = 0u64;
+    while w < OPFRAME_SELFTEST_WRITES {
+        let key = 0x00F_5000 + w;
+        if sub.write(0, key, 0xFFF_0000 + w, 1).is_none() {
+            return fail(0, 0);
+        }
+        w += 1;
+    }
+    let _ = sub.recall(0x00F_5000, 0, 1, 0);
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let _ = sub.forget_sweep();
+
+    // Surface the MOST-BORDERLINE FORGET_DECISION (the EXPERIENCE_DIGEST payload) and
+    // decode it -- its decision_id is the operator-turn content_tok.
+    let mut digest_payload: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut best_gap = u64::MAX;
+    let ring_len = sub.xp_ring_len();
+    let mut s = 0usize;
+    while s < ring_len {
+        if let Some(row) = sub.xp_ring_row(s) {
+            if let Some(rec) = exp::decode(&row) {
+                if rec.kind == exp::kind::FORGET_DECISION {
+                    let gap = tb_encode::opframe::borderline_gap(rec.kan_score_shadow, 0);
+                    if gap <= best_gap {
+                        best_gap = gap;
+                        digest_payload = row.to_vec();
+                    }
+                }
+            }
+        }
+        s += 1;
+    }
+    let decision_id = match exp::decode(&digest_payload) {
+        Some(r) => r.decision_id,
+        None => return fail(0, 0), // no forget-decision surfaced -> fail-closed
+    };
+
+    // (b) Run the REAL M28 operator-verifier and REUSE its verdict legs. Both the
+    //     ACCEPT and the chosen reject leg must genuinely have fired (anti-hollow).
+    let oc = opcmd_selftest();
+    if !oc.accepted || !oc.stale_rejected {
+        return fail(0, 0);
+    }
+    // The ACCEPTED turn: the enrolled verifier ADMITTED a fresh, head-bound,
+    // dual-authorized command; the REJECTED turn: it REJECTED a stale-nonce replay.
+    // content_tok = the adjudicated decision_id; aux_tok unused this milestone.
+    sub.corpus_emit_operator_turn(decision_id, 0, corpus::curation_verdict::ACCEPTED);
+    sub.corpus_emit_operator_turn(decision_id, 0, corpus::curation_verdict::REJECTED);
+
+    let (accepted, rejected) = sub.corpus_counts();
+    let records = sub.corpus_ids().len() as u64;
+    let head_w = corpus::corpus_head_witness(sub.corpus_head());
+    if records == 0 {
+        return fail(head_w, records);
+    }
+    // TWO-SIDED for free: >=1 ACCEPTED turn AND >=1 REJECTED turn (from the real M28 legs).
+    let two_sided = accepted >= 1 && rejected >= 1;
+    let (clean_ok, inclusion_ok, tamper_caught) = corpus_channel_roundtrip(&sub);
+
+    crate::CorpusChannelProof {
+        clean_ok,
+        inclusion_ok,
+        tamper_caught,
+        two_sided,
+        records,
+        head: head_w,
+        kan_active: KAN_ACTIVE,
+    }
+}
+
+/// M39 (DoD-6): run the LABELED_OUTCOME channel self-test and report a
+/// [`crate::CorpusChannelProof`]. 100% SAFE, no device, no scheduler -- pure value
+/// computation over the Kani-proven `tb_encode::corpus` leaf and the REAL forget /
+/// read-touch survival path.
+///
+/// It MIRRORS `bakeoff_selftest`'s deterministic seed/forget/read_touch scenario (the
+/// house pattern -- a FRESH substrate, NO shared state with bakeoff's discarded local
+/// sub): `BAKEOFF_WRITES` low-importance writes, a HOT recall, an aged `forget_sweep`
+/// (each demote records a FORGET_DECISION), then an UNFILTERED `read_touch` on the
+/// first HALF within the survival window (the false-forgets) leaving the rest untouched
+/// with the window elapsed (the true-forgets). It scans the ring and, per FORGET_
+/// DECISION, computes `bakeoff::survival_label(...)` VERBATIM (no new censoring math)
+/// and emits ONE `LABELED_OUTCOME` corpus row per RESOLVED label. It then verifies the
+/// shared corpus round-trip. The marker is withheld unless every leg holds.
+///
+/// POLARITY (LOCKED DECISION -- the outcome labels THE DECISION'S CORRECTNESS):
+///   * `SurvivalLabel::Positive` (true-forget: stayed cold, the decision was VALIDATED)
+///     -> `corpus::OutcomeLabel::Positive`;
+///   * `SurvivalLabel::Negative` (false-forget: re-touched in window, the decision was
+///     WRONG) -> `corpus::OutcomeLabel::Negative`;
+///   * `SurvivalLabel::Censored` (the window is still OPEN -- NO label exists yet) is
+///     NOT emitted (there is nothing to label until `now` advances past the window).
+/// The label thus grades the FORGET DECISION, not the memory. HONEST: the label is a
+/// DECLARED right-censored survival outcome, NOT a learned signal
+/// (`labeled-outcome-source=DECLARED-CENSORING-NOT-LEARNED`,
+/// `labeled-outcome-semantics=DECISION-CORRECTNESS`); `KAN_ACTIVE` stays `false`.
+pub(crate) fn corpus_labeled_outcome_selftest() -> crate::CorpusChannelProof {
+    let fail = |head: u64, records: u64| crate::CorpusChannelProof {
+        clean_ok: false,
+        inclusion_ok: false,
+        tamper_caught: false,
+        two_sided: false,
+        records,
+        head,
+        kan_active: KAN_ACTIVE,
+    };
+
+    // (seed) Mirror bakeoff_selftest: N low-importance writes, a HOT recall, an aged sweep.
+    let mut sub = MemSubstrate::new();
+    let mut ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    let mut w = 0u64;
+    while w < BAKEOFF_WRITES {
+        let key = 0x00B_A000 + w;
+        match sub.write(0, key, 0xBBB_0000 + w, 1) {
+            Some(id) => ids.push(id),
+            None => return fail(0, 0),
+        }
+        w += 1;
+    }
+    let _ = sub.recall(0x00B_A000, 0, 1, 0);
+    sub.clock = sub.clock.wrapping_add(1_000_000);
+    let decision_tick = sub.clock;
+    if sub.forget_sweep() == 0 {
+        return fail(0, 0);
+    }
+
+    // (label) Re-touch the FIRST HALF within the survival window (NegativeFalseForget),
+    // leaving the rest untouched; advance `now` past the window so the untouched ones
+    // resolve PositiveTrueForget (identical to bakeoff_selftest's label construction).
+    let touch_tick = decision_tick.wrapping_add(SURVIVAL_WINDOW / 2);
+    sub.clock = touch_tick;
+    let mut touched: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    let half = ids.len() / 2;
+    let mut i = 0usize;
+    while i < half {
+        if sub.read_touch(ids[i]).is_some() {
+            touched.push(ids[i]);
+        }
+        i += 1;
+    }
+    let now_tick = decision_tick.wrapping_add(SURVIVAL_WINDOW.saturating_add(64));
+
+    // Scan the ring; per FORGET_DECISION compute survival_label VERBATIM and collect a
+    // (decision_id, corpus outcome) row for each RESOLVED label (skip Censored). Collect
+    // FIRST (the ring borrow ends), then emit (the corpus mutable borrow) -- the emit
+    // touches ONLY the corpus state, never the ring.
+    let mut pos: u64 = 0;
+    let mut neg: u64 = 0;
+    let mut to_emit: alloc::vec::Vec<(u64, corpus::OutcomeLabel)> = alloc::vec::Vec::new();
+    let ring_len = sub.xp_ring_len();
+    let mut s = 0usize;
+    while s < ring_len {
+        if let Some(row) = sub.xp_ring_row(s) {
+            if let Some(rec) = exp::decode(&row) {
+                if rec.kind == exp::kind::FORGET_DECISION {
+                    let first_touch = if touched.iter().any(|&t| t == rec.decision_id) {
+                        Some(touch_tick)
+                    } else {
+                        None
+                    };
+                    let label =
+                        survival_label(decision_tick, now_tick, first_touch, SURVIVAL_WINDOW);
+                    // POLARITY (LOCKED): the outcome labels THE DECISION'S CORRECTNESS.
+                    // The payload carries the labeled decision's id. Censored (window
+                    // still open) is NOT emitted -- no label exists yet.
+                    match label {
+                        SurvivalLabel::Positive => {
+                            to_emit.push((
+                                rec.decision_id,
+                                corpus::OutcomeLabel::Positive(rec.decision_id as i64),
+                            ));
+                            pos += 1;
+                        }
+                        SurvivalLabel::Negative => {
+                            to_emit.push((
+                                rec.decision_id,
+                                corpus::OutcomeLabel::Negative(rec.decision_id as i64),
+                            ));
+                            neg += 1;
+                        }
+                        SurvivalLabel::Censored => {}
+                    }
+                }
+            }
+        }
+        s += 1;
+    }
+    for (decision_id, outcome) in to_emit.iter() {
+        sub.corpus_emit_labeled_outcome(*decision_id, *outcome);
+    }
+
+    let records = sub.corpus_ids().len() as u64;
+    let head_w = corpus::corpus_head_witness(sub.corpus_head());
+    if records == 0 {
+        return fail(head_w, records);
+    }
+    // TWO-SIDED: >=1 Positive (true-forget) AND >=1 Negative (false-forget) resolved label.
+    let two_sided = pos >= 1 && neg >= 1;
+    let (clean_ok, inclusion_ok, tamper_caught) = corpus_channel_roundtrip(&sub);
+
+    crate::CorpusChannelProof {
+        clean_ok,
+        inclusion_ok,
+        tamper_caught,
+        two_sided,
+        records,
+        head: head_w,
+        kan_active: KAN_ACTIVE,
+    }
+}
+
 // --- M40: the verified LEXICAL recall-scoring self-test (the marker body) ------
 //
 // Exercises the Kani-proven `tb_encode::recall` BM25-family leaf over a DETERMINISTIC
