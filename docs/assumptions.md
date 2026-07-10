@@ -516,7 +516,8 @@ explicitly scoped OUT of the proven set while memory isolation stays in it.
   because it carries no security value; the lane says so on its own token (NOT
   `HOST-CUSTODIED-NEVER-REUSE`, which would be false for that lane). The durable,
   never-decrement TOP-level counter that makes `NEVER-REUSE` honest is the M35
-  monitor obligation (`leafidx=DEFERRED-TO-M35-MONITOR`); the two-level-tree
+  (M35 — see `docs/plans/sovereignty-plan.md`) monitor obligation
+  (`leafidx=DEFERRED-TO-M35-MONITOR`); the two-level-tree
   "resolution" relocates the reuse hazard up one level, it does not close it.
 - **The LMS leaf-index is a SEPARATE state machine from M28's `key_evolve`.** The
   M28 symmetric-MAC PRF-chain (`key_{i+1}=khash(key_i, EVOLVE_DOMAIN)`) and the
