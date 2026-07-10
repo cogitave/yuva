@@ -2,11 +2,13 @@
 //!
 //! This is the substrate-side half of the engine/organ factorization
 //! (docs/proposals/boot-profiles.md §3.4): the tier-tagged durability seam
-//! ([`BackingStore`]), the RAM-backed default ([`RamStore`]), and the M20
-//! durable virtio-blk store ([`VirtioBlkStore`]). It depends on NOTHING in the
-//! agent organ ([`super::organ`]) -- only `tb_encode::blkfmt` (the Kani-proven
-//! on-disk codecs) and the safe `crate::arch::blk_*` MMIO facades -- so a future
-//! substrate-profile build keeps this compiled while the organ is gated out.
+//! ([`BackingStore`]), the RAM-backed default ([`RamStore`]), the M20 durable
+//! virtio-blk store ([`VirtioBlkStore`]), and the M20 durable-persistence
+//! round-trip self-test ([`persist_selftest`]) that drives that store DIRECTLY.
+//! It depends on NOTHING in the agent organ ([`super::organ`]) -- only
+//! `tb_encode::blkfmt` (the Kani-proven on-disk codecs) and the safe
+//! `crate::arch::blk_*` MMIO facades -- so a future substrate-profile build
+//! keeps this compiled while the organ is gated out.
 //! ZERO unsafe (inherited `#![forbid(unsafe_code)]` from the `mem` parent).
 
 use alloc::vec::Vec;
@@ -138,15 +140,17 @@ pub(crate) fn region_index(region: Region) -> usize {
 pub(crate) struct VirtioBlkStore {
     /// The probed virtio-mmio slot the blk device sits at.
     slot: u32,
-    /// The committed checkpoint generation (bumped by exactly 1 per flush).
-    /// `pub(crate)` so the organ-side M20 `persist_selftest` can assert gen
-    /// continuity across the engine/organ seam (the DoD-6 entanglement, §3.4).
-    pub(crate) gen: u64,
+    /// The committed checkpoint generation (bumped by exactly 1 per flush). Read
+    /// by the in-module M20 [`persist_selftest`] to assert gen continuity across
+    /// the mount/flush/re-mount round-trip -- a private engine field now that the
+    /// round-trip lives ON the engine (the DoD-6 organ/engine entanglement is
+    /// resolved: no organ names the raw store any more, §3.4).
+    gen: u64,
     /// Per-Region committed log-head BYTE watermark (one frame == one sector).
     log_head: [u64; 3],
-    /// Per-Region committed replayable record count. `pub(crate)` for the same
-    /// cross-seam `persist_selftest` replay-count assertion as `gen` above.
-    pub(crate) record_count: [u64; 3],
+    /// Per-Region committed replayable record count. Read by the in-module M20
+    /// [`persist_selftest`] for the same replay-count assertion as `gen` above.
+    record_count: [u64; 3],
     /// Per-Region append sequence (strictly increasing; the replay witness).
     seq: [u64; 3],
     /// Per-Region STAGED (not-yet-committed) record payloads (heap, never stack).
@@ -369,5 +373,128 @@ impl BackingStore for VirtioBlkStore {
     /// is the durable checkpoint counter; the low half is per-boot freshness).
     fn epoch(&self) -> u64 {
         (self.gen << 32) | (self.appends_since_mount & 0xFFFF_FFFF)
+    }
+}
+
+// --- M20: the durable-persistence self-test (the marker body) ----------------
+
+/// The number of known sentinel records the round-trip appends + replays.
+const PERSIST_SENTINELS: u64 = 3;
+
+/// M20: run the single-boot durability round-trip + report a [`crate::PersistProof`].
+///
+/// probe -> mount (capture the PRIOR gen) -> append N sentinel records DIRECTLY
+/// through the [`VirtioBlkStore`]'s [`BackingStore`] seam on a REAL [`Region`]
+/// (the engine's own staged-append path -- NO `MemSubstrate`/organ tier in the
+/// loop) -> two-phase flush -> DROP the store (all in-RAM image destroyed) + the
+/// device is reset -> RE-MOUNT the SAME disk image -> replay the Region log ->
+/// assert the replayed sentinel bytes == what was appended AND `gen` bumped by
+/// exactly 1. A true durability round-trip: the bytes left the kernel's RAM, hit
+/// the device, and came back from the device on a fresh mount that dropped all
+/// prior in-RAM state.
+///
+/// Lives on the ENGINE, not the organ: driving `append`/`read_at`/`flush`
+/// DIRECTLY (instead of routing through the organ's `MemSubstrate::write` ->
+/// `push_record` journal, as it did pre-untangle) means the M20 substrate row
+/// exercises ZERO agent-memory-organ logic -- the seam that lets a stage-B build
+/// compile the organ out without dragging the M20 round-trip with it
+/// (docs/proposals/boot-profiles.md §3.4/§11). Each sentinel's 8-byte payload is
+/// its 0-based id, exactly the bytes + count `push_record` appended pre-untangle
+/// (the journal allocated `t2.next_id` from 0), so the replayed image and every
+/// witness value (`gen`/`records`/`replayed`/`prior`) stay BYTE-IDENTICAL.
+///
+/// Absent / LegacyUnsupported are graceful skips. All scratch is heap/`Vec` or a
+/// single reusable 512-byte sector buffer inside [`VirtioBlkStore`] -- NO large
+/// stack arrays (#65 discipline).
+pub(crate) fn persist_selftest() -> crate::PersistProof {
+    use crate::PersistProof;
+
+    // 1. Probe for a MODERN virtio-blk (DeviceID==2).
+    let (slot, _cap) = match crate::arch::blk_probe() {
+        Some(x) => x,
+        None => {
+            return if crate::arch::blk_saw_legacy() {
+                PersistProof::LegacyUnsupported
+            } else {
+                PersistProof::Absent
+            };
+        }
+    };
+
+    // 2. Mount the store on the (freshly-attached) disk; capture the prior gen.
+    let mut store = match VirtioBlkStore::mount(slot) {
+        Ok(s) => s,
+        Err(_) => return PersistProof::Failed { stage: 0x3 },
+    };
+    let prior = store.gen;
+
+    // 3. Append N sentinel records DIRECTLY through the Region's backing seam
+    //    (the engine's staged-append path -- `append(Region::Episodic, ..)` --
+    //    with NO MemSubstrate/organ tier in the loop). Each sentinel's 8-byte
+    //    payload is its 0-based id: the exact bytes + count the organ's
+    //    `push_record` journal produced pre-untangle, so the replay image + the
+    //    witness stay byte-identical.
+    let mut written_ids: [u64; PERSIST_SENTINELS as usize] = [0; PERSIST_SENTINELS as usize];
+    let mut n = 0u64;
+    while n < PERSIST_SENTINELS {
+        written_ids[n as usize] = n; // the journal's 0-based next_id sequence
+        if store.append(Region::Episodic, &n.to_le_bytes()).is_err() {
+            return PersistProof::Failed { stage: 0x4 };
+        }
+        n += 1;
+    }
+
+    // 4. Two-phase flush (records -> FLUSH -> superblock gen+1 -> FLUSH).
+    if store.flush().is_err() {
+        return PersistProof::Failed { stage: 0x4 };
+    }
+    // The committed generation after the flush (the high half of epoch).
+    let committed_gen = store.epoch() >> 32;
+    if committed_gen != prior.wrapping_add(1) {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+
+    // 5. DROP the store (destroys ALL in-RAM image + staging state) and re-mount
+    //    the SAME disk image -- a fresh read-from-device.
+    drop(store);
+    let remount = match VirtioBlkStore::mount(slot) {
+        Ok(s) => s,
+        Err(_) => return PersistProof::Failed { stage: 0x5 },
+    };
+
+    // 6. Assert generation continuity + replay equality. The re-mount must see
+    //    the committed gen, and the replayed Episodic image must equal the
+    //    concatenated sentinel bytes appended (byte-for-byte).
+    if remount.gen != committed_gen {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+    let ep = region_index(Region::Episodic);
+    let replayed = remount.record_count[ep];
+    if replayed != PERSIST_SENTINELS {
+        return PersistProof::Failed { stage: 0x6 };
+    }
+    // Each sentinel appended exactly `id.to_le_bytes()` (8 bytes), so the image
+    // is the 24-byte concatenation; verify it matches what we wrote, in order.
+    let mut k = 0u64;
+    while k < PERSIST_SENTINELS {
+        let base = (k as usize) * 8;
+        let mut got = [0u8; 8];
+        if remount
+            .read_at(Region::Episodic, base as u64, &mut got)
+            .unwrap_or(0)
+            != 8
+        {
+            return PersistProof::Failed { stage: 0x6 };
+        }
+        if u64::from_le_bytes(got) != written_ids[k as usize] {
+            return PersistProof::Failed { stage: 0x6 };
+        }
+        k += 1;
+    }
+
+    PersistProof::Proven {
+        gen: remount.gen,
+        replayed,
+        prior,
     }
 }
