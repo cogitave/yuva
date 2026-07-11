@@ -14,19 +14,22 @@ publish = false
 # so the ELF lands at target/<triple>/<profile>/yuva-kernel — the path the
 # scripts/run-*.sh runners receive as $1.
 
-# Boot Profiles stage-B PROOF-OF-CONCEPT (docs/proposals/boot-profiles.md §11):
+# Boot Profiles stage-B compile-out (docs/proposals/boot-profiles.md §11):
 # `agent-organs` is a kernel-crate-local feature, DEFAULT-ON. Because it is on by
 # default, EVERY existing build/CI invocation (`cargo kbuild` with no --features
 # flag) is byte-identical — the SP#4 M38 conduct head is preserved by
-# construction. Building `--no-default-features` compiles OUT exactly ONE gated
-# agent organ (M26 exit-telemetry): the `#[cfg(feature = "agent-organs")]` in
-# kernel/src/main.rs removes its whole block, so the M26 marker literal is ABSENT
-# from the image (no skip form either) and its `tb_hal::exittel_selftest` +
-# `tb_encode::exittel` compute path becomes unreferenced and DCE-eligible. This
-# is a ONE-ORGAN proof of the compile-out MECHANISM — the other ~18 organs are
-# still built and still run; the string-absence proof is in
-# scripts/run-compileout-poc-x86_64.sh. Full stage B (every organ + the mem/
-# engine/organ factorization) remains the open, named successor.
+# construction. Building `--no-default-features` compiles OUT every SELF-CONTAINED
+# agent organ: each `#[cfg(feature = "agent-organs")]` site in kernel/src/main.rs
+# removes that organ's whole if/else (and its co-gated helpers), so each marker
+# literal is ABSENT from the image (no skip form either) and its
+# `tb_hal::*_selftest` + `tb_encode::*` compute path becomes unreferenced +
+# DCE-eligible. The self-contained set (14 organs) is M13, M16, M17, M18, M18.1,
+# M18.2, M21, M22, M23, M24, M26, M33, M39, M40. The PIPELINE cluster (M25, M28,
+# M30, M31 both legs, M32-local, M38) is DELIBERATELY EXCLUDED — those blocks bind
+# values later folds consume, so they stay built + runtime-gated (the two grammars
+# coexist). The string-absence proof is in scripts/run-compileout-x86_64.sh. Full
+# stage B (the crate-level organ gate + the mem/ engine/organ factorization + an
+# image-size delta) remains the open, named successor and is NOT claimed here.
 [features]
 default = ["agent-organs"]
 agent-organs = []
