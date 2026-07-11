@@ -2,7 +2,7 @@
 # scripts/run-compileout-x86_64.sh — Boot Profiles stage-B COMPILE-OUT lane,
 # GENERALIZED to every SELF-CONTAINED agent organ (docs/proposals/boot-profiles.md
 # §11). Supersedes the original one-organ compile-out PoC lane (the M26 organ):
-# the mechanism it proved for ONE organ is here asserted, TABLE-DRIVEN, for all 14
+# the mechanism it proved for ONE organ is here asserted, TABLE-DRIVEN, for all 15
 # self-contained organs at once.
 #
 # Stage A landed the RUNTIME skip-form grammar: a substrate-profile boot of the
@@ -24,7 +24,7 @@
 #       organ's position to the clean-exit `PROFILE: substrate OK` tail (so each
 #       absence is genuine omission, never a crash-before-organ).
 #   (A2) PIPELINE organs STILL BUILT + runtime-skipped: the not-yet-migrated
-#       pipeline cluster (M25, M28, M30, M31, M38) each prints its stage-A skip
+#       pipeline cluster (M25, M30, M31, M38) each prints its stage-A skip
 #       form `<literal> (substrate profile, agent organ skipped)` — the two
 #       grammars coexist. These bind values later folds consume, so they stay
 #       runtime-gated this stage (NOT compiled out).
@@ -80,7 +80,10 @@ SKIP_SUFFIX='(substrate profile, agent organ skipped)'
 #              the organ RAN and its absence-in-ELF means the block was removed.
 #   FAMILY   — the `M<n>:` family prefix (dots escaped) for the residue sweep;
 #              a leaked FAIL line of ANY form would carry it.
-# The 14 rows = the M26 PoC organ + the 13 this stage generalizes to.
+# The 15 rows = the M26 PoC organ + the 14 this stage generalizes to. M28 is the
+# ASYMMETRIC one: only its operator-cmd organ half is compiled out (marker +
+# witness below); the M29 khash KAT it used to bracket is SUBSTRATE-CORE and stays
+# in the image + the core-PRESENT assertions (§3.3), NEVER absent.
 # ---------------------------------------------------------------------------
 ORGANS=(
   "M13: memory OK|mem: read-your-writes OK|M13:"
@@ -94,6 +97,7 @@ ORGANS=(
   "M23: experience OK|exp: head=|M23:"
   "M24: bakeoff OK|bakeoff: vlo_kan=|M24:"
   "M26: exit-telemetry OK|exittel: head=|M26:"
+  "M28: operator-cmd OK|opcmd: challenge=|M28:"
   "M33: prov-lineage OK|prov-sig: sig=LMS-SHA256-W4-H10|M33:"
   "M39: corpus OK|corpus: head=|M39:"
   "M40: recall OK|recall: top-id=|M40:"
@@ -105,7 +109,6 @@ NOT_BUILT="${#ORGANS[@]}"
 # folds, so they are DELIBERATELY not compiled out this stage.
 PIPELINE=(
   'M25: operator OK'
-  'M28: operator-cmd OK'
   'M30: infer-transport OK'
   'M31: infer-e2e OK'
   'M38: conductor OK'
