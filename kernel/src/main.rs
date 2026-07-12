@@ -4907,6 +4907,21 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // claims live ONLY in structured stripped tokens, so the run-scripts' bare-'crypto'
     // prose reject stays maximally strict). DoD: "M28: operator-cmd OK" then
     // "M29: khash-mac OK".
+    //
+    // BOOT-PROFILES STAGE-B (compile-out, docs/proposals/boot-profiles.md §3.3):
+    // this site is split ASYMMETRICALLY, unlike the self-contained organs. ONLY the
+    // M28 operator-cmd ORGAN — the opcmd selftest, its witness lines, the
+    // `M28: operator-cmd OK` marker AND its substrate-skip form — is gated behind the
+    // default-ON `agent-organs` feature and vanishes absent-by-omission with
+    // `--no-default-features` (§1.4 rung 3). The M29 khash KAT is SUBSTRATE-CORE
+    // (§3.3: a keyed BLAKE2s-256 integrity primitive, NOT an organ) and MUST stay in
+    // the substrate image, so its emission is hoisted OUT of this block's `else` arm
+    // into the standalone, ungated block below. Gating the whole `if/else` (the
+    // self-contained-organ pattern) would be WRONG here — it would strip the khash
+    // KAT from the substrate build. Default-ON keeps the byte-identical agent boot
+    // (SP#4). Proven by scripts/run-compileout-x86_64.sh (M28 in the ORGANS table;
+    // khash+M29 in the core-PRESENT assertions).
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let oc = tb_hal::opcmd_selftest();
         // FAIL-CLOSED: the valid command must be ACCEPTED AND each of the four attacks
@@ -4996,13 +5011,32 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // fail-closed). Deliberately NO 'crypto' substring in the marker text.
         tb_hal::serial_write_str("M29: khash-mac OK\n");
     } else {
-        // Boot-Profiles stage A (§3.3): M28 operator-cmd is an agent organ —
-        // skipped. But the khash primitive (a keyed BLAKE2s-256 MAC) is a
-        // SUBSTRATE integrity feature, NOT an organ, so it stays live: the
-        // standalone RFC 7693 KAT emits the SAME khash: + M29: lines at this
-        // stream position. Exactly ONE KAT emission per boot on either profile
-        // (the agent arm's khash line rode opcmd_selftest, byte-identical).
+        // Boot-Profiles (§3.3): M28 operator-cmd is an agent organ — skipped on the
+        // substrate profile (default build). ONLY the skip form is emitted here; the
+        // khash KAT that used to ride this arm is SUBSTRATE-CORE and now lives in the
+        // standalone block below, so it still emits at this stream position. This
+        // whole M28 block is compiled out under `--no-default-features` (stage-B); the
+        // khash block below is NOT — that is the asymmetric split.
         tb_hal::serial_write_str("M28: operator-cmd OK (substrate profile, agent organ skipped)\n");
+    }
+
+    // ---- M29: the khash KAT is SUBSTRATE-CORE (§3.3) — NOT gated by agent-organs ----
+    // A keyed BLAKE2s-256 integrity primitive, not an agent organ, so it stays in the
+    // substrate image on BOTH the default and the `--no-default-features` build. On the
+    // AGENT profile the KAT already ran + emitted the `khash:` witness + `M29:` marker
+    // INSIDE the opcmd path above (byte-identical to today —
+    // `khash-hoist=SUBSTRATE-ARM-ONLY-EMISSION`), so this standalone block is skipped;
+    // on the substrate profile (default build) and on EVERY `--no-default-features`
+    // boot (where the M28 organ above is absent-by-omission), this block emits the same
+    // two lines at this stream position. Exactly one khash+M29 emission per boot on
+    // either profile / either build. With the feature OFF the agent arm does not exist,
+    // so the KAT is unconditional — the substrate-core khash can never fall through a
+    // runtime profile check into absence.
+    #[cfg(feature = "agent-organs")]
+    let khash_emitted_by_agent_arm = profile::agent_organs_enabled();
+    #[cfg(not(feature = "agent-organs"))]
+    let khash_emitted_by_agent_arm = false;
+    if !khash_emitted_by_agent_arm {
         if !tb_hal::khash_kat_selftest() {
             tb_hal::serial_write_str("M29: khash-mac FAIL kat=RFC7693\n");
             tb_hal::fail_exit();

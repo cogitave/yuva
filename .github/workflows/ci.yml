@@ -278,15 +278,18 @@ jobs:
   # stays the byte-identical agent default). Builds the kernel
   # `--no-default-features` (the kernel-crate-local `agent-organs` feature OFF, so
   # EVERY `#[cfg(feature = "agent-organs")]` block is removed), boots it under
-  # `-append yuva.profile=substrate`, and asserts (table-driven) each of the 14
-  # self-contained organs (M13/M16/M17/M18/M18.1/M18.2/M21/M22/M23/M24/M26/M33/
+  # `-append yuva.profile=substrate`, and asserts (table-driven) each of the 15
+  # self-contained organs (M13/M16/M17/M18/M18.1/M18.2/M21/M22/M23/M24/M26/M28/M33/
   # M39/M40) is ABSENT-BY-OMISSION from BOTH the serial stream (no marker, no skip
   # form, no witness, no `M<n>:` family residue) AND the compiled ELF (a strict
   # anchored byte-search), while the profile-scoped micro-VMM core RAN to the clean
-  # `PROFILE: substrate OK` tail and the PIPELINE cluster (M25/M28/M30/M31/M38)
-  # stayed built + shown in the stage-A skip form (the two grammars coexist). NOT a
-  # reduced-TCB product (the witness is `organs-not-built=14 scope=SELF-CONTAINED-
-  # ONLY pipeline-organs=STILL-BUILT-RUNTIME-GATED`, no minimal/secure/tcb claim).
+  # `PROFILE: substrate OK` tail and the PIPELINE cluster (M25/M30/M31/M38)
+  # stayed built + shown in the stage-A skip form (the two grammars coexist). M28 is
+  # the ASYMMETRIC split: only its operator-cmd organ half is compiled out; the M29
+  # khash KAT it used to bracket is SUBSTRATE-CORE (§3.3) and stays in the image +
+  # the core-PRESENT assertions. NOT a reduced-TCB product (the witness is
+  # `organs-not-built=15 scope=SELF-CONTAINED-ONLY pipeline-organs=STILL-BUILT-
+  # RUNTIME-GATED`, no minimal/secure/tcb claim).
   # Full stage B (the crate-level organ gate + the mem/ engine/organ factorization
   # + an image-size delta) is the open, named successor. A more generous 90s
   # ceiling than the substrate lane's 40s (which flaked on slow runners today).
@@ -324,7 +327,7 @@ jobs:
       - name: Build kernel (x86_64, --no-default-features → agent-organs OFF)
         run: cargo kbuild --no-default-features --target "targets/${TARGET_X86}.json"
 
-      - name: Boot compile-out + assert (14 self-contained organs ABSENT in stream + ELF; core ran; pipeline intact in skip form)
+      - name: Boot compile-out + assert (15 self-contained organs ABSENT in stream + ELF; core ran; pipeline intact in skip form)
         env:
           QEMU_TIMEOUT: 90
         run: bash scripts/run-compileout-x86_64.sh
