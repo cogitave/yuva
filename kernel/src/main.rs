@@ -4548,6 +4548,17 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // gated, so in substrate it is a dummy that is never consumed. M31-part-1
     // prints NOTHING on success (the witness rides part 2), so there is no marker
     // to skip here; the M31 skip marker is emitted by part 2.
+    // BOOT-PROFILES STAGE-B compile-out (docs/proposals/boot-profiles.md §11): the
+    // PIPELINE cluster (M25/M30/M31/M32-local/M38) is a single DATA-FLOW SPAN, unlike
+    // the self-contained organs. This tuple + `m31_fold` + `m31_chan` + the
+    // `m32_local_*` tuple flow FORWARD into later gated blocks, so the whole span is
+    // CO-GATED behind the default-ON `agent-organs` feature: each producer AND its
+    // consumers carry their own `#[cfg]` (the M33/M39/M40 self-contained organs
+    // interleave here, so one literal region is impossible), and `--no-default-
+    // features` removes them all together with NO orphaned binding. Default-ON keeps
+    // the byte-identical agent boot (SP#4). Full rationale on the M26 PoC block; the
+    // span is proven by scripts/run-compileout-x86_64.sh.
+    #[cfg(feature = "agent-organs")]
     let (m31_req_id, m31_digest32, m31_prompt, m31_resp, m31_recalls) = if profile::agent_organs_enabled() {
         use tb_hal::caps::{self, Handle};
 
@@ -4682,6 +4693,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         // Substrate: dummy tuple, never consumed (all consumers are gated off).
         (0u64, [0u8; 32], Vec::new(), Vec::new(), 0u64)
     };
+    // BOOT-PROFILES STAGE-B: co-gated with the M31 pipeline span (feeds M25 below).
+    #[cfg(feature = "agent-organs")]
     let m31_fold = tb_hal::infer_fold_payload(m31_req_id, &m31_digest32);
 
     // ---- M25: verified OPERATOR TRANSCRIPT (the exogenous-oracle channel) --------
@@ -4716,6 +4729,8 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // DIGEST, never raw model bytes), so the committed final seq covers the
     // inference evidence (frames 4 -> 5; the tx_head displacement is the
     // designed M31 change -- every OTHER fold head stays byte-identical).
+    // BOOT-PROFILES STAGE-B: co-gated with the M31 pipeline span (consumes m31_fold).
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         let op = tb_hal::opframe_selftest(&m31_fold);
         // FAIL-CLOSED: the clean transcript must verify (recompute==head) AND a genuine
@@ -5075,7 +5090,11 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // FROM-LITERATURE` is inherited from M29. DoD: "M30: infer-transport OK".
     // M31: a Proven channel hands its (slot, revealed key K, host nonce N)
     // forward so the M31 wire legs can MAC/verify under the NEW infer domain.
+    // BOOT-PROFILES STAGE-B: co-gated with the M31 pipeline span (M30 populates
+    // m31_chan; M31-part-2 + M32-local below consume it).
+    #[cfg(feature = "agent-organs")]
     let mut m31_chan: Option<(u32, [u8; 32], [u8; 16])> = None;
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         match tb_hal::xport_selftest() {
             tb_hal::InferChanProof::Absent => {
@@ -5201,6 +5220,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // -- the skip variant deliberately LACKS the backend token, so it can never
     // satisfy the cumulative-tail grep; every peer-attached lane rejects it by
     // name. DoD: "M31: infer-e2e OK backend=MOCK-DETERMINISTIC".
+    // BOOT-PROFILES STAGE-B: co-gated with the M31 pipeline span (consumes m31_chan +
+    // the m31_req_id/prompt/resp/recalls/digest32 tuple).
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         match m31_chan {
             None => {
@@ -5431,6 +5453,9 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // NOT ADMITTED and emits NO `infer-local:` witness (the census-forbidden
     // prefix); on a channel-less agent lane it is a LOUD skip WITHOUT the witness
     // prefix (the conductor falls back to its in-kernel stand-in, identical head).
+    // BOOT-PROFILES STAGE-B: co-gated with the M31 pipeline span (consumes m31_chan;
+    // the m32_local_* tuple flows into the M38 conductor below).
+    #[cfg(feature = "agent-organs")]
     let (m32_local_received, m32_local_resp_len): (bool, u64) =
         if profile::agent_organs_enabled() {
             use tb_hal::caps::{self, Handle};
@@ -5834,6 +5859,10 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
     // (peer 0x03, deterministic stand-in -- #90 closed); the external organ stays
     // a CI mock, and no vendored C engine reaches the boot yet (the real-engine
     // follow-up).
+    // BOOT-PROFILES STAGE-B: co-gated tail of the M31 pipeline span (consumes the
+    // m32_local_* tuple). The cfg attr sits on the OUTER statement ONLY -- the SP#4
+    // conduct-head computation inside is untouched (byte-identical default boot).
+    #[cfg(feature = "agent-organs")]
     if profile::agent_organs_enabled() {
         use tb_hal::caps::{self, Handle};
 
@@ -6581,6 +6610,10 @@ fn trap_hook(info: &TrapInfo) -> TrapAction {
 /// The host harness prints its `challenge=`/`tag=` fields in the SAME format,
 /// so the run script's leg-2 cross-process equality is an exact string
 /// compare. Pure safe Rust (no `core::fmt`, no allocation).
+// BOOT-PROFILES STAGE-B: the M30/M31/M32/M33 gated blocks are this helper's only
+// callers; with `--no-default-features` it is unreferenced. The default build is
+// unaffected (the cfg_attr is inert when the feature is on -- SP#4 byte-identical).
+#[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
 fn write_hex_bytes16(bytes: &[u8; 16]) {
     tb_hal::serial_write_str("0x");
     let mut i = 0usize;
@@ -6602,6 +6635,10 @@ fn write_hex_bytes16(bytes: &[u8; 16]) {
 /// newline, uppercase `M`, `=`, or ESC 0x1b), so untrusted response bytes can
 /// neither forge an `M31:`-prefixed marker/token nor carry an ANSI sequence.
 /// Pure safe Rust (no `core::fmt`, no allocation).
+// BOOT-PROFILES STAGE-B: the M31-part-2 gated block is this helper's only caller;
+// with `--no-default-features` it is unreferenced. The default build is unaffected
+// (the cfg_attr is inert when the feature is on -- SP#4 byte-identical).
+#[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
 fn write_hex_bytes(bytes: &[u8]) {
     let mut i = 0usize;
     while i < bytes.len() {

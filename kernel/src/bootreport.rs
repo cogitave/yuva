@@ -149,9 +149,15 @@ pub enum Subsys {
     /// M20 durable storage: real vs `(no disk, skipped)`.
     Storage,
     /// M30 inference transport: real vs `(no host peer, skipped)`.
+    // BOOT-PROFILES STAGE-B: only the (gated) M30 block constructs this variant;
+    // `--no-default-features` drops that caller. Inert on the default build.
+    #[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
     Transport,
     /// M31 agent inference: `[ MOCK ]` (backend=MOCK-DETERMINISTIC) vs
     /// `(no host peer, skipped)`.
+    // BOOT-PROFILES STAGE-B: only the (gated) M31 block constructs this variant;
+    // `--no-default-features` drops that caller. Inert on the default build.
+    #[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
     Inference,
 }
 
@@ -183,6 +189,11 @@ static ST_STORAGE: AtomicU8 = AtomicU8::new(0);
 static ST_TRANSPORT: AtomicU8 = AtomicU8::new(0);
 static ST_INFERENCE: AtomicU8 = AtomicU8::new(0);
 /// Set true iff a real `M38: conductor OK … verdict=ACCEPT` fired this boot.
+// BOOT-PROFILES STAGE-B: written ONLY by observe_m38_ok (the gated M38 block's
+// sink) and read by no one yet (the render veto-line is deferred, §11.3), so with
+// `--no-default-features` both this static and observe_m38_ok are unreferenced.
+// Inert on the default build.
+#[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
 static M38_OK: AtomicBool = AtomicBool::new(false);
 
 fn slot(s: Subsys) -> &'static AtomicU8 {
@@ -206,6 +217,9 @@ pub fn observe(s: Subsys, st: State) {
 /// Cognitive-orchestrator pretty LINE is an operator veto point (§11.3) and is
 /// NOT rendered at stage A even when this is set; this observation implements
 /// the proposal's gate so the operator can flip the line on later review.
+// BOOT-PROFILES STAGE-B: the (gated) M38 conductor block is this fn's only caller;
+// `--no-default-features` drops it. Inert on the default build.
+#[cfg_attr(not(feature = "agent-organs"), allow(dead_code))]
 pub fn observe_m38_ok() {
     M38_OK.store(true, Ordering::Relaxed);
 }
