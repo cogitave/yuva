@@ -1,6 +1,8 @@
 //! The ADMISSION codec + the strength-index attenuation algebra -- the pure,
-//! host-verifiable value layer of the self-modification admission gate
-//! (`docs/cogi-cognitive-architecture.md` / `cogi-substrate-architecture.md`).
+//! host-verifiable value layer of the substrate's self-modification admission
+//! gate (the capability-gated protocol by which an untrusted agent proposes a new
+//! organ into a running instance; the substrate stays AGENT-AGNOSTIC, see
+//! `docs/spec/yuva-abi-v1.md`).
 //!
 //! Self-modification is ONE capability-gated protocol: an UNTRUSTED proposer
 //! submits an [`AdmissionRequest`] (an organ + its evidence), and the TRUSTED
