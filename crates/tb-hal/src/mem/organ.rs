@@ -127,7 +127,8 @@ mod selftests;
 pub(crate) use selftests::{
     bakeoff_selftest, conductor_selftest, corpus_labeled_outcome_selftest,
     corpus_operator_turn_selftest, corpus_persist, corpus_selftest, exittel_selftest,
-    exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
+    exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest,
+    m24_durable_mem_selftest, m33_persist_head,
     opcmd_selftest, opframe_selftest, prov_selftest, recall_selftest, xport_selftest,
 };
 
@@ -714,6 +715,69 @@ impl MemSubstrate {
         }
     }
 
+    /// M24: a fresh substrate over a caller-provided (possibly durable) backing
+    /// store, REHYDRATING the T2 episodic journal from any committed episodes the
+    /// backing replayed on mount. The §3.4 seam: the organ names ONLY the
+    /// [`BackingStore`] trait; the substrate half (`engine`) constructs the durable
+    /// `VirtioBlkStore` and hands it in here, so a substrate-profile build that
+    /// compiles the organ out drags no durable-store code with it.
+    pub(crate) fn with_backing(backing: Box<dyn BackingStore>) -> Self {
+        let mut s = Self::new();
+        s.backing = backing;
+        s.rehydrate_from_backing();
+        s
+    }
+
+    /// M24: rebuild the T2 episodic journal from the durable Episodic log the
+    /// backing replayed on mount (each committed record is one 48-byte
+    /// `EpisodeBody`). Fail-soft: a short/absent tail read STOPS rehydration (the
+    /// committed prefix is honoured, mirroring the engine's torn-tail replay), and
+    /// `next_id`/`clock` advance past the restored records so new writes stay
+    /// monotone. Rehydrates T2 (the read-your-writes journal `M_MEM_READ` serves)
+    /// only; T3 semantic/recall durability is a SEPARATE milestone -- the episode
+    /// codec carries the T2 fields, not T3 importance/links/tier.
+    fn rehydrate_from_backing(&mut self) {
+        use tb_encode::blkfmt::{episode_decode, EPISODE_LEN};
+        let mut off: u64 = 0;
+        let mut buf = [0u8; EPISODE_LEN];
+        let mut max_id: u64 = 0;
+        let mut any = false;
+        loop {
+            match self.backing.read_at(Region::Episodic, off, &mut buf) {
+                Ok(n) if n == EPISODE_LEN => {
+                    let e = episode_decode(&buf);
+                    self.t2.log.push(Episode {
+                        id: e.id,
+                        content_tok: e.content_tok,
+                        value: e.value,
+                        t_created: e.t_created,
+                        t_invalid: e.t_invalid,
+                        producing_task: e.producing_task,
+                    });
+                    if e.id >= max_id {
+                        max_id = e.id;
+                    }
+                    any = true;
+                    off = off.wrapping_add(EPISODE_LEN as u64);
+                }
+                // A partial record, an empty stream (Ok(0)), or NotFound: the
+                // committed prefix is honoured; stop.
+                _ => break,
+            }
+        }
+        if any {
+            self.t2.next_id = max_id.wrapping_add(1);
+            self.clock = self.clock.max(max_id.wrapping_add(1));
+        }
+    }
+
+    /// M24: FLUSH the durable backing (its two-phase commit to the device); a
+    /// no-op for the RAM default. The durable-memory witness calls this after a
+    /// cap-path write to make the append durable before the drop+remount round-trip.
+    pub(crate) fn checkpoint(&mut self) -> bool {
+        self.backing.flush().is_ok()
+    }
+
     /// The current freshness epoch of the backing store (T3 staleness marker).
     #[allow(dead_code)]
     pub(crate) fn epoch(&self) -> u64 {
@@ -1143,7 +1207,21 @@ impl MemSubstrate {
         self.t3.total_len = self.t3.total_len.saturating_add(1);
         self.quota.tokens_written = self.quota.tokens_written.saturating_add(1);
         self.quota.records = self.quota.records.saturating_add(1);
-        let _ = self.backing.append(Region::Episodic, &id.to_le_bytes());
+        // M24: persist the FULL 48-byte Episode body (not just the id) through the
+        // durability seam, so a durable backing can rehydrate the T2 journal
+        // field-for-field on remount. `t_created`/`t_invalid`/`producing_task`
+        // mirror the Episode pushed above (clock has not yet advanced this call).
+        let eb = tb_encode::blkfmt::EpisodeBody {
+            id,
+            content_tok: token,
+            value,
+            t_created: self.clock,
+            t_invalid: 0,
+            producing_task: 0,
+        };
+        let _ = self
+            .backing
+            .append(Region::Episodic, &tb_encode::blkfmt::episode_encode(&eb));
         self.clock = self.clock.wrapping_add(1);
         Some(id)
     }

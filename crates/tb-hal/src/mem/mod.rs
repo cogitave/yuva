@@ -40,11 +40,16 @@ mod organ;
 // would be dead. It stays `pub(crate)` in `engine`, reachable within the subsystem.
 // The organ self-tests come up through `organ`; the substrate M20
 // `persist_selftest` comes straight off `engine` (both resolve as `crate::mem::X`).
-pub(crate) use engine::persist_selftest;
+// M24: `mount_durable` (the durable-backing constructor) is re-exported so the
+// durable-memory witness can attach a mounted virtio-blk store; the concrete
+// `VirtioBlkStore` + the `BackingStore` trait stay in `engine` (the organ names
+// only the trait via `super::engine`).
+pub(crate) use engine::{mount_durable, persist_selftest};
 pub(crate) use organ::{
     bakeoff_selftest, conductor_selftest, corpus_labeled_outcome_selftest,
     corpus_operator_turn_selftest, corpus_persist, corpus_selftest, exittel_selftest,
-    exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest, m33_persist_head,
+    exp_selftest, infer_local_wire_selftest, infer_wire_selftest, kan_selftest,
+    m24_durable_mem_selftest, m33_persist_head,
     opcmd_selftest, opframe_selftest, prov_selftest, recall_selftest,
     xport_selftest, MemSubstrate,
 };

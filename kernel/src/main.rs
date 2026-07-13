@@ -1904,6 +1904,44 @@ pub extern "C" fn rust_main(boot_info: usize) -> ! {
         );
     }
 
+        // Durable memory (the deferred "M24 spill", folded into the M13 memory
+        // organ -- the "M24:" marker is the bakeoff milestone): a cap-path write
+        // survives a real device round-trip. The witness mounts the durable
+        // virtio-blk backing, writes a sentinel through the organ's write() (the
+        // path M_MEM_WRITE dispatches to), FLUSHES, DROPS the substrate (all in-RAM
+        // T2 gone), RE-MOUNTS + rehydrates the T2 journal from the replayed
+        // Episodic log, and reads the sentinel back. Owns EPISODIC (M20's substrate
+        // round-trip vacated to WORKING to deconflict). Absent disk = graceful
+        // skip; a round-trip failure is FAIL-CLOSED (m13_fail withholds the marker,
+        // so the durable claim can never hollow-pass).
+        match tb_hal::m24_durable_selftest() {
+            tb_hal::M24DurableProof::Persisted { readback, id } => {
+                tb_hal::serial_write_str("durable-mem: readback=");
+                write_hex_u64(readback as u64);
+                tb_hal::serial_write_str(" id=");
+                write_hex_u64(id);
+                tb_hal::serial_write_byte(b'\n');
+                if !readback {
+                    tb_hal::serial_write_str(
+                        "M13: memory FAIL (durable-mem cap-path write did not survive the device round-trip)\n",
+                    );
+                    tb_hal::fail_exit();
+                }
+            }
+            tb_hal::M24DurableProof::Absent => {
+                tb_hal::serial_write_str("durable-mem: readback=0x0 id=0x0 (no disk, skipped)\n");
+            }
+            tb_hal::M24DurableProof::Failed { stage } => {
+                tb_hal::serial_write_str("durable-mem: FAIL stage=");
+                write_hex_u64(stage as u64);
+                tb_hal::serial_write_byte(b'\n');
+                tb_hal::serial_write_str(
+                    "M13: memory FAIL (durable-mem cap-path round-trip failed fail-closed)\n",
+                );
+                tb_hal::fail_exit();
+            }
+        }
+
     tb_hal::serial_write_str("M13: memory OK\n"); // <-- the M13 DoD marker
     } else {
         tb_hal::serial_write_str("M13: memory OK (substrate profile, agent organ skipped)\n");
