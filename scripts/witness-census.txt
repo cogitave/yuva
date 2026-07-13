@@ -5,6 +5,7 @@ conduct-step:
 conduct:
 corpus:
 cost:
+durable-mem:
 exittel:
 exp:
 infer-dump:
