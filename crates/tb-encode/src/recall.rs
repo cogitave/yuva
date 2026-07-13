@@ -133,9 +133,15 @@ pub fn bm25_tf_norm(tf: u64, doc_len: u64, avg_len: u64) -> i64 {
     let tf = tf as i64;
     let dl = doc_len as i64;
     let avgl = (avg_len.max(1)) as i64;
-    // norm = (1 - b + b*dl/avgl) * SCALE, integer-divided (dl/avgl floored). With
-    // b = 0.75*SCALE this is 250 + 750*(dl/avgl) >= 250 > 0.
-    let norm = (SCALE - BM25_B) + BM25_B * (dl / avgl);
+    // norm = (1 - b + b*dl/avgl) * SCALE. The length ratio is evaluated
+    // MULTIPLY-BEFORE-DIVIDE -- `(BM25_B * dl) / avgl`, NOT `BM25_B * (dl / avgl)`
+    // -- so the fixed-point keeps ~3 fractional digits of dl/avgl instead of
+    // flooring the ratio to an integer (which collapses length normalization to a
+    // step function and, for the common dl < avgl case, drops it entirely). With
+    // b = 0.75*SCALE this is 250 + 750*dl/avgl >= 250 > 0. Identical for the
+    // single-token records the kernel feeds today (dl == avgl == 1 => 250 + 750),
+    // so the boot KAT is unchanged; it only sharpens multi-token ranking.
+    let norm = (SCALE - BM25_B) + BM25_B * dl / avgl;
     // numer = tf*(k1+1) scaled: tf * (BM25_K1 + SCALE).
     let numer = tf * (BM25_K1 + SCALE);
     // denom = SCALE*(tf + k1*norm_real) = tf*SCALE + BM25_K1*norm/SCALE.
