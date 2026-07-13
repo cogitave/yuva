@@ -1,0 +1,42 @@
+# recall-bench -- the HOST benchmark harness for the M40 verified no-float BM25
+# recall leaf (`tb-encode::recall`).
+#
+# It links the SAME Kani-proven `tb_encode::recall::bm25_doc_score` the kernel
+# scores with -- NEVER a second BM25 implementation (the same-math rule as
+# tools/prov-signer / tools/xport-harness). The inverted index, candidate
+# generation and top-k selection are harness plumbing (the kernel keeps those in
+# tb-hal); the *scored arithmetic* is the verified leaf, byte-for-byte.
+#
+# Purpose: an apples-to-apples, same-box comparison of the deterministic integer
+# fixed-point leaf against the float reference implementations (bm25s method
+# 'lucene' == our exact IDF twin; rank-bm25 = the popular ecosystem baseline) on
+# BEIR NFCorpus -- ranking quality (does integer quantization cost NDCG?),
+# latency, footprint, and the axis no float engine offers: bit-exact determinism.
+#
+# An independent nested workspace (the tb-vmm / prov-signer precedent): cargo
+# auto-excludes it from the parent no_std kernel workspace; it keeps its own
+# Cargo.lock and never perturbs the kbuild / -Zbuild-std lanes.
+[workspace]
+
+[package]
+name = "recall-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Host benchmark for the M40 verified no-float BM25 recall leaf vs float BM25 references (BEIR NFCorpus)."
+
+[[bin]]
+name = "recall-bench"
+path = "src/main.rs"
+
+# Zero external deps -- the leaf under test, and std for file IO + timing. The
+# plain-text interchange (docs.tok/queries.tok/meta.txt) is parsed by hand so no
+# serde enters the measurement.
+[dependencies]
+tb-encode = { path = "../../crates/tb-encode" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
