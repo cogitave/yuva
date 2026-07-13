@@ -11,6 +11,7 @@
 //! keeps this compiled while the organ is gated out.
 //! ZERO unsafe (inherited `#![forbid(unsafe_code)]` from the `mem` parent).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 // --- the durability seam (BackingStore) --------------------------------------
@@ -376,6 +377,25 @@ impl BackingStore for VirtioBlkStore {
     }
 }
 
+// --- M24: mount the durable store as an organ backing ------------------------
+
+/// M24: probe for a durable virtio-blk device and, if present, MOUNT it as a
+/// [`BackingStore`] the memory organ spills through. Returns `None` on an
+/// absent/legacy device (the caller falls back to the RAM default). This is the
+/// SOLE constructor of a durable [`VirtioBlkStore`] outside the M20 self-test, and
+/// it lives on the ENGINE (substrate) side so the organ names only the trait
+/// (§3.4): a substrate-profile build that compiles the organ out drags no
+/// durable-store code with it. Mount replays the committed Episodic log into the
+/// store's in-RAM image, from which `MemSubstrate::rehydrate_from_backing` rebuilds
+/// the T2 journal.
+pub(crate) fn mount_durable() -> Option<Box<dyn BackingStore>> {
+    let (slot, _cap) = crate::arch::blk_probe()?;
+    match VirtioBlkStore::mount(slot) {
+        Ok(s) => Some(Box::new(s)),
+        Err(_) => None,
+    }
+}
+
 // --- M20: the durable-persistence self-test (the marker body) ----------------
 
 /// The number of known sentinel records the round-trip appends + replays.
@@ -438,7 +458,12 @@ pub(crate) fn persist_selftest() -> crate::PersistProof {
     let mut n = 0u64;
     while n < PERSIST_SENTINELS {
         written_ids[n as usize] = n; // the journal's 0-based next_id sequence
-        if store.append(Region::Episodic, &n.to_le_bytes()).is_err() {
+        // M24: the substrate M20 round-trip drives the WORKING region so it does
+        // not collide with the M24 durable-memory witness, which owns EPISODIC
+        // (the organ's 48-byte EpisodeBody records) -- two durability tests on the
+        // one M20 partition must not share a region (raw 8-byte sentinels here vs
+        // 48-byte episodes there would corrupt each other's replay).
+        if store.append(Region::Working, &n.to_le_bytes()).is_err() {
             return PersistProof::Failed { stage: 0x4 };
         }
         n += 1;
@@ -468,7 +493,7 @@ pub(crate) fn persist_selftest() -> crate::PersistProof {
     if remount.gen != committed_gen {
         return PersistProof::Failed { stage: 0x6 };
     }
-    let ep = region_index(Region::Episodic);
+    let ep = region_index(Region::Working);
     let replayed = remount.record_count[ep];
     if replayed != PERSIST_SENTINELS {
         return PersistProof::Failed { stage: 0x6 };
@@ -480,7 +505,7 @@ pub(crate) fn persist_selftest() -> crate::PersistProof {
         let base = (k as usize) * 8;
         let mut got = [0u8; 8];
         if remount
-            .read_at(Region::Episodic, base as u64, &mut got)
+            .read_at(Region::Working, base as u64, &mut got)
             .unwrap_or(0)
             != 8
         {

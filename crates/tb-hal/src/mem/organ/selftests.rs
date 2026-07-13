@@ -3180,3 +3180,51 @@ pub(crate) fn m33_persist_head() -> M33PersistResult {
     }
     r
 }
+
+/// M24: the durable-memory cap-path round-trip witness (both arches). Mounts the
+/// durable virtio-blk backing, writes a unique sentinel THROUGH the organ's
+/// `write()` (the exact path the `M_MEM_WRITE` dispatch arm calls), FLUSHES it to
+/// the device, DROPS the substrate (destroying all in-RAM T2 state), RE-MOUNTS the
+/// SAME disk, and reads the sentinel back through the organ -- proving a
+/// capability-mediated memory write left RAM, hit the device, and returned on a
+/// fresh mount + T2 rehydration. Owns the EPISODIC region (the substrate M20
+/// `persist_selftest` was moved to WORKING to deconflict). Absent disk is a
+/// GRACEFUL skip. Heap/`Vec` + the store's single reusable 512-byte sector buffer
+/// only (the #65 no-large-stack-array discipline).
+pub(crate) fn m24_durable_mem_selftest() -> crate::verified_leaf::M24DurableProof {
+    use crate::verified_leaf::M24DurableProof;
+
+    // A unique sentinel the witness writes + reads back.
+    const M24_KEY: u64 = 0x0000_4D32_3400_0001; // "M24" tag + 1
+    const M24_VAL: u64 = 0xD24A_600D_1234_5678;
+
+    // 1. Mount the durable backing; a graceful skip when no disk is attached.
+    let backing = match crate::mem::mount_durable() {
+        Some(b) => b,
+        None => return M24DurableProof::Absent,
+    };
+    let mut sub = super::MemSubstrate::with_backing(backing);
+
+    // 2. Write the sentinel through the organ's write path + flush to the device.
+    let id = match sub.write(0, M24_KEY, M24_VAL, 1) {
+        Some(i) => i,
+        None => return M24DurableProof::Failed { stage: 0x1 },
+    };
+    if !sub.checkpoint() {
+        return M24DurableProof::Failed { stage: 0x2 };
+    }
+
+    // 3. DROP the substrate (all in-RAM T2 destroyed) + RE-MOUNT the SAME disk.
+    drop(sub);
+    let backing2 = match crate::mem::mount_durable() {
+        Some(b) => b,
+        None => return M24DurableProof::Failed { stage: 0x3 },
+    };
+    let sub2 = super::MemSubstrate::with_backing(backing2); // rehydrates T2 from disk
+
+    // 4. Read the sentinel back through the organ -> the durable round-trip proven.
+    match sub2.read(id) {
+        Some(v) if v == M24_VAL => M24DurableProof::Persisted { readback: true, id },
+        _ => M24DurableProof::Failed { stage: 0x4 },
+    }
+}

@@ -875,6 +875,41 @@ pub fn persist_selftest() -> PersistProof {
     mem::persist_selftest()
 }
 
+/// M24 durable-MEMORY cap-path round-trip outcome (returned to the kernel for
+/// marker rendering). A closed, pure-data verdict. Distinct from [`PersistProof`]
+/// (the organ-free M20 substrate round-trip): this proves the ORGAN's
+/// capability-mediated write (`M_MEM_WRITE` -> `MemSubstrate::write` ->
+/// `backing.append`) persists AND rehydrates the T2 journal on remount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum M24DurableProof {
+    /// The cap-path write was flushed to the device, the substrate was DROPPED +
+    /// RE-MOUNTED, and the sentinel read back byte-equal after T2 rehydration.
+    /// `id` is the record id the round-trip proved durable.
+    Persisted {
+        /// The read-back matched the written value byte-for-byte.
+        readback: bool,
+        /// The record id proven to survive the device round-trip.
+        id: u64,
+    },
+    /// No virtio-blk disk attached -- a GRACEFUL GREEN skip (same as the M20 lane).
+    Absent,
+    /// Found + driven but the round-trip failed fail-closed. `stage`: 0x1 write,
+    /// 0x2 flush, 0x3 re-mount, 0x4 read-back mismatch. Rendered WITHOUT an "OK"
+    /// substring, so the run-script grep is red.
+    Failed {
+        /// The pipeline stage that failed (see the variant doc).
+        stage: u8,
+    },
+}
+
+/// M24: run the durable-MEMORY cap-path round-trip witness (both arches) and report
+/// the outcome. See [`M24DurableProof`]. The ORGAN-gated durability proof (the
+/// substrate-side organ-free counterpart is [`persist_selftest`]); owns the
+/// EPISODIC region, which the M20 round-trip vacated to WORKING to deconflict.
+pub fn m24_durable_selftest() -> M24DurableProof {
+    mem::m24_durable_mem_selftest()
+}
+
 // ===========================================================================
 // M21: verified fixed-point ADDITIVE-policy leaf self-test facade. The
 // fail-closed loader + real round-trip the kernel runs at boot over the FROZEN
