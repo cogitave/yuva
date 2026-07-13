@@ -6314,3 +6314,63 @@ fn kani_corpus_fold_determinism() {
     assert!(bad != leaf);
     assert!(!corpus_verify_inclusion(bad, &[], head));
 }
+
+// --- admission codec + strength attenuation (the self-modification gate) ------
+
+/// Roundtrip: an [`AdmissionRequest`] survives encode -> decode field-for-field
+/// over its full symbolic input space (a total fixed-layout LE codec).
+#[kani::proof]
+fn kani_admit_req_roundtrip() {
+    use crate::admit::{admit_req_decode, admit_req_encode, AdmissionRequest};
+    let r = AdmissionRequest {
+        organ_digest: kani::any(),
+        witness_digest: kani::any(),
+        spec_digest: kani::any(),
+        claimed_strength: kani::any(),
+        proposer_id: kani::any(),
+        effect_mask: kani::any(),
+        budget: kani::any(),
+    };
+    let d = admit_req_decode(&admit_req_encode(&r));
+    assert!(d == r);
+    // NEGATIVE CONTROL: dropping `budget` from the codec (leaving it 0) would fail
+    // this equality for any nonzero-budget request.
+}
+
+/// Roundtrip: an [`AdmissionVerdict`] survives encode -> decode field-for-field.
+#[kani::proof]
+fn kani_admit_verdict_roundtrip() {
+    use crate::admit::{admit_verdict_decode, admit_verdict_encode, AdmissionVerdict};
+    let v = AdmissionVerdict {
+        request_digest: kani::any(),
+        decision: kani::any(),
+        granted_strength: kani::any(),
+        granted_rights: kani::any(),
+        spec_digest: kani::any(),
+        verifier_id: kani::any(),
+        decision_seq: kani::any(),
+    };
+    let d = admit_verdict_decode(&admit_verdict_encode(&v));
+    assert!(d == v);
+}
+
+/// The strength-attenuation lemma (the strength analogue of
+/// `Rights::intersect`): a grant can only DOWNGRADE trust, never inflate it. For
+/// ALL inputs the result is a valid closed level AND numerically `>=` (weaker-or-
+/// equal to) both clamped inputs, so `EMPIRICAL` evidence can NEVER be laundered
+/// into a `PROVEN` grant. Total over the full `u8 x u8` space.
+#[kani::proof]
+fn kani_strength_attenuate_never_inflates() {
+    use crate::admit::{strength_attenuate, strength_is_valid, STRENGTH_EMPIRICAL};
+    let c: u8 = kani::any();
+    let w: u8 = kani::any();
+    let r = strength_attenuate(c, w);
+    // Always a valid closed level (out-of-range inputs clamp fail-closed).
+    assert!(strength_is_valid(r));
+    // Never stronger (numerically smaller) than either clamped input.
+    let cc = if strength_is_valid(c) { c } else { STRENGTH_EMPIRICAL };
+    let ww = if strength_is_valid(w) { w } else { STRENGTH_EMPIRICAL };
+    assert!(r >= cc && r >= ww);
+    // NEGATIVE CONTROL: `min` in place of `max` (granting the STRONGER trust) makes
+    // r < the weaker input -> this assertion FAILS.
+}

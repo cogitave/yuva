@@ -304,6 +304,7 @@
 //! invariants. See `scripts/verify-encode.sh` (DoD marker `V1: kani-encoders OK`).
 
 pub mod abi;
+pub mod admit;
 pub mod attest;
 pub mod bakeoff;
 pub mod blkfmt;
