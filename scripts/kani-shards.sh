@@ -68,9 +68,9 @@
 # crates/tb-encode/src/proofs.rs (asserted below). Bump in lockstep when a
 # milestone adds/removes a harness. (#76 REDISTRIBUTES the existing 135 across
 # four shards -- the total is UNCHANGED.)
-EXPECTED_HARNESSES_TOTAL=135
+EXPECTED_HARNESSES_TOTAL=138
 
-# Shard A (55): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
+# Shard A (58): the silicon-adjacent encoder/parser families (VMX, paging/EPT,
 # IPC, memscore, L2.1-L2.3, aL2.4-aL2.6, M20 blkfmt -- all measured-trivial)
 # + the heavy tamper/e2e witnesses: the M22 fold non-degeneracy pair, the
 # kept-FULL M23 e2e fold witness, the M28 MAC tamper, the COMPLETE M29 khash
@@ -155,6 +155,13 @@ SHARD_A=(
   # shard C below (the compression budget).
   kani_attest_pae_injective             # 3.8s
   kani_attest_decode_fail_closed        # 22s
+  # Self-modification admission codec x3 (the CHEAP value-layer harnesses -- two
+  # fixed-layout LE roundtrips + the strength-attenuation never-inflate lemma;
+  # no hashing, all <2.5s local WSL, routed to this lighter shard next to the
+  # thematically-adjacent attest codec).
+  kani_admit_req_roundtrip              # ~2s
+  kani_admit_verdict_roundtrip          # ~2s
+  kani_strength_attenuate_never_inflates # 0.07s
 )
 
 # Shard B (36): the operator/policy/ledger codec families that STAY after the
