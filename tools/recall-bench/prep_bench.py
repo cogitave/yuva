@@ -18,7 +18,8 @@ import bm25s
 from rank_bm25 import BM25Okapi
 
 OUT  = os.environ.get("IRBENCH_DATA", os.path.expanduser("~/irbench/data"))
-DATA = f"{OUT}/nfcorpus"
+DS   = os.environ.get("IRBENCH_DS", "nfcorpus")  # any BEIR set: nfcorpus, scifact, ...
+DATA = f"{OUT}/{DS}"
 K1, B = 1.2, 0.75
 TOPK = 10
 LAT_REPEATS = 5  # repeat the query loop; report the fastest (warm) pass

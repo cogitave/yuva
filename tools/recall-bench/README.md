@@ -72,23 +72,51 @@ All three systems consume identical tokens (`bm25s` standard pipeline,
 everywhere — the leaf's frozen constants; the harness asserts the interchange
 agrees, so the comparison isolates float vs integer and nothing else.
 
-## Result (BEIR NFCorpus test, 323 queries, one WSL box)
+## Result (BEIR, one WSL box; NDCG@10 / Recall@10 via pytrec_eval)
 
-| system | NDCG@10 | Recall@10 | MAP | QPS | deterministic |
-|---|---|---|---|---|---|
-| bm25s (float, lucene) | 0.3052 | 0.1435 | 0.1164 | ~3,250 | no (float) |
-| rank-bm25 (float, okapi) | 0.3056 | 0.1446 | 0.1166 | ~840 | no (float) |
-| Rust-float (ideal, harness) | 0.3052 | 0.1435 | 0.1164 | ~15,900 | no (float) |
-| **Yuva no-float leaf (integer)** | **0.3051** | **0.1433** | **0.1164** | **~19,400** | **bit-exact** |
+**NFCorpus** (3,633 docs, 323 test queries):
 
-The verified integer leaf matches float BM25 ranking quality (NDCG@10 0.3051 vs
-0.3052) while being ~22% faster than the same-harness ideal-float and the only
-implementation that is deterministic *and* formally machine-checked. Absolute QPS
-is hardware-dependent — only the same-box numbers here are comparable; do not
-compare them to a paper's numbers from other hardware.
+| system | NDCG@10 | Recall@10 | QPS | deterministic |
+|---|---|---|---|---|
+| bm25s (float, lucene) | 0.3052 | 0.1435 | ~3,250 | no (float) |
+| rank-bm25 (float, okapi) | 0.3056 | 0.1446 | ~840 | no (float) |
+| Rust-float (ideal, harness) | 0.3052 | 0.1435 | ~15,900 | no (float) |
+| **Yuva no-float leaf (integer)** | **0.3051** | **0.1433** | **~19,400** | **bit-exact** |
 
-> The 0.3051 figure holds only *after* the length-normalization precision fix
-> (`bm25_tf_norm` multiply-before-divide). This benchmark is what surfaced that
-> bug: before it, integer NDCG@10 was 0.2887 (−5.4% vs float), because the floored
-> `dl/avgl` ratio silently disabled length normalization for sub-average-length
-> documents. See the commit that precedes this harness.
+**SciFact** (5,183 docs, 300 test queries):
+
+| system | NDCG@10 | Recall@10 | QPS | deterministic |
+|---|---|---|---|---|
+| bm25s (float, lucene) | 0.6625 | 0.7799 | ~3,290 | no (float) |
+| rank-bm25 (float, okapi) | 0.6657 | 0.7899 | ~190 | no (float) |
+| Rust-float (ideal, harness) | 0.6625 | 0.7799 | ~2,160 | no (float) |
+| **Yuva no-float leaf (integer)** | **0.6634** | **0.7833** | **~2,520** | **bit-exact** |
+
+**What holds, honestly:**
+
+1. **Ranking-quality parity with float BM25.** On both datasets the verified
+   integer leaf matches the float twin's NDCG@10 (0.3051 vs 0.3052; 0.6634 vs
+   0.6625) and reproduces its ranking with **int-vs-float top-10 overlap 0.997**.
+   The in-harness ideal-float run equals `bm25s` to 4 decimals on both sets,
+   validating the harness.
+2. **Unique properties:** it is the only implementation here that is *both*
+   bit-exact **deterministic** (identical across runs, and by construction across
+   platforms — no float) and formally **Kani-machine-checked**.
+3. **Speed — the robust claim is vs the *same-harness* float:** the integer leaf
+   is consistently faster than the ideal-float twin in the identical harness
+   (~22% NFCorpus, ~17% SciFact) — pure integer arithmetic, no FP division. It is
+   always far faster than `rank-bm25`. It is **not** universally faster than
+   `bm25s`: `bm25s`'s numpy vectorisation over candidates wins on long-document
+   corpora (SciFact ~3,290 vs ~2,520), while the leaf's scalar scoring wins on
+   short-document corpora (NFCorpus ~19,400 vs ~3,250). Absolute QPS is
+   hardware/workload-dependent — only these same-box figures are comparable; do
+   not compare them to a paper's numbers from other hardware.
+
+> **What the length-normalization fix did.** These figures hold *after* the
+> `bm25_tf_norm` multiply-before-divide fix, which this benchmark surfaced. The
+> principled effect is *fidelity to real BM25*: int-vs-float top-10 overlap rose
+> from **0.74 → 0.997 on both datasets**. That recovered a real **−5.4% NDCG@10**
+> loss on NFCorpus (0.2887 → 0.3051); on SciFact NDCG was already at float parity
+> either way (before 0.6667, after 0.6634 — the floored error there was benign
+> noise, not a gain). Faithfully computing the intended BM25 is the goal, not a
+> lucky-on-one-dataset approximation. See the commit preceding this harness.
