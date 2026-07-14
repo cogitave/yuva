@@ -662,11 +662,12 @@ fn kani_recall_term_score_absent_is_zero() {
 
 /// The load-bearing recall invariant, proven SOUNDLY without over-quantifying a
 /// fixed-point division: ADDING a matching query term never LOWERS a document's
-/// accumulated score. Because every `bm25_term_score` is non-negative (proven above)
-/// and the accumulation uses `saturating_add`, the two-term score is `>= 0` and `>=`
-/// the one-term prefix -- "more query-term evidence never hurts". The
-/// term-frequencies + document geometry iterate a small `(tf0, tf1, doc_len,
-/// avg_len)` ladder (the general symbolic divides), while the two corpus
+/// accumulated score. Every per-term `idf * tf_norm` product is non-negative (both
+/// factors are proven non-negative above), the accumulation uses `saturating_add`,
+/// and the final integer division by `SCALE` is order-preserving -- so the two-term
+/// score is `>= 0` and `>=` the one-term prefix ("more query-term evidence never
+/// hurts"). The term-frequencies + document geometry iterate a small `(tf0, tf1,
+/// doc_len, avg_len)` ladder (the general symbolic divides), while the two corpus
 /// document-frequencies `df0`/`df1` stay FULLY SYMBOLIC (cheap `ln_fixed`).
 ///
 /// NEGATIVE CONTROL: changing `saturating_add` to `saturating_sub` in `bm25_doc_score`
