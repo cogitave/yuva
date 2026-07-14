@@ -72,51 +72,56 @@ All three systems consume identical tokens (`bm25s` standard pipeline,
 everywhere — the leaf's frozen constants; the harness asserts the interchange
 agrees, so the comparison isolates float vs integer and nothing else.
 
-## Result (BEIR, one WSL box; NDCG@10 / Recall@10 via pytrec_eval)
+## Result (BEIR, one WSL box; NDCG@10 via pytrec_eval, same-box QPS)
 
-**NFCorpus** (3,633 docs, 323 test queries):
+Three datasets spanning short keyword queries (NFCorpus), claim queries (SciFact)
+and whole-argument queries of hundreds of terms (ArguAna). "Fidelity" = int-vs-float
+top-10 overlap: how faithfully the integer leaf reproduces the float ranking.
 
-| system | NDCG@10 | Recall@10 | QPS | deterministic |
-|---|---|---|---|---|
-| bm25s (float, lucene) | 0.3052 | 0.1435 | ~3,250 | no (float) |
-| rank-bm25 (float, okapi) | 0.3056 | 0.1446 | ~840 | no (float) |
-| Rust-float (ideal, harness) | 0.3052 | 0.1435 | ~15,900 | no (float) |
-| **Yuva no-float leaf (integer)** | **0.3051** | **0.1433** | **~19,400** | **bit-exact** |
+| dataset | Yuva NDCG@10 | float twin | fidelity | Yuva QPS | float QPS¹ | bm25s QPS |
+|---|---|---|---|---|---|---|
+| NFCorpus (3.6k docs, 323 q) | **0.3051** | 0.3052 | 0.999 | **19,155** | 15,587 | 3,101 |
+| SciFact (5.2k docs, 300 q) | **0.6634** | 0.6625 | 0.997 | 2,366 | 1,970 | 3,224 |
+| ArguAna (8.7k docs, 1406 q) | **0.3552** | 0.3551 | 0.996 | 87 | 84 | 1,926 |
 
-**SciFact** (5,183 docs, 300 test queries):
-
-| system | NDCG@10 | Recall@10 | QPS | deterministic |
-|---|---|---|---|---|
-| bm25s (float, lucene) | 0.6625 | 0.7799 | ~3,290 | no (float) |
-| rank-bm25 (float, okapi) | 0.6657 | 0.7899 | ~190 | no (float) |
-| Rust-float (ideal, harness) | 0.6625 | 0.7799 | ~2,160 | no (float) |
-| **Yuva no-float leaf (integer)** | **0.6634** | **0.7833** | **~2,520** | **bit-exact** |
+<sub>¹ Rust-float = the identical harness with f64; it reproduces `bm25s` NDCG@10 to
+four decimals on all three sets, which validates the harness. `rank-bm25` (not shown)
+matches on quality but is far slower everywhere (816 / 187 / 10 QPS).</sub>
 
 **What holds, honestly:**
 
-1. **Ranking-quality parity with float BM25.** On both datasets the verified
-   integer leaf matches the float twin's NDCG@10 (0.3051 vs 0.3052; 0.6634 vs
-   0.6625) and reproduces its ranking with **int-vs-float top-10 overlap 0.997**.
-   The in-harness ideal-float run equals `bm25s` to 4 decimals on both sets,
-   validating the harness.
+1. **Ranking-quality parity with float BM25 on all three datasets.** The verified
+   integer leaf matches the float twin's NDCG@10 to ≤0.001 and reproduces its
+   ranking with **fidelity ≥ 0.996** — including on ArguAna's hundreds-of-terms
+   queries, which is exactly where a naive integer BM25 drifts (see the fixes).
 2. **Unique properties:** it is the only implementation here that is *both*
    bit-exact **deterministic** (identical across runs, and by construction across
    platforms — no float) and formally **Kani-machine-checked**.
 3. **Speed — the robust claim is vs the *same-harness* float:** the integer leaf
    is consistently faster than the ideal-float twin in the identical harness
-   (~22% NFCorpus, ~17% SciFact) — pure integer arithmetic, no FP division. It is
-   always far faster than `rank-bm25`. It is **not** universally faster than
-   `bm25s`: `bm25s`'s numpy vectorisation over candidates wins on long-document
-   corpora (SciFact ~3,290 vs ~2,520), while the leaf's scalar scoring wins on
-   short-document corpora (NFCorpus ~19,400 vs ~3,250). Absolute QPS is
-   hardware/workload-dependent — only these same-box figures are comparable; do
-   not compare them to a paper's numbers from other hardware.
+   (+23% NFCorpus, +20% SciFact, +4% ArguAna) — pure integer arithmetic, no FP
+   division — and always far faster than `rank-bm25`. It is **not** universally
+   faster than `bm25s`: `bm25s`'s numpy vectorisation wins as candidates-per-query
+   grow — decisively on ArguAna's long queries (1,926 vs 87), and on SciFact
+   (3,224 vs 2,366) — while the scalar leaf wins on short-query NFCorpus (19,155
+   vs 3,101). Absolute QPS is hardware/workload-dependent; only these same-box
+   figures are comparable — never compare them to a paper's numbers from other
+   hardware.
 
-> **What the length-normalization fix did.** These figures hold *after* the
-> `bm25_tf_norm` multiply-before-divide fix, which this benchmark surfaced. The
-> principled effect is *fidelity to real BM25*: int-vs-float top-10 overlap rose
-> from **0.74 → 0.997 on both datasets**. That recovered a real **−5.4% NDCG@10**
-> loss on NFCorpus (0.2887 → 0.3051); on SciFact NDCG was already at float parity
-> either way (before 0.6667, after 0.6634 — the floored error there was benign
-> noise, not a gain). Faithfully computing the intended BM25 is the goal, not a
-> lucky-on-one-dataset approximation. See the commit preceding this harness.
+> **Two precision fixes this benchmark surfaced** (both preserve determinism,
+> verifiability, and the single-token boot proof; both principled = *fidelity to
+> real BM25*, not a dataset-specific tweak):
+>
+> 1. **Length-norm floor** — `bm25_tf_norm` computed `BM25_B * (dl / avgl)`, an
+>    integer-floored ratio that silently disabled length normalization for
+>    sub-average documents. Multiply-before-divide fixed it: NFCorpus fidelity
+>    0.74 → 0.999, recovering a real **−5.4% NDCG@10** (0.2887 → 0.3051).
+> 2. **Per-term rounding accumulation** — `bm25_doc_score` divided every term by
+>    `SCALE` before summing, so one rounding error accrued per query term. On
+>    ArguAna's long queries this dropped fidelity to **0.75** and inflated NDCG to
+>    0.3679 (a *false* win — the divergence merely landed favourably). Deferring
+>    the division to a single end step restored fidelity **0.75 → 0.996** and
+>    honest parity (0.3552 vs float 0.3551).
+>
+> Both were invisible on short queries and only appeared once the benchmark spanned
+> corpus/query shapes — the reason to benchmark against the field, not in a vacuum.
