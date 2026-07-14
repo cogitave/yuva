@@ -133,9 +133,15 @@ pub fn bm25_tf_norm(tf: u64, doc_len: u64, avg_len: u64) -> i64 {
     let tf = tf as i64;
     let dl = doc_len as i64;
     let avgl = (avg_len.max(1)) as i64;
-    // norm = (1 - b + b*dl/avgl) * SCALE, integer-divided (dl/avgl floored). With
-    // b = 0.75*SCALE this is 250 + 750*(dl/avgl) >= 250 > 0.
-    let norm = (SCALE - BM25_B) + BM25_B * (dl / avgl);
+    // norm = (1 - b + b*dl/avgl) * SCALE. The length ratio is evaluated
+    // MULTIPLY-BEFORE-DIVIDE -- `(BM25_B * dl) / avgl`, NOT `BM25_B * (dl / avgl)`
+    // -- so the fixed-point keeps ~3 fractional digits of dl/avgl instead of
+    // flooring the ratio to an integer (which collapses length normalization to a
+    // step function and, for the common dl < avgl case, drops it entirely). With
+    // b = 0.75*SCALE this is 250 + 750*dl/avgl >= 250 > 0. Identical for the
+    // single-token records the kernel feeds today (dl == avgl == 1 => 250 + 750),
+    // so the boot KAT is unchanged; it only sharpens multi-token ranking.
+    let norm = (SCALE - BM25_B) + BM25_B * dl / avgl;
     // numer = tf*(k1+1) scaled: tf * (BM25_K1 + SCALE).
     let numer = tf * (BM25_K1 + SCALE);
     // denom = SCALE*(tf + k1*norm_real) = tf*SCALE + BM25_K1*norm/SCALE.
@@ -154,21 +160,32 @@ pub fn bm25_term_score(tf: u64, df: u64, n_docs: u64, doc_len: u64, avg_len: u64
 }
 
 /// The multi-term LEXICAL score of ONE candidate document against a query token-SET:
-/// the ADDITIVE accumulation of [`bm25_term_score`] over each query term's
-/// `(tf, df)` in this document. `query` is `&[(tf, df)]` -- the per-term
-/// (term-frequency-in-this-document, document-frequency-in-the-corpus) pairs; a term
-/// absent from the document contributes `tf = 0` (score `0`). The sum uses
-/// `saturating_add` so an adversarial input can never overflow (it clamps to
-/// `i64::MAX`, never panics). MONOTONE: adding a matching term (or increasing any
-/// term's `tf`) never LOWERS the document's score -- the load-bearing recall
-/// invariant (more query-term evidence never hurts).
+/// the additive accumulation of each query term's BM25 contribution `idf * tf_norm`.
+/// `query` is `&[(tf, df)]` -- the per-term (term-frequency-in-this-document,
+/// document-frequency-in-the-corpus) pairs; a term absent from the document
+/// contributes `tf = 0` (score `0`).
+///
+/// PRECISION: the per-term `idf * tf_norm` products are summed at FULL fixed-point
+/// scale and divided by [`SCALE`] ONCE at the end, rather than dividing every term
+/// (as [`bm25_term_score`] does) and summing the rounded results. Deferring the
+/// single division stops one rounding error PER QUERY TERM from accumulating, which
+/// on long multi-term queries visibly drifts the integer ranking away from real
+/// BM25 (BEIR ArguAna: int-vs-float top-10 fidelity 0.75 -> 0.996). It is EXACTLY
+/// `bm25_term_score` for a single-term query (`idf*tf_norm/SCALE`), so the kernel's
+/// single-token recall self-test is unchanged. Both `saturating_mul`/`saturating_add`
+/// clamp to `i64::MAX` so an adversarial input can never overflow (never panics).
+///
+/// MONOTONE: adding a matching term (or increasing any term's `tf`) never LOWERS the
+/// document's score -- the load-bearing recall invariant (more query-term evidence
+/// never hurts); integer division by [`SCALE`] preserves the accumulator's order.
 #[must_use]
 pub fn bm25_doc_score(query: &[(u64, u64)], n_docs: u64, doc_len: u64, avg_len: u64) -> i64 {
     let mut acc: i64 = 0;
     for &(tf, df) in query {
-        acc = acc.saturating_add(bm25_term_score(tf, df, n_docs, doc_len, avg_len));
+        let prod = bm25_idf(df, n_docs).saturating_mul(bm25_tf_norm(tf, doc_len, avg_len));
+        acc = acc.saturating_add(prod);
     }
-    acc
+    acc / SCALE
 }
 
 /// The fixed byte width of a [`hit_canon`] record: `rank` (u16 LE) ++ `id` (u64 LE)
